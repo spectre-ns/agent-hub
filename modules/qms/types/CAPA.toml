@@ -88,6 +88,12 @@ label = "Plan agreed"
 
 [[lifecycle.transition]]
 from = ["actions"]
+to = "investigating"
+by = "workflow"            # its run was cancelled: the plan is reopened, and a person may then cancel the CAPA
+label = "Back to investigating"
+
+[[lifecycle.transition]]
+from = ["actions"]
 to = "verification"
 by = "workflow"
 
