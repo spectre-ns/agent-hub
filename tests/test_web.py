@@ -1329,3 +1329,90 @@ def test_colour_tokens_keep_wcag_contrast_in_both_themes(theme):
     # the focus ring and the card edges come from the tokens, not from fixed colours
     from practicehub.web.assets import CSS
     assert "#388BFF" not in CSS and "var(--card-edge)" in tokens["shadow-raised"]
+
+
+# ------------------------------------------------------------------------------------------- boards: moving cards
+def _moves(page: str, card: str) -> dict:
+    """The columns a card on a board may be dropped on, as the page says (its data-moves)."""
+    m = re.search(r'data-card="' + re.escape(card) + r'" data-moves="([^"]*)"', page)
+    return json.loads(html.unescape(m.group(1))) if m else {}
+
+
+def test_a_board_marks_where_each_card_may_be_dropped_by_the_same_rules_as_its_move_buttons(hub, server):
+    """A lifecycle board has a column per state; each card lists only the moves its page offers a person (none
+    reserved to a workflow), and one that asks for fields or a comment opens its transition screen."""
+    rana = _modules(hub, server)
+    doc = hub.create_record(M(hub, "rana"), "Document", {"title": "Hand hygiene"})
+    capa = hub.create_record(M(hub, "rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
+    page = call(server, "GET", "/views/dms-documents", rana)[1]
+    assert all(f'data-col="{s}"' in page for s in ("draft", "in-review", "approved", "obsolete"))
+    moves = _moves(page, f"Document/{doc['id']}")
+    assert set(moves) == {"in-review", "obsolete"} and moves["in-review"]["how"] == "post"  # approved: a workflow's
+    card = page.split(f'data-card="Document/{doc["id"]}"')[1].split("</form>")[0]
+    assert f'action="/records/Document/{doc["id"]}/move"' in card and '<select name="to"' in card \
+        and '<option value="in-review">' in card and 'value="approved"' not in card and 'type="radio"' not in card
+    moves = _moves(call(server, "GET", "/views/qms-capas", rana)[1], f"CAPA/{capa['id']}")
+    assert moves["investigating"] == {"how": "screen", "label": "investigating…",
+                                      "href": f"/records/CAPA/{capa['id']}/move?to=investigating"}
+    # the work board: what the item page's buttons allow, for whoever looks
+    jo = token(hub, "jo")
+    page = call(server, "GET", "/board", jo)[1]
+    assert 'data-col="todo"' in page and 'data-col="prog"' in page and 'data-col="done"' in page
+    iid = re.search(r'data-card="(item-[^"]+)" data-moves', page).group(1)
+    assert set(_moves(page, iid)) == {"prog", "done"} and _moves(page, iid)["done"]["how"] == "screen"
+    item = hub.engine.item(iid)
+    other = next(m for m in hub.members("person") if not hub.engine.eligibility(m, item)[0])
+    assert _moves(call(server, "GET", "/board", token(hub, other["id"]))[1], iid) == {}
+
+
+def test_a_move_from_a_board_applies_the_same_rules_and_a_refused_one_says_why(hub, server):
+    rana = _modules(hub, server)
+    doc = hub.create_record(M(hub, "rana"), "Document", {"title": "Hand hygiene"})
+    url, back = f"/records/Document/{doc['id']}/move", "/views/dms-documents"
+    ver = str(doc["meta"]["versionId"])
+    # refused: not a move a person may make from here; the reason, in the dialog, and nothing moved
+    code, page = call(server, "POST", url, rana, form={"to": "approved", "_version": ver, "_back": back, "_ask": "1"})
+    assert code == 422 and "does not move from" in page and "data-modal-body" in page and 'role="alert"' in page
+    assert hub.records.read("Document", doc["id"])["status"] == "draft"
+    # accepted: back to the board
+    code, _ = call(server, "POST", url, rana, form={"to": "in-review", "_version": ver, "_back": back, "_ask": "1"})
+    assert code == 303 and hub.records.read("Document", doc["id"])["status"] == "in-review"
+    # changed since the board was drawn: refused as a conflict
+    other = hub.create_record(M(hub, "rana"), "Document", {"title": "Sharps"})
+    hub.update_record(M(hub, "rana"), f"Document/{other['id']}", {"title": "Sharps disposal"})
+    code, page = call(server, "POST", f"/records/Document/{other['id']}/move", rana,
+                      form={"to": "obsolete", "_version": str(other["meta"]["versionId"]), "_back": back, "_ask": "1"})
+    assert code == 409 and "changed this record" in page and hub.records.read("Document", other["id"])["status"] == "draft"
+    # a move that asks for fields: its screen first, which returns to the board once it is accepted
+    capa = hub.create_record(M(hub, "rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
+    curl = f"/records/CAPA/{capa['id']}/move"
+    code, _ = call(server, "POST", curl, rana, form={"to": "investigating", "_back": "/views/qms-capas", "_ask": "1"})
+    assert code == 303 and hub.records.read("CAPA", capa["id"])["status"] == "open"
+    code, page = call(server, "GET", f"{curl}?to=investigating&_back=/views/qms-capas", rana)
+    assert code == 200 and 'name="_back" value="/views/qms-capas"' in page and 'name="owner"' in page
+    code, page = call(server, "POST", curl, rana, form={"to": "investigating", "_back": "/views/qms-capas"})
+    assert code == 422 and "fill in Owner" in page and 'name="_back" value="/views/qms-capas"' in page
+    code, _ = call(server, "POST", curl, rana, form={"to": "investigating", "owner": "rana", "_back": "//elsewhere.example"})
+    assert code == 303 and hub.records.read("CAPA", capa["id"])["status"] == "investigating"
+
+
+def test_the_work_boards_move_to_form_works_without_the_script(hub, server):
+    """Move to… is a plain form: In progress assigns it, To do gives it back, Done opens the item's form; a move the
+    member may not make is refused with the reason, and the item stays where it was."""
+    jo = token(hub, "jo")
+    page = call(server, "GET", "/board", jo)[1]
+    iid = re.search(r'data-card="(item-[^"]+)" data-moves', page).group(1)
+    form = page.split(f'data-card="{iid}"')[1].split("</form>")[0]
+    assert 'action="/board/move"' in form and f'name="item" value="{iid}"' in form and '<button' in form
+    code, _ = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "prog", "_back": "/board?who=mine"})
+    assert code == 303 and hub.engine.item(iid)["status"] == "claimed" and hub.engine.item(iid)["claimed_by"] == "jo"
+    code, page = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "wait", "_back": "/board"})
+    assert code == 422 and "not moved" in page and hub.engine.item(iid)["status"] == "claimed"
+    other = next(m for m in hub.members("person") if m["id"] != "jo")
+    code, page = call(server, "POST", "/board/move", token(hub, other["id"]), form={"item": iid, "to": "todo"})
+    assert code == 403 and "only whoever is working on an item gives it back" in page
+    assert hub.engine.item(iid)["claimed_by"] == "jo"
+    code, _ = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "done"})
+    assert code == 303  # what the step needs is asked on the item's page
+    code, _ = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "todo", "_back": "/board"})
+    assert code == 303 and hub.engine.item(iid)["status"] == "open"

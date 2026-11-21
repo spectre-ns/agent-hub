@@ -1442,9 +1442,9 @@ class RecordPages:
         t = rt.transition(schema.first(rec, rt.lifecycle["path"]), req["query"].get("to", ""))
         if t is None or t["by"] == "workflow":
             raise Invalid(f"{a_an(rt.label.lower())} does not move there from here")
-        return self._move_page(req, rt, rec, t)
+        return self._move_page(req, rt, rec, t, back=self.safe_back(req["query"].get("_back")))
 
-    def _move_page(self, req, rt, rec, t, *, form: dict | None = None, problem: str = ""):
+    def _move_page(self, req, rt, rec, t, *, form: dict | None = None, problem: str = "", back: str = ""):
         me = req["me"]
         ref = f"{rt.id}/{rec['id']}"
         shown = rec
@@ -1465,8 +1465,9 @@ class RecordPages:
         body = (f'<div data-modal-body>{err}<p>{e(self.hub.title(rec))}: from {self._state_loz(st)} to {self._state_loz(t["to"])}.</p>'
                 f'<form method="post" action="/records/{e(rt.id)}/{e(rec["id"])}/move" class="card stack">'
                 f'<input type="hidden" name="to" value="{e(t["to"])}"><input type="hidden" name="_version" '
-                f'value="{ver}">{self._req_note(inputs)}{inputs}{comment}<div class="filters"><button class="primary">{e(t["label"])}</button>'
-                f'<a class="btn secondary" href="/records/{e(rt.id)}/{e(rec["id"])}" data-modal-close>Cancel</a></div>'
+                f'value="{ver}">' + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")
+                + f'{self._req_note(inputs)}{inputs}{comment}<div class="filters"><button class="primary">{e(t["label"])}</button>'
+                f'<a class="btn secondary" href="{e(back or f"/records/{rt.id}/{rec['id']}")}" data-modal-close>Cancel</a></div>'
                 f'</form></div>')
         return self.layout(req, t["label"], body, crumbs=[("/records", "Records"),
                                                           (f"/records/{rt.id}", rt.plural),
@@ -1499,18 +1500,25 @@ class RecordPages:
             st, to = schema.first(rec, rt.lifecycle["path"]), f.get("to", "")
             t = rt.transition(st, to)
             asked = t["fields"] if t else []
+            back = self.safe_back(f.get("_back"))  # from a board: back to it
+            if f.get("_ask") and t and t["by"] != "workflow" and (asked or t["comment"]):
+                # a board's Move to…: a move that asks for fields or a comment shows its screen first
+                q = urllib.parse.urlencode({"to": to, **({"_back": back} if back else {})})
+                raise self._redirect(f"/records/{rtype}/{rid}/move?{q}")
             try:
                 changes = self._from_form(rt, f, partial=True, before=rec, only=asked) if asked else {}
                 after = schema.put({**rec, **changes}, rt.lifecycle["path"], to)
                 hub.update_record(me, ref, after, comment=f.get("_comment") if t and t["comment"] else None,
                                   expected_version=f.get("_version") or None)
-            except Invalid as exc:
-                if not (t and (asked or t["comment"])):
+            except (Denied, Invalid) as exc:
+                if not (t and (asked or t["comment"])) or isinstance(exc, Denied):
+                    if back:  # from a board: why, in the dialog, the card back where it was
+                        raise self.refused_move(req, hub.title(rec), exc, back) from None
                     raise
                 from .server import Rendered  # the move's screen again, in the dialog, saying why
                 raise Rendered(409 if isinstance(exc, Conflict) else 422,
-                               self._move_page(req, rt, rec, t, form=f, problem=str(exc))) from None
-            raise self._redirect(f"/records/{rtype}/{rid}")
+                               self._move_page(req, rt, rec, t, form=f, problem=str(exc), back=back)) from None
+            raise self._redirect(back or f"/records/{rtype}/{rid}")
         try:
             self._confirm_signer(req, f)
             hub.sign_record(me, ref, f.get("meaning", ""), f.get("comment", ""), seen=f.get("seen") or "-")
@@ -1603,10 +1611,18 @@ class RecordPages:
                                    f"{max(4, 100 * n // top)}%'></span> {n}</td></tr>" for k, n in w["counts"].items())
                     out.append(f"<div class='section'>{head}<table class='chart'><tbody>{bars}</tbody></table></div>")
                     continue
+                groups, counts = w["groups"], w["counts"]
+                moving = self._board_moves(me, w)
+                if moving:  # a board of a lifecycle: every state is a column, in the lifecycle's order
+                    order = moving.states()
+                    groups = {k: groups.get(k, []) for k in order + [k for k in groups if k not in order]}
+                    counts = {k: counts.get(k, 0) for k in groups}
+                back = self.here(req)
                 cols = "".join(
-                    f'<section class="col" aria-label="{e(k)}"><header>{self._state_loz(k)}<span class="n">'
-                    f'{w["counts"][k]}</span></header>'
-                    + "".join(self._view_tile(w, r) for r in rows) + "</section>" for k, rows in w["groups"].items())
+                    f'<section class="col" data-col="{e(k)}" aria-label="{e(k)}"><header>{self._state_loz(k)}'
+                    f'<span class="n">{counts[k]}</span></header>'
+                    + "".join(self._view_tile(w, r, moving, back) for r in rows) + "</section>"
+                    for k, rows in groups.items())
                 out.append(f"<div class='section'>{head}<div class='board'>{cols or '<p class=muted>Nothing yet.</p>'}"
                            f"</div></div>")
             else:
@@ -1633,12 +1649,43 @@ class RecordPages:
         text = e("" if val is None else str(val))
         return f'<a href="{e(self._view_href(w, r))}">{text or e(r.get("id", ""))}</a>' if first else text
 
-    def _view_tile(self, w, r) -> str:
+    def _board_moves(self, me, w):
+        """The record type whose lifecycle a board widget shows (grouped by its state), when the member may move
+        its records; else None."""
+        if w["kind"] != "board" or w["source"] != "records":
+            return None
+        rt = self.hub.record_type(w["type"])
+        lc = rt.lifecycle if rt else None
+        if not lc or w["group_by"] not in (lc["path"], lc.get("field")) or not self._may_write(me, rt.id):
+            return None
+        return rt
+
+    def _record_moves(self, rt, rec) -> dict:
+        """Where a record's card may go: the moves its page offers a person (not those only a workflow makes);
+        one that asks for fields or a comment opens its transition screen."""
+        st = schema.first(rec, rt.lifecycle["path"])
+        out = {}
+        for t in rt.lifecycle.get("transition", []):
+            if t["by"] == "workflow" or t["to"] == st or not (st in t["from"] or "*" in t["from"]) or t["to"] in out:
+                continue
+            asks = bool(t["fields"] or t["comment"])
+            out[t["to"]] = {"how": "screen" if asks else "post", "label": t["to"] + ("…" if asks else ""),
+                            **({"href": f"/records/{rt.id}/{rec['id']}/move?"
+                                        + urllib.parse.urlencode({"to": t["to"]})} if asks else {})}
+        return out
+
+    def _view_tile(self, w, r, moving=None, back: str = "") -> str:
         cols = w["columns"] or [{"label": "Title", "path": "title"}]
         first = w["value"](r, cols[0]["path"])
         rest = " · ".join(str(x) for x in (w["value"](r, c["path"]) for c in cols[1:]) if x not in (None, ""))
-        return (f'<a class="tile" href="{e(self._view_href(w, r))}"><div class="t">{e(str(first or r.get("id", "")))}'
-                f'</div>' + (f'<div class="about">{e(rest)}</div>' if rest else "") + "</a>")
+        inner = (f'<div class="t">{e(str(first or r.get("id", "")))}</div>'
+                 + (f'<div class="about">{e(rest)}</div>' if rest else ""))
+        if not moving:
+            return self.board_card(inner, self._view_href(w, r), "", "", "", {}, "", {})
+        ver = str((r.get("meta") or {}).get("versionId", ""))
+        return self.board_card(inner, self._view_href(w, r), "", f"{moving.id}/{r['id']}", str(first or r["id"]),
+                               self._record_moves(moving, r), f"/records/{moving.id}/{r['id']}/move",
+                               {"_version": ver, "_back": back, "_ask": "1"})
 
     # ------------------------------------------------------------------------------------------ modules
     def page_modules(self, req):

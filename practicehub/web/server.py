@@ -122,6 +122,7 @@ class App(RecordPages, DefinitionPages, OfficePages):
         R("POST", r"/me/passphrase", self.post_passphrase)
         R("GET", r"/", self.page_inbox)
         R("GET", r"/board", self.page_board)
+        R("POST", r"/board/move", self.post_board_move)
         R("GET", r"/items/(?P<iid>[\w-]+)", self.page_item)
         R("POST", r"/items/(?P<iid>[\w-]+)/(?P<verb>claim|complete|decide|release|ack|take-over)", self.post_item)
         R("GET", rf"/{sp}", self.page_subjects)
@@ -949,8 +950,8 @@ class App(RecordPages, DefinitionPages, OfficePages):
                 return "wait"
             return {"open": "todo", "claimed": "prog", "done": "done"}.get(it["status"], "todo")
 
-        cols = [("todo", "To do", ""), ("prog", "In progress", "prog"), ("wait", "Awaiting approval", "wait"),
-                ("done", "Done recently", "done")]
+        cols = self.BOARD_COLS
+        back = self.here(req)
 
         def lane_of(it):
             if group == "workflow":
@@ -970,8 +971,8 @@ class App(RecordPages, DefinitionPages, OfficePages):
                 out.append(f'<div class="lane">{e(titles.get(lane, lane))} <span class="badge">{len(its)}</span></div>')
             colhtml = []
             for cid, label, cls in cols:
-                tiles = [self._tile(i) for i in its if column(i) == cid]
-                colhtml.append(f'<section class="col" aria-label="{e(label)}"><header><span class="loz {cls}">{e(label)}'
+                tiles = [self._tile(i, self._item_moves(me, i), back) for i in its if column(i) == cid]
+                colhtml.append(f'<section class="col" data-col="{cid}" aria-label="{e(label)}"><header><span class="loz {cls}">{e(label)}'
                                f'</span><span class="n">{len(tiles)}</span></header>{"".join(tiles)}</section>')
             out.append(f'<div class="board">{"".join(colhtml)}</div>')
         if not items:
@@ -985,14 +986,94 @@ class App(RecordPages, DefinitionPages, OfficePages):
         return self.layout(req, "Board", filters + "".join(out), crumbs=[("/", "Practice"), ("", "Board")],
                            actions='<a class="btn secondary" href="/runs">All work</a>')
 
-    def _tile(self, it) -> str:
+    BOARD_COLS = [("todo", "To do", ""), ("prog", "In progress", "prog"), ("wait", "Awaiting approval", "wait"),
+                  ("done", "Done recently", "done")]
+
+    def _tile(self, it, moves: dict | None = None, back: str = "/board") -> str:
         flag = '<span class="badge person">people only</span>' if it["persons_only"] else ""
         note = f'<div class="why">{e(it["note"])}</div>' if it.get("note") and it["status"] != "done" else ""
         urgent = " urgent" if it.get("priority") == "urgent" else ""
-        return (f'<a class="tile{urgent}" href="/items/{e(it["id"])}"><div class="t">{e(it["title"])}'
-                f'{self._urgency(it)}</div>'
-                f'<div class="about">{e(it.get("run_title", ""))}</div>{note}<div class="foot">{self._ki(it["kind"])}'
-                f'<span class="key">{self._key(it["id"])}</span>{flag}{self._av(it["claimed_by"])}</div></a>')
+        inner = (f'<div class="t">{e(it["title"])}{self._urgency(it)}</div>'
+                 f'<div class="about">{e(it.get("run_title", ""))}</div>{note}<div class="foot">{self._ki(it["kind"])}'
+                 f'<span class="key">{self._key(it["id"])}</span>{flag}{self._av(it["claimed_by"])}</div>')
+        return self.board_card(inner, f'/items/{it["id"]}', urgent, it["id"], it["title"], moves or {},
+                               "/board/move", {"item": it["id"], "_back": back})
+
+    def _item_moves(self, me, it) -> dict:
+        """Where a work item's card may go on the board, by the item page's own buttons: Assign to me (to In
+        progress), Give it back (to To do), and its form (to Done, which asks for what the step needs)."""
+        if it["kind"] not in ("task", "gate") or it["status"] not in ("open", "claimed"):
+            return {}
+        if it["status"] == "claimed" and it["claimed_by"] != me["id"]:
+            return {}
+        if not self.hub.engine.eligibility(me, it)[0]:
+            return {}
+        screen = {"how": "screen", "href": f"/items/{it['id']}", "label": "Done…"}
+        if it["status"] == "open":
+            return {"prog": {"how": "post", "label": "In progress"}, "done": screen}
+        return {"todo": {"how": "post", "label": "To do"}, "done": screen}
+
+    @staticmethod
+    def here(req) -> str:
+        q = urllib.parse.urlencode(req["query"])
+        return req["path"] + (f"?{q}" if q else "")
+
+    @staticmethod
+    def safe_back(v) -> str:
+        """Where a board's form returns to: a path on this hub, never another site."""
+        v = v if isinstance(v, str) else ""
+        return v if v.startswith("/") and not v.startswith("//") and not any(c in v for c in "\\\r\n") else ""
+
+    def board_card(self, inner: str, href: str, cls: str, key: str, title: str, moves: dict, action: str,
+                   hidden: dict) -> str:
+        """A card on a board. One that may move is dragged to a column it may go to (``data-moves``: each column,
+        and whether it moves at once or asks first), or moved with its Move to… list, a plain form without the
+        script. The server decides: the card stays where it was until the move is accepted."""
+        card = f' data-card="{e(key)}"' if key else ""
+        if not moves:
+            return f'<a class="tile{cls}" href="{e(href)}"{card}>{inner}</a>'
+        opts = "".join(f'<option value="{e(c)}">{e(m["label"])}</option>' for c, m in moves.items())
+        fields = "".join(f'<input type="hidden" name="{e(k)}" value="{e(str(v))}">' for k, v in hidden.items())
+        return (f'<div class="tile movable{cls}" data-card="{e(key)}" data-moves="{e(json.dumps(moves))}" '
+                f'draggable="true"><a class="tile-link" href="{e(href)}" draggable="false">{inner}</a>'
+                f'<form method="post" action="{e(action)}" class="move-to">{fields}'
+                f'<select name="to" aria-label="Move {e(title)} to" required><option value="">Move to…</option>'
+                f'{opts}</select><button class="secondary">Move</button></form></div>')
+
+    def refused_move(self, req, what: str, exc: Exception, back: str):
+        """A move the server would not make: why, in the dialog over the board (a page without the script)."""
+        code = getattr(exc, "status", None) or (403 if isinstance(exc, Denied) else 422)
+        body = (f'<div data-modal-body><div class="flash error" role="alert"><p>{e(what)} was not moved: {e(str(exc))}'
+                f'</p></div><p><a class="btn secondary" href="{e(back)}" data-modal-close>Back to the board</a></p></div>')
+        return Rendered(code, self.layout(req, "Not moved", body))
+
+    def post_board_move(self, req):
+        """A card moved on the work board: the same engine call as the item page's button, or its form."""
+        me, eng = req["me"], self.hub.engine
+        f = self.form(req)
+        back = self.safe_back(f.get("_back")) or "/board"
+        iid, to = str(f.get("item") or ""), f.get("to", "")
+        item = eng.item(iid)
+        try:
+            if to == "done":
+                ok, why = eng.eligibility(me, item)
+                if not ok:
+                    raise Denied(why)
+                if item["kind"] not in ("task", "gate") or item["status"] not in ("open", "claimed"):
+                    raise Invalid("only work still to do is finished")
+                raise Redirect(f"/items/{iid}")  # what the step needs is asked on its page
+            if to == "prog":
+                if item["kind"] == "hold" or item["status"] != "open":
+                    raise Invalid("only work still to do is assigned")
+                eng.claim(me, iid)
+            elif to == "todo":
+                eng.release(me, iid, f.get("note", ""))
+            else:
+                raise Invalid({"wait": "an approval waits for its sponsor; work is not moved there"}.get(
+                    to, "pick a column it may go to"))
+        except (Denied, Invalid) as exc:
+            raise self.refused_move(req, item["title"], exc, back) from None
+        raise Redirect(back)
 
     # ------------------------------------------------------------------------------------------ all work (runs)
     def page_runs(self, req):
@@ -1226,7 +1307,7 @@ class App(RecordPages, DefinitionPages, OfficePages):
                            f'<button>{"Take over" if item["escalated"] else "Reassign"}</button></form>')
         events = [ev for ev in self.hub.track.list(run_id=run["id"], limit=500) if ev["subject"] == f"item:{iid}"]
         main.append(f'<div class="section"><h2>Activity</h2>{self._activity(list(reversed(events)), me)}</div>')
-        body = f'<div class="issue"><div>{"".join(main)}</div>{details}</div>'
+        body = f'<div class="issue"><div data-modal-body>{"".join(main)}</div>{details}</div>'
         return self.layout(req, item["title"], body, crumbs=crumbs, actions=actions)
 
     def _work_form(self, me, item, iid, step, kept: dict | None = None) -> str:
@@ -1914,7 +1995,7 @@ class App(RecordPages, DefinitionPages, OfficePages):
             kept = {k: v for k, v in f.items() if k not in ("passphrase", "credential", "seen")}
             code = 403 if isinstance(exc, Denied) else 422
             raise Rendered(code, self.page_item(req, iid, kept=kept, error=exc)) from None
-        raise Redirect(f"/runs/{item['run_id']}")
+        raise Redirect(self.safe_back(f.get("_back")) or f"/runs/{item['run_id']}")  # from the board: back to it
 
     # ------------------------------------------------------------------------------------------ subjects
     def subject_link(self, ref: str, text: str | None = None) -> str:
