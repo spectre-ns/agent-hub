@@ -147,7 +147,7 @@ class App(RecordPages, DefinitionPages):
         R("POST", r"/blocks/(?P<bid>[\w-]+)/(?P<ver>\d+)/(?P<verb>approve|withdraw)", self.post_block_verb)
         R("GET", r"/start/(?P<wid>[a-z][a-z0-9-]*)", self.page_start_one)
         R("GET", r"/team/new", self.page_team_new)
-        R("GET", r"/settings", self.page_settings),
+        R("GET", r"/settings", self.page_admin)
         R("GET", r"/team", self.page_team)
         R("GET", r"/team/(?P<mid>[\w-]+)", self.page_member)
         R("POST", r"/team", self.post_team_add)
@@ -464,6 +464,8 @@ class App(RecordPages, DefinitionPages):
         if not me:
             return (head + f'<header class="top"><span class="logo">{mark}{e(name)}</span></header>'
                     f'<main style="max-width:560px;margin:0 auto">{page}</main></body></html>')
+        if self._is_admin(req, me):
+            return head + self._admin_shell(req, me, mark, name, page)
         side = self._sidebar(req, me)
         top = (f'<a class="skip" href="#main">Skip to content</a><header class="top">'
                f'<button type="button" class="menu-toggle" aria-label="Menu" aria-expanded="false" aria-controls="side">'
@@ -481,44 +483,91 @@ class App(RecordPages, DefinitionPages):
         return (f'{head}{top}<div class="{shell}">{side}{subnav}<main id="main" tabindex="-1">{page}</main></div>'
                 f'</body></html>')
 
-    def _settings(self, me) -> list[tuple[str, list[tuple[str, str, str]]]]:
-        """The practice's settings, grouped: how it works (set up) and what it did (audit). The practice menu, top
-        left, and the settings page list them; the sidebar keeps to the work."""
+    def _settings(self, me) -> list[tuple[str, list[tuple[str, str, str, str]]]]:
+        """The practice's settings, grouped: how it works (set up) and what it did (audit), each link with an icon. The
+        admin ribbon and the settings landing list them; the work sidebar keeps to the work."""
         owner = bool(me and self.hub.is_policy_owner(me))
-        setup = [("/team", "Team", "who works here, their roles and sponsors"),
-                 ("/modules", "Modules", "what the practice has installed"),
-                 ("/workflows", "Workflows", "how work moves, step by step"),
-                 ("/define/types", "Record types", "what the practice keeps records of"),
-                 ("/define/views", "Views", "boards and tables of records"),
-                 ("/blocks", "Blocks", "reusable steps"),
-                 ("/define/skills", "Skills", "what agents know how to do")]
-        audit = ([("/track", "Track", "everything that happened, signed and chained"),
-                  ("/access", "Access report", "who may read and write what")] if owner else [])
+        setup = [("/team", "Team", "who works here, their roles and sponsors", "team"),
+                 ("/modules", "Modules", "what the practice has installed", "module"),
+                 ("/workflows", "Workflows", "how work moves, step by step", "flow"),
+                 ("/define/types", "Record types", "what the practice keeps records of", "records"),
+                 ("/define/views", "Views", "boards and tables of records", "board"),
+                 ("/blocks", "Blocks", "reusable steps", "block"),
+                 ("/define/skills", "Skills", "what agents know how to do", "skill")]
+        audit = ([("/track", "Track", "everything that happened, signed and chained", "track"),
+                  ("/access", "Access report", "who may read and write what", "access")] if owner else [])
         if me and (owner or self.hub.can(me, "reader", "data_class:correspondence")):
-            audit.append(("/outbox", "Outbox", "messages waiting to go and those sent"))
+            audit.append(("/outbox", "Outbox", "messages waiting to go and those sent", "outbox"))
         return [g for g in (("Set up", setup), ("Audit", audit)) if g[1]]
 
+    SETTINGS_GROUPS = {"Set up": "How the practice works: its people, what it keeps and how work moves.",
+                       "Audit": "What the practice did, and who may see what."}
+    # pages that open in the admin shell (the settings), not in the work layout
+    ADMIN_PREFIXES = ("/settings", "/team", "/modules", "/workflows", "/define", "/blocks", "/track", "/access",
+                      "/outbox")
+
+    def _is_admin(self, req, me) -> bool:
+        path = (req.get("path") or "/").rstrip("/") or "/"
+        own = f"/team/{me['id']}"
+        if path == own or path.startswith(own + "/"):  # a member's own profile is theirs, under the profile menu
+            return False
+        return any(path == p or path.startswith(p + "/") for p in self.ADMIN_PREFIXES)
+
+    def _admin_shell(self, req, me, mark: str, name: str, page: str) -> str:
+        """The settings, as a screen of their own: a slim bar with the way back to the work, and a ribbon, left, of
+        every setup item (the closest one lit)."""
+        path = (req.get("path") or "/").rstrip("/") or "/"
+        groups = self._settings(me)
+        hrefs = ["/settings"] + [h for _, links in groups for h, *_ in links]
+        hits = [h for h in hrefs if path == h or path.startswith(h + "/")]
+        best = max(hits, key=len) if hits else None
+
+        def link(h, label, icon):
+            on = h == best
+            return (f'<a class="rib{" on" if on else ""}" href="{e(h)}"{" aria-current=page" if on else ""}>'
+                    f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS[icon]}</svg><span>{e(label)}</span></a>')
+
+        ribbon = ('<nav class="ribbon" id="ribbon" aria-label="Settings">' + link("/settings", "Overview", "settings")
+                  + "".join(f'<div class="rib-group" role="group" aria-labelledby="rib-{i}"><div class="rib-sec" '
+                            f'id="rib-{i}">{e(g)}</div>' + "".join(link(h, w, ic) for h, w, _, ic in links) + "</div>"
+                            for i, (g, links) in enumerate(groups)) + "</nav>")
+        top = (f'<a class="skip" href="#main">Skip to content</a><header class="top admin-top">'
+               f'<a class="logo" href="/settings">{mark}<span>{e(name)} settings</span></a><span class="spacer"></span>'
+               f'<a class="btn subtle back-to-work" href="/"><span aria-hidden="true">&larr;</span> Back to work</a>'
+               + self._me_menu(me) + "</header>")
+        return (f'{top}<div class="admin-shell">{ribbon}<main id="main" tabindex="-1">{page}</main></div>'
+                f'</body></html>')
+
     def _practice_menu(self, me, mark: str) -> str:
-        """Top left: the practice, and a menu of its settings."""
+        """Top left: the practice, and the way to its settings (a screen of their own) and home."""
         p = self.hub.practice
         item = lambda href, words: f'<a role="menuitem" href="{e(href)}">{e(words)}</a>'
-        groups = "".join(f'<div class="menu-sec">{e(g)}</div>' + "".join(item(h, w) for h, w, _ in links)
-                         for g, links in self._settings(me))
         return (f'<div class="avatar-menu practice-menu"><button type="button" aria-haspopup="menu" aria-expanded="false" '
                 f'aria-controls="practice-menu" class="logo" aria-label="{e(p.get("name", "Practice Hub"))}: settings">'
                 f'{mark}<span>{e(p.get("name", "Practice Hub"))}</span><svg class="chev" width="12" height="12" '
                 f'viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5">'
-                f'<path d="M6 9l6 6 6-6"/></svg></button><div role="menu" id="practice-menu" aria-label="Practice settings" '
+                f'<path d="M6 9l6 6 6-6"/></svg></button><div role="menu" id="practice-menu" aria-label="Practice" '
                 f'hidden><div class="menu-head"><b>{e(p.get("name", "Practice Hub"))}</b>'
-                f'<span>{e(p.get("kind", "").replace("-", " "))}</span></div>' + item("/", "Home") + groups
-                + '<div role="separator"></div>' + item("/settings", "All settings") + '</div></div>')
+                f'<span>{e(p.get("kind", "").replace("-", " "))}</span></div>' + item("/settings", "Settings")
+                + item("/", "Home") + '</div></div>')
 
-    def page_settings(self, req):
-        me = req["me"]
-        body = "".join(f'<h2 class="pick-head">{e(g)}</h2><ul class="pick">' + "".join(
-            f'<li><a href="{e(h)}"><b>{e(w)}</b><span class="muted">{e(d)}</span></a></li>' for h, w, d in links)
-            + "</ul>" for g, links in self._settings(me))
-        return self.layout(req, "Settings", body, crumbs=[("/", "Practice"), (None, "Settings")])
+    def page_admin(self, req):
+        """The settings landing: each group in a line, and its items as cards."""
+        me, p = req["me"], self.hub.practice
+        body = []
+        for g, links in self._settings(me):
+            body.append(f'<section class="admin-group"><h2>{e(g)}</h2><p class="muted">{e(self.SETTINGS_GROUPS.get(g, ""))}'
+                        f'</p><ul class="admin-cards">' + "".join(
+                            f'<li><a href="{e(h)}"><svg viewBox="0 0 24 24" aria-hidden="true">{ICONS[ic]}</svg>'
+                            f'<b>{e(w)}</b><span class="muted">{e(d)}</span></a></li>' for h, w, d, ic in links)
+                        + "</ul></section>")
+        facts = [("Name", p.get("name")), ("Kind", (p.get("kind") or "").replace("-", " ")),
+                 ("Privacy law", p.get("privacy_law")), ("Data stays in", p.get("data_residency"))]
+        rows = "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in facts if v)
+        if rows:
+            body.append('<section class="admin-group"><h2>Practice</h2><p class="muted">Set when the practice was '
+                        f'created.</p><table class="kv">{rows}</table></section>')
+        return self.layout(req, "Settings", "".join(body))
 
     def _me_menu(self, me) -> str:
         """The signed-in member's menu, top right: their profile, their settings, signing out."""
@@ -673,7 +722,9 @@ class App(RecordPages, DefinitionPages):
     def page_login(self, req):
         q = req["query"]
         if self.dev and q.get("as"):
-            raise Redirect("/", f"ph_as={urllib.parse.quote(q['as'])}; Path=/; HttpOnly; SameSite=Strict")
+            nxt = q.get("next", "/")
+            nxt = nxt if nxt.startswith("/") and not nxt.startswith("//") and "\\" not in nxt else "/"
+            raise Redirect(nxt, f"ph_as={urllib.parse.quote(q['as'])}; Path=/; HttpOnly; SameSite=Strict")
         dev = ""
         if self.dev:
             rows = "".join(f'<a class="tile" href="/login?as={e(m["id"])}"><div class="foot" style="gap:10px">'
