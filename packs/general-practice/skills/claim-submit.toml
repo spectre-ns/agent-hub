@@ -1,0 +1,6 @@
+id = "claim-submit"
+title = "Submit or hold a claim"
+instructions = """
+Submit a claim when the coding is consistent with the visit; hold it when anything looks off, and say what in the
+comment. The workflow lets agents decide only routine, low-value claims; everything else goes to billing staff.
+"""

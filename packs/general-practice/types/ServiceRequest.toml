@@ -1,0 +1,142 @@
+# A referral to a specialist (or a requisition), signed by the referring physician.
+id = "ServiceRequest"
+label = "Referral"
+plural = "Referrals"
+data_class = "clinical"
+strict = true
+date = "authoredOn"
+active = "record.status in ['draft', 'active', 'on-hold']"
+order = 80
+summary = "A referral to a specialist (or a requisition), signed by the referring physician."
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "active", "on-hold", "revoked", "completed", "entered-in-error", "unknown"]
+required = true
+
+[[field]]
+name = "intent"
+type = "choice"
+choices = ["proposal", "plan", "directive", "order", "original-order", "reflex-order", "filler-order",
+           "instance-order", "option"]
+required = true
+help = "order, for a referral the physician signs"
+
+[[field]]
+name = "priority"
+type = "choice"
+choices = ["routine", "urgent", "asap", "stat"]
+
+[[field]]
+name = "code"
+label = "Referral to (coded)"
+type = "object"
+required = true
+advanced = true
+
+[[field]]
+name = "referral_to"
+label = "Referral to"
+path = "code.text"
+type = "string"
+help = "the service asked for, e.g. Cardiology consult"
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "encounter"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+
+[[field]]
+name = "authoredOn"
+label = "Referred"
+type = "datetime"
+
+[[field]]
+name = "requester"
+label = "Referring physician"
+type = "reference"
+target = ["Practitioner"]
+rel = "requester"
+
+[[field]]
+name = "performer"
+label = "Specialists (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "specialist"
+label = "Specialist"
+path = "performer.0.display"
+type = "string"
+help = "who the patient is referred to, in words"
+
+[[field]]
+name = "reasonCode"
+label = "Reason codes (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "reason_text"
+label = "Reason"
+path = "reasonCode.0.text"
+type = "string"
+
+[[field]]
+name = "supportingInfo"
+label = "Supporting information (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "note"
+label = "Notes (as JSON)"
+type = "list"
+advanced = true
+help = "the signed letter, and what was sent with it"
+
+[[field]]
+name = "note_text"
+label = "Note"
+path = "note.0.text"
+type = "text"
+
+[[screen]]
+id = "referral"
+on = ["create"]
+fields = ["subject", "referral_to", "specialist", "priority", "intent", "reason_text", "requester", "authoredOn",
+          "encounter", "note_text"]
+
+[lifecycle]
+field = "status"
+initial = "draft"
+[[lifecycle.transition]]
+from = ["draft"]
+to = "active"
+[[lifecycle.transition]]
+from = ["active", "on-hold"]
+to = "completed"
+[[lifecycle.transition]]
+from = ["active"]
+to = "on-hold"
+[[lifecycle.transition]]
+from = ["on-hold"]
+to = "active"
+[[lifecycle.transition]]
+from = ["draft", "active", "on-hold"]
+to = "revoked"
+[[lifecycle.transition]]
+from = ["*"]
+to = "entered-in-error"

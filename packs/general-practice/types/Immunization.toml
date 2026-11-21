@@ -1,0 +1,139 @@
+# A vaccine given to a patient, here or elsewhere.
+id = "Immunization"
+label = "Immunization"
+plural = "Immunizations"
+data_class = "clinical"
+strict = true
+date = "occurrenceDateTime"
+active = "record.status == 'completed'"
+order = 50
+summary = "A vaccine given to a patient, here or elsewhere."
+part_of = "patient"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["completed", "entered-in-error", "not-done"]
+required = true
+
+[[field]]
+name = "vaccineCode"
+label = "Vaccine (coded)"
+type = "object"
+required = true
+advanced = true
+
+[[field]]
+name = "vaccine"
+label = "Vaccine"
+path = "vaccineCode.text"
+type = "string"
+help = "e.g. Influenza vaccine (seasonal)"
+
+[[field]]
+name = "patient"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "encounter"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+
+[[field]]
+name = "occurrenceDateTime"
+label = "Given"
+type = "datetime"
+required = true
+
+[[field]]
+name = "primarySource"
+label = "Given here"
+type = "boolean"
+
+[[field]]
+name = "lotNumber"
+label = "Lot number"
+type = "string"
+
+[[field]]
+name = "site"
+label = "Site (coded)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "site_text"
+label = "Site"
+path = "site.text"
+type = "string"
+help = "e.g. left deltoid"
+
+[[field]]
+name = "route"
+label = "Route (coded)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "route_text"
+label = "Route"
+path = "route.text"
+type = "string"
+help = "e.g. intramuscular"
+
+[[field]]
+name = "doseQuantity"
+label = "Dose (as JSON)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "dose"
+label = "Dose"
+path = "doseQuantity.value"
+type = "number"
+
+[[field]]
+name = "dose_unit"
+label = "Dose unit"
+path = "doseQuantity.unit"
+type = "string"
+help = "e.g. mL"
+
+[[field]]
+name = "performer"
+label = "Given by (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "given_by"
+label = "Given by"
+path = "performer.0.actor"
+type = "reference"
+target = ["Practitioner"]
+rel = "performer"
+
+[[field]]
+name = "note"
+label = "Notes"
+type = "list"
+advanced = true
+
+[[field]]
+name = "note_text"
+label = "Note"
+path = "note.0.text"
+type = "text"
+
+[[screen]]
+id = "immunization"
+on = ["create", "edit"]
+fields = ["patient", "vaccine", "status", "occurrenceDateTime", "primarySource", "lotNumber", "dose", "dose_unit",
+          "site_text", "route_text", "given_by", "encounter", "note_text"]

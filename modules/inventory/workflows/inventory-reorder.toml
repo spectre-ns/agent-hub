@@ -1,0 +1,60 @@
+id = "inventory-reorder"
+title = "Reorder stock"
+summary = """When an item's on hand falls to its reorder point, it is marked low and a purchaser is asked to order it.
+Once ordered it shows as on-order until a delivery is received."""
+record = "StockItem"
+
+[trigger]
+event = "record.updated:StockItem"
+when = "record.status == 'stocked' and record.reorder_point != null and record.on_hand != null and record.on_hand <= record.reorder_point"
+
+[[steps]]
+id = "low"
+title = "Mark the item low"
+kind = "automation"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "low"
+
+[[steps]]
+id = "order"
+title = "Order more stock"
+kind = "task"
+role = "purchaser"
+after = ["low"]
+due = "2d"
+escalate_to = "inventory-manager"
+context = ["record:inventory"]
+instructions = """This item has reached its reorder point. Order the usual quantity from its supplier (or say why
+not), and write down the order so the delivery can be matched when it arrives."""
+[[steps.fields]]
+name = "quantity"
+type = "number"
+required = true
+[[steps.fields]]
+name = "supplier"
+type = "string"
+[[steps.fields]]
+name = "order_ref"
+label = "Order number"
+type = "string"
+required = true
+[[steps.fields]]
+name = "expected"
+label = "Expected delivery"
+type = "date"
+
+[[steps]]
+id = "on-order"
+title = "Mark the item on-order"
+kind = "automation"
+after = ["order"]
+action = "record.update"
+for_each = "{{run.record}}"
+where = "each_record.status == 'low'"   # unless a delivery arrived first
+[steps.params]
+ref = "{{each}}"
+[steps.params.set]
+status = "on-order"

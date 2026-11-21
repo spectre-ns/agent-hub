@@ -1,0 +1,37 @@
+id = "patient-reply-draft"
+title = "Draft a reply to a patient"
+runtime = "prompt"
+summary = """
+An injected prompt: an agent drafts a reply to a patient's administrative question (hours, forms, booking, fees).
+The tone is a parameter. Anything clinical goes to a person.
+"""
+
+prompt = """
+Draft a {{input.tone}} reply to the patient's question in {{input.question}}. Answer only administrative questions:
+opening hours, forms, booking, fees and directions. If the question is about symptoms, results, medication or
+anything clinical, do not answer it: set needs_clinician to true and write a one-line holding reply that says a
+member of the care team will be in touch.
+"""
+
+[[input]]
+name = "question"
+type = "text"
+required = true
+help = "what the patient wrote"
+
+[[input]]
+name = "tone"
+type = "choice"
+choices = ["warm", "brief", "formal"]
+default = "warm"
+
+
+[[output]]
+name = "reply"
+type = "text"
+required = true
+
+[[output]]
+name = "needs_clinician"
+type = "boolean"
+required = true

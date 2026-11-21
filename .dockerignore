@@ -1,0 +1,8 @@
+.venv/
+.git/
+state/
+.env
+.secret
+**/__pycache__/
+.pytest_cache/
+tests/

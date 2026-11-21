@@ -1,0 +1,79 @@
+# A billable service, from the fee schedule.
+id = "ChargeItem"
+label = "Charge"
+plural = "Charges"
+data_class = "billing"
+strict = true
+date = "occurrenceDateTime"
+active = "record.status in ['planned', 'billable']"
+order = 120
+summary = "A billable service, from the fee schedule."
+part_of = "context"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["planned", "billable", "not-billable", "aborted", "billed", "entered-in-error", "unknown"]
+required = true
+
+[[field]]
+name = "code"
+label = "Fee code"
+type = "object"
+required = true
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "context"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+required = true
+
+[[field]]
+name = "occurrenceDateTime"
+label = "Date of service"
+type = "datetime"
+
+[[field]]
+name = "quantity"
+label = "Units (as JSON)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "units"
+path = "quantity.value"
+type = "number"
+
+[[field]]
+name = "priceOverride"
+label = "Amount (as JSON)"
+type = "object"
+advanced = true
+help = "{value, currency: CAD}"
+
+[[field]]
+name = "amount"
+path = "priceOverride.value"
+type = "number"
+
+[[field]]
+name = "enterer"
+type = "object"
+
+[[field]]
+name = "account"
+type = "list"
+
+[[field]]
+name = "note"
+type = "list"

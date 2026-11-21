@@ -1,0 +1,66 @@
+# A message or letter to or from a patient, a pharmacy, a specialist.
+id = "Communication"
+label = "Message"
+plural = "Messages"
+data_class = "correspondence"
+strict = true
+date = "sent"
+active = "not record.status in ['completed', 'entered-in-error', 'not-done', 'stopped']"
+order = 100
+summary = "A message or letter to or from a patient, a pharmacy, a specialist."
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["preparation", "in-progress", "not-done", "on-hold", "stopped", "completed", "entered-in-error", "unknown"]
+required = true
+
+[[field]]
+name = "category"
+type = "list"
+
+[[field]]
+name = "medium"
+type = "list"
+help = "portal, fax, phone, letter"
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "topic"
+type = "object"
+
+[[field]]
+name = "about"
+type = "list"
+
+[[field]]
+name = "sent"
+type = "datetime"
+
+[[field]]
+name = "received"
+type = "datetime"
+
+[[field]]
+name = "recipient"
+type = "list"
+
+[[field]]
+name = "sender"
+type = "object"
+
+[[field]]
+name = "payload"
+type = "list"
+help = "[{contentString}]"
+
+[[field]]
+name = "note"
+type = "list"

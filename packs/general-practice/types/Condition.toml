@@ -1,0 +1,134 @@
+# A problem on the problem list, or a diagnosis.
+id = "Condition"
+label = "Problem"
+plural = "Problems"
+data_class = "clinical"
+strict = true
+date = "onsetDateTime"
+active = "record.clinicalStatus.text in ['active', 'recurrence', 'relapse']"
+order = 20
+summary = "A problem on the problem list, or a diagnosis."
+part_of = "subject"
+
+[[field]]
+name = "clinicalStatus"
+label = "Clinical status (coded)"
+type = "object"
+required = true
+advanced = true
+help = "CodeableConcept from condition-clinical: {coding: [{system, code: active}], text: active}"
+
+[[field]]
+name = "clinical_status"
+label = "Clinical status"
+path = "clinicalStatus.text"
+type = "choice"
+choices = ["active", "recurrence", "relapse", "inactive", "remission", "resolved"]
+
+[[field]]
+name = "verificationStatus"
+label = "Verification status (coded)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "verification_status"
+label = "Verification status"
+path = "verificationStatus.text"
+type = "choice"
+choices = ["unconfirmed", "provisional", "differential", "confirmed", "refuted", "entered-in-error"]
+
+[[field]]
+name = "category"
+label = "Categories (as JSON)"
+type = "list"
+advanced = true
+help = "[{text: problem-list-item | encounter-diagnosis}]"
+
+[[field]]
+name = "category_text"
+label = "Category"
+path = "category.0.text"
+type = "choice"
+choices = ["problem-list-item", "encounter-diagnosis"]
+
+[[field]]
+name = "severity"
+label = "Severity (coded)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "severity_text"
+label = "Severity"
+path = "severity.text"
+type = "choice"
+choices = ["mild", "moderate", "severe"]
+
+[[field]]
+name = "code"
+label = "Problem (coded)"
+type = "object"
+required = true
+advanced = true
+
+[[field]]
+name = "problem"
+label = "Problem"
+path = "code.text"
+type = "string"
+help = "the problem or diagnosis, in words, e.g. Essential hypertension"
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "encounter"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+
+[[field]]
+name = "onsetDateTime"
+label = "Onset"
+type = "datetime"
+
+[[field]]
+name = "abatementDateTime"
+label = "Resolved"
+type = "datetime"
+
+[[field]]
+name = "recordedDate"
+label = "Recorded"
+type = "datetime"
+
+[[field]]
+name = "recorder"
+type = "reference"
+target = ["Practitioner"]
+rel = "recorder"
+
+[[field]]
+name = "note"
+label = "Notes"
+type = "list"
+advanced = true
+
+[[field]]
+name = "note_text"
+label = "Note"
+path = "note.0.text"
+type = "text"
+
+[[screen]]
+id = "problem"
+on = ["create", "edit"]
+fields = ["subject", "problem", "clinical_status", "verification_status", "category_text", "severity_text",
+          "onsetDateTime", "abatementDateTime", "recordedDate", "recorder", "encounter", "note_text"]

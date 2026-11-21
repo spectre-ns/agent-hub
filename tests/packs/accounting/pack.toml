@@ -1,0 +1,80 @@
+# A small accounting practice, to show the core knows nothing about medicine. Fictional.
+
+[practice]
+requires_core = "1"
+id = "lighthouse"
+kind = "accounting"
+name = "Lighthouse Accounting"
+jurisdiction = "Nova Scotia, Canada"
+data_residency = "Canada"
+timezone = "America/Halifax"
+escalation_role = "partner"
+
+[subject]
+type = "Client"
+label = "Client"
+plural = "Clients"
+path = "clients"
+registered_event = "client.signed-up"
+register_label = "Start onboarding"
+
+[[roles]]
+id = "partner"
+name = "Partner"
+description = "Signs returns and owns the practice's procedures."
+
+[[roles]]
+id = "preparer"
+name = "Return preparer"
+description = "Prepares returns from the client's slips."
+
+[[roles]]
+id = "reception"
+name = "Reception"
+description = "Books meetings and answers the phone."
+
+[[data_classes]]
+id = "profile"
+name = "Client profile"
+record_types = ["Client", "Meeting", "Complaint"]
+
+[[data_classes]]
+id = "tax"
+name = "Tax documents and returns"
+record_types = ["TaxSlip", "TaxReturn"]
+
+[[data_classes]]
+id = "billing"
+name = "Invoices"
+record_types = ["Invoice"]
+
+[grants.partner]
+write = ["profile", "tax", "billing"]
+read = []
+policy_owner = true
+member_admin = true
+
+[grants.preparer]
+read = ["profile", "tax"]
+
+[grants.reception]
+write = ["profile"]
+
+[[members]]
+id = "lee"
+name = "Lee Marsh, CPA"
+roles = ["partner"]
+owner = true
+
+[[members]]
+id = "kim"
+name = "Kim Doucette"
+roles = ["reception"]
+
+[[members]]
+id = "prep-agent"
+kind = "agent"
+name = "Preparation agent"
+sponsor = "lee"
+roles = ["preparer"]
+profile = { model = "standin", max_risk = "medium", skills = ["return-prep"] }

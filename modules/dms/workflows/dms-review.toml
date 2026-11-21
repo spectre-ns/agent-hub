@@ -1,0 +1,49 @@
+id = "dms-review"
+title = "Review a controlled document"
+summary = "A document sent for review is approved by a document controller, who signs, or returned to its author."
+record = "Document"
+
+[trigger]
+event = "record.transitioned:Document"
+when = "record.status == 'in-review'"
+
+[[steps]]
+id = "approve"
+title = "Approve the document for use"
+kind = "gate"
+role = "document-controller"
+signer = "person"
+not_by = ["record.editors"]   # an author never approves their own document
+meaning = "I approve this document for use"
+meanings = { return = "I return this document to its author unapproved" }
+outcomes = ["approve", "return"]
+context = ["record:documents"]
+due = "3d"
+escalate_to = "document-controller"
+instructions = """Read the document in full: what you sign is the text shown here, at this revision. Approve it for use,
+or return it to its author with what to change."""
+
+[[steps]]
+id = "publish"
+title = "Publish the approved document"
+kind = "automation"
+after = ["approve"]
+when = "approve.outcome == 'approve'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "approved"
+effective = "{{run.today}}"
+
+[[steps]]
+id = "return"
+title = "Return it to the author"
+kind = "automation"
+after = ["approve"]
+when = "approve.outcome == 'return'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "draft"

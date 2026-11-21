@@ -1,0 +1,117 @@
+# Practice Hub and, optionally, the rest of the stack. Everything stays on this host (PHIA: data in Canada).
+#
+#   docker compose -f deploy/docker-compose.yml run --rm hub init --pack general-practice
+#   docker compose -f deploy/docker-compose.yml up hub                      # the hub and its MongoDB (local tuples)
+#   docker compose -f deploy/docker-compose.yml --profile identity up       # + Keycloak
+#   docker compose -f deploy/docker-compose.yml --profile authz up          # + OpenFGA
+#   docker compose -f deploy/docker-compose.yml --profile models up         # + LiteLLM (with Langfuse callbacks)
+#   docker compose -f deploy/docker-compose.yml run --rm -v /backups:/backups hub backup /backups/$(date +%F)
+#
+# Ports avoid 8080, 9980 and 11434. Pin image versions to the ones you have tested before going live.
+# Secrets come from deploy/.env (gitignored); see deploy/env.example.
+
+name: practicehub
+
+services:
+  hub:
+    build: ..
+    ports: ["127.0.0.1:8200:8200"]
+    # the anchors (the track's head, written every minute) are on their own volume, off the state volume: put
+    # hub-anchors on other storage, or copy it off the host, so a restored or rolled-back database is noticed
+    volumes: ["hub-state:/state", "hub-anchors:/anchors"]
+    env_file: [{ path: .env, required: false }]
+    environment:
+      PRACTICEHUB_STATE: /state
+      PRACTICEHUB_ANCHORS: /anchors/track.anchors
+      PRACTICEHUB_DATABASE: mongodb://mongo:27017/practicehub?replicaSet=rs0&directConnection=true
+    depends_on: { mongo: { condition: service_healthy } }
+    restart: unless-stopped
+
+  mongo:
+    # The database: records, the track, runs, work, definitions, members, and files (GridFS). A one-node replica
+    # set, because the hub writes in transactions. Not published on the host; back it up with `practicehub backup`.
+    image: mongo:7.0
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes: ["mongo-data:/data/db"]
+    healthcheck:  # initiates the replica set on first start, then reports healthy once it has a primary
+      test: ["CMD", "mongosh", "--quiet", "--eval",
+             "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}).ok }; quit(db.hello().isWritablePrimary ? 0 : 1)"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  agents:
+    # every agent works its inbox in-process; for per-agent tokens over the API, run one
+    # `practicehub agents run --agent <id> --url http://hub:8200` per agent instead
+    build: ..
+    command: ["agents", "run", "--interval", "10"]
+    volumes: ["hub-state:/state", "hub-anchors:/anchors"]
+    environment:
+      PRACTICEHUB_ANCHORS: /anchors/track.anchors
+      PRACTICEHUB_DATABASE: mongodb://mongo:27017/practicehub?replicaSet=rs0&directConnection=true
+    env_file: [{ path: .env, required: false }]
+    depends_on: [hub, mongo]
+    restart: unless-stopped
+    profiles: ["agents"]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start-dev", "--http-port=8180", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in deploy/.env}
+    ports: ["127.0.0.1:8180:8180"]
+    volumes: ["./keycloak:/opt/keycloak/data/import:ro"]  # practicehub keycloak realm > deploy/keycloak/practice.json
+    profiles: ["identity"]
+
+  openfga:
+    image: openfga/openfga:v1.8.9
+    command: ["run"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://openfga:${OPENFGA_DB_PASSWORD:?set OPENFGA_DB_PASSWORD}@openfga-db:5432/openfga
+      OPENFGA_AUTHN_METHOD: preshared
+      OPENFGA_AUTHN_PRESHARED_KEYS: ${OPENFGA_TOKEN:?set OPENFGA_TOKEN}
+      OPENFGA_PLAYGROUND_ENABLED: "false"
+    ports: ["127.0.0.1:8081:8080"]  # container port; the host port is 8081
+    depends_on: [openfga-migrate]
+    profiles: ["authz"]
+
+  openfga-migrate:
+    image: openfga/openfga:v1.8.9
+    command: ["migrate"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://openfga:${OPENFGA_DB_PASSWORD}@openfga-db:5432/openfga
+    depends_on: [openfga-db]
+    profiles: ["authz"]
+
+  openfga-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: openfga
+      POSTGRES_PASSWORD: ${OPENFGA_DB_PASSWORD}
+      POSTGRES_DB: openfga
+    volumes: ["openfga-db:/var/lib/postgresql/data"]
+    profiles: ["authz"]
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/config.yaml", "--port", "4000"]
+    volumes: ["./litellm.yaml:/config.yaml:ro"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_API_KEY:?set LITELLM_API_KEY}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]  # Ollama on the host, as a client of port 11434
+    ports: ["127.0.0.1:4000:4000"]
+    profiles: ["models"]
+
+volumes:
+  mongo-data:    # the practice's data: back it up (practicehub backup) and keep it in Canada
+  hub-state:
+  hub-anchors:   # keep on different storage from hub-state; back it up separately
+  openfga-db:

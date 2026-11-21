@@ -1,0 +1,103 @@
+# One movement of stock: a delivery received, stock issued for use, a write-off (damaged, expired, lost), stock found, or a count.
+# Submitting it posts it: the inventory-post workflow changes the item's on hand.
+id = "StockMove"
+label = "Stock move"
+plural = "Stock moves"
+data_class = "inventory"
+title = "{kind} {quantity} {item}"
+date = "moved"
+flag = "status"
+order = 41
+summary = "Stock received, issued, written off, found or counted. Posting it changes what is on hand."
+
+[[field]]
+name = "kind"
+type = "choice"
+choices = ["receive", "issue", "write-off", "found", "count"]
+required = true
+help = "receive a delivery, issue for use, write off what was damaged, expired or lost, add stock that was found, or a shelf count"
+
+[[field]]
+name = "item"
+type = "reference"
+target = ["StockItem"]
+rel = "moves"
+required = true
+
+[[field]]
+name = "quantity"
+type = "number"
+required = true
+min = 0
+help = "how many units (never negative: the kind says which way it goes); for a count, how many are on the shelf"
+
+[[field]]
+name = "moved"
+label = "Date"
+type = "date"
+
+[[field]]
+name = "location"
+label = "At"
+type = "reference"
+target = ["Location"]
+rel = "at"
+
+[[field]]
+name = "lot"
+label = "Lot number"
+max_length = 60
+
+[[field]]
+name = "expires"
+type = "date"
+
+[[field]]
+name = "reason"
+type = "text"
+help = "why: the delivery note, who it was issued to, what was damaged"
+
+[[field]]
+name = "reject_reason"
+label = "Why it was sent back"
+type = "text"
+by = "workflow"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "submitted", "posted", "rejected"]
+
+[lifecycle]
+field = "status"
+initial = "draft"
+abandoned = { "submitted" = "draft" }   # a sign-off that is cancelled hands the move back
+locked = ["submitted", "posted"]        # once sent for posting, people change nothing but the state
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "submitted"
+label = "Submit for posting"
+
+[[lifecycle.transition]]
+from = ["submitted"]
+to = "posted"
+by = "workflow"
+label = "Posted"
+
+[[lifecycle.transition]]
+from = ["submitted"]
+to = "rejected"
+by = "workflow"
+label = "Rejected"
+
+[[lifecycle.transition]]
+from = ["submitted"]
+to = "draft"
+by = "workflow"
+label = "Back to its author"
+
+[[lifecycle.transition]]
+from = ["rejected"]
+to = "draft"
+label = "Revise"

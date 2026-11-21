@@ -1,0 +1,34 @@
+# Core base type: who or what the work is about (a patient, a client, a lot, a matter).
+# A pack's type says ``extends = "Subject"``. Each field below is part of the core's contract: the pack either keeps
+# it as is (the field is inherited), names its own field that holds it (``[base] name = ["given", "family"]``),
+# or points at a path. The core and every module read a subject through these fields only.
+id = "Subject"
+label = "Subject"
+abstract = true
+summary = "Who or what the work is about."
+title = "{name}"
+
+[[field]]
+name = "name"
+label = "Name"
+type = "string"
+required = true
+help = "what people call it: a person's name, a lot number with its product"
+
+[[field]]
+name = "identifier"
+label = "Identifier"
+type = "string"
+help = "a number it is looked up by: a health card, a lot or serial number, a file number"
+
+[[field]]
+name = "contact"
+label = "Contact"
+type = "string"
+help = "how to reach the person, when it is one"
+
+[[field]]
+name = "responsible"
+label = "Responsible member"
+type = "member"
+help = "the member who answers for it"

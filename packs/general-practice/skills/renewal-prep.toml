@@ -1,0 +1,78 @@
+id = "renewal-prep"
+title = "Prepare a prescription renewal"
+instructions = """
+Prepare the renewal request for the physician to decide. From the chart, find the medication's current (active)
+prescription: give its reference (MedicationRequest/<id>) as current_order, and copy its dose and directions, quantity,
+unit, repeats and days' supply exactly as written there; never invent or change them. Say when it was last prescribed
+and by whom, and the last visit. If there is no active prescription for it, say so (found_in_chart false, no
+current_order). Say whether the patient is due for a visit
+(no visit in the last 12 months, or the prescription says a review is due). List anything the physician should know:
+allergies that mention the drug, a recent abnormal result related to it, a dose that does not match the request.
+Do not recommend renewing or declining; the physician decides.
+"""
+
+[[output]]
+name = "medication"
+type = "string"
+required = true
+help = "the medication and dose as currently prescribed"
+
+[[output]]
+name = "found_in_chart"
+type = "boolean"
+help = "true when the chart has a current prescription for it"
+
+[[output]]
+name = "current_order"
+type = "string"
+help = "the active prescription being renewed, as MedicationRequest/<id>; empty when there is none"
+
+[[output]]
+name = "dosage"
+type = "string"
+help = "directions as on the current order, e.g. 1 tablet by mouth once daily"
+
+[[output]]
+name = "quantity"
+type = "number"
+min = 0
+help = "quantity per fill, as on the current order"
+
+[[output]]
+name = "unit"
+type = "string"
+help = "the unit of the quantity, e.g. tablet"
+
+[[output]]
+name = "repeats"
+type = "number"
+min = 0
+help = "number of repeats allowed, as on the current order"
+
+[[output]]
+name = "days_supply"
+type = "number"
+min = 0
+help = "days each fill lasts, as on the current order"
+
+[[output]]
+name = "last_prescribed"
+type = "date"
+
+[[output]]
+name = "last_visit"
+type = "date"
+
+[[output]]
+name = "due_for_visit"
+type = "boolean"
+
+[[output]]
+name = "concerns"
+type = "list"
+help = "what the physician should know, one item each"
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

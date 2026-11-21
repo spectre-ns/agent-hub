@@ -1,0 +1,41 @@
+# Practice Hub on Nebari: add this to your nebari-config.yaml, then `nebari deploy -c nebari-config.yaml`.
+#
+# Before deploying:
+#   1. Build and push the image (from the repository root):
+#        docker build -t <registry>/practicehub:0.1.0 . && docker push <registry>/practicehub:0.1.0
+#   2. Publish the chart (deploy/helm/practicehub) to a Helm repository Nebari can reach, e.g. as an OCI artifact:
+#        helm package deploy/helm/practicehub && helm push practicehub-0.1.0.tgz oci://<registry>/charts
+#      or serve the packaged chart from a static site with `helm repo index`.
+#   3. Create the hub's secret in Nebari's namespace (never put it in this file):
+#        kubectl -n dev create secret generic practicehub-secret \
+#          --from-literal=PRACTICEHUB_SECRET="$(openssl rand -hex 32)"
+#
+# PHIA: keep everything in Canada. The cluster's region decides where the disks (MongoDB, state, anchors) live:
+#   amazon_web_services.region: ca-central-1
+#   google_cloud_platform.region: northamerica-northeast1
+#   azure.region: canadacentral
+
+helm_extensions:
+  - name: practicehub
+    repository: https://<your-chart-repository>   # where step 2 published the chart
+    chart: practicehub
+    version: 0.1.0
+    overrides:
+      image:
+        repository: <registry>/practicehub
+        tag: "0.1.0"
+      pack: general-practice
+      secret:
+        existingSecret: practicehub-secret
+      hub:
+        anchorsStorageClass: ""   # name a different storage class from the database's, so losing one shows
+      mongo:
+        size: 20Gi
+      agents:
+        enabled: true
+      ingress:
+        enabled: true
+        className: traefik        # Nebari's ingress
+        host: practicehub.<your-nebari-domain>
+        tls:
+          - hosts: [practicehub.<your-nebari-domain>]

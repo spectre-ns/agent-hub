@@ -1,0 +1,197 @@
+# A result: a lab value, a vital sign. The physician's review is written back (status final, reviewed-by extensions).
+id = "Observation"
+label = "Result"
+plural = "Results"
+data_class = "clinical"
+strict = true
+date = "effectiveDateTime"
+flag = "interpretation.0.text"
+active = "not record.status in ['cancelled', 'entered-in-error']"
+order = 40
+summary = "A result: a lab value or a vital sign, and the physician's review of it."
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["registered", "preliminary", "final", "amended", "corrected", "cancelled", "entered-in-error", "unknown"]
+required = true
+
+[[field]]
+name = "category"
+label = "Categories (as JSON)"
+type = "list"
+advanced = true
+help = "[{text: laboratory | vital-signs | ...}]"
+
+[[field]]
+name = "category_text"
+label = "Category"
+path = "category.0.text"
+type = "string"
+help = "laboratory, vital-signs, ..."
+
+[[field]]
+name = "code"
+label = "Test (coded)"
+type = "object"
+required = true
+advanced = true
+
+[[field]]
+name = "test"
+label = "Test"
+path = "code.text"
+type = "string"
+help = "what was measured, e.g. HbA1c"
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "encounter"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+
+[[field]]
+name = "basedOn"
+label = "Based on (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "orders"
+label = "Ordered by"
+path = "basedOn.*"
+type = "reference"
+target = ["ServiceRequest", "MedicationRequest"]
+rel = "basedOn"
+
+[[field]]
+name = "effectiveDateTime"
+label = "Taken"
+type = "datetime"
+
+[[field]]
+name = "issued"
+type = "datetime"
+
+[[field]]
+name = "performer"
+label = "Performers (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "valueQuantity"
+label = "Value and unit (as JSON)"
+type = "object"
+advanced = true
+help = "{value, unit}"
+
+[[field]]
+name = "value"
+label = "Value"
+path = "valueQuantity.value"
+type = "number"
+
+[[field]]
+name = "unit"
+label = "Unit"
+path = "valueQuantity.unit"
+type = "string"
+help = "e.g. mmol/L, %"
+
+[[field]]
+name = "valueString"
+label = "Value (text)"
+type = "string"
+
+[[field]]
+name = "valueCodeableConcept"
+label = "Value (coded)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "interpretation"
+label = "Flags (as JSON)"
+type = "list"
+advanced = true
+help = "[{coding: [{system: v3-ObservationInterpretation, code: N | H | L | A | AA}], text: normal | abnormal | critical}]"
+
+[[field]]
+name = "flag_text"
+label = "Flag"
+path = "interpretation.0.text"
+type = "string"
+help = "normal, abnormal or critical"
+
+[[field]]
+name = "referenceRange"
+label = "Reference range (as JSON)"
+type = "list"
+advanced = true
+help = "[{low: {value, unit}, high: {value, unit}, text}]"
+
+[[field]]
+name = "range_text"
+label = "Reference range"
+path = "referenceRange.0.text"
+type = "string"
+help = "e.g. 4.0-6.0 %"
+
+[[field]]
+name = "note"
+label = "Notes"
+type = "list"
+advanced = true
+
+[[field]]
+name = "note_text"
+label = "Note"
+path = "note.0.text"
+type = "text"
+
+[[field]]
+name = "extension"
+label = "Review (as JSON)"
+type = "list"
+advanced = true
+help = "the physician's review: reviewed-by (valueReference), reviewed-on (valueDateTime), review-outcome"
+
+[[screen]]
+id = "result"
+on = ["create"]
+fields = ["subject", "test", "category_text", "effectiveDateTime", "value", "unit", "valueString", "range_text",
+          "flag_text", "encounter", "note_text"]
+
+[lifecycle]
+field = "status"
+initial = "registered"
+[[lifecycle.transition]]
+from = ["registered"]
+to = "preliminary"
+[[lifecycle.transition]]
+from = ["registered", "preliminary", "final"]
+to = "final"
+by = "workflow"
+label = "Reviewed by a physician"
+[[lifecycle.transition]]
+from = ["final", "amended", "corrected"]
+to = "amended"
+[[lifecycle.transition]]
+from = ["final", "amended", "corrected"]
+to = "corrected"
+[[lifecycle.transition]]
+from = ["registered", "preliminary"]
+to = "cancelled"
+[[lifecycle.transition]]
+from = ["*"]
+to = "entered-in-error"

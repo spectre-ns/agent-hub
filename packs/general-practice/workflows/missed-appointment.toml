@@ -1,0 +1,43 @@
+id = "missed-appointment"
+title = "Missed appointment"
+record = "Patient"
+summary = """
+A patient missed an appointment or cancelled late. The practice's policy (the missed-appointment-fee block, Python)
+decides whether there is a fee, and the patient is told either way.
+"""
+
+[trigger]
+starters = ["front-desk", "practice-manager"]
+
+[[input]]
+name = "notice_hours"
+type = "number"
+required = true
+help = "hours of notice the patient gave (0 if none)"
+
+[[input]]
+name = "missed_this_year"
+type = "number"
+default = 0
+
+[[steps]]
+id = "assess"
+title = "Apply the missed-appointment policy"
+kind = "automation"
+block = "missed-appointment-fee"
+[steps.params]
+notice_hours = "{{input.notice_hours}}"
+missed_this_year = "{{input.missed_this_year}}"
+fee = 50
+
+[[steps]]
+id = "tell"
+title = "Tell the patient"
+kind = "automation"
+after = ["assess"]
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your missed appointment"
+body = "We missed you at your appointment. {{assess.reason}}. Amount due: ${{assess.amount}}. Reply to rebook."

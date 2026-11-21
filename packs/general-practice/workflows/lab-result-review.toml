@@ -1,0 +1,278 @@
+id = "lab-result-review"
+title = "Lab result review"
+record = "Patient"
+summary = """
+A result arrives from the lab. Code checks the value against its range and the practice's critical limits, whatever
+the lab's flag says; a result the lab or the check calls critical pages the physicians at once and goes straight to an urgent physician review, without waiting for the sort. Other
+results are sorted first.
+A physician reviews every result and decides what happens next. Only a result that both the lab and the sort call
+normal, and that the range check finds in range, can be filed as normal, and only then is the patient told it is normal. The reviewing physician and the date
+are written back to the result. Agents sort; they never sign off a result.
+"""
+
+[trigger]
+starters = ["lab-interface", "nurse", "physician"]
+event = "lab.result"
+
+[[input]]
+name = "test"
+label = "Test"
+type = "string"
+required = true
+[[input]]
+name = "value"
+label = "Result value"
+type = "string"
+required = true
+[[input]]
+name = "unit"
+label = "Unit"
+type = "string"
+[[input]]
+name = "range"
+label = "Reference range"
+type = "string"
+[[input]]
+name = "flag"
+label = "Lab flag"
+type = "choice"
+choices = ["normal", "abnormal", "critical"]
+required = true
+[[input]]
+name = "observation"
+label = "Result record"
+type = "reference"
+target = ["Observation"]
+help = "The result the lab filed for this patient (another patient's is refused)"
+
+[[steps]]
+id = "check"
+title = "Check the value against its range"
+kind = "automation"
+block = "lab-range-check"
+[steps.params]
+test = "{{input.test}}"
+value = "{{input.value}}"
+unit = "{{input.unit}}"
+range = "{{input.range}}"
+
+[[steps]]
+id = "page"
+title = "Page the physicians (critical result)"
+kind = "automation"
+after = ["check"]
+when = "input.flag == 'critical' or check.band == 'critical'"
+action = "message.send"
+[steps.params]
+channel = "page"
+to = "role:physician"
+subject = "CRITICAL result"
+body = "Critical {{input.test}} {{input.value}} {{input.unit}} for {{run.record}} ({{check.reason}}). Review now."
+
+[[steps]]
+id = "sort"
+title = "Sort the result"
+kind = "task"
+role = "clinical-assistant"
+people_role = "nurse"
+due = "1d"
+escalate_to = "physician"
+skill = "lab-triage"
+risk = "medium"
+after = ["check"]
+when = "not (input.flag == 'critical' or check.band == 'critical')"
+context = ["record:clinical", "input"]
+
+[[steps]]
+id = "review"
+title = "Review the result (normal)"
+kind = "gate"
+role = "physician"
+due = "2d"
+escalate_to = "medical-director"
+after = ["sort", "check"]
+when = "input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal'"
+signer = "person"
+outcomes = ["file-normal", "call-patient", "book-visit"]
+meaning = "I have reviewed this result"
+context = ["record:clinical", "input", "check", "sort"]
+instructions = "The lab, the range check and the sort both call this result normal. File it as normal only if you agree; the patient is then told it is normal."
+
+[[steps]]
+id = "review-flagged"
+title = "Review the result (abnormal or critical)"
+kind = "gate"
+role = "physician"
+due = "4h"
+escalate_to = "medical-director"
+after = ["sort", "check"]
+when = "not (input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal') and not (input.flag == 'critical' or check.band == 'critical')"
+signer = "person"
+outcomes = ["no-action-needed", "call-patient", "book-visit"]
+meaning = "I have reviewed this result"
+context = ["record:clinical", "input", "check", "sort"]
+instructions = """This result is flagged abnormal or critical. It cannot be filed as normal. Choose no-action-needed when
+it needs no action now (the patient is told it was reviewed, not that it is normal), or have the patient called or
+booked."""
+
+[[steps]]
+id = "review-critical"
+title = "Review the result now (critical)"
+kind = "gate"
+role = "physician"
+priority = "urgent"
+due = "1h"
+escalate_to = "medical-director"
+after = ["sort", "check"]
+when = "input.flag == 'critical' or check.band == 'critical'"
+signer = "person"
+outcomes = ["no-action-needed", "call-patient", "book-visit"]
+meaning = "I have reviewed this critical result"
+context = ["input", "check", "record:clinical"]
+instructions = """The lab or the range check calls this result critical. Act on it now: have the patient called, or
+send them to emergency care. It has not been sorted by an agent."""
+
+[[steps]]
+id = "reviewed"
+title = "Note who reviewed the result, and when"
+kind = "automation"
+after = ["review", "review-flagged", "review-critical"]
+action = "clock.now"
+[steps.params]
+by = "{{review.by}}{{review-flagged.by}}{{review-critical.by}}"
+outcome = "{{review.outcome}}{{review-flagged.outcome}}{{review-critical.outcome}}"
+comment = "{{review.comment}}{{review-flagged.comment}}{{review-critical.comment}}"
+
+[[steps]]
+id = "file-result"
+title = "File the review on the result"
+kind = "automation"
+after = ["reviewed"]
+when = "input.observation != null and input.observation != ''"
+action = "record.update"
+[steps.params]
+ref = "{{input.observation}}"
+[steps.params.set]
+status = "final"
+extension = [
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-by", valueReference = { reference = "Practitioner/{{reviewed.by}}" } },
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-on", valueDateTime = "{{reviewed.now}}" },
+  { url = "https://harbourview.example/fhir/StructureDefinition/review-outcome", valueString = "{{reviewed.outcome}}" },
+]
+
+[[steps]]
+id = "tell-normal"
+title = "Tell the patient it is normal"
+kind = "automation"
+after = ["reviewed"]
+when = "reviewed.outcome == 'file-normal' and input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal'"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your {{input.test}} result"
+body = "Your physician has reviewed your {{input.test}} result and it is within the normal range. No action is needed."
+
+[[steps]]
+id = "tell-reviewed"
+title = "Tell the patient their result was reviewed"
+kind = "automation"
+after = ["reviewed"]
+when = "reviewed.outcome == 'no-action-needed'"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your {{input.test}} result"
+body = "Your physician has reviewed your {{input.test}} result. No action is needed right now; you can talk about it at your next visit, or call us if you have questions."
+
+[[steps]]
+id = "call"
+title = "Call the patient about their result"
+kind = "task"
+role = "nurse"
+due = "1d"
+escalate_to = "physician"
+after = ["reviewed"]
+when = "reviewed.outcome == 'call-patient' and not (input.flag == 'critical' or check.band == 'critical')"
+persons_only = true
+context = ["record:demographics", "record:clinical", "input", "reviewed"]
+instructions = "Call the patient about this result. If you cannot reach them, leave reached unticked: a physician decides what to do next."
+[[steps.fields]]
+name = "reached"
+type = "boolean"
+[[steps.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[steps]]
+id = "call-critical"
+title = "Call the patient now about a critical result"
+kind = "task"
+role = "nurse"
+priority = "urgent"
+due = "1h"
+escalate_to = "physician"
+after = ["reviewed"]
+when = "reviewed.outcome == 'call-patient' and (input.flag == 'critical' or check.band == 'critical')"
+persons_only = true
+context = ["record:demographics", "record:clinical", "input", "reviewed"]
+instructions = "This result is critical: call the patient now, and send them to the emergency department if the physician asked. If you cannot reach them, leave reached unticked: a physician decides what to do next."
+[[steps.fields]]
+name = "reached"
+type = "boolean"
+[[steps.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[steps]]
+id = "not-reached"
+title = "The patient could not be reached about their result"
+kind = "task"
+role = "physician"
+after = ["call", "call-critical"]
+when = "(call.notes != null and call.reached != true) or (call-critical.notes != null and call-critical.reached != true)"
+persons_only = true
+priority = "urgent"
+due = "1h"
+escalate_to = "medical-director"
+context = ["input", "check", "reviewed", "call", "call-critical", "record:demographics", "record:clinical"]
+instructions = """A nurse could not reach this patient about a result you asked to discuss. Decide what happens now:
+try again, write to them, call their emergency contact, or book them in."""
+[[steps.fields]]
+name = "action"
+type = "choice"
+choices = ["reached-the-patient", "letter-sent", "called-emergency-contact", "booked-a-visit", "no-further-action"]
+required = true
+[[steps.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[steps]]
+id = "book"
+title = "Book a visit"
+kind = "automation"
+after = ["reviewed"]
+when = "reviewed.outcome == 'book-visit' and not (input.flag == 'critical' or check.band == 'critical')"
+action = "workflow.start"
+[steps.params]
+workflow = "appointment-request"
+[steps.params.input]
+reason = "Follow-up on {{input.test}} result"
+urgency = "soon"
+
+[[steps]]
+id = "book-critical"
+title = "Book an urgent visit (critical result)"
+kind = "automation"
+after = ["reviewed"]
+when = "reviewed.outcome == 'book-visit' and (input.flag == 'critical' or check.band == 'critical')"
+action = "workflow.start"
+[steps.params]
+workflow = "appointment-request"
+[steps.params.input]
+reason = "Follow-up on {{input.test}} result"
+urgency = "urgent"

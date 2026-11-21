@@ -1,0 +1,108 @@
+# Something the practice keeps in stock. On hand is set only by posted stock moves (by = "workflow"), never typed in.
+id = "StockItem"
+label = "Stock item"
+plural = "Stock items"
+data_class = "inventory"
+title = "{sku} {name}"
+flag = "status"
+order = 40
+summary = "A supply kept in stock, how many are on hand, and when to order more."
+
+[[field]]
+name = "sku"
+label = "Item code"
+required = true
+max_length = 40
+
+[[field]]
+name = "name"
+required = true
+max_length = 200
+
+[[field]]
+name = "category"
+type = "choice"
+choices = ["clinical-supply", "vaccine", "medication", "office", "cleaning", "equipment"]
+
+[[field]]
+name = "unit"
+help = "what one counts as: box of 100, vial, each"
+max_length = 40
+
+[[field]]
+name = "location"
+label = "Kept in"
+type = "reference"
+target = ["Location"]
+rel = "kept-in"
+
+[[field]]
+name = "on_hand"
+label = "On hand"
+type = "number"
+by = "workflow"
+help = "set by posted stock moves: receive, issue, write-off, found or count"
+
+[[field]]
+name = "reorder_point"
+label = "Reorder at"
+type = "number"
+help = "when on hand falls to this, a purchaser is asked to order more"
+
+[[field]]
+name = "reorder_quantity"
+label = "Order quantity"
+type = "number"
+
+[[field]]
+name = "supplier"
+max_length = 200
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["stocked", "low", "on-order", "discontinued"]
+
+[[field]]
+name = "notes"
+type = "text"
+
+[[field]]
+name = "discontinue_reason"
+label = "Why it is discontinued"
+type = "text"
+
+[lifecycle]
+field = "status"
+initial = "stocked"
+abandoned = { "low" = "stocked" }   # a reorder that is cancelled leaves the item as it was
+
+[[lifecycle.transition]]
+from = ["stocked"]
+to = "low"
+by = "workflow"            # it reached its reorder point
+label = "Low"
+
+[[lifecycle.transition]]
+from = ["low"]
+to = "on-order"
+by = "workflow"            # a purchaser ordered it
+label = "Ordered"
+
+[[lifecycle.transition]]
+from = ["low", "on-order"]
+to = "stocked"
+label = "Clear reorder"    # a posted delivery does this on its own; a person may, when nothing is coming
+comment = true
+
+[[lifecycle.transition]]
+from = ["stocked", "low", "on-order"]
+to = "discontinued"
+label = "Discontinue"
+fields = ["discontinue_reason"]
+require = ["discontinue_reason"]
+
+[[lifecycle.transition]]
+from = ["discontinued"]
+to = "stocked"
+label = "Stock it again"

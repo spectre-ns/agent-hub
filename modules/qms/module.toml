@@ -1,0 +1,28 @@
+# Quality: corrective and preventive actions (CAPA). It builds on document control: a CAPA names the controlled
+# documents it affects, and sending a CAPA's actions out sends those documents for review in the dms module.
+
+[module]
+requires_core = "1.0"
+id = "qms"
+name = "Quality"
+version = "1"
+summary = "Corrective and preventive actions, linked to the controlled documents they change."
+shortcuts = ["CAPA"]
+requires = ["dms"]
+
+[[roles]]
+id = "quality-manager"
+name = "Quality manager"
+description = "Owns corrective and preventive actions and signs that they worked."
+
+[[data_classes]]
+id = "quality"
+name = "Quality records"
+description = "Corrective and preventive actions, incidents and their investigations."
+
+[grants.quality-manager]
+write = ["quality", "documents"]
+read = ["quality", "documents"]
+
+[grants.document-controller]
+read = ["quality"]

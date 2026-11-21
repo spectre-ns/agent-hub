@@ -1,0 +1,52 @@
+id = "missed-appointment-fee"
+title = "Missed-appointment fee"
+runtime = "python"
+summary = """
+The practice's missed-appointment policy as code: whether to charge, how much, and why. Deterministic, so the same
+facts always give the same answer, and the answer is in the track.
+"""
+
+code = '''
+def run(input):
+    hours = input["notice_hours"]
+    missed = input.get("missed_this_year") or 0
+    if hours >= 24:
+        return {"charge": False, "amount": 0, "reason": "cancelled with at least 24 hours' notice"}
+    if missed == 0:
+        return {"charge": False, "amount": 0, "reason": "first missed appointment this year: a reminder, no fee"}
+    return {"charge": True, "amount": input["fee"],
+            "reason": f"less than 24 hours' notice and {missed} earlier missed appointment(s) this year"}
+'''
+
+[[input]]
+name = "notice_hours"
+type = "number"
+required = true
+help = "how many hours before the appointment the patient cancelled (0 if they did not)"
+
+[[input]]
+name = "missed_this_year"
+type = "number"
+default = 0
+help = "missed appointments in the last 12 months, before this one"
+
+[[input]]
+name = "fee"
+type = "number"
+default = 50
+help = "the practice's fee, in dollars"
+
+[[output]]
+name = "charge"
+type = "boolean"
+required = true
+
+[[output]]
+name = "amount"
+type = "number"
+required = true
+
+[[output]]
+name = "reason"
+type = "string"
+required = true

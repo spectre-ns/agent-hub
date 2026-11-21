@@ -1,0 +1,127 @@
+id = "referral"
+title = "Referral to a specialist"
+record = "Patient"
+summary = """
+A physician refers a patient. The clinical admin agent drafts the letter from the chart; the physician corrects and
+signs it; the referral is filed and sent, and the patient is told.
+"""
+
+[trigger]
+starters = ["physician"]
+
+[[input]]
+name = "specialty"
+type = "string"
+required = true
+[[input]]
+name = "specialist"
+type = "string"
+help = "name and fax, if known"
+[[input]]
+name = "reason"
+type = "text"
+required = true
+[[input]]
+name = "urgency"
+type = "choice"
+choices = ["routine", "urgent"]
+default = "routine"
+
+[[steps]]
+id = "draft"
+title = "Draft the letter"
+kind = "task"
+role = "clinical-assistant"
+due = "2d"
+escalate_to = "practice-manager"
+skill = "referral-letter"
+risk = "medium"
+context = ["record:clinical", "record:demographics", "input"]
+
+[[steps]]
+id = "finalize"
+title = "Finalize the letter"
+kind = "task"
+role = "physician"
+due = "3d"
+escalate_to = "medical-director"
+after = ["draft"]
+review_of = "draft"
+persons_only = true
+context = ["record:clinical", "input"]
+[[steps.fields]]
+name = "letter"
+type = "text"
+required = true
+[[steps.fields]]
+name = "attachments"
+type = "list"
+help = "chart items to send with the letter, as Type/id"
+
+[[steps]]
+id = "sign"
+title = "Sign the referral"
+kind = "gate"
+role = "physician"
+due = "3d"
+escalate_to = "medical-director"
+after = ["finalize"]
+signer = "person"
+outcomes = ["send", "cancel"]
+meaning = "I am referring this patient and the letter is accurate"
+meanings = { cancel = "I cancel this referral" }
+not_by = []
+context = ["finalize"]
+
+[[steps]]
+id = "timing"
+title = "Note the date of the referral"
+kind = "automation"
+after = ["sign"]
+when = "sign.outcome == 'send'"
+action = "clock.now"
+
+[[steps]]
+id = "file"
+title = "File the referral"
+kind = "automation"
+after = ["timing"]
+action = "record.create"
+[steps.params]
+type = "ServiceRequest"
+[steps.params.data]
+status = "active"
+intent = "order"
+priority = "{{input.urgency}}"
+authoredOn = "{{timing.now}}"
+subject = { reference = "{{run.record}}" }
+requester = { reference = "Practitioner/{{sign.by}}" }
+code = { text = "Referral to {{input.specialty}}" }
+reasonCode = [{ text = "{{input.reason}}" }]
+note = [{ text = "{{finalize.letter}}" }, { text = "Sent with: {{finalize.attachments}}" }]
+
+[[steps]]
+id = "send"
+title = "Send to the specialist"
+kind = "automation"
+after = ["file"]
+action = "message.send"
+[steps.params]
+channel = "fax"
+to = "{{input.specialist}}"
+subject = "Referral: {{input.specialty}}"
+body = """{{finalize.letter}}
+
+Enclosed: {{finalize.attachments}}"""
+
+[[steps]]
+id = "tell-patient"
+title = "Tell the patient"
+kind = "automation"
+after = ["file"]
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your referral"
+body = "Your physician has referred you to {{input.specialty}}. Their office will contact you with an appointment."

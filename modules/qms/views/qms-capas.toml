@@ -1,0 +1,11 @@
+id = "qms-capas"
+title = "CAPAs"
+summary = "Corrective and preventive actions by status."
+roles = ["quality-manager", "document-controller"]
+
+[[widget]]
+kind = "board"
+title = "By status"
+type = "CAPA"
+group_by = "status"
+columns = ["title", "kind", "opened"]

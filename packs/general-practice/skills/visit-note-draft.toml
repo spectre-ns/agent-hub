@@ -1,0 +1,33 @@
+id = "visit-note-draft"
+title = "Draft a visit note"
+instructions = """
+Draft a SOAP note from the visit transcript, for the physician to edit and sign. Write only what was said or observed
+in the visit; use the chart (medications, allergies, earlier results) to get names and doses right, never to add
+findings. Where the transcript is unclear, write [unclear] rather than guess. Do not add a diagnosis or a plan the
+physician did not state. This is a draft: the physician is its author.
+"""
+
+[[output]]
+name = "subjective"
+type = "text"
+required = true
+
+[[output]]
+name = "objective"
+type = "text"
+
+[[output]]
+name = "assessment"
+type = "text"
+help = "only what the physician said"
+
+[[output]]
+name = "plan"
+type = "text"
+required = true
+help = "only what the physician said"
+
+[[output]]
+name = "follow_up"
+type = "string"
+help = "when to come back, if the physician said"

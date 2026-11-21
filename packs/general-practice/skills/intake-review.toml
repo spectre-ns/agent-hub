@@ -1,0 +1,39 @@
+id = "intake-review"
+title = "Review new-patient paperwork"
+instructions = """
+Read the patient's registration and intake form. Check that the paperwork is complete: health card number,
+date of birth, a phone number or email, an emergency contact, current medications (or "none"), allergies (or "none"),
+and consent to the practice's privacy notice.
+
+List what is missing in plain words the front desk can send to the patient. Flag anything a person should look at
+before the patient is accepted, quoting the form: a stated urgent problem, a request to transfer from another
+physician mid-treatment, or answers that contradict each other. Do not judge the patient's health.
+"""
+
+[[output]]
+name = "complete"
+type = "boolean"
+help = "true when nothing required is missing"
+
+[[output]]
+name = "missing"
+type = "list"
+help = "what the patient still needs to provide, one item per entry"
+
+[[output]]
+name = "flags"
+type = "list"
+help = "things a person should look at, quoting the form"
+
+[[output]]
+name = "urgency"
+type = "choice"
+choices = ["routine", "urgent"]
+required = true
+help = "urgent when the patient says they have an urgent problem"
+
+[[output]]
+name = "summary"
+type = "text"
+required = true
+help = "two or three sentences for the front desk"

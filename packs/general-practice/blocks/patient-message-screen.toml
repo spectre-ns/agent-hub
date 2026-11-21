@@ -1,0 +1,150 @@
+id = "patient-message-screen"
+title = "Screen a patient message for red flags"
+runtime = "python"
+summary = """
+Reads a patient's message for words that may mean an emergency (chest pain or pressure, trouble breathing, blue lips,
+stroke signs, heavy bleeding, thoughts of suicide or an overdose, a severe allergic reaction, a fever in a young baby...).
+Plain code, not a model: the same words always give the same answer. A message it flags goes straight to a nurse to
+call the patient; no agent drafts a reply to it. It errs towards flagging: a nurse reading a message that was fine
+costs minutes, a missed emergency does not.
+
+A warning sign the patient says they do not have ("no chest pain") is not a red flag, but the message is marked
+``unsure`` and a nurse answers it within hours, not an agent. "Never had pain like this", "without warning", "no one
+is home" are not denials. Thoughts of suicide or self-harm, harm from or to others, and poisoning are never read as
+denied. A keyword list will miss things, so two more guards: every message, flagged or not, gets ``advice`` telling the
+patient the inbox is not watched around the clock and to call 911 in an emergency; and only a message that is plainly
+about paperwork (booking, forms, refills, billing...) and names nothing like a symptom is ``routine``. Only a routine
+message may get an agent's draft; everything else goes to a nurse.
+"""
+
+code = '''
+import re
+
+# (name, pattern, may_be_denied)
+FLAGS = [
+    ("chest pain", r"breast\W*bone|sternum|elephant|chest.{0,30}(squeez|crush|press|tight|heav)|(sweat\w*|clammy).{0,60}(jaw|arm|chest|nause|sick)|(jaw|arm|chest)\w*.{0,60}(sweat|clammy)|jaw\W+(\w+\W+)?(ache|aches|pain|hurt)|chest\W*(pain|pressure|tight|hurt|ache|heav|squeez|crush|discomfort)|(heavy|tight|crushing|squeez\w*|pressure|elephant)\W+(\w+\W+){0,3}(in\W+|on\W+)?(my\W+)?chest|pain\W+in\W+(my\W+)?chest|chest\W+(has\W+been\W+|is\W+|feels?\W+|felt\W+)?(\w+\W+)?(heavy|tight|crush|hurt|sore)|heart\W+attack|(left\W+)?arm\W+(is\W+|feels?\W+|went\W+|goes\W+)?(numb|dead|tingl)|(pain\W+|goes\W+|going\W+|spread\w*\W+|radiat\w*\W+)(down|in|into|to|up)\W+(my\W+)?(left\W+)?(arm|jaw|neck)", True),
+    ("trouble breathing", r"enough\W+air|struggl\w*\W+(for\W+|to\W+)(breath|air)|fight\w*\W+for\W+(breath|air)|breathing\W+(is\W+)?(\w+\W+)?(hard|difficult|bad|laboured|labored|noisy|fast|rapid)|(only|just)\W+(say|get\W+out)\W+(a\W+)?few\W+words|(inhaler|puffer)\w*\W+(\w+\W+){0,3}nothing|sucking\W+in|under\W+(her|his|the|their)\W+ribs|(able|unable)\W+to\W+(\w+\W+)?breathe|breathe\W+(properly|normally|right)|(isn.?t|is\W+not|wasn.?t|was\W+not|not|stop\w*)\W+breath|barely\W+(\w+\W+)?breath|out\W+of\W+breath|(hurts?|hurting|painful|pain\w*|sore)\W+(\w+\W+)?(to\W+|when\W+(i\W+)?|if\W+i\W+)?(breath|take\W+a\W+breath)|(baby|he|she|son|daughter|child|lips?|face|skin|toddler)\W+(\w+\W+){0,2}(blue|grey|gray|purple)\b|\b(looks?|turned|turning|went|gone|going|is)\W+(a\W+bit\W+|kind\W+of\W+|kinda\W+)?(blue|grey|gray|purple)\b|(can.?t|cannot|can\W+not|hard\W+to|trouble|difficult\w*|struggling\W+to|unable\W+to|not\W+able\W+to)\W+(\w+\W+)?(breath|catch\W+my\W+breath)|short(ness)?\W+of\W+breath|not\W+breathing|stopped\W+breathing|choking|gasping|breathless|wheez|(puffer|inhaler)\W+(\w+\W+){0,2}(not|isn.?t|doesn.?t|won.?t)\W+(help|work)|(lips?|face|skin)\W+(\w+\W+)?(is\W+|are\W+|turn\w*\W+|went\W+|look\w*\W+)?(blue|grey|gray)|turning\W+blue|blue\W+lips", True),
+    ("stroke signs", r"(trouble|difficult\w*|hard|struggl\w*)\W+(\w+\W+)?(speak|talk|get\w*\W+(my\W+|the\W+|his\W+|her\W+)?words)|(face|mouth|smile)\W+(\w+\W+){0,3}(funny|strange|weird|odd|wrong|different)\W+(\w+\W+){0,2}(one\W+side|on\W+the\W+(left|right))|(can.?t|cannot|couldn.?t)\W+feel\W+(my\W+|his\W+|her\W+|their\W+)?(\w+\W+)?(face|cheek|lip)|(not|isn.?t|wasn.?t|stopped)\W+making\W+(any\W+)?sense|talking\W+(nonsense|gibberish)|droop|(face|mouth|smile)\W+(has\W+|had\W+)?(dropped|fallen|slipped)|dropped\W+on\W+one\W+side|(can.?t|cannot|couldn.?t|unable\W+to)\W+find\W+(\w+\W+)?words|(can.?t|cannot|couldn.?t|unable\W+to)\W+(move|lift|feel|use)\W+(my\W+|his\W+|her\W+|their\W+)?(right\W+|left\W+)?(arm|leg|hand|side|foot)|(sudden\w*|all\W+of\W+a\W+sudden)\W+(\w+\W+){0,2}confus|confus\w*\W+(\w+\W+){0,2}(sudden\w*|all\W+of\W+a\W+sudden|out\W+of\W+nowhere)|one\W+side\W+(\w+\W+){0,3}(weak|numb|heavy|dead|droop)|(weak|numb|heavy)\w*\W+(on\W+)?(the\W+|my\W+|his\W+|her\W+)?(left|right|one)\W+side|(can.?t|cannot|couldn.?t|unable\W+to)\W+(talk|speak|get\W+(my\W+|the\W+|his\W+|her\W+)?words\W+out)|(sudden\w*|all\W+of\W+a\W+sudden)\W+(\w+\W+){0,2}(can.?t|cannot|couldn.?t)\W+see|(lost|losing|lose)\W+(\w+\W+)?(vision|sight)|(can.?t|cannot)\W+see\W+(\w+\W+){0,2}(out\W+of|from|with)\W+(my\W+)?(\w+\W+)?eye|went\W+blind|gone\W+blind|face\W+(is\W+|looks?\W+)?(droop|lopsided|uneven)|droop\w*\W+(face|mouth)|(face|mouth|smile)\W+(\w+\W+){0,2}(lopsided|crooked|uneven)|slurr|garbled|(speech|talking|words)\W+(\w+\W+){0,2}(strange|weird|wrong|jumbled|mixed)|one\W+side\W+(of\W+)?(my\W+|his\W+|her\W+)?(body|face)|numb\w*\W+(on\W+)?one\W+side|sudden\w*\W+(\w+\W+)?(weak|confus|vision|blind|can.?t\W+speak)|stroke|can.?t\W+(lift|move)\W+(my\W+)?(arm|leg)", True),
+    ("heavy bleeding", r"(heavy|lot\W+of|won.?t\W+stop|can.?t\W+stop|uncontroll\w*|soak\w*)\W+(\w+\W+){0,2}(bleed|blood)|blood\W+(\w+\W+){0,6}(won.?t|doesn.?t|will\W+not|not)\W+stop|bleed\w*\W+(heavily|a\W+lot|won.?t\W+stop|everywhere|through)|(vomit|throw)\w*\W+(\w+\W+)?(up\W+)?blood|cough\w*\W+(up\W+)?blood|blood\W+in\W+(my\W+|the\W+)?(stool|vomit|poo|toilet)|(stool|poo|poop)\w*\W+(is\W+|are\W+|was\W+)?(\w+\W+)?black|black\W+(tarry\W+)?(stool|poo)|tarry", True),
+    ("self-harm", r"take\W+(all|every\w*|the\W+rest)\W+(of\W+)?(my\W+|the\W+)?(\w+\W+)?(pills|tablets|meds|medication)|\brope\b|noose|goodbye\W+(letter|note|message)|suicide\W+note|(life|living)\W+(isn.?t|is\W+not|isnt|ain.?t)\W+worth|not\W+worth\W+living|never\W+wake\W+up|took\W+(\d+|\w+)\W+of\W+(my|his|her|the)\W+|(drank|drunk|drink\w*).{0,60}(pills|tablets|meds)|(pills|tablets|meds).{0,60}(drank|drunk|alcohol|vodka|wine|beer|whisk)|swallowed\W+(\w+\W+){0,5}(pills|tablets|meds)|kill(ing)?\W+my\s*self|hang(ing)?\W+my\s*self|(plan\w*|going|want\w*|thinking\W+about|thought\W+about)\W+(\w+\W+)?to\W+(hang|jump|drown|shoot|overdose|end)\b|jump(ing)?\W+(off|from|in\W+front\W+of)\W+(a\W+|the\W+|my\W+)?(bridge|building|roof|balcony|train|cliff|car|bus)|(nobody|no\W+one|no\W+body)\W+(would|will|is\W+going\W+to|is\W+gonna|gonna)\W+(even\W+)?(miss|notice|care)|(can.?t|cannot|can\W+not)\W+(go\W+on|keep\W+going|do\W+this\W+anymore|take\W+(it|this)\W+anymore)|cut(ting)?\W+(my\W+)?(arms?|wrists?|legs?|thighs?)\b|(started|start|back\W+to)\W+cutting|cutting\W+again|suicid|kill\W+(my\s*self|me)|end\W+(my|it)\W+(life|all)|ending\W+(it|things|my\W+life)|end\W+things|self.?harm|hurt(ing)?\W+my\s*self|cut(ting)?\W+my\s*self|(don.?t|do\W+not)\W+want\W+to\W+(live|be\W+alive|be\W+here|wake\W+up)|want\w*\W+to\W+die|wanna\W+die|better\W+off\W+(dead|without\W+me)|no\W+(reason|point)\W+(to\W+|in\W+)?(live|living|go\W+on)|(don.?t|do\W+not|can.?t)\W+see\W+(the\W+|a\W+)?point|easier\W+if\W+i\W+(wasn.?t|weren.?t|was\W+not|were\W+not)\W+(around|here|alive)|(wasn.?t|weren.?t)\W+around\W+anymore|overdos|took\W+(\w+\W+){0,3}(pills|tablets|capsules|meds)\W+(\w+\W+){0,3}(\d{2,}|lot|many|all|handful|bottle)|took\W+(a\W+lot|all|too\W+many|a\W+(bottle|handful|pack)|\d{2,}|[4-9]|\w+ty|\w+teen|ten|twelve)\W+(\w+\W+){0,3}(pills|tablets|capsules|meds)|swallowed\W+(\w+\W+){0,3}(pills|tablets)|(took|swallowed|taken)\W+(a\W+|the\W+)?(whole\W+)?(bottle|handful|box|pack|packet)\W+of", False),
+    ("harm to or from others", r"(afraid|scared|worried|frightened)\W+(\w+\W+){0,3}(hurt|harm|shake|kill)\W+(my\W+|the\W+)?(baby|child|kids?|son|daughter|children)|(feel|feeling|am|i.?m)\W+(\w+\W+)?unsafe|not\W+safe|(hit|hits|hitting|beat\w*|choke\w*|strangl\w*|hurt\w*|threaten\w*)\W+(me|us)\b|(threaten\w*|going|want\w*)\W+to\W+(kill|hurt)\W+(me|us|him|her|them|someone|somebody|my)|(hurt|kill)\W+(someone|somebody|people)|scared\W+to\W+go\W+home|not\W+safe\W+at\W+home|voices?\W+(\w+\W+){0,4}(hurt|kill|harm)", False),
+    ("severe allergic reaction", r"swollen\W+(\w+\W+)?(lips?|tongue|face|throat|mouth|eyes?)|(lips?|tongue|face|throat|mouth|eyes?)\W+(\w+\W+){0,2}(swollen|swoll|puff|blown\W+up)|anaphyla|allergic\W+reaction|throat\W+(is\W+|feels?\W+|going\W+)?(\w+\W+)?(swell|clos|tight|itch)|(lips?|tongue|face)\W+(is\W+|are\W+|feels?\W+)?(\w+\W+)?(swell|thick|puffy)|swell\w*\W+(\w+\W+)?(lips?|tongue|throat)|epi.?pen|can.?t\W+swallow", True),
+    ("collapse or seizure", r"(isn.?t|is\W+not|stopped|won.?t|not)\W+(\w+\W+)?respond|(had|having|has|have|took|taking)\W+(a\W+)?fits?\b|(not|isn.?t|won.?t|can.?t|cannot|couldn.?t|wouldn.?t)\W+(\w+\W+)?wak(e|ing)\b|hard\W+to\W+wake|confus\w*\W+(\w+\W+){0,3}(drowsy|sleepy|out\W+of\W+it)|(drowsy|sleepy|out\W+of\W+it)\W+(\w+\W+){0,3}confus|faint|passed\W+out|pass\W+out|unconscious|unresponsive|not\W+respond|won.?t\W+wake|seizure|convuls|collaps|fitting|floppy|limp\b", True),
+    ("fast or irregular heartbeat with symptoms", r"(heart|pulse|heart\W*rate|hr)\W+(\w+\W+){0,3}(1[4-9]\d|2\d\d)\b|heart\W+(is\W+)?(going|beating)\W+(so\W+|really\W+|very\W+)?(fast|crazy|wild)|(hearts?|heart.?s|pulse)\W+(is\W+)?(\w+\W+)?(racing|pounding|at\W+1[4-9]\d|at\W+2\d\d)|palpitat", True),
+    ("feels like dying", r"(feel|feels|feeling|felt)\W+(like\W+)?(i.?m|i\W+am|i\W+was)\W+(going\W+to\W+|gonna\W+)?(die|dying)|(think|thought|sure)\W+(i.?m|i\W+am)\W+(going\W+to\W+|gonna\W+)?(die|dying)|\bi.?m\W+dying|sense\W+of\W+doom", True),
+    ("severe pain", r"(pain|ache|hurts?|hurting)\W+(is\W+|has\W+been\W+|was\W+)?(\w+\W+)?(unbearable|excruciating|agoni\w*|severe|the\W+worst|too\W+much)|(worst|severe|unbearable|excruciating|agoni\w*)\W+(\w+\W+)?(\w+\W+)?(pain|headache)|thunderclap|hit\W+(\w+\W+){0,3}(bat|hammer)|(pain|hurts?)\W+(is\W+)?(a\W+)?(9|10)\W*(/|out\W+of)\W*10|(testicle|testicular|scrotum|groin)\W+(\w+\W+){0,3}(pain|hurt|swoll)|(sudden\w*|really|badly)\W+(\w+\W+)?hurts", True),
+    ("pregnancy concern", r"pregnan\w*.{0,40}(bleed|pain|cramp|spot|fluid|leak|headache|vision|swell)|(bleed|pain|cramp|spot)\w*.{0,40}pregnan|baby\W+(isn.?t|is\W+not|not|has\W+not|hasn.?t|has\W+stopped|stopped)\W+(\w+\W+)?mov|\b\d{2}\W+weeks.{0,40}(mov|bleed|pain|fluid|leak)|waters?\W+(have\W+|has\W+)?broke", True),
+    ("unwell young baby", r"(baby|infant|newborn|\b\d+\W*(day|week|wk)s?\W*old|\b[0-2]\W*(month|mo)s?\W*old)(.{0,60})(fever|temperature|temp\b|warm|hot\W+to\W+(the\W+)?touch|\bhot\b|burning\W+up|floppy|limp|sleepy|won.?t\W+(feed|eat|wake)|not\W+feeding|isn.?t\W+feeding|\b3[89](\.\d)?\b|\b4[0-2](\.\d)?\b|\b10[0-6](\.\d)?\b)|(fever|temperature|temp\b|warm|floppy|sleepy|won.?t\W+(feed|eat)|not\W+feeding|isn.?t\W+feeding|\b3[89](\.\d)?\b|\b4[0-2](\.\d)?\b).{0,60}(baby|infant|newborn|\b\d+\W*(day|week|wk)s?\W*old|\b[0-2]\W*(month|mo)s?\W*old)", True),
+    ("very high fever or confusion with fever", r"(fever|temperature|temp)\W+(\w+\W+){0,3}(4[0-2](\.\d)?\b|10[4-7](\.\d)?\b)|(fever|temp\w*).{0,60}confus|confus.{0,60}fever", True),
+    ("meningitis signs", r"(rash|spots).{0,40}(doesn.?t|does\W+not|won.?t|not)\W+(fade|go\W+away\W+when\W+pressed|blanch)|non.?blanch|stiff\W+neck|neck\W+(is\W+)?stiff", True),
+    ("spinal cord compression", r"(can.?t|cannot|can\W+not)\W+feel\W+(my\W+)?(legs|feet)|(lost|losing|no)\W+control\W+(of|over)\W+(my\W+)?(bladder|bowel)|numb\w*\W+(between|in)\W+(my\W+)?(legs|groin|bottom|buttocks)|saddle", True),
+    ("blood sugar emergency", r"(sugar|glucose|meter|reading|monitor|cgm)\W+(\w+\W+){0,3}(says|reads|shows|showing|saying)\W+(hi|lo|high|low)\b|(sugar|glucose|bg|bs)\W+(\w+\W+){0,3}(is\W+|was\W+|of\W+|at\W+)?([0-2](\.\d)?\b|[1-3]\d\b(?!\.)|[2-9]\d\.\d|\d\d\.\d)|hypo\b|hypoglyc|(sugar|glucose)\W+(\w+\W+){0,2}(very\W+)?(low|high)", True),
+    ("poisoning or swallowed object", r"(swallow\w*|ate|eaten|drank|drunk|chew\w*|got\W+into|licked)\W+(\w+\W+){0,5}(pills|tablets|meds|medicine|medication|pods?|tide|dishwasher|laundry|bleach|cleaner|batter(y|ies)|magnets?|antifreeze|vape|e.?juice|nicotine)|(swallow\w*|ate|eaten|drank|drink|drunk)\W+(\w+\W+){0,3}(battery|batteries|magnet|bleach|cleaner|detergent|pod|antifreeze|poison|chemical|lighter\W+fluid)|poison|(took|taken|swallowed)\W+(\w+\W+){0,3}(someone\W+else|my\W+(wife|husband|mom|mum|dad|partner|friend|son|daughter|kid|child)).{0,20}(pills|tablets|meds|medication|warfarin|\w+)|(took|taken)\W+(\w+\W+){0,2}(extra|double|too\W+much|by\W+accident|accidentally)|accidentally\W+(took|swallowed|gave)", False),
+    ("possible sepsis", r"rigou?rs?\b|(can.?t|cannot|won.?t)\W+stop\W+(shak|shiver|trembl)|(shak|shiver|trembl)\w*.{0,60}(burning\W+up|fever|hot|temperature)|(burning\W+up|fever|temperature)\w*.{0,60}(shak|shiver|trembl)|mottled|(cold|clammy)\W+(and\W+)?(grey|gray|blue|pale)", True),
+    ("head injury", r"(hit|bang\w*|bump\w*|injur\w*|knock\w*)\W+(\w+\W+){0,2}head|head\W+injur|concuss", True),
+    ("blood clot signs", r"(calf|leg)\W+(\w+\W+){0,3}(swollen|swelling|red|hot|painful).{0,80}(breath|chest)", True),
+    ("severe abdominal pain or vomiting", r"(abdominal|stomach|belly|tummy)\W+(\w+\W+){0,2}(unbearable|excruciating|agoni\w*|severe|the\W+worst)|(severe|bad|terrible|unbearable)\W+(\w+\W+)?(abdominal|stomach|belly|tummy)\W+pain|(belly|stomach|abdominal|tummy)\W+pain\W+(is\W+)?(a\W+)?(9|10)|can.?t\W+stop\W+(vomit|throw)", True),
+]
+
+NEGATION = re.compile(r"\b(no|not|none|denies|deny|don.?t\W+have|do\W+not\W+have|haven.?t\W+(had|got)|"
+                      r"hasn.?t\W+had|free\W+of)\b")
+# not a denial of the sign: "no one is home", "not sure", "never had it like this", "without warning"
+NOT_A_DENIAL = re.compile(r"\b(no\W+one|nobody|no\W+way|not\W+sure|not\W+certain|not\W+great|not\W+good|"
+                          r"not\W+well|not\W+ok|not\W+okay|don.?t\W+know|no\W+idea|not\W+(helping|working|getting|going|improving|"
+                          r"stopping|easing|better|settling|touching)|no\W+(better|change|relief|help|longer))\b")
+# words after a sign that undo a denial: "haven't had pain like this before", "isn't chest pain normal?"
+UNDOES = re.compile(r"\b(like\W+this|like\W+that|this\W+(bad|badly|much|strong)|so\W+(bad|badly)|before|ever|"
+                    r"normal|usual|anymore|any\W+more|worse|again)\b|\?")
+CLAUSE = re.compile(r"[,.;:!?]|\b(but|and|though|although|however|except|yet|now)\b")
+
+
+def denied(text, start):
+    """True if the words just before ``start``, in the same clause, deny it ("no chest pain", "I don't have")."""
+    before = CLAUSE.split(text[:start])[-1] if CLAUSE.search(text[:start]) else text[:start]
+    words = " ".join(before.split()[-4:])
+    after = CLAUSE.split(text[start:], maxsplit=1)[0] if CLAUSE.search(text[start:]) else text[start:]
+    end = CLAUSE.search(text[start:])
+    if UNDOES.search(after) or (end and end.group(0) == "?"):
+        return False
+    return bool(NEGATION.search(NOT_A_DENIAL.sub(" ", words)))
+
+
+# Only a message that is plainly about the practice's paperwork, and names nothing that sounds like a symptom, is
+# "routine": an agent may draft a reply to it. Everything else goes to a nurse. The keyword list above will always
+# miss some way of saying an emergency; this makes a miss cost hours with a nurse, not a reply from an agent.
+ADMIN = re.compile(r"\b(appointment|appt|book|booking|re.?schedul\w*|cancel\w*|move\W+my|slot|form|forms|sick\W+note|"
+                   r"doctor.?s\W+note|note\W+for|letter|fax|records?|copy\W+of|bill|billing|invoice|receipt|insurance|"
+                   r"payment|pay|refill|renew\w*|prescription|repeat|pharmacy|referral|address|phone\W+number|email|"
+                   r"hours|open|closed|parking|portal|password|log\W*in|results?|vaccin\w*|flu\W+shot|covid\W+shot|"
+                   r"physical|check.?up|annual|new\W+patient|transfer|wait\W*list)\b")
+SYMPTOM = re.compile(r"pain|hurt|ache|aching|sore|breath|bleed|blood|dizz|faint|light.?headed|vomit|throw\w*\W+up|nause|"
+                     r"\bsick\b|\bill\b|unwell|fever|temperature|\bhot\b|cold\W+and|swell|swoll|rash|itch|hives|numb|"
+                     r"tingl|weak|confus|droop|\bdie\b|dying|dead|suicid|kill|harm|overdos|swallow|drank|drunk|poison|"
+                     r"unsafe|afraid|scared|frighten|panic|depress|anxi|chest|heart|pulse|sugar|glucose|seiz|\bfits?\b|"
+                     r"collaps|respond|shak|shiver|lump|cough|diarr|infect|burn|\bcut\b|wound|\bfell\b|\bfall|injur|"
+                     r"accident|pregnan|symptom|side\W+effect|reaction|allerg|stroke|can.?t\W+(move|see|feel|speak|talk|"
+                     r"walk|eat|sleep|stop|wake|keep)|worse|\bbad\b|urgent|emergency|asap|right\W+away|help\b|wors|"
+                     r"mental|cope|coping|alone|crisis|pills|tablets|took|taken|double|extra|missed|forgot|instead|"
+                     r"swelling|jaw|arm|leg|face|eye|vision|head|stomach|belly|tummy|baby|newborn|rope|goodbye")
+
+
+def run(input):
+    text = " ".join(str(input.get("question") or "").lower().replace("\u2019", "'").split())
+    found, mentioned = [], []
+    for name, pattern, may_be_denied in FLAGS:
+        hits = list(re.finditer(f"(?=(?:{pattern}))", text))  # every place it matches, overlapping ones too
+        if not hits:
+            continue
+        if may_be_denied and all(denied(text, m.start()) for m in hits):
+            mentioned.append(name)
+        else:
+            found.append(name)
+    if found:
+        advice = ("If this is an emergency, call 911 or go to the nearest emergency department now. "
+                  "A nurse at the practice has your message and will call you as soon as possible.")
+    else:
+        advice = ("We have your message and will reply within one working day. Messages are not read around the "
+                  "clock: if you think this is an emergency, call 911 or go to the nearest emergency department. "
+                  "For urgent advice any time, call 811.")
+    routine = not found and not mentioned and bool(ADMIN.search(text)) and not SYMPTOM.search(text)
+    return {"red_flag": bool(found), "flags": found, "unsure": bool(mentioned) and not found,
+            "mentioned": mentioned, "routine": routine, "advice": advice,
+            "admin_reason": str(input.get("question") or "")[:300] if routine else ""}
+'''
+
+[[input]]
+name = "question"
+type = "text"
+required = true
+help = "the patient's message, as they wrote it"
+
+[[output]]
+name = "red_flag"
+type = "boolean"
+required = true
+
+[[output]]
+name = "flags"
+type = "list"
+
+[[output]]
+name = "unsure"
+type = "boolean"
+
+[[output]]
+name = "mentioned"
+type = "list"
+
+[[output]]
+name = "routine"
+type = "boolean"
+help = "true only for a plainly administrative message that names nothing like a symptom: only these may get an agent's draft"
+
+[[output]]
+name = "advice"
+type = "string"
+
+[[output]]
+name = "admin_reason"
+type = "string"
+help = "the message itself when it is routine (paperwork, a check-up), else empty: safe to show staff who never see the chart"

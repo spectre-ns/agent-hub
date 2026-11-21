@@ -1,0 +1,24 @@
+id = "plm-products"
+title = "Products"
+summary = "Product lines and their products, and the changes in progress."
+
+[[widget]]
+kind = "tree"
+title = "Product lines"
+type = "Product"
+where = "record.status != 'obsolete'"
+columns = ["revision", "status"]
+
+[[widget]]
+kind = "board"
+title = "Change orders"
+type = "ChangeOrder"
+group_by = "status"
+columns = ["title", "raised"]
+
+[[widget]]
+kind = "table"
+source = "items"
+title = "Changes waiting for the board"
+workflow = "plm-change"
+status = ["open", "claimed"]

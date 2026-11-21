@@ -1,0 +1,21 @@
+# A complaint, written the way a module writes its types: about whoever the practice serves (the core's Subject),
+# not about Client by name. The pickers and checks offer every type that extends Subject.
+id = "Complaint"
+label = "Complaint"
+plural = "Complaints"
+data_class = "profile"
+strict = true
+title = "{what}"
+
+[[field]]
+name = "about"
+type = "reference"
+target = ["Subject"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "what"
+label = "What happened"
+type = "string"
+required = true

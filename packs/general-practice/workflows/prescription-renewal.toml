@@ -1,0 +1,170 @@
+id = "prescription-renewal"
+title = "Prescription renewal"
+record = "Patient"
+summary = """
+A patient (or their pharmacy) asks for a renewal. The clinical admin agent prepares it from the chart (the current
+order, its dose, quantity and repeats), a physician decides and signs, the new prescription replaces the current one
+(which is marked completed, so the chart never shows two active orders), and the prescription goes to the pharmacy
+with the patient's name, date of birth and health card. A patient who is due for a visit is booked instead. A
+medication that is not on the chart is never renewed automatically: the physician writes a new prescription.
+"""
+
+[trigger]
+starters = ["front-desk", "nurse", "physician", "clinical-assistant", "patient-portal"]
+event = "renewal.requested"
+
+[[input]]
+name = "medication"
+label = "Medication asked for"
+type = "string"
+required = true
+
+[[input]]
+name = "pharmacy"
+label = "Pharmacy"
+type = "string"
+help = "name and fax of the pharmacy"
+
+[[steps]]
+id = "prepare"
+title = "Prepare the renewal"
+kind = "task"
+role = "clinical-assistant"
+due = "1d"
+escalate_to = "nurse"
+skill = "renewal-prep"
+risk = "medium"
+context = ["record:clinical", "record:demographics", "record:visits", "input.medication"]
+
+[[steps]]
+id = "decide"
+title = "Decide on the renewal"
+kind = "gate"
+role = "physician"
+due = "2d"
+escalate_to = "medical-director"
+after = ["prepare"]
+signer = "person"
+outcomes = ["renew", "book-visit", "decline"]
+meaning = "I authorize this prescription renewal as prepared: medication, dose, quantity and repeats"
+meanings = { book-visit = "I do not renew this prescription without a visit", decline = "I decline this prescription renewal" }
+context = ["input.medication", "input.pharmacy", "prepare", "record:clinical"]
+instructions = """Check the medication, dose, quantity and repeats the assistant copied from the current order. Renew only
+if they are right; otherwise decline with a comment, or book a visit."""
+
+[[steps]]
+id = "details"
+title = "Look up the patient's details for the pharmacy"
+kind = "automation"
+after = ["decide"]
+when = "decide.outcome == 'renew'"
+action = "patient.details"
+[steps.params]
+patient = "{{run.record}}"
+physician = "{{decide.by}}"
+valid_days = 365
+
+[[steps]]
+id = "not-on-chart"
+title = "Write a new prescription (not on the chart)"
+kind = "task"
+role = "physician"
+due = "2d"
+escalate_to = "medical-director"
+after = ["details"]
+when = "prepare.found_in_chart != true"
+persons_only = true
+context = ["input.medication", "input.pharmacy", "prepare", "record:clinical"]
+instructions = """The requested medication has no current order on the chart, so it cannot be renewed automatically.
+Write a new prescription in the usual way, or tell the patient why not."""
+[[steps.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[steps]]
+id = "prescribe"
+title = "Write the prescription"
+kind = "automation"
+after = ["details"]
+when = "prepare.found_in_chart == true and prepare.current_order != null and prepare.current_order != ''"
+action = "record.create"
+[steps.params]
+type = "MedicationRequest"
+[steps.params.data]
+status = "active"
+intent = "order"
+subject = { reference = "{{run.record}}" }
+authoredOn = "{{details.now}}"
+medicationCodeableConcept = { text = "{{prepare.medication}}" }
+dosageInstruction = [{ text = "{{prepare.dosage}}" }]
+dispenseRequest = { validityPeriod = { start = "{{details.today}}", end = "{{details.valid_until}}" }, numberOfRepeatsAllowed = "{{prepare.repeats}}", quantity = { value = "{{prepare.quantity}}", unit = "{{prepare.unit}}" }, expectedSupplyDuration = { value = "{{prepare.days_supply}}", unit = "days" } }
+priorPrescription = { reference = "{{prepare.current_order}}" }
+requester = { reference = "Practitioner/{{decide.by}}" }
+note = [{ text = "Renewal of {{prepare.current_order}}. {{decide.comment}}" }]
+
+[[steps]]
+id = "replace-prior"
+title = "Mark the previous order completed"
+kind = "automation"
+after = ["prescribe"]
+action = "record.update"
+[steps.params]
+ref = "{{prepare.current_order}}"
+[steps.params.set]
+status = "completed"
+
+[[steps]]
+id = "send-to-pharmacy"
+title = "Send to the pharmacy"
+kind = "automation"
+after = ["prescribe"]
+action = "message.send"
+[steps.params]
+channel = "fax"
+to = "{{input.pharmacy}}"
+subject = "Prescription renewal: {{details.name}}"
+body = """Prescription renewal from Harbourview Family Medicine.
+Patient: {{details.name}}, date of birth {{details.birth_date}}, NS health card {{details.health_card}}.
+Medication: {{prepare.medication}}. Directions: {{prepare.dosage}}.
+Dispense: {{prepare.quantity}} {{prepare.unit}} ({{prepare.days_supply}} days), {{prepare.repeats}} repeat(s). Valid until {{details.valid_until}}.
+Authorized by {{details.physician_name}} on {{details.today}}. Prescription {{prescribe.reference}}."""
+
+[[steps]]
+id = "book"
+title = "Book a visit"
+kind = "automation"
+after = ["decide"]
+when = "decide.outcome == 'book-visit'"
+action = "workflow.start"
+[steps.params]
+workflow = "appointment-request"
+[steps.params.input]
+reason = "Medication review ({{input.medication}})"
+urgency = "soon"
+
+[[steps]]
+id = "tell-patient"
+title = "Tell the patient a visit is needed"
+kind = "automation"
+after = ["decide"]
+when = "decide.outcome == 'book-visit'"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your renewal request"
+body = "Your physician would like to see you before renewing {{input.medication}}. We will contact you with an appointment."
+
+[[steps]]
+id = "tell-declined"
+title = "Tell the patient the renewal was not done"
+kind = "automation"
+after = ["decide"]
+when = "decide.outcome == 'decline'"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your renewal request"
+body = "Your physician has not renewed {{input.medication}}. Please call the office to talk about your medication."

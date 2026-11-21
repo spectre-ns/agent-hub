@@ -1,0 +1,113 @@
+id = "qms-capa"
+title = "Corrective or preventive action"
+summary = """Investigate and plan; open the affected controlled documents for revision; once every one has been
+reviewed and approved again (the dms module's review), a quality manager decides whether the action worked."""
+record = "CAPA"
+
+[trigger]
+event = "record.created:CAPA"
+starters = ["quality-manager"]
+
+[[steps]]
+id = "investigate"
+title = "Investigate the root cause and plan the action"
+kind = "task"
+role = "quality-manager"
+context = ["record:quality", "record:documents"]
+due = "5d"
+escalate_to = "quality-manager"
+[[steps.fields]]
+name = "root_cause"
+label = "Root cause"
+type = "text"
+required = true
+[[steps.fields]]
+name = "plan"
+label = "Action plan"
+type = "text"
+required = true
+
+[[steps]]
+id = "record-plan"
+title = "Write the plan into the CAPA"
+kind = "automation"
+after = ["investigate"]
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "actions"
+root_cause = "{{investigate.root_cause}}"
+plan = "{{investigate.plan}}"
+
+[[steps]]
+id = "revise-documents"
+title = "Open the affected documents for revision"
+kind = "automation"
+after = ["record-plan"]
+action = "record.update"
+for_each = "{{record.documents}}"
+where = "each_record.status == 'approved'"  # a draft or one already in review is left as it is
+[steps.params]
+ref = "{{each}}"
+increment = ["revision"]
+[steps.params.set]
+status = "draft"   # its author revises it and sends it for review; staff keep reading the approved revision
+
+[[steps]]
+id = "documents-approved"
+title = "Wait until every affected document is approved"
+kind = "wait"
+role = "document-controller"
+after = ["revise-documents"]
+for_each = "{{record.documents}}"
+until = "each_record.status == 'approved' or each_record.status == 'obsolete'"
+
+[[steps]]
+id = "to-verification"
+title = "Ready for verification"
+kind = "automation"
+after = ["documents-approved"]
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "verification"
+
+[[steps]]
+id = "verify"
+title = "Did the action work?"
+kind = "gate"
+role = "quality-manager"
+due = "30d"
+escalate_to = "quality-manager"
+after = ["to-verification"]
+signer = "person"
+meaning = "I have checked whether this action was effective"
+outcomes = ["effective", "not-effective"]
+context = ["record:quality", "record:documents"]
+not_by = ["investigate"]
+
+[[steps]]
+id = "close"
+title = "Close the CAPA"
+kind = "automation"
+after = ["verify"]
+when = "verify.outcome == 'effective'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "closed"
+
+[[steps]]
+id = "reopen"
+title = "Back to actions"
+kind = "automation"
+after = ["verify"]
+when = "verify.outcome == 'not-effective'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "actions"

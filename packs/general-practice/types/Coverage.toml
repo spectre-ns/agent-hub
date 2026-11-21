@@ -1,0 +1,56 @@
+# Insurance: MSI (provincial) or a private plan.
+id = "Coverage"
+label = "Coverage"
+plural = "Coverage"
+data_class = "demographics"
+strict = true
+date = "period"
+active = "record.status == 'active'"
+order = 110
+summary = "Insurance: MSI (provincial) or a private plan."
+part_of = "beneficiary"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["active", "cancelled", "draft", "entered-in-error"]
+required = true
+
+[[field]]
+name = "beneficiary"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "type"
+type = "object"
+help = "CodeableConcept, e.g. {text: \"MSI\"}"
+
+[[field]]
+name = "subscriberId"
+label = "Member ID"
+type = "string"
+
+[[field]]
+name = "identifier"
+type = "list"
+
+[[field]]
+name = "payor"
+type = "list"
+help = "who pays: [{display: \"Nova Scotia MSI\"}]"
+
+[[field]]
+name = "relationship"
+type = "object"
+
+[[field]]
+name = "class"
+type = "list"
+
+[[field]]
+name = "period"
+type = "object"

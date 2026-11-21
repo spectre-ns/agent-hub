@@ -1,0 +1,40 @@
+# Where stock is kept: a site, a room in it, a cupboard or fridge in the room. Locations form a tree.
+id = "Location"
+label = "Storage location"
+plural = "Storage locations"
+data_class = "inventory"
+title = "{name}"
+parent = "within"
+order = 50
+summary = "A site, room, cupboard or fridge where stock is kept."
+
+[navigator]
+tops = "Sites"
+
+[[field]]
+name = "name"
+required = true
+max_length = 120
+
+[[field]]
+name = "within"
+label = "Inside"
+type = "reference"
+target = ["Location"]
+rel = "within"
+help = "the room or site it is in; leave it empty for a site"
+
+[[field]]
+name = "kind"
+type = "choice"
+choices = ["site", "room", "cupboard", "fridge", "freezer", "cart"]
+
+[[field]]
+name = "cold_chain"
+label = "Cold chain"
+type = "boolean"
+help = "kept between 2 and 8 °C: vaccines and other fridge lines go here"
+
+[[field]]
+name = "notes"
+type = "text"

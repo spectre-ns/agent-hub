@@ -1,0 +1,16 @@
+# LiteLLM in front of on-premises models. Agents name these as litellm/<model_name> in their profile.
+model_list:
+  - model_name: gp-local
+    litellm_params:
+      model: ollama_chat/qwen3:14b
+      api_base: http://host.docker.internal:11434
+  # - model_name: gp-local          # or vLLM on a GPU host in the practice's Canadian data centre
+  #   litellm_params:
+  #     model: hosted_vllm/Qwen/Qwen3-14B
+  #     api_base: http://vllm:8000/v1
+
+litellm_settings:
+  success_callback: ["langfuse"]   # traces carry the agent (trace_user_id), the run (session_id), item and step tags
+  failure_callback: ["langfuse"]
+  redact_user_api_key_info: true
+  # turn_off_message_logging: true # keep prompts (record content) out of Langfuse if it is not on premises

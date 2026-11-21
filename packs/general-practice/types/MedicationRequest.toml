@@ -1,0 +1,172 @@
+# A prescription. A renewal writes a new order and marks the one it replaces completed.
+id = "MedicationRequest"
+label = "Prescription"
+plural = "Prescriptions"
+data_class = "clinical"
+strict = true
+date = "authoredOn"
+active = "record.status == 'active'"
+order = 30
+summary = "A prescription. A renewal writes a new order and marks the one it replaces completed."
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["active", "on-hold", "cancelled", "completed", "entered-in-error", "stopped", "draft", "unknown"]
+required = true
+
+[[field]]
+name = "intent"
+type = "choice"
+choices = ["proposal", "plan", "order", "original-order", "reflex-order", "filler-order", "instance-order", "option"]
+required = true
+help = "order, for a prescription the physician writes"
+
+[[field]]
+name = "medicationCodeableConcept"
+label = "Medication (coded)"
+type = "object"
+required = true
+advanced = true
+
+[[field]]
+name = "medication"
+label = "Medication"
+path = "medicationCodeableConcept.text"
+type = "string"
+help = "the drug, strength and form, e.g. Ramipril 5 mg capsule"
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "encounter"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+
+[[field]]
+name = "authoredOn"
+label = "Prescribed"
+type = "datetime"
+
+[[field]]
+name = "requester"
+label = "Prescriber"
+type = "reference"
+target = ["Practitioner"]
+rel = "requester"
+
+[[field]]
+name = "dosageInstruction"
+label = "Directions (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "directions"
+label = "Directions"
+path = "dosageInstruction.0.text"
+type = "text"
+help = "e.g. 1 capsule by mouth once daily"
+
+[[field]]
+name = "dispenseRequest"
+label = "Dispense (as JSON)"
+type = "object"
+advanced = true
+help = "{quantity: {value, unit}, numberOfRepeatsAllowed, expectedSupplyDuration: {value, unit: days}, validityPeriod}"
+
+[[field]]
+name = "quantity"
+path = "dispenseRequest.quantity.value"
+type = "number"
+
+[[field]]
+name = "quantity_unit"
+label = "Quantity unit"
+path = "dispenseRequest.quantity.unit"
+type = "string"
+help = "capsule, tablet, mL..."
+
+[[field]]
+name = "repeats"
+path = "dispenseRequest.numberOfRepeatsAllowed"
+type = "number"
+
+[[field]]
+name = "supply_days"
+label = "Days supply"
+path = "dispenseRequest.expectedSupplyDuration.value"
+type = "number"
+with = { unit = "days" }
+
+[[field]]
+name = "priorPrescription"
+label = "Replaces"
+path = "priorPrescription.reference"
+type = "reference"
+target = ["MedicationRequest"]
+rel = "replaces"
+
+[[field]]
+name = "reasonCode"
+label = "Reason codes (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "reason_text"
+label = "Reason"
+path = "reasonCode.0.text"
+type = "string"
+
+[[field]]
+name = "note"
+label = "Notes"
+type = "list"
+advanced = true
+
+[[field]]
+name = "note_text"
+label = "Note"
+path = "note.0.text"
+type = "text"
+
+[[screen]]
+id = "prescription"
+on = ["create"]
+fields = ["subject", "medication", "directions", "quantity", "quantity_unit", "repeats", "supply_days", "intent",
+          "requester", "authoredOn", "reason_text", "encounter", "priorPrescription", "note_text"]
+
+[lifecycle]
+field = "status"
+initial = "draft"
+[[lifecycle.transition]]
+from = ["draft"]
+to = "active"
+[[lifecycle.transition]]
+from = ["active"]
+to = "completed"
+label = "Replaced by a renewal, or finished"
+[[lifecycle.transition]]
+from = ["active", "on-hold"]
+to = "stopped"
+[[lifecycle.transition]]
+from = ["active"]
+to = "on-hold"
+[[lifecycle.transition]]
+from = ["on-hold"]
+to = "active"
+[[lifecycle.transition]]
+from = ["draft"]
+to = "cancelled"
+[[lifecycle.transition]]
+from = ["*"]
+to = "entered-in-error"

@@ -1,0 +1,61 @@
+{{- if .Values.mongo.enabled }}
+# MongoDB as a one-node replica set (the hub writes in transactions). Not exposed outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ph.name" . }}-mongo
+  labels: {{- include "ph.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true   # the replica set names this pod before it is ready
+  selector: {{- include "ph.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mongo
+  ports: [{ name: mongo, port: 27017 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ph.name" . }}-mongo
+  labels: {{- include "ph.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mongo
+spec:
+  serviceName: {{ include "ph.name" . }}-mongo
+  replicas: 1
+  selector:
+    matchLabels: {{- include "ph.labels" . | nindent 6 }}
+      app.kubernetes.io/component: mongo
+  template:
+    metadata:
+      labels: {{- include "ph.labels" . | nindent 8 }}
+        app.kubernetes.io/component: mongo
+    spec:
+      securityContext: { fsGroup: 999, runAsUser: 999, runAsNonRoot: true }
+      containers:
+        - name: mongo
+          image: {{ .Values.mongo.image }}
+          args: ["--replSet", "rs0", "--bind_ip_all"]
+          ports: [{ name: mongo, containerPort: 27017 }]
+          volumeMounts: [{ name: data, mountPath: /data/db }]
+          resources: {{- toYaml .Values.mongo.resources | nindent 12 }}
+          # initiates the replica set the first time, then is ready once this node is the primary
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval",
+                        "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: '{{ include "ph.mongoHost" . }}'}]}).ok }; quit(db.hello().isWritablePrimary ? 0 : 1)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 10
+          livenessProbe:
+            exec: { command: ["mongosh", "--quiet", "--eval", "quit(db.adminCommand('ping').ok ? 0 : 1)"] }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 10
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.mongo.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources: { requests: { storage: {{ .Values.mongo.size }} } }
+{{- end }}

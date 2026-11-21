@@ -1,0 +1,24 @@
+id = "lab-triage"
+title = "Sort an incoming lab result"
+instructions = """
+Sort the incoming result so it reaches the physician in the right queue. Use the lab's own flag and reference range:
+normal, abnormal, or critical. You may raise the category (e.g. a value just inside the range that is far from the
+patient's previous results is worth calling abnormal), never lower it below the lab's flag. Give the comparison with
+earlier results of the same test, if any. You do not interpret the result clinically.
+"""
+
+[[output]]
+name = "category"
+type = "choice"
+choices = ["normal", "abnormal", "critical"]
+required = true
+
+[[output]]
+name = "previous"
+type = "string"
+help = "earlier values of the same test, with dates"
+
+[[output]]
+name = "rationale"
+type = "text"
+required = true

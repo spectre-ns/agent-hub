@@ -1,0 +1,20 @@
+id = "slot-proposal"
+title = "Propose an appointment slot"
+instructions = """
+Pick one free slot for the patient from the allowed values. Respect what the patient asked for: preferred days or
+times and a preferred physician, when given. When the request is urgent, take the earliest slot. When the patient
+already has a physician at this practice (their general practitioner in the registration), prefer that physician.
+You see contact details and the calendar only; you do not see, and must not ask for, clinical details.
+"""
+
+[[output]]
+name = "slot"
+type = "choice"
+choices_from = "provider_free-slots"
+required = true
+help = "the chosen slot"
+
+[[output]]
+name = "why"
+type = "string"
+help = "one sentence: why this slot"

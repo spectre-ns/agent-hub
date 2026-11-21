@@ -1,0 +1,13 @@
+id = "return-prep"
+title = "Prepare a personal return"
+instructions = "Total the client's slips into a draft return. Do not file anything."
+
+[[output]]
+name = "income"
+type = "number"
+required = true
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

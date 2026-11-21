@@ -1,0 +1,371 @@
+# A family medicine clinic. Everything clinical lives in this pack; the hub's core knows nothing about medicine.
+#
+# The practice and its people are fictional.
+
+[practice]
+requires_core = "1.0"
+id = "harbourview"
+kind = "general-practice"
+name = "Harbourview Family Medicine"
+jurisdiction = "Nova Scotia, Canada"
+privacy_law = "PHIA (Personal Health Information Act)"
+data_residency = "Canada"
+timezone = "America/Halifax"
+escalation_role = "practice-manager"
+shortcuts = ["start:appointment-request", "Encounter", "Appointment"]   # the top bar and sidebar
+member_types = ["Practitioner"]   # a reference to Practitioner/<id> names a member of the practice
+message_class = "correspondence"  # the outbox shows a message to those who read this class...
+free_text_class = "clinical"      # ...and this one too when it quotes a patient's words or a clinician's answer
+notes = """Agents here do administrative work: intake, scheduling, drafting, preparing, coding. Clinicians decide and
+sign; no agent ever signs a clinical decision. Drafts written by agents are labelled as drafts until a clinician signs."""
+# Said to every agent of this practice, in its system prompt.
+agent_rules = [
+  "You do not diagnose, prescribe, or give clinical advice: a question that needs clinical judgement is escalated.",
+]
+
+# How long a queued message may wait for its delivery connector before the clock escalates it, and who delivers it by
+# hand when the connector is late (an urgent channel) or reports a failure. {to} is the recipient, in words.
+[practice.outbox.page]
+deadline_minutes = 5
+urgent = true
+deliver_role = "nurse"
+task = "Phone {to}"
+
+[practice.outbox.fax]
+deadline_minutes = 120
+deliver_role = "front-desk"
+task = "Fax this to {to}"
+
+[practice.outbox.patient-portal]
+deadline_minutes = 240
+deliver_role = "front-desk"
+task = "Reach the patient another way"
+
+# ---------------------------------------------------------------------------------------------------------- subject
+# Who the practice's work is about. A law firm would say type = "Client" (or "Matter"), an accountancy "Client".
+
+[subject]
+type = "Patient"
+label = "Patient"
+plural = "Patients"
+path = "patients"
+registered_event = "patient.registered"
+register_label = "Start new-patient intake"
+# The registration form is the Patient type's own (types/Patient.toml), which extends the core's Subject.
+
+# ------------------------------------------------------------------------------------------------------------ roles
+# A role is held by people, agents or both. Workflows name roles, never people.
+
+[[roles]]
+id = "physician"
+name = "Physician"
+description = "Sees patients, writes and signs notes, prescribes, reviews results, refers."
+
+[[roles]]
+id = "nurse"
+name = "Nurse"
+description = "Triage, follow-up calls, patient education."
+
+[[roles]]
+id = "front-desk"
+name = "Front desk"
+description = "Registers patients, accepts new patients, books and changes appointments."
+
+[[roles]]
+id = "scheduler"
+name = "Scheduler"
+description = "Finds and books appointment slots. Sees contact details and the calendar, never clinical notes."
+
+[[roles]]
+id = "intake-coordinator"
+name = "Intake coordinator"
+description = "Checks new-patient paperwork is complete and flags what a person should look at."
+
+[[roles]]
+id = "documentation-assistant"
+name = "Documentation assistant"
+description = "Drafts visit notes from the visit transcript for the physician to edit and sign."
+
+[[roles]]
+id = "clinical-assistant"
+name = "Clinical assistant"
+description = "Prepares renewals, sorts incoming results and drafts referral letters for a physician's decision."
+
+[[roles]]
+id = "billing"
+name = "Billing"
+description = "Codes visits and submits claims."
+
+[[roles]]
+id = "practice-manager"
+name = "Practice manager"
+description = "Runs the practice: owns its workflows and policies, manages the team, handles what goes wrong."
+
+[[roles]]
+id = "medical-director"
+name = "Medical director"
+description = """Owns clinical policy with the practice manager: approves workflow and block changes that touch clinical
+work, so no change waits on a single policy owner."""
+
+[[roles]]
+id = "patient-portal"
+name = "Patient portal"
+description = "The online portal: registers patients, takes their requests. A service, not a worker."
+
+[[roles]]
+id = "lab-interface"
+name = "Lab interface"
+description = "The laboratory feed: files results and starts their review. A service, not a worker."
+
+# ----------------------------------------------------------------------------------------------------- data classes
+# Permissions are granted per data class. Record types are FHIR R4 resources, so they can move to Medplum unchanged.
+
+[[data_classes]]
+id = "demographics"
+name = "Demographics and contact"
+record_types = ["Patient", "RelatedPerson", "Coverage"]
+
+[[data_classes]]
+id = "scheduling"
+name = "Appointments"
+record_types = ["Appointment"]
+
+[[data_classes]]
+id = "intake"
+name = "Intake forms"
+record_types = ["QuestionnaireResponse"]
+
+[[data_classes]]
+id = "visits"
+name = "Visit summaries (what billing needs)"
+record_types = ["Encounter"]
+
+[[data_classes]]
+id = "clinical"
+name = "Clinical record"
+record_types = ["Composition", "Observation", "Condition", "AllergyIntolerance", "MedicationRequest",
+                "MedicationStatement", "ServiceRequest", "DiagnosticReport", "Immunization"]
+
+[[data_classes]]
+id = "correspondence"
+name = "Messages and letters"
+record_types = ["Communication"]
+
+[[data_classes]]
+id = "billing"
+name = "Billing"
+record_types = ["ChargeItem", "Claim"]
+
+# ----------------------------------------------------------------------------------------------------------- grants
+# Writing a class implies reading it.
+
+[grants.physician]
+write = ["clinical", "visits", "scheduling", "correspondence"]
+read = ["demographics", "intake", "billing"]
+
+[grants.nurse]
+write = ["clinical", "visits", "scheduling", "correspondence", "intake"]   # a nurse checks patients in and triages
+read = ["demographics"]
+
+[grants.front-desk]
+write = ["demographics", "scheduling", "correspondence"]
+read = ["intake"]
+
+[grants.scheduler]
+write = ["scheduling"]
+read = ["demographics"]          # never clinical: a scheduling agent does not read notes
+
+[grants.intake-coordinator]
+write = ["intake"]
+read = ["demographics", "scheduling"]
+
+[grants.documentation-assistant]
+read = ["clinical", "intake", "demographics", "visits"]   # drafts go back to the physician, never into the chart
+
+[grants.clinical-assistant]
+read = ["clinical", "demographics", "intake", "visits"]
+write = ["correspondence"]
+
+[grants.billing]
+write = ["billing"]
+read = ["visits", "demographics"]
+
+[grants.practice-manager]
+read = ["demographics", "scheduling", "billing", "visits"]
+policy_owner = true
+member_admin = true
+
+[grants.medical-director]
+read = ["clinical", "visits", "demographics"]
+policy_owner = true              # a second policy owner: approvals never wait on one person
+
+[grants.patient-portal]
+write = ["demographics", "intake", "correspondence"]
+
+[grants.lab-interface]
+write = ["clinical"]
+
+# --------------------------------------------------------------------------------------------------------- calendar
+# What the free-slots provider and the Schedule page read: which record type is a booking, and where in it the
+# time, status and participants are. A practice without one has no schedule.
+# The calendar is the practice's Booking types (Appointment extends Booking); here only when and with whom.
+[calendar]
+provider_role = "physician"
+slot_minutes = 15
+slot_stride = 2
+lookahead_days = 5
+max_slots = 16
+hours = { mon = ["09:00", "17:00"], tue = ["09:00", "17:00"], wed = ["09:00", "17:00"], thu = ["09:00", "19:00"], fri = ["09:00", "13:00"] }
+
+# The same labels as the record types (types/*.toml), for anything that reads labels from here.
+[record_labels]
+Patient = "Patient"
+RelatedPerson = "Related person"
+Coverage = "Coverage"
+Appointment = "Appointment"
+QuestionnaireResponse = "Intake form"
+Encounter = "Visit"
+Composition = "Note"
+Observation = "Result"
+Condition = "Problem"
+AllergyIntolerance = "Allergy"
+MedicationRequest = "Prescription"
+MedicationStatement = "Medication taken"
+ServiceRequest = "Referral"
+DiagnosticReport = "Report"
+Immunization = "Immunization"
+Communication = "Message"
+ChargeItem = "Charge"
+Claim = "Claim"
+
+# ----------------------------------------------------------------------------------------------------------- events
+# Every event the practice's workflows listen for, with the fields it carries (they become the run's input).
+
+[[events]]
+id = "patient.registered"
+label = "A patient registered (desk or portal)"
+fields = []
+
+[[events]]
+id = "appointment.requested"
+label = "A patient asked for an appointment"
+fields = ["reason", "urgency", "preferences"]
+
+[[events]]
+id = "lab.result"
+label = "A lab result arrived"
+fields = ["test", "value", "unit", "range", "flag", "observation"]
+
+[[events]]
+id = "renewal.requested"
+label = "A patient or pharmacy asked for a prescription renewal"
+fields = ["medication", "pharmacy"]
+
+[[events]]
+id = "patient.question"
+label = "A patient sent a question through the portal"
+fields = ["question"]
+
+[[events]]
+id = "visit.ended"
+label = "A visit ended"
+fields = ["appointment", "visit_type", "minutes", "start", "end", "transcript"]
+
+# ---------------------------------------------------------------------------------------------------------- members
+# People first; every agent and service has a person as sponsor, accountable for what it does.
+
+[[members]]
+id = "rana"
+name = "Rana Haddad"
+title = "Practice manager"
+roles = ["practice-manager"]
+owner = true
+
+[[members]]
+id = "dr-amara"
+name = "Dr. Amara Okafor"
+title = "Family physician, medical director"
+roles = ["physician", "medical-director"]
+
+[[members]]
+id = "dr-liam"
+name = "Dr. Liam Fraser"
+title = "Family physician"
+roles = ["physician"]
+
+[[members]]
+id = "noor"
+name = "Noor Siddiqui"
+title = "Registered nurse"
+roles = ["nurse"]
+
+[[members]]
+id = "jo"
+name = "Jo Tremblay"
+title = "Front desk"
+roles = ["front-desk", "scheduler", "intake-coordinator"]
+
+[[members]]
+id = "sam"
+name = "Sam Comeau"
+title = "Billing clerk"
+roles = ["billing"]
+
+[[members]]
+id = "intake-agent"
+kind = "agent"
+name = "Intake agent"
+title = "Checks new-patient paperwork"
+sponsor = "jo"
+roles = ["intake-coordinator"]
+profile = { model = "standin", max_risk = "low", skills = ["intake-review"] }
+
+[[members]]
+id = "scheduling-agent"
+kind = "agent"
+name = "Scheduling agent"
+title = "Proposes and books appointments"
+sponsor = "jo"
+roles = ["scheduler"]
+profile = { model = "standin", max_risk = "low", skills = ["slot-proposal"] }
+
+[[members]]
+id = "scribe-agent"
+kind = "agent"
+name = "Scribe agent"
+title = "Drafts visit notes for physicians"
+sponsor = "dr-amara"
+roles = ["documentation-assistant"]
+profile = { model = "standin", max_risk = "medium", skills = ["visit-note-draft"] }
+
+[[members]]
+id = "clinical-admin-agent"
+kind = "agent"
+name = "Clinical admin agent"
+title = "Prepares renewals, sorts results, drafts referrals"
+sponsor = "dr-amara"
+roles = ["clinical-assistant"]
+profile = { model = "standin", max_risk = "medium", skills = ["renewal-prep", "lab-triage", "referral-letter", "patient-reply-draft"] }
+
+[[members]]
+id = "billing-agent"
+kind = "agent"
+name = "Billing agent"
+title = "Codes visits and submits routine claims"
+sponsor = "sam"
+roles = ["billing"]
+profile = { model = "standin", max_risk = "medium", skills = ["visit-coding", "claim-submit"] }
+
+[[members]]
+id = "portal"
+kind = "service"
+name = "Patient portal"
+sponsor = "rana"
+roles = ["patient-portal"]
+
+[[members]]
+id = "lab-feed"
+kind = "service"
+name = "Lab results feed"
+sponsor = "rana"
+roles = ["lab-interface"]

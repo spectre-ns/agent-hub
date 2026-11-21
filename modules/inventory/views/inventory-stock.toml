@@ -1,0 +1,32 @@
+id = "inventory-stock"
+title = "Stock"
+summary = "What is in stock, what is running low, and the latest moves."
+
+[[widget]]
+kind = "board"
+title = "Stock items"
+type = "StockItem"
+where = "record.status != 'discontinued'"
+group_by = "status"
+columns = ["name", "on_hand", "unit"]
+
+[[widget]]
+kind = "table"
+title = "Running low"
+type = "StockItem"
+where = "record.status == 'low' or record.status == 'on-order'"
+columns = ["sku", "name", "on_hand", "reorder_point", "supplier", "status"]
+
+[[widget]]
+kind = "table"
+title = "Recent moves"
+type = "StockMove"
+columns = ["kind", "item", "quantity", "moved", "status"]
+limit = 20
+
+[[widget]]
+kind = "table"
+source = "items"
+title = "Waiting for sign-off or an order"
+workflow = "inventory-post"
+status = ["open", "claimed"]

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+state/
+.env
+*.egg-info/
+.pytest_cache/
+.secret
+**/.secret
+deploy/.env
+deploy/keycloak/*.json

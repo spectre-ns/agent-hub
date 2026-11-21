@@ -1,0 +1,27 @@
+id = "post-claim-to-erp"
+title = "Post a signed claim to the back office"
+runtime = "external"
+engine = "webhook"
+target = "erpnext/claim"
+summary = """
+Sends a submitted claim to the back-office engine (for example a flow that writes a Sales Invoice in ERPNext) and
+records the reference it returns. The hub stays the system of record for the work; the back office for the money.
+Set PRACTICEHUB_ENGINE_WEBHOOK_URL to switch it on.
+"""
+
+[[input]]
+name = "claim"
+type = "string"
+required = true
+help = "the claim's reference, e.g. Claim/123"
+
+[[input]]
+name = "amount"
+type = "number"
+required = true
+
+[[output]]
+name = "erp_ref"
+type = "string"
+required = true
+help = "the back office's reference for the claim"

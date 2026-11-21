@@ -1,0 +1,162 @@
+id = "appointment-request"
+title = "Appointment request"
+record = "Patient"
+summary = """
+A patient asks for an appointment. A slot is proposed from the calendar and booked, and the patient is told.
+Code screens the patient's reason for red flags first, as it does every patient message: a red flag, a warning sign
+the patient mentions, or a request marked urgent goes to a nurse to call back within the hour, and a red flag also
+tells the patient at once to call 911 in an emergency (every patient is told the inbox is not watched around the
+clock). Only a request about paperwork or a check-up (screened as routine) goes straight to the scheduler; any other
+reason is read by a nurse first, who sends it on for a slot or calls and books it. The nurse books the urgent ones. A patient the nurse could not reach goes to a physician. The scheduler sees the calendar and contact details,
+never the chart.
+"""
+
+[trigger]
+starters = ["front-desk", "scheduler", "nurse", "physician", "patient-portal"]
+event = "appointment.requested"
+
+[[input]]
+name = "reason"
+type = "string"
+required = true
+help = "in the patient's words, as much as they want to say"
+
+[[input]]
+name = "urgency"
+type = "choice"
+choices = ["routine", "soon", "urgent"]
+default = "routine"
+
+[[input]]
+name = "preferences"
+type = "string"
+help = "days, times or physician the patient prefers"
+
+[[steps]]
+id = "screen"
+title = "Screen the reason for red flags"
+kind = "automation"
+block = "patient-message-screen"
+[steps.params]
+question = "{{input.reason}}"
+
+[[steps]]
+id = "safety-net"
+title = "Tell the patient what to do in an emergency"
+kind = "automation"
+after = ["screen"]
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "We have your request"
+body = "{{screen.advice}}"
+
+[[steps]]
+id = "nurse-call"
+title = "Call the patient back (urgent request)"
+kind = "task"
+role = "nurse"
+priority = "urgent"
+due = "1h"
+escalate_to = "physician"
+after = ["screen"]
+when = "input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true"
+persons_only = true
+context = ["input.reason", "screen", "record:demographics", "record:clinical"]
+instructions = """The patient's request was marked urgent, or their words may describe an emergency (see the screen).
+Call them now. Advise 911 or the emergency department if needed, or book them in today yourself: no slot is
+proposed automatically for a request that comes to you. If you cannot reach them,
+leave reached unticked: a physician decides what to do next."""
+[[steps.fields]]
+name = "reached"
+type = "boolean"
+[[steps.fields]]
+name = "advice"
+type = "text"
+required = true
+
+[[steps]]
+id = "not-reached"
+title = "The nurse could not reach the patient"
+kind = "task"
+role = "physician"
+after = ["nurse-call"]
+when = "nurse-call.advice != null and nurse-call.reached != true"
+persons_only = true
+priority = "urgent"
+due = "1h"
+escalate_to = "medical-director"
+context = ["input.reason", "screen", "nurse-call", "record:demographics", "record:clinical"]
+instructions = """A nurse tried to call this patient about an urgent request and could not reach them. Decide what
+happens now: try again, call their emergency contact, or ask for a welfare check. Write down what you did."""
+[[steps.fields]]
+name = "action"
+type = "choice"
+choices = ["reached-the-patient", "called-emergency-contact", "welfare-check", "no-further-action"]
+required = true
+[[steps.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[steps]]
+id = "triage"
+title = "Read the reason before a slot is booked"
+kind = "task"
+role = "nurse"
+due = "4h"
+escalate_to = "physician"
+after = ["screen"]
+when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine != true"
+persons_only = true
+context = ["input.reason", "input.urgency", "screen", "record:demographics", "record:clinical"]
+instructions = """The patient's reason mentions something that sounds like a symptom, so no slot is booked until a
+nurse has read it. Decide: an ordinary slot is fine (one is proposed and booked), or they need to be seen sooner or
+spoken to first, in which case call them and book them yourself."""
+[[steps.fields]]
+name = "decision"
+type = "choice"
+choices = ["book-a-slot", "book-it-soon", "i-will-call-and-book"]
+required = true
+[[steps.fields]]
+name = "note_for_scheduler"
+type = "string"
+help = "what the scheduler needs to know (length of visit, which physician); no clinical details"
+
+[[steps]]
+id = "propose"
+title = "Propose a slot"
+kind = "task"
+role = "scheduler"
+due = "1d"
+escalate_to = "front-desk"
+skill = "slot-proposal"
+after = ["screen", "triage"]
+when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and (screen.routine == true or triage.decision == 'book-a-slot' or triage.decision == 'book-it-soon')"
+context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "screen.admin_reason",
+           "triage.decision", "triage.note_for_scheduler"]
+
+[[steps]]
+id = "book"
+title = "Book the appointment"
+kind = "automation"
+after = ["propose"]
+action = "booking.book"          # the core's: written through the Booking fields Appointment keeps
+[steps.params]
+slot = "{{propose.slot}}"
+subject = "{{run.record}}"
+reason = "{{input.reason}}"
+defaults = { status = "booked" }
+
+[[steps]]
+id = "confirm"
+title = "Confirm with the patient"
+kind = "automation"
+after = ["book"]
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your appointment"
+body = "You are booked on {{book.when}} with {{book.member_name}} at Harbourview Family Medicine. Reply to change or cancel."

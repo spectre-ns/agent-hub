@@ -1,0 +1,162 @@
+id = "lab-range-check"
+title = "Check a lab value against its range"
+runtime = "python"
+summary = """
+Reads the number in a lab result and checks it, in code, against the range the lab sent and against the practice's
+critical limits for common tests (potassium, sodium, glucose, haemoglobin, calcium, platelets, white cells,
+troponin, INR), whatever the lab's own flag says. Values in US units (mg/dL, g/dL, mEq/L, ng/mL, K/uL) are converted
+first; with no unit, or a unit it does not know, a value critical in any unit labs use counts as critical. "1,200"
+is twelve hundred. A value it cannot read, or a range it cannot read, is "unknown", never "normal".
+The workflow files a result as normal only when the lab, the sort and this check all say normal.
+"""
+
+code = '''
+import re
+
+# test -> (names, short names, critical limits in the canonical unit, {unit as labs write it: factor to canonical}).
+# Short names (K, Na, Ca, Hb) count only when they are the whole test name, so "CA 125" is not calcium.
+TESTS = [
+    ("potassium", ("potassium",), ("k",), 2.8, 6.2, "mmol/L", {"mmol/l": 1, "meq/l": 1}),
+    ("sodium", ("sodium",), ("na",), 120, 160, "mmol/L", {"mmol/l": 1, "meq/l": 1}),
+    ("glucose", ("glucose",), ("glu",), 2.8, 25, "mmol/L", {"mmol/l": 1, "mg/dl": 1 / 18}),
+    ("haemoglobin", ("haemoglobin", "hemoglobin", "hgb"), ("hb",), 70, 200, "g/L",
+     {"g/l": 1, "g/dl": 10}),
+    ("calcium", ("calcium",), ("ca",), 1.75, 3.25, "mmol/L", {"mmol/l": 1, "mg/dl": 0.2495, "meq/l": 0.5}),
+    ("platelets", ("platelets", "platelet", "plt"), (), 20, 1000, "x10^9/L",
+     {"x10^9/l": 1, "10^9/l": 1, "x10e9/l": 1, "10*9/l": 1, "g/l": 1, "x10^3/ul": 1, "10^3/ul": 1, "k/ul": 1,
+      "/ul": 0.001, "/mm3": 0.001}),
+    ("white cells", ("wbc", "white", "leukocytes", "leucocytes"), (), 1.0, 50, "x10^9/L",
+     {"x10^9/l": 1, "10^9/l": 1, "x10e9/l": 1, "10*9/l": 1, "g/l": 1, "x10^3/ul": 1, "10^3/ul": 1, "k/ul": 1,
+      "/ul": 0.001, "/mm3": 0.001}),
+    ("troponin", ("troponin", "tni", "tnt", "hstni", "hstnt", "ctni", "ctnt"), (), None, 100, "ng/L",
+     {"ng/l": 1, "pg/ml": 1, "ng/ml": 1000, "ug/l": 1000}),
+    ("INR", ("inr",), (), None, 5.0, "", None),
+]
+# a blood limit means nothing for another specimen: "Glucose, urine", "White cells, urine", "Protein, CSF"
+NOT_BLOOD = {"urine", "urinary", "ur", "u", "csf", "stool", "fecal", "faecal", "fluid", "pleural", "peritoneal",
+             "synovial", "ascitic", "sweat", "saliva", "dialysate", "drain", "24h", "24hr", "timed", "random"}
+# names that contain a test's word but are another test: HbA1c, MCH and MCHC are not haemoglobin
+NOT_THIS = {"haemoglobin": {"a1c", "hba1c", "glycated", "glycosylated", "corpuscular", "mch", "mchc", "mean", "free",
+                            "cell", "distribution", "fetal", "electrophoresis", "variant"},
+            "glucose": {"a1c", "hba1c", "tolerance", "ogtt", "challenge", "csf"},
+            "calcium": {"ionized", "ionised", "free", "corrected", "creatinine", "ratio", "score", "channel"},
+            "white cells": {"casts", "esterase"}}
+IONIZED = ("ionized calcium", (), (), 0.78, 1.6, "mmol/L", {"mmol/l": 1, "mg/dl": 0.2495, "meq/l": 0.5})
+NUM = r"[-+]?\d+(?:\.\d+)?"
+PLAIN = {"serum", "plasma", "blood", "whole", "venous", "level", "total", "s", "p", "b"}
+
+
+def clean_number(text):
+    # "1,200" is twelve hundred; "4,5" is four and a half
+    t = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(text or ""))
+    return t.replace(",", ".").replace("−", "-")
+
+
+def number(text):
+    m = re.search(NUM, clean_number(text))
+    return float(m.group(0)) if m else None
+
+
+def bounds(text):
+    t = clean_number(text).replace("–", "-").replace("—", "-")
+    m = re.search("(" + NUM + r")\s*(?:-|to)\s*(" + NUM + ")", t)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    m = re.search(r"(<=?|>=?)\s*(" + NUM + ")", t)
+    if m:
+        v = float(m.group(2))
+        return (None, v) if m.group(1).startswith("<") else (v, None)
+    return None
+
+
+def unit_key(text):
+    u = str(text or "").lower().replace(" ", "").replace("µ", "u").replace("μ", "u")
+    return u.replace("×", "x").replace("mcg", "ug").replace("⁹", "^9").replace("³", "^3")
+
+
+def which(words):
+    if words & NOT_BLOOD:
+        return None
+    if words & {"ionized", "ionised", "ica", "free"} and words & {"calcium", "ca", "ica"}:
+        return IONIZED
+    for t in TESTS:
+        if words & NOT_THIS.get(t[0], set()):
+            continue
+        if words & set(t[1]) or (t[2] and words & set(t[2]) and words - PLAIN <= set(t[2])):
+            return t
+    return None
+
+
+def run(input):
+    test = " ".join(str(input.get("test") or "").lower().replace("-", " ").split())
+    words = set(re.findall(r"[a-z0-9]+", test))
+    unit = unit_key(input.get("unit"))
+    value = number(input.get("value"))
+    raw = clean_number(input.get("value")).strip()
+    above, below = raw.startswith(">"), raw.startswith("<")  # ">100" is over 100: at the limit is past it
+    if value is None:
+        return {"band": "unknown", "reason": f"the value {input.get('value')!r} has no number in it"}
+    t = which(words)
+    note = ""
+    if t:
+        name, _, _, low, high, canon, units = t
+        if units is None:
+            factors = {"": 1}
+        elif unit in units:
+            factors = {unit: units[unit]}
+        else:  # no unit, or one this check does not know: critical if it is critical in any unit it could be in.
+            # A unit is ruled out only when the lab's own range makes no sense in it (a glucose range of 3.9-6.1 is
+            # not mg/dL); with no readable range, every unit labs use is checked.
+            factors = units
+            r = bounds(input.get("range"))
+            if r:
+                fits = {u: f for u, f in units.items()
+                        if all(x is None or ((low is None or x * f >= low) and (high is None or x * f <= high))
+                               for x in r)}
+                factors = fits or units
+            note = f" (the unit {input.get('unit')!r} is not one this check knows)" if unit else " (no unit given)"
+        for u, f in factors.items():
+            v = value * f
+            shown = f"{value:g} {input.get('unit') or u}".strip()
+            if low is not None and not above and (v < low or (below and v <= low)):
+                return {"band": "critical", "reason": f"{shown} is below the critical {name} limit {low:g} {canon}"
+                                                      f"{note}"}
+            if high is not None and not below and (v > high or (above and v >= high)):
+                return {"band": "critical", "reason": f"{shown} is above the critical {name} limit {high:g} {canon}"
+                                                      f"{note}"}
+    b = bounds(input.get("range"))
+    if b is None:
+        return {"band": "unknown", "reason": f"the range {input.get('range')!r} cannot be read"}
+    low, high = b
+    if low is not None and value < low:
+        return {"band": "abnormal", "reason": f"{value:g} is below the range {input.get('range')}"}
+    if high is not None and value > high:
+        return {"band": "abnormal", "reason": f"{value:g} is above the range {input.get('range')}"}
+    return {"band": "normal", "reason": f"{value:g} is within {input.get('range')}"}
+'''
+
+[[input]]
+name = "test"
+type = "string"
+required = true
+[[input]]
+name = "value"
+type = "string"
+required = true
+[[input]]
+name = "unit"
+type = "string"
+[[input]]
+name = "range"
+type = "string"
+
+[[output]]
+name = "band"
+type = "choice"
+choices = ["normal", "abnormal", "critical", "unknown"]
+required = true
+
+[[output]]
+name = "reason"
+type = "string"
+required = true

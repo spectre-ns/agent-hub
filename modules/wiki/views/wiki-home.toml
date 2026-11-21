@@ -1,0 +1,25 @@
+id = "wiki-home"
+title = "Wiki"
+summary = "Every space and its pages, what changed lately, and the pages flagged as out of date."
+
+[[widget]]
+kind = "tree"
+title = "Spaces and pages"
+type = "WikiPage"
+where = "record.status != 'archived'"
+columns = ["status"]
+
+[[widget]]
+kind = "table"
+title = "Recently changed"
+type = "WikiPage"
+where = "record.status != 'archived'"
+columns = [{ label = "Page", path = "title" }, { label = "Status", path = "status" }, { label = "Changed", path = "meta.lastUpdated" }]
+limit = 10
+
+[[widget]]
+kind = "table"
+source = "items"
+title = "Pages waiting for a check"
+workflow = "wiki-check"
+status = ["open", "claimed"]

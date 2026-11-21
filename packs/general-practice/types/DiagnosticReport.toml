@@ -1,0 +1,80 @@
+# A report that groups results (a lab panel, imaging), with the reporting clinician's conclusion.
+id = "DiagnosticReport"
+label = "Report"
+plural = "Reports"
+data_class = "clinical"
+strict = true
+date = "effectiveDateTime"
+active = "not record.status in ['cancelled', 'entered-in-error']"
+order = 45
+summary = "A report that groups results (a lab panel, imaging), with the reporting clinician's conclusion."
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["registered", "partial", "preliminary", "final", "amended", "corrected", "appended", "cancelled",
+           "entered-in-error", "unknown"]
+required = true
+
+[[field]]
+name = "category"
+type = "list"
+
+[[field]]
+name = "code"
+label = "Report"
+type = "object"
+required = true
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "encounter"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+
+[[field]]
+name = "basedOn"
+label = "Based on"
+type = "list"
+
+[[field]]
+name = "effectiveDateTime"
+label = "Taken"
+type = "datetime"
+
+[[field]]
+name = "issued"
+type = "datetime"
+
+[[field]]
+name = "performer"
+type = "list"
+
+[[field]]
+name = "result"
+type = "list"
+
+[[field]]
+name = "results"
+path = "result.*"
+type = "reference"
+target = ["Observation"]
+rel = "result"
+
+[[field]]
+name = "conclusion"
+type = "text"
+
+[[field]]
+name = "presentedForm"
+label = "Report as sent"
+type = "list"

@@ -1,0 +1,88 @@
+# A wiki page. A page with no parent is the home page of a space; the pages under it are the space's tree.
+id = "WikiPage"
+label = "Wiki page"
+plural = "Wiki pages"
+data_class = "wiki"
+title = "{title}"
+parent = "parent"
+flag = "status"
+order = 20
+summary = "A page of the practice's wiki: a handbook, a guide, a how-to or notes."
+layout = "page"
+
+[navigator]             # a second column beside the page: the spaces, then the open space's page tree
+tops = "Spaces"
+hide = ["archived"]
+
+[[field]]
+name = "title"
+required = true
+max_length = 200
+
+[[field]]
+name = "parent"
+label = "Under"
+type = "reference"
+target = ["WikiPage"]
+rel = "parent"
+help = "the page this one sits under; leave it empty to start a new space"
+
+[[field]]
+name = "body"
+label = "Page"
+type = "markdown"
+
+[[field]]
+name = "labels"
+type = "list"
+help = "words to find the page by, one per line"
+
+[[field]]
+name = "owner"
+type = "member"
+help = "who keeps the page current"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "published", "needs-check", "archived"]
+
+[[field]]
+name = "checked"
+label = "Last checked"
+type = "date"
+help = "when a wiki owner last confirmed the page is current"
+
+[lifecycle]
+field = "status"
+initial = "draft"
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "published"
+label = "Publish"
+
+[[lifecycle.transition]]
+from = ["published"]
+to = "needs-check"
+label = "Flag as out of date"
+
+[[lifecycle.transition]]
+from = ["needs-check"]
+to = "published"
+by = "workflow"         # a wiki owner's check puts it back
+label = "Confirm it is current"
+
+[[lifecycle.transition]]
+from = ["draft", "published", "needs-check"]
+to = "archived"
+label = "Archive"
+
+[[lifecycle.transition]]
+from = ["archived"]
+to = "draft"
+label = "Restore"
+
+[[signature]]
+meaning = "I have checked this page is current"
+states = ["published"]

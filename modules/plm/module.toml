@@ -1,0 +1,41 @@
+# Product lifecycle (PLM): what the practice makes, assembles or supplies (kits, devices, compounded products), each
+# at a revision, with what it is made of and the controlled documents (dms) that specify it. A released product only
+# changes through a change order: reviewed and signed by the change board, then each product and document it names is
+# opened at its next revision, the documents go through document control again, and a product owner releases them.
+# A sub-module of quality (qms): a change order may come from a CAPA, and the CAPA shows it on its Linked tab.
+# It knows nothing about any one practice.
+
+[module]
+requires_core = "1.0"
+id = "plm"
+name = "Product lifecycle"
+version = "1"
+summary = "Products at revisions, their parts and specifications, and change orders that release new revisions."
+shortcuts = ["Product", "ChangeOrder"]
+requires = ["dms", "qms"]
+
+[[roles]]
+id = "product-owner"
+name = "Product owner"
+description = "Owns products: proposes changes to them, and releases a new revision once its documents are approved."
+
+[[roles]]
+id = "change-board"
+name = "Change board"
+description = "Reviews change orders and signs to approve or reject them. Never the one who wrote the change."
+
+[[data_classes]]
+id = "products"
+name = "Products"
+description = "Products, their parts and specifications, and the changes made to them. No patient information."
+
+[grants.everyone]   # everyone who works here may see what a product is, and at which revision
+read = ["products"]
+
+[grants.product-owner]
+read = ["products", "documents", "quality"]
+write = ["products", "documents"]
+
+[grants.change-board]
+read = ["products", "documents", "quality"]
+write = ["products"]

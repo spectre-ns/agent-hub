@@ -1,0 +1,121 @@
+# A corrective or preventive action. It points at the controlled documents (dms) it changes.
+id = "CAPA"
+label = "CAPA"
+plural = "CAPAs"
+data_class = "quality"
+date = "opened"
+flag = "status"
+order = 20
+summary = "A corrective or preventive action, and the documents it changes."
+
+[[field]]
+name = "title"
+required = true
+
+[[field]]
+name = "kind"
+type = "choice"
+choices = ["corrective", "preventive"]
+required = true
+
+[[field]]
+name = "problem"
+type = "text"
+required = true
+
+[[field]]
+name = "opened"
+type = "date"
+
+[[field]]
+name = "owner"
+type = "member"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "investigating", "actions", "verification", "closed", "cancelled"]
+
+[[field]]
+name = "documents"
+label = "Documents affected"
+type = "list"
+
+[[field]]
+name = "document"
+label = "Document affected"
+path = "documents.*"
+type = "reference"
+target = ["Document"]
+rel = "affects"
+
+[[field]]
+name = "root_cause"
+label = "Root cause"
+type = "text"
+
+[[field]]
+name = "plan"
+label = "Action plan"
+type = "text"
+
+[[field]]
+name = "cancel_reason"
+label = "Why it was cancelled"
+type = "text"
+show = true
+
+[lifecycle]
+field = "status"
+initial = "open"
+locked = ["closed", "cancelled"]
+abandoned = { "verification" = "actions", "actions" = "investigating" }   # cancelled verification leaves the actions open; cancelled actions go back to investigating, which a person may cancel
+
+[[lifecycle.transition]]
+from = ["open"]
+to = "investigating"
+label = "Start investigating"
+screen = "start"              # a transition screen: who owns it, asked as it starts
+require = ["owner"]
+comment = true
+
+[[lifecycle.transition]]
+from = ["open", "investigating"]
+to = "actions"
+by = "workflow"
+require = ["root_cause", "plan"]
+label = "Plan agreed"
+
+[[lifecycle.transition]]
+from = ["actions"]
+to = "verification"
+by = "workflow"
+
+[[lifecycle.transition]]
+from = ["verification"]
+to = "actions"
+by = "workflow"
+label = "Not effective: more action"
+
+[[lifecycle.transition]]
+from = ["verification"]
+to = "closed"
+by = "workflow"
+
+[[lifecycle.transition]]
+from = ["open", "investigating"]   # once actions are under way, its workflow finishes or a quality manager cancels the run
+to = "cancelled"
+label = "Cancel"
+fields = ["cancel_reason"]
+require = ["cancel_reason"]
+
+[[screen]]
+id = "start"
+fields = ["owner", "opened"]
+
+[[signature]]
+meaning = "I verify that this action was effective"
+roles = ["quality-manager"]
+states = ["verification"]
+# No moves_to: the qms-capa workflow's verify gate closes a CAPA (and keeps the investigator out of it). This is a
+# further attestation a quality manager may add while it is in verification.

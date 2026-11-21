@@ -1,0 +1,17 @@
+id = "referral-letter"
+title = "Draft a referral letter"
+instructions = """
+Draft a referral letter to the specialist for the physician to sign. Include the reason for referral as the physician
+gave it, relevant history, current medications, allergies and recent results from the chart. Keep it to one page.
+Do not add reasons, findings or urgency the physician did not give.
+"""
+
+[[output]]
+name = "letter"
+type = "text"
+required = true
+
+[[output]]
+name = "attachments"
+type = "list"
+help = "chart items to send with the letter, as Type/id"

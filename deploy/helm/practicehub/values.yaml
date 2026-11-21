@@ -1,0 +1,48 @@
+# Practice Hub on Kubernetes. Keep the cluster, its disks and its backups in Canada (PHIA): on Nebari, set the
+# provider's region (ca-central-1 on AWS, northamerica-northeast1 on GCP, canadacentral on Azure).
+
+image:
+  repository: ""          # your registry's practicehub image (built from the repository's Dockerfile); required
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+pack: general-practice    # the practice pack, set up by the init job on first install
+
+# The hub's secret (it seals the track and signs sessions): an existing Secret, never a value in this file.
+#   kubectl create secret generic practicehub-secret --from-literal=PRACTICEHUB_SECRET="$(openssl rand -hex 32)"
+secret:
+  existingSecret: practicehub-secret
+  key: PRACTICEHUB_SECRET
+
+hub:
+  # one hub process per database: it serializes its own writes
+  port: 8200
+  resources: {}
+  env: {}                 # more PRACTICEHUB_* settings (MEDPLUM_URL, KESTRA_URL...); secrets via envFrom below
+  envFrom: []             # e.g. [{secretRef: {name: practicehub-integrations}}]
+  stateSize: 1Gi          # the state directory (keys, local settings)
+  anchorsSize: 128Mi      # the track's anchors: put them on other storage than the database
+  anchorsStorageClass: "" # a different class (or a different zone) from the database's, so losing one shows
+  storageClass: ""
+
+agents:
+  enabled: false          # every agent works its inbox in the hub's cluster
+  interval: 10
+
+mongo:
+  enabled: true           # false to use a MongoDB you run (set externalUri); it must be a replica set
+  image: mongo:7.0
+  size: 10Gi
+  storageClass: ""
+  resources: {}
+externalUri: ""           # mongodb+srv://... when mongo.enabled is false; from a Secret, via hub.envFrom, if it has a password
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls: []
+  annotations: {}

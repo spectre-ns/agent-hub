@@ -1,0 +1,155 @@
+id = "inventory-post"
+title = "Post a stock move"
+summary = """A submitted stock move changes the item's on hand. A delivery received or stock issued posts at once (an
+issue for more than is on hand goes back to a stock keeper); a write-off, stock found or a count is signed off by an inventory
+manager first, never the one who wrote it."""
+record = "StockMove"
+
+[trigger]
+event = "record.transitioned:StockMove"
+when = "record.status == 'submitted'"
+
+[[steps]]
+id = "sign-off"
+title = "Sign off the stock change"
+kind = "gate"
+role = "inventory-manager"
+signer = "person"
+when = "record.kind in ['write-off', 'found', 'count']"
+not_by = ["record.editors"]
+meaning = "I have checked this change to stock on hand"
+outcomes = ["post", "reject"]
+context = ["record:inventory"]
+due = "2d"
+escalate_to = "inventory-manager"
+instructions = """A write-off, stock found or a count changes on hand without a delivery or an issue. Check the reason (and, for a
+count, that the shelf was counted): post it, or reject it and it goes back to whoever wrote it."""
+
+[[steps]]
+id = "receive"
+title = "Add the delivery to on hand"
+kind = "automation"
+when = "record.kind == 'receive'"
+action = "record.update"
+for_each = "{{record.item}}"
+[steps.params]
+ref = "{{each}}"
+[steps.params.increment]
+on_hand = "{{record.quantity}}"
+
+[[steps]]
+id = "restock"
+title = "Mark the item stocked again"
+kind = "automation"
+after = ["receive"]
+action = "record.update"
+for_each = "{{record.item}}"
+where = "(each_record.status == 'low' or each_record.status == 'on-order') and each_record.on_hand > each_record.reorder_point"
+[steps.params]
+ref = "{{each}}"
+[steps.params.set]
+status = "stocked"
+
+[[steps]]
+id = "issue"
+title = "Take the issued stock off on hand"
+kind = "automation"
+when = "record.kind == 'issue'"
+action = "record.update"
+for_each = "{{record.item}}"
+where = "each_record.on_hand >= record.quantity"   # never below zero: a short issue goes back to a person
+[steps.params]
+ref = "{{each}}"
+[steps.params.decrement]
+on_hand = "{{record.quantity}}"
+
+[[steps]]
+id = "short"
+title = "Not enough on hand to issue"
+kind = "automation"
+after = ["issue"]
+when = "issue.passed_over != []"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "rejected"
+reject_reason = "Less is on hand than this issues."
+
+[[steps]]
+id = "write-off"
+title = "Take the written-off stock off on hand"
+kind = "automation"
+after = ["sign-off"]
+when = "sign-off.outcome == 'post' and record.kind == 'write-off'"
+action = "record.update"
+for_each = "{{record.item}}"
+where = "each_record.on_hand >= record.quantity"   # never below zero: count the shelf instead
+[steps.params]
+ref = "{{each}}"
+[steps.params.decrement]
+on_hand = "{{record.quantity}}"
+
+[[steps]]
+id = "short-write-off"
+title = "Not enough on hand to write off"
+kind = "automation"
+after = ["write-off"]
+when = "write-off.passed_over != []"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "rejected"
+reject_reason = "Less is on hand than this writes off: count the shelf instead."
+
+[[steps]]
+id = "found"
+title = "Add the found stock to on hand"
+kind = "automation"
+after = ["sign-off"]
+when = "sign-off.outcome == 'post' and record.kind == 'found'"
+action = "record.update"
+for_each = "{{record.item}}"
+[steps.params]
+ref = "{{each}}"
+[steps.params.increment]
+on_hand = "{{record.quantity}}"
+
+[[steps]]
+id = "count"
+title = "Set on hand to the count"
+kind = "automation"
+after = ["sign-off"]
+when = "sign-off.outcome == 'post' and record.kind == 'count'"
+action = "record.update"
+for_each = "{{record.item}}"
+[steps.params]
+ref = "{{each}}"
+[steps.params.set]
+on_hand = "{{record.quantity}}"
+
+[[steps]]
+id = "rejected"
+title = "Return the move to its author"
+kind = "automation"
+after = ["sign-off"]
+when = "sign-off.outcome == 'reject'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "rejected"
+reject_reason = "Not signed off: {{sign-off.comment}}"
+
+[[steps]]
+id = "posted"
+title = "Mark the move posted"
+kind = "automation"
+after = ["restock", "issue", "write-off", "found", "count"]
+when = "record.status == 'submitted'"   # a short issue or write-off has already been rejected
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "posted"

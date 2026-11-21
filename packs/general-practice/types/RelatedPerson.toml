@@ -1,0 +1,44 @@
+# Someone related to a patient: a parent, a substitute decision-maker, a caregiver.
+id = "RelatedPerson"
+label = "Related person"
+plural = "Related people"
+data_class = "demographics"
+strict = true
+date = "period"
+active = "record.active != false"
+order = 115
+summary = "Someone related to a patient: a parent, a substitute decision-maker, a caregiver."
+part_of = "patient"
+
+[[field]]
+name = "patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "active"
+type = "boolean"
+
+[[field]]
+name = "relationship"
+type = "list"
+help = "CodeableConcept list, e.g. [{text: \"Daughter\"}] or substitute decision-maker"
+
+[[field]]
+name = "name"
+type = "list"
+
+[[field]]
+name = "telecom"
+label = "Phone and email"
+type = "list"
+
+[[field]]
+name = "address"
+type = "list"
+
+[[field]]
+name = "period"
+type = "object"

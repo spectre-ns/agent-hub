@@ -1,0 +1,76 @@
+id = "new-patient-intake"
+title = "New patient intake"
+record = "Patient"
+summary = """
+A new patient registers (at the desk or on the portal). Their paperwork is checked, the patient is asked for anything
+missing, someone at the front desk accepts them into the practice, and their first visit is booked.
+"""
+
+[trigger]
+starters = ["front-desk", "intake-coordinator", "patient-portal"]
+event = "patient.registered"
+
+[[steps]]
+id = "review"
+title = "Check the paperwork"
+kind = "task"
+role = "intake-coordinator"
+due = "3d"
+escalate_to = "practice-manager"
+skill = "intake-review"
+context = ["record:demographics", "record:intake"]
+
+[[steps]]
+id = "ask-for-missing"
+title = "Ask the patient for what is missing"
+kind = "automation"
+after = ["review"]
+when = "review.complete == false"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your registration with Harbourview Family Medicine"
+body = "Thank you for registering. To finish, we still need: {{review.missing}}. Reply on the portal or call the front desk."
+
+[[steps]]
+id = "accept"
+title = "Accept the patient"
+kind = "gate"
+role = "front-desk"
+due = "3d"
+escalate_to = "practice-manager"
+after = ["review"]
+signer = "person"
+outcomes = ["accept", "waitlist", "decline"]
+meaning = "I accept this patient into the practice's roster"
+meanings = { waitlist = "I put this patient on the waitlist", decline = "I decline this patient for the roster" }
+context = ["record:demographics", "record:intake", "review"]
+instructions = "Read the intake agent's summary and flags. The roster has room unless the practice manager has said otherwise."
+
+[[steps]]
+id = "book-first-visit"
+title = "Book the first visit"
+kind = "automation"
+after = ["accept"]
+when = "accept.outcome == 'accept'"
+action = "workflow.start"
+[steps.params]
+workflow = "appointment-request"
+[steps.params.input]
+reason = "First visit (new patient)"
+urgency = "{{review.urgency}}"
+preferences = ""
+
+[[steps]]
+id = "tell-waitlist"
+title = "Tell the patient they are on the waitlist"
+kind = "automation"
+after = ["accept"]
+when = "accept.outcome == 'waitlist'"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "You are on our waitlist"
+body = "Thank you for registering. Our physicians' rosters are full; we will contact you as soon as a place opens."

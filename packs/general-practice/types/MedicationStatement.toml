@@ -1,0 +1,61 @@
+# A medication the patient says they take (over the counter, from another prescriber).
+id = "MedicationStatement"
+label = "Medication taken"
+plural = "Medications taken"
+data_class = "clinical"
+strict = true
+date = "effectiveDateTime"
+active = "record.status in ['active', 'intended', 'on-hold']"
+order = 35
+summary = "A medication the patient says they take (over the counter, from another prescriber)."
+part_of = "subject"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["active", "completed", "entered-in-error", "intended", "stopped", "on-hold", "unknown", "not-taken"]
+required = true
+
+[[field]]
+name = "medicationCodeableConcept"
+label = "Medication"
+type = "object"
+required = true
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "effectiveDateTime"
+label = "Taken since"
+type = "datetime"
+
+[[field]]
+name = "effectivePeriod"
+label = "Taking period"
+type = "object"
+
+[[field]]
+name = "dateAsserted"
+label = "Recorded"
+type = "datetime"
+
+[[field]]
+name = "informationSource"
+label = "Told by"
+type = "reference"
+target = ["Patient", "RelatedPerson", "Practitioner"]
+rel = "source"
+
+[[field]]
+name = "dosage"
+type = "list"
+
+[[field]]
+name = "note"
+type = "list"

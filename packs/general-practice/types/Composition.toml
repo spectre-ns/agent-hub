@@ -1,0 +1,111 @@
+# A signed clinical note. Notes enter the chart only once a physician signs them.
+id = "Composition"
+label = "Note"
+plural = "Notes"
+data_class = "clinical"
+strict = true
+date = "date"
+active = "record.status != 'entered-in-error'"
+order = 60
+summary = "A signed clinical note. Notes enter the chart only once a physician signs them."
+part_of = "encounter"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["preliminary", "final", "amended", "entered-in-error"]
+required = true
+
+[[field]]
+name = "type"
+label = "Kind of note (coded)"
+type = "object"
+advanced = true
+help = "CodeableConcept, e.g. {text: \"Visit note\"}"
+
+[[field]]
+name = "note_type"
+label = "Kind of note"
+path = "type.text"
+type = "string"
+help = "e.g. Visit note, Phone call"
+
+[[field]]
+name = "title"
+type = "string"
+required = true
+
+[[field]]
+name = "date"
+type = "datetime"
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "encounter"
+label = "Visit"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+required = true
+
+[[field]]
+name = "author"
+label = "Authors (as JSON)"
+type = "list"
+required = true
+advanced = true
+
+[[field]]
+name = "authors"
+label = "Author"
+path = "author.*"
+type = "reference"
+target = ["Practitioner"]
+rel = "author"
+
+[[field]]
+name = "attester"
+label = "Attested by (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "section"
+label = "Sections (as JSON)"
+type = "list"
+advanced = true
+help = "[{title, text}]: Subjective, Objective, Assessment, Plan, Follow-up"
+
+[[field]]
+name = "body"
+label = "Text"
+path = "section.0.text"
+type = "text"
+help = "the note; a visit note's sections are written by the visit-documentation workflow"
+
+[[screen]]
+id = "note"
+on = ["create"]
+fields = ["subject", "title", "note_type", "date", "authors", "encounter", "body"]
+
+[lifecycle]
+field = "status"
+initial = "preliminary"
+locked = ["final", "entered-in-error"]   # a signed note changes only by amending it
+[[lifecycle.transition]]
+from = ["preliminary"]
+to = "final"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["final", "amended"]
+to = "amended"
+[[lifecycle.transition]]
+from = ["*"]
+to = "entered-in-error"

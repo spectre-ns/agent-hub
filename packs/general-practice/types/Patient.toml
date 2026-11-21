@@ -1,0 +1,187 @@
+# A patient of the practice: who the practice's work is about.
+id = "Patient"
+label = "Patient"
+plural = "Patients"
+data_class = "demographics"
+extends = "Subject"           # the core's subject: work, calendars and modules (a CAPA, a document) point at it
+title = "{name}[ (born {birthDate})][ · card {health_card}]"
+strict = true
+date = "birthDate"
+active = "record.active != false"
+order = 0
+summary = "A person registered with the practice."
+
+[base]                        # where a patient keeps what the core's Subject has
+name = ["given", "family"]
+identifier = "health_card"
+contact = "phone"
+responsible = "generalPractitioner"
+
+[[field]]
+name = "given"
+path = "name.0.given.0"
+label = "Given name"
+type = "string"
+required = true
+
+[[field]]
+name = "family"
+path = "name.0.family"
+label = "Family name"
+type = "string"
+required = true
+
+[[field]]
+name = "name"
+label = "Names"
+type = "list"
+required = true
+advanced = true
+help = "FHIR HumanName list: [{given: [...], family}]"
+
+[[field]]
+name = "birthDate"
+label = "Date of birth"
+type = "date"
+required = true
+match = true                  # with the name, how a second registration of the same person is noticed
+
+[[field]]
+name = "gender"
+type = "choice"
+choices = ["male", "female", "other", "unknown"]
+
+[[field]]
+name = "active"
+type = "boolean"
+help = "false once the patient has left the practice"
+
+[[field]]
+name = "health_card"
+path = "identifier.0.value"
+label = "Health card number"
+type = "string"
+with = { system = "https://novascotia.ca/health-card" }
+
+[[field]]
+name = "phone"
+path = "telecom.0.value"
+label = "Phone"
+type = "string"
+with = { system = "phone" }
+
+[[field]]
+name = "street"
+path = "address.0.line.0"
+label = "Street address"
+type = "string"
+
+[[field]]
+name = "city"
+path = "address.0.city"
+label = "City or town"
+type = "string"
+with = { use = "home", country = "CA" }
+
+[[field]]
+name = "province"
+path = "address.0.state"
+label = "Province"
+type = "string"
+
+[[field]]
+name = "postal_code"
+path = "address.0.postalCode"
+label = "Postal code"
+type = "string"
+
+[[field]]
+name = "contact_name"
+path = "contact.0.name.text"
+label = "Emergency contact"
+type = "string"
+
+[[field]]
+name = "contact_relationship"
+path = "contact.0.relationship.0.text"
+label = "Their relationship to the patient"
+type = "string"
+
+[[field]]
+name = "contact_phone"
+path = "contact.0.telecom.0.value"
+label = "Emergency contact's phone"
+type = "string"
+with = { system = "phone" }
+
+[[field]]
+name = "identifier"
+label = "Identifiers"
+type = "list"
+advanced = true
+help = "the Nova Scotia health card: {system: https://novascotia.ca/health-card, value}"
+
+[[field]]
+name = "telecom"
+label = "Phones and email"
+type = "list"
+advanced = true
+
+[[field]]
+name = "address"
+label = "Addresses"
+type = "list"
+advanced = true
+help = "FHIR Address list: [{line, city, state, postalCode, country}]"
+
+[[field]]
+name = "contact"
+label = "Emergency contacts"
+type = "list"
+advanced = true
+help = "[{relationship: [{text}], name: {text}, telecom: [...]}]"
+
+[[field]]
+name = "communication"
+label = "Languages"
+type = "list"
+advanced = true
+
+[[field]]
+name = "generalPractitioner"
+label = "Physician"
+path = "generalPractitioner.*"
+type = "reference"
+target = ["Practitioner"]
+rel = "physician"
+
+# Screens: which fields each form shows, in what parts and order. What a field is (required, help, choices) stays
+# with the field above. Registration is the create screen; a module adds a part with extends/types/Patient.toml.
+[[screen]]
+id = "register"
+on = ["create"]
+[[screen.tab]]
+label = "Who"
+fields = ["given", "family", "birthDate", "gender"]
+[[screen.tab]]
+label = "How to reach them"
+fields = ["phone", "street", "city", "province", "postal_code"]
+[[screen.tab]]
+label = "Care"
+fields = ["health_card", "generalPractitioner"]
+
+[[screen]]
+id = "chart"
+on = ["edit", "view"]
+[[screen.tab]]
+label = "Who"
+fields = ["given", "family", "birthDate", "gender", "active"]
+[[screen.tab]]
+label = "How to reach them"
+fields = ["phone", "street", "city", "province", "postal_code"]
+[[screen.tab]]
+label = "Emergency contact"
+fields = ["contact_name", "contact_relationship", "contact_phone"]
+[[screen.tab]]
+label = "Care"
+fields = ["health_card", "generalPractitioner"]

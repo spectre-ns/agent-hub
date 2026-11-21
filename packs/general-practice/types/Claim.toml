@@ -1,0 +1,67 @@
+# A claim to MSI or an insurer.
+id = "Claim"
+label = "Claim"
+plural = "Claims"
+data_class = "billing"
+strict = true
+date = "created"
+active = "record.status == 'active'"
+order = 125
+summary = "A claim to MSI or an insurer."
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["active", "cancelled", "draft", "entered-in-error"]
+required = true
+
+[[field]]
+name = "type"
+type = "object"
+
+[[field]]
+name = "use"
+type = "choice"
+choices = ["claim", "preauthorization", "predetermination"]
+
+[[field]]
+name = "patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "created"
+type = "datetime"
+
+[[field]]
+name = "provider"
+type = "reference"
+target = ["Practitioner"]
+rel = "provider"
+
+[[field]]
+name = "priority"
+type = "object"
+
+[[field]]
+name = "insurance"
+type = "list"
+
+[[field]]
+name = "diagnosis"
+type = "list"
+
+[[field]]
+name = "item"
+label = "Items"
+type = "list"
+
+[[field]]
+name = "total"
+type = "object"
+
+[[field]]
+name = "identifier"
+type = "list"

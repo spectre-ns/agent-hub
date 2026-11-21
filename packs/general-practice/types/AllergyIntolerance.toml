@@ -1,0 +1,132 @@
+# An allergy or intolerance. Active ones are shown in a banner on the patient's page.
+id = "AllergyIntolerance"
+label = "Allergy"
+plural = "Allergies"
+data_class = "clinical"
+strict = true
+date = "recordedDate"
+flag = "criticality"
+alert = true
+active = "not record.clinicalStatus.text in ['inactive', 'resolved']"
+order = 10
+summary = "An allergy or intolerance. Active ones are shown in a banner on the patient's page."
+part_of = "patient"
+
+[[field]]
+name = "clinicalStatus"
+label = "Clinical status (coded)"
+type = "object"
+advanced = true
+help = "CodeableConcept from allergyintolerance-clinical: active | inactive | resolved"
+
+[[field]]
+name = "clinical_status"
+label = "Clinical status"
+path = "clinicalStatus.text"
+type = "choice"
+choices = ["active", "inactive", "resolved"]
+
+[[field]]
+name = "verificationStatus"
+label = "Verification status (coded)"
+type = "object"
+advanced = true
+
+[[field]]
+name = "verification_status"
+label = "Verification status"
+path = "verificationStatus.text"
+type = "choice"
+choices = ["unconfirmed", "confirmed", "refuted", "entered-in-error"]
+
+[[field]]
+name = "type"
+type = "choice"
+choices = ["allergy", "intolerance"]
+
+[[field]]
+name = "category"
+type = "list"
+help = "food | medication | environment | biologic, one a line"
+
+[[field]]
+name = "criticality"
+type = "choice"
+choices = ["low", "high", "unable-to-assess"]
+
+[[field]]
+name = "code"
+label = "Substance (coded)"
+type = "object"
+required = true
+advanced = true
+
+[[field]]
+name = "substance"
+label = "Substance"
+path = "code.text"
+type = "string"
+help = "what the patient reacts to, e.g. Penicillin"
+
+[[field]]
+name = "patient"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "onsetDateTime"
+label = "Onset"
+type = "datetime"
+
+[[field]]
+name = "recordedDate"
+label = "Recorded"
+type = "datetime"
+
+[[field]]
+name = "recorder"
+type = "reference"
+target = ["Practitioner"]
+rel = "recorder"
+
+[[field]]
+name = "reaction"
+label = "Reactions"
+type = "list"
+advanced = true
+help = "[{manifestation: [{text}], severity: mild | moderate | severe}]"
+
+[[field]]
+name = "reaction_text"
+label = "Reaction"
+path = "reaction.0.manifestation.0.text"
+type = "string"
+help = "what happens, e.g. Hives"
+
+[[field]]
+name = "reaction_severity"
+label = "Reaction severity"
+path = "reaction.0.severity"
+type = "choice"
+choices = ["mild", "moderate", "severe"]
+
+[[field]]
+name = "note"
+label = "Notes"
+type = "list"
+advanced = true
+
+[[field]]
+name = "note_text"
+label = "Note"
+path = "note.0.text"
+type = "text"
+
+[[screen]]
+id = "allergy"
+on = ["create", "edit"]
+fields = ["patient", "substance", "type", "category", "criticality", "reaction_text", "reaction_severity",
+          "clinical_status", "verification_status", "onsetDateTime", "recordedDate", "recorder", "note_text"]

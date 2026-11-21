@@ -1,0 +1,46 @@
+id = "wiki-check"
+title = "Check a wiki page"
+summary = "A page flagged as out of date is checked by a wiki owner: confirmed as current (signed), or archived."
+record = "WikiPage"
+
+[trigger]
+event = "record.transitioned:WikiPage"
+when = "record.status == 'needs-check'"
+
+[[steps]]
+id = "check"
+title = "Check the page is current"
+kind = "gate"
+role = "wiki-owner"
+signer = "person"
+meaning = "I have checked this page is current"
+outcomes = ["confirm", "archive"]
+context = ["record:wiki"]
+due = "7d"
+instructions = """Read the page. If something in it is wrong, edit the page first, then confirm it. Archive a page
+that is no longer true and that nobody should follow."""
+
+[[steps]]
+id = "confirm"
+title = "Put the page back"
+kind = "automation"
+after = ["check"]
+when = "check.outcome == 'confirm'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "published"
+checked = "{{run.today}}"
+
+[[steps]]
+id = "archive"
+title = "Archive the page"
+kind = "automation"
+after = ["check"]
+when = "check.outcome == 'archive'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "archived"

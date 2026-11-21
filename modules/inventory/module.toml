@@ -1,0 +1,49 @@
+# Inventory: what the practice keeps on its shelves (supplies, vaccines, kits), where it is kept, and every movement in
+# or out. Stock on hand is never typed in: only a posted stock move changes it, so the count always has a history.
+# Receiving and issuing post at once; an adjustment or a count is signed off by an inventory manager first. When an
+# item falls to its reorder point, a purchaser is asked to order it.
+# It knows nothing about any one practice.
+
+[module]
+requires_core = "1.0"
+id = "inventory"
+name = "Inventory"
+version = "1"
+summary = "Stock items, where they are kept, and the moves that receive, issue, adjust and count them."
+requires = []
+shortcuts = ["StockItem", "StockMove"]
+
+[[roles]]
+id = "stock-keeper"
+name = "Stock keeper"
+description = "Receives deliveries, issues stock and counts the shelves."
+
+[[roles]]
+id = "purchaser"
+name = "Purchaser"
+description = "Orders stock when an item reaches its reorder point."
+
+[[roles]]
+id = "inventory-manager"
+name = "Inventory manager"
+description = "Signs off adjustments and counts that change stock on hand. Never the one who wrote the move."
+
+[[data_classes]]
+id = "inventory"
+name = "Inventory"
+description = "Stock items, storage locations and stock moves. No patient information."
+
+[grants.everyone]   # everyone who works here may see what is in stock and where
+read = ["inventory"]
+
+[grants.stock-keeper]
+read = ["inventory"]
+write = ["inventory"]
+
+[grants.purchaser]
+read = ["inventory"]
+write = ["inventory"]
+
+[grants.inventory-manager]
+read = ["inventory"]
+write = ["inventory"]

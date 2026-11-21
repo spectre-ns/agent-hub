@@ -1,0 +1,89 @@
+# A controlled document. Only a signed review approves it; anyone who works on it may sign that they have read it.
+id = "Document"
+label = "Controlled document"
+plural = "Controlled documents"
+data_class = "documents"
+date = "effective"
+flag = "status"
+order = 10
+summary = "A policy, procedure or form under document control."
+
+[[field]]
+name = "title"
+required = true
+
+[[field]]
+name = "number"
+label = "Document number"
+help = "e.g. SOP-014"
+
+[[field]]
+name = "revision"
+type = "number"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "in-review", "approved", "obsolete"]
+
+[[field]]
+name = "owner"
+type = "member"
+
+[[field]]
+name = "effective"
+label = "Effective from"
+type = "date"
+
+[[field]]
+name = "file"
+type = "attachment"
+help = "the document itself, by its SHA-256 in the blob store"
+
+[[field]]
+name = "body"
+type = "markdown"
+
+[lifecycle]
+field = "status"
+initial = "draft"
+in_use = "approved"   # while a document is revised, staff keep reading its last approved revision
+locked = ["in-review", "approved", "obsolete"]   # what was reviewed is what gets approved
+abandoned = { "in-review" = "draft" }            # a review that is cancelled hands the document back
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "in-review"
+label = "Send for review"
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "approved"
+by = "workflow"         # only a signed review gets here
+label = "Approve"
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "draft"
+by = "workflow"
+label = "Return to the author"
+
+[[lifecycle.transition]]
+from = ["approved"]
+to = "draft"
+label = "Revise"
+
+[[lifecycle.transition]]
+from = ["approved"]
+to = "in-review"
+by = "workflow"         # a CAPA sends an approved document straight back for review
+label = "Send back for review"
+
+[[lifecycle.transition]]
+from = ["draft", "approved"]
+to = "obsolete"
+label = "Make obsolete"
+
+[[signature]]
+meaning = "I have read and understood this document"
+states = ["approved"]

@@ -1,0 +1,33 @@
+# A client of the firm. It extends the core's Subject, so the core's pages, pickers and any module see it.
+id = "Client"
+label = "Client"
+plural = "Clients"
+data_class = "profile"
+extends = "Subject"
+strict = true
+title = "{name}[ · {email}]"
+
+[base]
+identifier = "sin_tail"
+contact = "email"
+responsible = false
+
+[[field]]
+name = "name"                 # the same name as the Subject's: it holds it
+path = "name.0.text"
+label = "Name"
+type = "string"
+required = true
+match = true
+
+[[field]]
+name = "email"
+label = "Email"
+type = "string"
+fact = true
+
+[[field]]
+name = "sin_tail"
+label = "Last three digits of the SIN"
+type = "string"
+fact = true

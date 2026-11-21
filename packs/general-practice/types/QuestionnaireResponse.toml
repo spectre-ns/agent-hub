@@ -1,0 +1,47 @@
+# A completed intake form.
+id = "QuestionnaireResponse"
+label = "Intake form"
+plural = "Intake forms"
+data_class = "intake"
+strict = true
+date = "authored"
+active = "record.status != 'entered-in-error'"
+order = 95
+summary = "A completed intake form."
+part_of = "subject"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["in-progress", "completed", "amended", "entered-in-error", "stopped"]
+required = true
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "questionnaire"
+type = "string"
+help = "which form, e.g. new-patient-intake"
+
+[[field]]
+name = "authored"
+label = "Completed"
+type = "datetime"
+
+[[field]]
+name = "source"
+type = "reference"
+target = ["Patient", "RelatedPerson", "Practitioner"]
+rel = "source"
+
+[[field]]
+name = "item"
+label = "Answers"
+type = "list"
+help = "[{linkId, answer: [{valueString | valueBoolean | ...}]}]"

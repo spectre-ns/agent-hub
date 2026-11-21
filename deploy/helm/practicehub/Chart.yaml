@@ -1,0 +1,6 @@
+apiVersion: v2
+name: practicehub
+description: Practice Hub, with its MongoDB (a one-node replica set), for Kubernetes and Nebari
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,64 @@
+id = "personal-return"
+title = "Personal tax return"
+record = "Client"
+summary = "The agent prepares the return from the slips; a partner reviews and signs it; the client is invoiced."
+
+[trigger]
+starters = ["partner", "reception"]
+
+[[input]]
+name = "year"
+type = "number"
+required = true
+
+[[steps]]
+id = "prepare"
+title = "Prepare the return"
+kind = "task"
+role = "preparer"
+skill = "return-prep"
+risk = "medium"
+context = ["record:tax", "record:profile", "input"]
+
+[[steps]]
+id = "review"
+title = "Review the return"
+kind = "task"
+role = "partner"
+after = ["prepare"]
+review_of = "prepare"
+persons_only = true
+context = ["record:tax"]
+[[steps.fields]]
+name = "income"
+type = "number"
+required = true
+[[steps.fields]]
+name = "summary"
+type = "text"
+required = true
+
+[[steps]]
+id = "sign"
+title = "Sign and file"
+kind = "gate"
+role = "partner"
+after = ["review"]
+signer = "person"
+outcomes = ["file", "return-to-preparer"]
+meaning = "I have reviewed this return and it is complete and accurate"
+context = ["review"]
+
+[[steps]]
+id = "invoice"
+title = "Invoice the client"
+kind = "automation"
+after = ["sign"]
+when = "sign.outcome == 'file'"
+action = "record.create"
+[steps.params]
+type = "Invoice"
+[steps.params.data]
+subject = { reference = "{{run.record}}" }
+description = "Personal return {{input.year}}"
+amount = 150

@@ -1,0 +1,17 @@
+id = "dms-documents"
+title = "Documents"
+summary = "Controlled documents by status, and the reviews waiting on someone."
+
+[[widget]]
+kind = "board"
+title = "By status"
+type = "Document"
+group_by = "status"
+columns = ["title", "number", "revision"]
+
+[[widget]]
+kind = "table"
+source = "items"
+title = "Reviews waiting"
+workflow = "dms-review"
+status = ["open", "claimed"]

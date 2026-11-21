@@ -1,0 +1,29 @@
+# A meeting with a client. It extends the core's Booking: the core's schedule, free slots and booking.book keep it.
+id = "Meeting"
+label = "Meeting"
+plural = "Meetings"
+data_class = "profile"
+extends = "Booking"
+strict = true
+
+[base]
+subject = "client"
+with = "staff"
+cancelled = "called_off"
+
+[[field]]
+name = "client"
+type = "reference"
+target = ["Client"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "staff"
+type = "member"
+list = true
+
+[[field]]
+name = "called_off"
+label = "Called off"
+type = "boolean"

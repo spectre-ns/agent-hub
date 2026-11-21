@@ -1,0 +1,43 @@
+# Core base type: time held with members for a subject (an appointment, a machine slot, a hearing).
+# The calendar, free slots, double-booking checks and ``booking.book`` read and write bookings through these fields.
+id = "Booking"
+label = "Booking"
+abstract = true
+summary = "Time held with members, for a subject."
+title = "{start}[ {reason}]"
+date = "start"
+
+[[field]]
+name = "start"
+label = "Starts"
+type = "datetime"
+required = true
+
+[[field]]
+name = "end"
+label = "Ends"
+type = "datetime"
+
+[[field]]
+name = "reason"
+label = "Reason"
+type = "string"
+
+[[field]]
+name = "subject"
+label = "For"
+type = "reference"
+target = ["Subject"]
+
+[[field]]
+name = "with"
+label = "With"
+type = "member"
+list = true
+help = "the members whose time it holds"
+
+[[field]]
+name = "cancelled"
+label = "Cancelled"
+type = "boolean"
+help = "true when it no longer holds the time"
