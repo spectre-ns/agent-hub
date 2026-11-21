@@ -444,7 +444,7 @@ class App(RecordPages, DefinitionPages):
 
     # ================================================================================================ pages
     def layout(self, req, title: str, body: str, *, crumbs=(), actions: str = "", subnav: str = "",
-               heading: bool = True) -> str:
+               heading: bool = True, above: str = "") -> str:
         me = req.get("me")
         p = self.hub.practice
         name = p.get("name", "Practice Hub")
@@ -458,7 +458,7 @@ class App(RecordPages, DefinitionPages):
         if crumbs:
             crumb = ('<div class="crumbs">' + '<span class="sep">/</span>'.join(
                 f'<a href="{e(h)}">{e(t)}</a>' if h else e(t) for h, t in crumbs) + "</div>")
-        page = (f'{crumb}<div class="pagehead"><h1{"" if heading else " class=visually-hidden"}>{e(title)}</h1>'
+        page = (f'{crumb}{above}<div class="pagehead"><h1{"" if heading else " class=visually-hidden"}>{e(title)}</h1>'
                 f'{f"<div class=actions>{actions}</div>" if actions else ""}</div>{body}')
         mark = f'<span class="mark">{e(self._initials(name))}</span>'
         if not me:
@@ -1811,29 +1811,24 @@ class App(RecordPages, DefinitionPages):
         raise Redirect(f"/{self.subj['path']}/{p['id']}")
 
     def page_subject(self, req, pid):
+        """A subject's page: their banner (facts and alerts), then what is part of them (allergies, problems), each
+        kind a section with its own Add, then what links to them (visits, results), then the work about them."""
         me, st = req["me"], self.subj["type"]
         ref = f"{st}/{pid}"
         p = self.hub.read_record(me, ref)
-        chart = self.hub.chart(me, ref)
-        labels = {d["id"]: d["name"] for d in self.hub.pack.data_classes} if self.hub.pack else {}
-        parts = [self._values({k: (self.member_name(v[7:]) if isinstance(v, str) and v.startswith("member:") else v)
-                               for k, v in self.hub.facts(p).items()})]
-        for dc, recs in chart["classes"].items():
-            def kind(r):
-                rt = self.hub.record_type(r["resourceType"])
-                return rt.label if rt else self.human(r["resourceType"])
-            items = "".join(f'<li><details><summary>{e(kind(r))}: {e(self.hub.title(r))} '
-                            f'<span class="muted">{e(schema.record_date(self.hub.record_type(r["resourceType"]), r)[:10])}</span></summary>'
-                            f'{self._plain_html(r)}<p><a href="{e(self.record_href(f"{r["resourceType"]}/{r["id"]}"))}">'
-                            f'Open this {e(self._lower(kind(r)))}</a></p></details></li>' for r in recs)
-            parts.append(f"<h2>{e(labels.get(dc, dc))}</h2><ul class='plain'>{items}</ul>")
-        if chart["hidden"]:
-            parts.append(f'<p class="muted">{chart["hidden"]} record(s) in classes you may not read are not shown.</p>')
+        chart = self.hub.chart(me, ref)  # the view of the whole file, as the access report counts it
+        sections, rail, hidden = self.owner_sections(me, ref)
+        parts = [self.subject_banner(me, ref, heading=True), sections]
+        if not sections:
+            parts.append("<p class='muted'>Nothing recorded yet.</p>")
+        if chart["hidden"] or hidden:
+            parts.append(f'<p class="muted">{max(chart["hidden"], hidden)} record(s) in classes you may not read are '
+                         f'not shown.</p>')
         if self.hub.is_policy_owner(me):
             parts.append(f'<p><a class="btn secondary" href="/access?subject={urllib.parse.quote(ref)}">'
                          f'Who opened or changed this file</a></p>')
         runs = self.hub.engine.runs(record=ref)
-        parts.append(f"<h2>Work about this {e(self.subj['label'].lower())}</h2>" + (
+        parts.append(f"<h2 id='work'>Work about this {e(self.subj['label'].lower())}</h2>" + (
             "<table>" + "".join(f'<tr><td><a href="/runs/{r["id"]}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
                                 f'<td class="muted">{e(r["created_at"][:16].replace("T", " "))}</td></tr>' for r in runs)
             + "</table>" if runs else "<p class='muted'>None.</p>"))
@@ -1847,8 +1842,11 @@ class App(RecordPages, DefinitionPages):
                               f' class="card"><input type="hidden" name="_workflow" value="{e(wf.id)}">'
                               f'<p class="muted">{e(wf.summary)}</p>{fields}<button>Start</button></form></details>')
         if starts:
-            parts.append("<h2>Start work</h2>" + "".join(starts))
-        return self.layout(req, self.hub.title(p), "".join(parts))
+            parts.append("<h2 id='start-work'>Start work</h2>" + "".join(starts))
+        extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))] + ([("start-work", "Start work", None)] if starts else [])
+        return self.layout(req, self.hub.title(p), "".join(parts), heading=False,
+                           crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.title(p))],
+                           subnav=self.owner_rail(self.hub.title(p), rail, extra, label=self.subj["label"]))
 
     def post_start(self, req, pid):
         f = self._form_output(self.form(req))

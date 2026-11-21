@@ -380,6 +380,32 @@ border-radius:3px;background:var(--danger-on);color:var(--danger);font-weight:70
 .chart-section>.tablewrap{padding:0 8px 8px}.chart-section>table{width:calc(100% - 16px);margin:0 8px 8px}
 .chart-section>.empty,.chart-section>p{margin:0}
 .chart-section>p{padding:12px 16px}
+.chart-section{scroll-margin-top:72px}
+.chart-section>header .btn{flex:none}
+.count-badge{display:inline-block;vertical-align:middle;margin-left:4px;font-size:12px;line-height:16px;font-weight:600;
+padding:0 8px;border-radius:8px;background:var(--neutral);color:var(--fg)}
+table.parts{table-layout:fixed;width:100%}table.parts td.t>a{font-weight:500}
+table.parts th:nth-child(2){width:150px}table.parts th:nth-child(3){width:130px}table.parts th:nth-child(4){width:110px}
+.chart-section.empty-part>header{border-bottom:0}.chart-section>header .none{flex:none;font-size:14px}
+@media (max-width:600px){table.parts,table.parts tbody{display:block}table.parts tr:first-child{display:none}
+table.parts tr{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
+table.parts td{display:block;border:0;padding:0}table.parts td.t{flex:1 1 100%;white-space:normal}
+table.parts td:empty{display:none}.chart-section>header{flex-wrap:wrap}}
+table.parts td.nowrap{white-space:nowrap}
+details.peek{display:inline}details.peek>summary{display:inline-block;list-style:none;cursor:pointer;margin-left:6px;
+padding:0 4px;border-radius:3px;color:var(--subtlest);font-size:12px}
+details.peek>summary::-webkit-details-marker{display:none}
+details.peek>summary::before{content:"\25B8"}details.peek[open]>summary::before{content:"\25BE"}
+details.peek>summary:hover{background:var(--neutral-hover);color:var(--fg)}
+details.peek[open]>:not(summary){display:block;margin:8px 0 4px;padding:8px 12px;border-left:2px solid var(--border);
+font-weight:400;white-space:normal}
+h2.links-head{margin:32px 0 12px}.issue .chart-section{margin-top:16px}
+.owner-rail a{display:flex;align-items:center;gap:8px}
+.owner-rail .count{margin-left:auto;font-size:12px;line-height:16px;background:var(--neutral);color:var(--fg);border-radius:8px;
+padding:0 8px;min-width:24px;text-align:center}
+.part-of{margin:0 0 12px;color:var(--subtle)}.part-of a{font-weight:600}
+.subject-banner h1.name{margin:0}
+.subject-banner+.alert-banner{margin-top:-8px}
 .empty:not(.av){padding:24px;text-align:center;color:var(--subtlest)}
 .empty-state{padding:12px 16px;text-align:left;color:var(--subtlest);border:2px dashed var(--border);border-radius:3px}
 
@@ -584,6 +610,9 @@ flex-wrap:wrap;gap:8px 12px;align-items:center;box-shadow:var(--shadow-overlay)}
 @media (max-width:900px){
   .shell.has-subnav{grid-template-columns:minmax(0,1fr)}
   .subnav{position:static;height:auto;max-height:40vh;border-right:0;border-bottom:1px solid var(--border)}
+  .owner-rail{display:flex;gap:4px;overflow-x:auto;padding:8px 16px;max-height:none}
+  .owner-rail .sec{display:none}.owner-rail ul{display:contents}
+  .owner-rail a{white-space:nowrap;border:1px solid var(--border);border-radius:16px;padding:2px 10px}
   .shell{grid-template-columns:minmax(0,1fr)}
   .side{display:none;position:fixed;top:56px;left:0;width:min(280px,100vw);z-index:30;box-shadow:var(--shadow-overlay)}
   .side.open{display:block}
@@ -1830,6 +1859,12 @@ function formModal() {
   }
   async function send(ev, f) {
     if (ev.defaultPrevented) return;  // another check (the text editor's required field) stopped it
+    if (f.method.toLowerCase() === "get") {  // a step that asks first (which owner?): the next step, in the dialog
+      ev.preventDefault();
+      const u = new URL(f.action, location.href);
+      new FormData(f).forEach((v, k) => u.searchParams.append(k, v));
+      dirty = false; open(u.pathname + u.search, ""); return;
+    }
     if (f.method.toLowerCase() !== "post" || f.querySelector("input[type=file]")) return;  // files: an ordinary post
     ev.preventDefault();
     f.dispatchEvent(new Event("modal-submit"));
