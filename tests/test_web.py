@@ -651,7 +651,7 @@ def test_screens_arrange_the_forms_and_a_move_asks_what_it_needs(hub, server):
     code, page = call(server, "GET", f"{url}/move?to=investigating", rana)
     assert code == 200 and 'name="owner"' in page and 'name="_comment"' in page and 'name="title"' not in page
     code, page = call(server, "POST", f"{url}/move", rana, form={"to": "investigating", "_comment": "kept"})
-    assert code == 200 and "fill in Owner" in page and ">kept</textarea>" in page
+    assert code == 422 and "fill in Owner" in page and ">kept</textarea>" in page and "data-modal-body" in page
     assert hub.records.read("CAPA", capa["id"])["status"] == "open"
     code, page = call(server, "POST", f"{url}/move", rana, form={"to": "investigating", "owner": "rana",
                                                                 "_comment": "kept"})
@@ -1149,3 +1149,79 @@ def test_a_policy_owner_changes_the_practice_on_its_settings_page(hub, server):
                                                                           "name": "Kept while refused"})
     assert status == 422 and "Mars/Base" in page and "Kept while refused" in page and "time zone" in page
     assert hub.practice["name"] == "Harbourview Family Health"
+
+
+# ------------------------------------------------------------------------------- parts: records that live in an owner
+def _part_setup(hub):
+    """The pack's patient, a part type (part_of) that is an alert, and one active part of that patient."""
+    hub_types = {t: hub.record_type(t) for t in hub.record_types()}
+    part = next(t for t in hub_types.values() if t.part_of and t.alert)
+    owner_t = hub.concrete(part.part_of["target"])[0]
+    pats = hub.records.search(owner_t)
+    me = M(hub, "dr-amara")
+    pat = next((p for p in pats if hub.parts(me, f"{owner_t}/{p['id']}")[0][part.id]), pats[0])
+    return part, owner_t, pat
+
+
+def test_an_owner_page_shows_its_parts_with_counts_and_adds_one_in_place(hub, server):
+    """A patient's page is sections of what is part of it (heading, count, newest first, Add with the owner set),
+    then what links to it; a left rail lists them; an alert part is also in the banner."""
+    part, owner_t, pat = _part_setup(hub)
+    ref = f"{owner_t}/{pat['id']}"
+    recs, _ = hub.parts(M(hub, "dr-amara"), ref)
+    page = call(server, "GET", f"/patients/{pat['id']}", token(hub, "dr-amara"))[1]
+    sec = page.split(f'id="part-{part.id}"')[1].split("</section>")[0]
+    assert f'<span class="count-badge">{len(recs[part.id])}</span>' in sec
+    field = part.part_of["field"]
+    assert f'href="/records/{part.id}/new?{field}={urllib.parse.quote(ref)}" data-modal' in sec
+    assert 'class="subnav owner-rail"' in page and f'href="#part-{part.id}"' in page
+    assert "id='work'" in page and "Start work" in page
+    if recs[part.id]:
+        assert 'class="alert-banner"' in page
+    code, form = call(server, "GET", f"/records/{part.id}/new?{field}={urllib.parse.quote(ref)}",
+                      token(hub, "dr-amara"))
+    assert code == 200 and "data-modal-body" in form and 'class="part-of"' in form
+    assert f'type="hidden" name="{field}" value="{html.escape(ref)}"' in form or \
+        f'name="{field}" value="{html.escape(ref)}" type="hidden"' in form or \
+        re.search(rf'<input[^>]*type="hidden"[^>]*name="{field}"', form)
+
+
+def test_a_part_type_is_not_listed_on_its_own(hub, server):
+    """A part type is absent from /records and from Start work; its own list says to open one from its owner."""
+    part, owner_t, _ = _part_setup(hub)
+    amara = token(hub, "dr-amara")
+    assert f'href="/records/{part.id}"' not in call(server, "GET", "/records", amara)[1]
+    start = call(server, "GET", "/start", amara)[1]
+    assert f'href="/records/{part.id}/new"' not in start
+    code, page = call(server, "GET", f"/records/{part.id}", amara)
+    assert code == 200 and f"is part of" in page and f'href="/records/{part.id}/new"' not in page
+
+
+def test_adding_a_part_without_its_owner_asks_which_one_first(hub, server):
+    part, owner_t, pat = _part_setup(hub)
+    amara = token(hub, "dr-amara")
+    code, page = call(server, "GET", f"/records/{part.id}/new", amara)
+    assert code == 200 and 'id="owner-pick"' in page and "Which " in page and "data-modal-body" in page
+    field = part.part_of["field"]
+    code, page = call(server, "GET", f"/records/{part.id}/new?{field}={owner_t}/{pat['id']}", amara)
+    assert code == 200 and 'id="owner-pick"' not in page and 'class="part-of"' in page
+
+
+def test_a_part_page_reads_inside_its_owner(hub, server):
+    """A part's page has the breadcrumb owner › plural › title and the owner's banner above it."""
+    part, owner_t, pat = _part_setup(hub)
+    ref = f"{owner_t}/{pat['id']}"
+    me = M(hub, "dr-amara")
+    r = hub.parts(me, ref)[0][part.id][0]    # the demo has one
+    page = call(server, "GET", f"/records/{part.id}/{r['id']}", token(hub, "dr-amara"))[1]
+    crumbs = page.split('class="crumbs"')[1].split("</nav>")[0] if 'class="crumbs"' in page else page
+    assert html.escape(hub.title(pat)) in crumbs and f'#part-{part.id}"' in crumbs and html.escape(part.plural) in crumbs
+    assert 'class="subject-banner"' in page
+
+
+def test_a_refused_move_in_the_dialog_says_why_in_the_dialog(hub, server):
+    """A move refused (a field it needs is empty) answers 422 with the move screen inside data-modal-body."""
+    rana = _modules(hub, server)
+    capa = hub.create_record(hub.member("rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
+    code, page = call(server, "POST", f"/records/CAPA/{capa['id']}/move", rana, form={"to": "investigating"})
+    assert code == 422 and "data-modal-body" in page and "fill in Owner" in page

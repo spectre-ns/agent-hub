@@ -1663,6 +1663,38 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             {"to_ref": ref, "rel": rel, "from_ref": {"$regex": f"^{re.escape(t)}/"}})]
         return sorted((k for k in kids if k), key=lambda r: self.title(r).casefold())
 
+    # ------------------------------------------------------------------ parts and links
+    def part_types(self, rtype: str) -> list[schema.RecordType]:
+        """The types whose records are parts of a record of ``rtype`` (``part_of`` naming it), by ``order``."""
+        out = [rt for rt in self.record_types().values()
+               if rt.part_of and not rt.abstract and rtype in self.concrete(rt.part_of["target"])]
+        return sorted(out, key=lambda rt: (rt.order, rt.id))
+
+    def owner_of(self, rec: dict) -> str | None:
+        """The record that owns a part (``Type/id``), or None when its type is not part of another."""
+        rt = self.record_type(rec.get("resourceType") or "")
+        if not rt or not rt.part_of:
+            return None
+        return schema.ref_of(schema.first(rec, rt.part_of["path"]))
+
+    def parts(self, member: dict, ref: str) -> tuple[dict[str, list[dict]], int]:
+        """A record's parts, per part type (every part type of its type, even with none yet), newest first, that
+        the member may read; and how many it may not."""
+        out, hidden = {}, 0
+        for rt in self.part_types(ref.split("/", 1)[0]):
+            f = rt.field(rt.part_of["field"])
+            rows = self.db.links.find({"to_ref": ref, "rel": f["rel"] if f else rt.part_of["field"],
+                                       "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}})
+            if not self.may_read(member, rt.id):
+                hidden += len(rows)
+                continue
+            recs = [r for r in (self.records.read(*x["from_ref"].split("/", 1)) for x in rows)
+                    if r and schema.ref_of(schema.first(r, rt.part_of["path"])) == ref]
+            for r in recs:
+                self.note_view(member, f"{rt.id}/{r['id']}", how=f"part of {ref}")
+            out[rt.id] = sorted(recs, key=lambda r: schema.record_date(rt, r), reverse=True)
+        return out, hidden
+
     def tree(self, member: dict, rtype: str, where=None) -> list[tuple[int, dict]]:
         """Every record of a type that has a tree, as (depth, record) in reading order: each under its parent, each
         level by title. A record whose parent is missing or filtered out sits at the top."""

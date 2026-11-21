@@ -14,7 +14,7 @@ import urllib.parse
 
 from .. import pack as packmod
 from .. import schema
-from ..hub import HubError, Denied, Invalid
+from ..hub import Conflict, HubError, Denied, Invalid
 
 e = html.escape
 SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?")  # a field a form can edit: a top-level key, or a list of them
@@ -81,6 +81,16 @@ def a_an(words: str) -> str:
     if low.startswith(("hour", "honest", "honour", "heir")):
         return "an " + w
     return ("an " if low[:1] in "aeiou" else "a ") + w
+
+
+class _Without:
+    """A record type seen without some of its fields (those a form does not offer)."""
+
+    def __init__(self, rt, skip):
+        self._rt, self.fields = rt, [f for f in rt.fields if f["name"] not in skip]
+
+    def __getattr__(self, k):
+        return getattr(self._rt, k)
 
 
 class RecordPages:
@@ -462,10 +472,15 @@ class RecordPages:
         return nav + "".join(f'<fieldset id="{i}" class="tabpanel"><legend>{e(t["label"] or "Details")}</legend>'
                              f'{"".join(draw(f) for f in t["fields"])}</fieldset>' for i, t in zip(ids, tabs))
 
-    def _inputs(self, rt, rec, me, op: str = "edit") -> str:
+    def _inputs(self, rt, rec, me, op: str = "edit", skip=()) -> str:
         """The form's controls: the type's screen for ``op`` (create, edit) in its tabs, or, with no screen, every
-        field with the pack's ``advanced`` ones (whole structures, as JSON) folded away below."""
+        field with the pack's ``advanced`` ones (whole structures, as JSON) folded away below. ``skip``: names of
+        fields the form does not offer (a part's owner, set already)."""
         tabs = self._on_screen(rt, op)
+        if skip:
+            tabs = [{**t, "fields": [f for f in t["fields"] if f["name"] not in skip]} for t in tabs] \
+                if tabs is not None else None
+            rt = _Without(rt, skip)
         if tabs is not None:
             out = self._tabbed(tabs, lambda f: self._input(f, rec, me), f"{op}-{rt.id.lower()}")
             if op == "edit":  # the whole values (as JSON) stay in reach below the screen, as without one
@@ -582,7 +597,7 @@ class RecordPages:
         me, hub = req["me"], self.hub
         rows = []
         for t, rt in sorted(hub.record_types().items(), key=lambda kv: (kv[1].order, kv[0])):
-            if not self._may_read(me, t):
+            if not self._may_read(me, t) or rt.part_of:  # a part is reached through its owner
                 continue
             n = {"n": hub.db.records.count({"type": t})}
             rows.append(f'<tr><td><a href="/records/{e(t)}">{e(rt.plural)}</a></td><td>{e(rt.summary)}</td>'
@@ -608,6 +623,9 @@ class RecordPages:
         more, recs = len(recs) > SHOWN, recs[:SHOWN]
         lc = rt.lifecycle
         heads = [f for f in self._editable(rt) if f["type"] in ("string", "choice", "date", "member", "number")][:3]
+        owner = self._owner_field(rt)  # a part: which record it is part of, first
+        if owner:
+            heads = [owner] + [f for f in heads if f is not owner][:2]
         rows = "".join(
             f'<tr><td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
             + (f'<td>{self._state_loz(schema.first(r, lc["path"]))}</td>' if lc else "")
@@ -618,7 +636,11 @@ class RecordPages:
         if req["query"].get("parent"):  # the old way to add under a record: its create form now has its own page
             raise self._redirect(f"/records/{rtype}/new?parent={urllib.parse.quote(req['query']['parent'])}")
         create = (f'<a class="btn primary" href="/records/{e(rtype)}/new" data-modal>Create</a>'
-                  if hub.may_write(me, rtype) and rtype != self.subj["type"] else "")
+                  if hub.may_write(me, rtype) and rtype != self.subj["type"] and not rt.part_of else "")
+        if rt.part_of:
+            ol = self._owner_label(rt)
+            table = (f'<div class="flash info"><p>Each {e(self._lower(rt.label))} is part of {e(a_an(ol))}: open one '
+                     f'from its {e(ol)}, and add one there.</p></div>' + table)
         search = (f'<form class="inline"><input name="q" value="{e(q)}" placeholder="Search {e(self._lower(rt.plural))}" aria-label="Search {e(self._lower(rt.plural))}">'
                   f'<button class="secondary">Search</button></form>')
         note = (f"<p class='muted'>The {SHOWN} most recently changed are shown: search to find any other.</p>"
@@ -637,20 +659,61 @@ class RecordPages:
         if not hub.may_write(me, rtype):
             raise Denied(f"{me['name']} may not add {rt.plural.lower()}")
         lc = rt.lifecycle
-        under = req["query"].get("parent", "") or (kept or {}).get("_parent", "")
-        seed = {k: v for k, v in (kept or {}).items() if k != "_parent"} or None
+        q = req["query"]
+        under = q.get("parent", "") or (kept or {}).get("_parent", "")
+        seed = {k: v for k, v in (kept or {}).items() if k not in ("_parent", "_owner")} or None
         if rt.parent and under.startswith(rtype + "/"):
             seed = {"resourceType": rtype, **(seed or {}), **schema.put({}, rt.parent, {"reference": under})}
-        start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
+        for f in rt.fields:  # a link named in the address (New visit, from a patient's page): filled in
+            got = q.get(f["name"]) or q.get(f["path"])
+            if (f["type"] == "reference" and not f["path"].endswith(".*") and isinstance(got, str)
+                    and got.split("/", 1)[0] in self.hub.concrete(f["target"]) and not (kept or {}).get(f["path"])):
+                seed = schema.put({"resourceType": rtype, **(seed or {})}, f["path"], {"reference": got})
         err = f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>' if error else ""
-        inputs = self._inputs(rt, seed, me, "create")
+        crumbs = [("/records", "Records"), (f"/records/{rtype}", rt.plural), (None, "Create")]
+        skip, own, cancel, back = (), "", f"/records/{e(rtype)}", '<a class="btn subtle back" href="/start" data-modal>← Back</a>'
+        if rt.part_of:  # a part is added to its owner: which one, first
+            of = self._owner_field(rt)
+            typed = q.get(of["name"]) or q.get(of["path"]) or (kept or {}).get("_owner") or ""
+            owner, problem = None, None
+            if typed:
+                try:
+                    owner = self._resolve_ref(of, typed)
+                    self.hub.read_record(me, owner)
+                except (Invalid, Denied, HubError) as exc:
+                    owner, problem = None, exc
+            if owner is None:
+                return self._owner_pick(req, rt, of, problem)
+            o = self.hub.records.read(*owner.split("/", 1))
+            seed = schema.put({"resourceType": rtype, **(seed or {})}, of["path"], {"reference": owner})
+            skip = (of["name"],)
+            href = self.record_href(owner)
+            own = (f'<input type="hidden" name="{e(of["path"])}" value="{e(owner)}">'
+                   f'<p class="part-of">Part of <a href="{e(href)}">{e(self.hub.title(o))}</a></p>')
+            cancel, back = e(href), ""
+            crumbs = [(href, self.hub.title(o)), (f"{href}#part-{rtype}", rt.plural), (None, "Add")]
+        start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
+        inputs = self._inputs(rt, seed, me, "create", skip=skip)
+        verb = "Add" if rt.part_of else "Create"
         body = (f'<div data-modal-body>{err}<form method="post" action="/records/{e(rtype)}" class="card stack" id="new">'
-                f'<p class="muted">{e(rt.summary)}{start}</p>{self._req_note(inputs)}{inputs}'
-                f'<div class="filters"><button class="primary">Create</button>'
-                f'<a class="btn secondary" href="/records/{e(rtype)}" data-modal-close>Cancel</a>'
-                f'<a class="btn subtle back" href="/start" data-modal>← Back</a></div></form></div>')
-        return self.layout(req, f"Create {a_an(self._lower(rt.label))}", body,
-                           crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural), (None, "Create")])
+                f'{own}<p class="muted">{e(rt.summary)}{start}</p>{self._req_note(inputs)}{inputs}'
+                f'<div class="filters"><button class="primary">{verb}</button>'
+                f'<a class="btn secondary" href="{cancel}" data-modal-close>Cancel</a>{back}</div></form></div>')
+        return self.layout(req, f"{verb} {a_an(self._lower(rt.label))}", body, crumbs=crumbs)
+
+    def _owner_pick(self, req, rt, of, problem=None) -> str:
+        """Adding a part with no owner named: which one, found as a reference picker finds it, then the form."""
+        me, ol = req["me"], self._owner_label(rt)
+        ctl = self._input({**of, "label": f"Which {ol}?", "help": "", "required": True}, None, me)
+        err = f'<div class="flash error" role="alert"><p>{e(str(problem))}</p></div>' if problem else ""
+        body = (f'<div data-modal-body>{err}<form method="get" action="/records/{e(rt.id)}/new" class="card stack" '
+                f'id="owner-pick"><p class="muted">Each {e(self._lower(rt.label))} is part of {e(a_an(ol))}. '
+                f'Choose the {e(ol)} first; the form opens next.</p>{ctl}<div class="filters">'
+                f'<button class="primary">Next</button><a class="btn secondary" href="/records/{e(rt.id)}" '
+                f'data-modal-close>Cancel</a><a class="btn subtle back" href="/start" data-modal>← Back</a></div>'
+                f'</form></div>')
+        return self.layout(req, f"Add {a_an(self._lower(rt.label))}", body,
+                           crumbs=[("/records", "Records"), (f"/records/{rt.id}", rt.plural), (None, "Add")])
 
     def _create_pick(self, me) -> str:
         """What the member may add, the practice's shortcuts first; each opens its create screen in the dialog."""
@@ -658,13 +721,13 @@ class RecordPages:
         short = self.shortcuts(me)
         rest = [t for t, rt in sorted(hub.record_types().items(), key=lambda kv: (kv[1].order, kv[0]))
                 if t not in short and t not in hub.member_types() and not rt.abstract and t != self.subj["type"]
-                and self._may_write(me, t)]
+                and not rt.part_of and self._may_write(me, t)]
 
         def li(t):
             rt = hub.record_type(t)
             return (f'<li><a href="/records/{e(t)}/new" data-modal><b>{e(rt.label)}</b>'
                     f'<span class="muted">{e(rt.summary)}</span></a></li>')
-        short = [t for t in short if self._may_write(me, t)]
+        short = [t for t in short if self._may_write(me, t) and not hub.record_type(t).part_of]
         return ((f'<ul class="pick">{"".join(li(t) for t in short)}</ul>' if short else "")
                 + (f'<details{" open" if not short else ""}><summary>Everything else</summary><ul class="pick">'
                    f'{"".join(li(t) for t in rest)}</ul></details>' if rest else ""))
@@ -683,7 +746,7 @@ class RecordPages:
         """The record types the practice works in most, as the pack and the modules installed name them
         (``shortcuts`` in pack.toml or module.toml): the Practice section's links. Only those the member may read."""
         return [t for t in self._shortcut_entries() if not t.startswith("start:")
-                and self.hub.record_type(t) and self._may_read(me, t)]
+                and self.hub.record_type(t) and not self.hub.record_type(t).part_of and self._may_read(me, t)]
 
     def quick_starts(self, me) -> list:
         """Workflows the pack or a module puts on the top bar (``shortcuts = ["start:<workflow>"]``), that this
@@ -723,14 +786,24 @@ class RecordPages:
         if not rt:
             raise Invalid(f"there is no record type {rtype}")
         f = self.form(req)
+        of = self._owner_field(rt)
         try:
-            rec = self.hub.create_record(me, rtype, self._from_form(rt, f, partial=False, op="create"))
+            data = self._from_form(rt, f, partial=False, op="create")
+            if of and of["path"] not in data and f.get(of["path"]):  # the owner, set before the form (not on its screen)
+                data[of["path"]] = self._coerce(of, f[of["path"]])
+            rec = self.hub.create_record(me, rtype, data)
         except Invalid as exc:
             from .server import Rendered
             kept = self._typed(rt, f, op="create")
             if isinstance(f.get("_parent"), str) and f["_parent"]:
                 kept["_parent"] = f["_parent"]
-            raise Rendered(422, self.page_record_new(req, rtype, kept=kept, error=exc)) from None
+            if of and isinstance(f.get(of["path"]), str):
+                kept["_owner"] = f[of["path"]]
+            raise Rendered(409 if isinstance(exc, Conflict) else 422,
+                           self.page_record_new({**req, "query": {}}, rtype, kept=kept, error=exc)) from None
+        owner = self.hub.owner_of(rec)
+        if owner:  # added to its owner: back to the owner, at the section it was added to
+            raise self._redirect(f"{self.record_href(owner)}#part-{rtype}")
         raise self._redirect(f"/records/{rtype}/{rec['id']}")
 
     UNDOING = ("cancelled", "obsolete", "discontinued", "entered-in-error", "withdrawn", "revoked", "retired",
@@ -757,6 +830,211 @@ class RecordPages:
                 "inprogress" if "review" in s or s in self.UNDERWAY else
                 "default")
         return f'<span class="loz {tone}">{e(str(st))}</span>'
+
+    # ------------------------------------------------------------------------------------------ parts and links
+    def _status_of(self, rt, r) -> str:
+        """A record's state in a list: its lifecycle state, else active or inactive when its type says which."""
+        if rt.lifecycle:
+            return self._state_loz(schema.first(r, rt.lifecycle["path"]))
+        if rt.active:
+            return self._state_loz("active" if schema.is_active(rt, r) else "inactive")
+        return ""
+
+    @staticmethod
+    def _flag_of(rt, r) -> str:
+        v = schema.first(r, rt.flag) if rt.flag else None
+        if isinstance(v, dict):
+            v = v.get("text") or (v.get("coding") or [{}])[0].get("display")
+        if v in (None, ""):
+            return ""
+        s = str(v).lower()
+        tone = ("critical" if s in ("critical", "high", "hh", "ll", "urgent", "overdue") else
+                "normal" if s in ("normal", "low", "n", "routine") else "abnormal")
+        return f'<span class="flag flag-{tone}">{e(str(v))}</span>'
+
+    @staticmethod
+    def _day(v) -> str:
+        v = str(v or "")
+        return v[:16].replace("T", " ") if re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d.*", v) else v[:10]
+
+    def _owner_field(self, rt) -> dict | None:
+        return rt.field(rt.part_of["field"]) if rt.part_of else None
+
+    def _owner_label(self, rt) -> str:
+        """What owns a part, in words: "patient", "visit", "patient or group"."""
+        names = []
+        for t in self.hub.concrete(rt.part_of["target"]):
+            ot = self.hub.record_type(t)
+            names.append(self._lower(ot.label if ot else t))
+        return " or ".join(names)
+
+    def _part_rows(self, rt, recs, *, peek: bool = True) -> str:
+        """Records in a compact table: title (it opens it; a peek reads it here), date, status, flag."""
+        lower = self._lower(rt.label)
+        def row(r):
+            ref = f"{rt.id}/{r['id']}"
+            look = (f'<details class="peek"><summary><span class="visually-hidden">Read this {e(lower)} here'
+                    f'</span></summary>{self._plain_html(r)}</details>' if peek else "")
+            return (f'<tr><td class="t"><a href="{e(self.record_href(ref))}">{e(self.hub.title(r))}</a>{look}</td>'
+                    f'<td class="muted nowrap">{e(self._day(schema.record_date(rt, r)))}</td>'
+                    f'<td>{self._status_of(rt, r)}</td><td>{self._flag_of(rt, r)}</td></tr>')
+        return ('<div class="tablewrap"><table class="parts"><tr><th>' + e(rt.label) + '</th><th>Date</th>'
+                '<th>Status</th><th><span class="visually-hidden">Flag</span></th></tr>'
+                + "".join(row(r) for r in recs) + "</table></div>")
+
+    def owner_sections(self, me, ref: str) -> tuple[str, list[tuple[str, str, int]], int]:
+        """A record's parts, one section per part type (by ``order``): heading and count, newest first, and an Add
+        button that opens the create dialog with the owner set. Then the records that link to it, grouped by type,
+        each with its own New. Returns (html, rail entries (anchor, words, count), records hidden from this member)."""
+        hub = self.hub
+        rtype = ref.split("/", 1)[0]
+        q = urllib.parse.quote(ref)
+        parts, hidden = hub.parts(me, ref)
+        out, rail = [], []
+        for t, recs in parts.items():
+            rt = hub.record_type(t)
+            f = self._owner_field(rt)
+            add = (f'<a class="btn secondary" href="/records/{e(t)}/new?{e(f["name"])}={e(q)}" data-modal>'
+                   f'Add {e(self._lower(rt.label))}</a>' if self._may_write(me, t) else "")
+            none = "" if recs else f'<span class="muted none">None recorded</span>'
+            out.append(f'<section class="chart-section{"" if recs else " empty-part"}" id="part-{e(t)}" '
+                       f'aria-labelledby="part-{e(t)}-h"><header>'
+                       f'<h2 id="part-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></h2>'
+                       f'{none}{add}</header>{self._part_rows(rt, recs) if recs else ""}</section>')
+            rail.append((f"part-{t}", rt.plural, len(recs)))
+        groups: dict[str, dict] = {}
+        for x in hub.linked(me, ref):
+            t, _, rid = x["ref"].partition("/")
+            rt = hub.record_type(t)
+            if (not rt or rt.part_of or t in hub.member_types() or (t == rtype and rt.parent)
+                    or rt.abstract):
+                continue  # parts are under their own owner; a tree's children are under it already
+            g = groups.setdefault(t, {"rels": set(), "recs": {}})
+            g["rels"].add(x["rel"])
+            if rid not in g["recs"]:
+                r = hub.records.read(t, rid)
+                if r:
+                    g["recs"][rid] = r
+                    hub.note_view(me, x["ref"], how=f"linked to {ref}")
+        links = []
+        for t in sorted(groups, key=lambda t: (hub.record_type(t).order, t)):
+            rt, g = hub.record_type(t), groups[t]
+            recs = sorted(g["recs"].values(), key=lambda r: schema.record_date(rt, r), reverse=True)
+            # the field a new one names this record in: a single reference, of a rel seen, that may point here
+            fld = next((f for f in rt.fields if f["type"] == "reference" and not f["path"].endswith(".*")
+                        and f["rel"] in g["rels"] and rtype in hub.concrete(f["target"])), None)
+            new = (f'<a class="btn subtle" href="/records/{e(t)}/new?{e(fld["name"])}={e(q)}" data-modal>'
+                   f'New {e(self._lower(rt.label))}</a>' if fld and self._may_write(me, t) else "")
+            links.append(f'<section class="chart-section" id="link-{e(t)}" aria-labelledby="link-{e(t)}-h"><header>'
+                         f'<h3 id="link-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></h3>'
+                         f'{new}</header>{self._part_rows(rt, recs[:50])}'
+                         + (f'<p class="muted body">The 50 most recent of {len(recs)}.</p>' if len(recs) > 50 else "")
+                         + '</section>')
+            rail.append((f"link-{t}", rt.plural, len(recs)))
+        if links:
+            out.append('<h2 class="links-head" id="links">Linked here</h2>' + "".join(links))
+        hidden += sum(1 for x in hub.db.links.find({"to_ref": ref}, fields=["from_ref"])
+                      if hub.record_type(x["from_ref"].split("/")[0])
+                      and not self._may_read(me, x["from_ref"].split("/")[0]))
+        return "".join(out), rail, hidden
+
+    def owner_rail(self, title: str, rail: list[tuple[str, str, int]], extra: list | tuple = (), label: str = "record") -> str:
+        """The owner page's second column: its part sections, then its link groups, with counts (anchors)."""
+        if not rail:
+            return ""
+        a = lambda anchor, words, n: (f'<li><a href="#{e(anchor)}">{e(words)}'
+                                      + (f'<span class="count">{n}</span>' if n is not None else "") + '</a></li>')
+        own = [x for x in rail if x[0].startswith("part-")]
+        linked = [x for x in rail if x[0].startswith("link-")]
+        return (f'<nav class="subnav owner-rail" aria-label="Sections of {e(title)}">'
+                + (f'<div class="sec">On this {e(self._lower(label))}</div><ul>{"".join(a(*x) for x in own)}</ul>' if own else "")
+                + (f'<div class="sec">Linked here</div><ul>{"".join(a(*x) for x in linked)}</ul>' if linked else "")
+                + (f'<div class="sec">Work</div><ul>{"".join(a(*x) for x in extra)}</ul>' if extra else "")
+                + "</nav>")
+
+    def alerts(self, me, ref: str) -> str:
+        """Active records of ``alert`` types that are parts of (or link to) this record: one banner."""
+        hub = self.hub
+        rtype = ref.split("/", 1)[0]
+        found = []
+        for rt in hub.part_types(rtype):
+            if not rt.alert or not self._may_read(me, rt.id):
+                continue
+            f = self._owner_field(rt)
+            for x in hub.db.links.find({"to_ref": ref, "rel": f["rel"], "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}}):
+                r = hub.records.read(*x["from_ref"].split("/", 1))
+                if r and schema.is_active(rt, r):
+                    found.append((rt, r))
+        if not found:
+            return ""
+        by: dict = {}
+        for rt, r in found:
+            by.setdefault(rt.id, (rt, []))[1].append(r)
+        return '<div class="alert-banner" role="note">' + "; ".join(
+            f'{e(rt.plural)}: ' + ", ".join(f'<a href="{e(self.record_href(f"{rt.id}/{r["id"]}"))}">{e(self.hub.title(r))}</a>'
+                                           for r in recs) for rt, recs in by.values()) + "</div>"
+
+    def subject_banner(self, me, ref: str, *, heading: bool = False) -> str:
+        """The subject's banner: their name (a link to their page), headline facts, and alerts."""
+        hub = self.hub
+        p = hub.records.read(*ref.split("/", 1))
+        if not p:
+            return ""
+        facts = "".join(f'<div><dt>{e(self.human(k))}</dt><dd>{self._fact_html(v)}</dd></div>'
+                        for k, v in hub.facts(p).items() if v not in (None, ""))
+        name = (f'<h1 class="name">{e(hub.title(p))}</h1>' if heading else
+                f'<p class="name"><a href="{e(self.record_href(ref))}">{e(hub.title(p))}</a></p>')
+        return f'<div class="subject-banner">{name}<dl class="facts">{facts}</dl></div>' + self.alerts(me, ref)
+
+    def record_banner(self, me, rec: dict) -> str:
+        """An owner that is not a subject (a visit), as the banner over its parts: its name (a link), status and
+        date, and the subject it links to, with that subject's alerts."""
+        hub = self.hub
+        rt = hub.record_type(rec["resourceType"])
+        ref = f"{rt.id}/{rec['id']}"
+        facts = [(rt.label, self._status_of(rt, rec))]
+        when = schema.record_date(rt, rec) if rt.date else ""
+        if when:
+            facts.append(("Date", e(self._day(when))))
+        subs = self._subjects_of(rt, rec)
+        facts += [(lbl, f'<a href="{e(self.record_href(s))}">{e(hub.title(hub.records.read(*s.split("/", 1)) or {}) or s)}</a>')
+                  for lbl, s in subs]
+        dl = "".join(f'<div><dt>{e(k)}</dt><dd>{v}</dd></div>' for k, v in facts if v)
+        return (f'<div class="subject-banner"><p class="name"><a href="{e(self.record_href(ref))}">'
+                f'{e(hub.title(rec))}</a></p><dl class="facts">{dl}</dl></div>'
+                + "".join(self.alerts(me, s) for _, s in subs[:1]))
+
+    def _subjects_of(self, rt, rec) -> list[tuple[str, str]]:
+        """The subjects a record links to by its own single reference fields: (field label, ref)."""
+        st, out = self.subj["type"], []
+        for f in rt.fields:
+            if f["type"] != "reference" or f["path"].endswith(".*") or st not in self.hub.concrete(f["target"]):
+                continue
+            r = schema.ref_of(schema.first(rec, f["path"]))
+            if r and r.startswith(st + "/") and r not in [x for _, x in out]:
+                out.append((f["label"], r))
+        return out
+
+    def owner_crumbs(self, me, rt, rec) -> list | None:
+        """A part's breadcrumb: its owner (and the owner's own owner, for a part of a part), then the section."""
+        owner = self.hub.owner_of(rec)
+        if not owner or not self._may_read(me, owner.split("/", 1)[0]):
+            return None
+        o = self.hub.records.read(*owner.split("/", 1))
+        if not o:
+            return None
+        ort = self.hub.record_type(owner.split("/", 1)[0])
+        up = (self.owner_crumbs(me, ort, o) or []) if ort and ort.part_of else []
+        up = up[:-1] if up else []
+        href = self.record_href(owner)
+        return [*up, (href, self.hub.title(o)), (f"{href}#part-{rt.id}", rt.plural), (None, self.hub.title(rec))]
+
+    def owner_banner(self, me, owner: str) -> str:
+        t = owner.split("/", 1)[0]
+        if t == self.subj["type"]:
+            return self.subject_banner(me, owner)
+        o = self.hub.records.read(*owner.split("/", 1))
+        return self.record_banner(me, o) if o and self._may_read(me, t) else ""
 
     # ------------------------------------------------------------------------------------------ one record
     def page_record(self, req, rtype, rid, kept: dict | None = None, error: Exception | None = None):
@@ -815,6 +1093,7 @@ class RecordPages:
         is_page = rt.layout == "page"
         edit_btn = (f'<a class="btn primary" href="{url}?edit=1#edit" accesskey="e" aria-keyshortcuts="Alt+E">Edit</a>'
                     if editable and not editing else "")
+        rail: list = []
         if tab == "details":
             used = hub.in_use_version(me, ref)
             if used:
@@ -831,7 +1110,7 @@ class RecordPages:
                             + e("; ".join(t["label"] for t in lc["transition"] if st in t["from"] and t["by"] != "workflow")
                                 or "A workflow moves it on") + ' to change it.</p></div>')
             elif editing and not is_page:
-                inputs = self._inputs(rt, shown, me, "edit")
+                inputs = self._inputs(rt, shown, me, "edit", skip=(rt.part_of["field"],) if rt.part_of else ())
                 main[2] = (f'{refused}<form method="post" action="{url}/edit" class="card stack editing" id="edit">'
                            f'<input type="hidden" name="_version" value="{ver}">{self._req_note(inputs)}{inputs}'
                            f'<div class="filters"><button class="primary">Save</button>'
@@ -858,6 +1137,11 @@ class RecordPages:
                     "<ul class='plain'>" + "".join(
                         f'<li><a href="{e(self.record_href(f"{rtype}/{k["id"]}"))}">{e(hub.title(k))}</a></li>'
                         for k in kids) + "</ul>" if kids else "<p class='muted'>Nothing yet.</p>") + "</section>")
+            if not editing:  # what is part of it, then what links to it
+                sections, rail, hidden = self.owner_sections(me, ref) if not is_page else ("", [], 0)
+                main.append(sections)
+                if hidden:
+                    main.append(f'<p class="muted">{hidden} record(s) in classes you may not read are not shown.</p>')
         elif tab == "signatures":
             main.append(self._signatures_panel(me, rt, rec, ref, st, None if typed else kept, error))
         elif tab == "links":
@@ -895,13 +1179,26 @@ class RecordPages:
         moves_html = "".join(move(t) for t in mine) if not editing else ""
         sigs = hub.signatures(me, ref)
         cur = [s for s in sigs if s["current"]]
+        title = hub.title(rec)
+        owner = hub.owner_of(rec)
+        part_crumbs = self.owner_crumbs(me, rt, rec)
+        banner = ""
+        if owner:  # a part sits under its owner: the owner's banner (a patient's, with their alerts) above it
+            banner = self.owner_banner(me, owner)
+        elif rtype != self.subj["type"]:  # a record about a subject (a visit): the subject, as its first fact
+            subs = self._subjects_of(rt, rec)
+            if subs and self._may_read(me, self.subj["type"]):
+                banner = self.subject_banner(me, subs[0][1])
+        nav = self.navigator(me, rtype, ref)
+        if not nav and tab == "details" and not editing and len(rail) >= 3:  # a few sections need no column
+            nav = self.owner_rail(title, rail, label=rt.label)
         if is_page:
-            body = refused + self._page_body(req, rt, shown if editing else rec, main, prose, st, tab, editing, url,
-                                             ver, moves_html, edit_btn, auto, sigs, cur, may_write)
+            body = refused + self._page_body(req, rt, shown if editing else rec, main, prose, st, tab, editing,
+                                                      url, ver, moves_html, edit_btn, auto, sigs, cur, may_write)
             above = [(self.record_href(f"{rtype}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
             return self.layout(req, hub.title(rec), body, heading=not editing,
-                               crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
-                                       (None, hub.title(rec))], subnav=self.navigator(me, rtype, ref))
+                               crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
+                                                      (None, hub.title(rec))], subnav=nav, above=banner)
 
         # side column: state, moves a person may make, signatures at a glance
         side = []
@@ -922,12 +1219,12 @@ class RecordPages:
             side.insert(0, "<h2>On this page</h2><ul class='plain toc'>" + "".join(
                 f'<li class="l{lvl}"><a href="#{e(anchor)}">{e(words)}</a></li>' for lvl, words, anchor in heads)
                 + "</ul>")
-        title = hub.title(rec)
-        body = (f'<div class="issue"><div>{"".join(main)}</div><aside class="issue-side">{"".join(side)}</aside></div>')
+        body = (f'<div class="issue"><div>{"".join(main)}</div><aside class="issue-side">{"".join(side)}'
+                f'</aside></div>')
         above = [(self.record_href(f"{rtype}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
-        return self.layout(req, title, body, crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural),
-                                                       *above, (None, title)], subnav=self.navigator(me, rtype, ref),
-                           actions=edit_btn)
+        return self.layout(req, title, body, crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural),
+                                                                    *above, (None, title)], subnav=nav,
+                           actions=edit_btn, above=banner)
 
     def _page_body(self, req, rt, rec, main, prose, st, tab, editing, url, ver, moves_html, edit_btn, auto, sigs, cur,
                    may_write) -> str:
@@ -1151,11 +1448,12 @@ class RecordPages:
         err = f'<div class="flash error" role="alert"><p>{e(problem)}</p></div>' if problem else ""
         ver = e(str((rec.get("meta") or {}).get("versionId", "")))
         st = schema.first(rec, rt.lifecycle["path"])
-        body = (f'{err}<p>{e(self.hub.title(rec))}: from {self._state_loz(st)} to {self._state_loz(t["to"])}.</p>'
+        body = (f'<div data-modal-body>{err}<p>{e(self.hub.title(rec))}: from {self._state_loz(st)} to {self._state_loz(t["to"])}.</p>'
                 f'<form method="post" action="/records/{e(rt.id)}/{e(rec["id"])}/move" class="card stack">'
                 f'<input type="hidden" name="to" value="{e(t["to"])}"><input type="hidden" name="_version" '
                 f'value="{ver}">{self._req_note(inputs)}{inputs}{comment}<div class="filters"><button class="primary">{e(t["label"])}</button>'
-                f'<a class="btn secondary" href="/records/{e(rt.id)}/{e(rec["id"])}">Cancel</a></div></form>')
+                f'<a class="btn secondary" href="/records/{e(rt.id)}/{e(rec["id"])}" data-modal-close>Cancel</a></div>'
+                f'</form></div>')
         return self.layout(req, t["label"], body, crumbs=[("/records", "Records"),
                                                           (f"/records/{rt.id}", rt.plural),
                                                           (f"/records/{ref}", self.hub.title(rec)), (None, t["label"])])
@@ -1195,7 +1493,9 @@ class RecordPages:
             except Invalid as exc:
                 if not (t and (asked or t["comment"])):
                     raise
-                return self._move_page(req, rt, rec, t, form=f, problem=str(exc))
+                from .server import Rendered  # the move's screen again, in the dialog, saying why
+                raise Rendered(409 if isinstance(exc, Conflict) else 422,
+                               self._move_page(req, rt, rec, t, form=f, problem=str(exc))) from None
             raise self._redirect(f"/records/{rtype}/{rid}")
         try:
             self._confirm_signer(req, f)
