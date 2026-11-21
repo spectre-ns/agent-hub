@@ -701,8 +701,11 @@ class RecordPages:
 
     def _shortcut_entries(self) -> list[str]:
         out: list[str] = []
+        local = (self.hub.db.get_setting("practice_local", {}) or {}).get("shortcuts")
         for p in (self.hub.pack.all_parts() if self.hub.pack else []):
-            for t in p.practice.get("shortcuts", []) or []:
+            # the practice's own shortcuts as its policy owners last set them, else as its pack says; modules add theirs
+            own = local if (local is not None and p is self.hub.pack) else p.practice.get("shortcuts", [])
+            for t in own or []:
                 if isinstance(t, str) and t not in out:
                     out.append(t)
         return out

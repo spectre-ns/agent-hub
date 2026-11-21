@@ -2684,3 +2684,39 @@ def test_a_part_never_moves_to_another_owner(hub):
     rec = hub.create_record(jo, "Allergy2", {"patient": {"reference": f"Patient/{a['id']}"}, "substance": "nuts"})
     with pytest.raises(Invalid):
         hub.update_record(jo, f"Allergy2/{rec['id']}", {"patient": {"reference": f"Patient/{b['id']}"}})
+
+
+def test_only_a_policy_owner_changes_the_practice_and_who_it_is_stays_with_its_pack(hub):
+    """A policy owner changes the practice's name, code, contacts, time zone, escalation role and shortcuts; each change
+    is tracked with what it was. Who the practice is (id, kind, jurisdiction, privacy law, where data stays) changes only
+    by a reviewed pack upgrade; a pack upgrade keeps what the policy owners changed."""
+    with pytest.raises(Denied):
+        hub.set_practice(M(hub, "jo"), {"name": "Jo's clinic"})
+    for bad in ({"data_residency": "Anywhere"}, {"privacy_law": "none"}, {"code": "x"}, {"timezone": "Mars/Base"},
+                {"escalation_role": "nobody"}, {"shortcuts": ["NoSuchType"]}, {"name": ""}):
+        with pytest.raises(Invalid):
+            hub.set_practice(M(hub, "rana"), bad)
+    hub.set_practice(M(hub, "rana"), {"name": "Harbourview Family Health", "code": "HFH", "escalation_role": "physician"})
+    assert hub.practice["name"] == "Harbourview Family Health" and hub.practice["data_residency"] == "Canada"
+    ev = hub.db.events.find_one({"action": "practice.changed"})
+    assert ev["data"]["changed"]["name"] == {"from": "Harbourview Family Medicine", "to": "Harbourview Family Health"}
+    hub.db.set_setting("practice", {**hub.db.get_setting("practice"), "name": "From the pack"})  # as an upgrade writes
+    assert hub.practice["name"] == "Harbourview Family Health"
+
+
+def test_a_record_type_stored_before_a_stricter_check_is_set_aside_not_a_failure(hub, monkeypatch):
+    """A type the hub stored before a check that now refuses it is treated as absent (no page or list fails on it) and
+    named, with why, until a fixed version is proposed and approved; the other types work as before."""
+    from practicehub.workflows import DefinitionError
+    parse = type(hub)._def_parse
+
+    def strict(self, kind, source):
+        if kind == "type" and 'id = "Condition"' in source:
+            raise DefinitionError(["lifecycle.initial: say which state a new record starts in"])
+        return parse(self, kind, source)
+    monkeypatch.setattr(type(hub), "_def_parse", strict)
+    hub._defs.clear()
+    assert hub.record_type("Condition") is None and "Condition" not in hub.record_types()
+    assert "Patient" in hub.record_types() and "initial" in hub.broken_types["Condition"]
+    listed = {d["id"]: d for d in hub.definitions("type")}
+    assert listed["Condition"]["definition"] is None and "initial" in listed["Condition"]["problem"]

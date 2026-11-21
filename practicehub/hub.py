@@ -263,7 +263,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             drop = sorted(t for t in removed if t not in others)
             if drop:
                 self.authz.delete(drop)
-            self.db.set_setting("practice", {**(self.practice or {}), **p.practice})
+            self.db.set_setting("practice", {**(self.db.get_setting("practice", {}) or {}), **p.practice})  # 
+            # what policy owners changed on the settings page stays on top (practice_local)
             root = self.track.append(actor, "practice.upgraded", f"practice:{p.practice.get('id', p.id)}",
                               data={"pack": p.id, "version": p.version, "digest": p.digest,
                                     "pack_py_sha256": p.module_sha256,
@@ -873,7 +874,59 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     @property
     def practice(self) -> dict:
-        return self.db.get_setting("practice", {}) or {}
+        """The practice as its pack says, with what its policy owners changed since on the practice settings page."""
+        return {**(self.db.get_setting("practice", {}) or {}), **(self.db.get_setting("practice_local", {}) or {})}
+
+    # what a policy owner may change on the practice settings page; who the practice is (its id, kind, jurisdiction,
+    # privacy law, where its data stays) comes from its pack, and changes only by a reviewed pack upgrade
+    PRACTICE_EDITABLE = ("name", "code", "timezone", "phone", "email", "address", "website", "escalation_role",
+                         "shortcuts")
+
+    def set_practice(self, actor: dict, changes: dict) -> dict:
+        """A policy owner changes the practice's own settings. Each change is tracked with what it was before."""
+        self.require(actor, "policy_owner", "practice:main", "change the practice's settings")
+        now, clean = self.practice, {}
+        for k, v in changes.items():
+            if k not in self.PRACTICE_EDITABLE:
+                raise Invalid(f"{k!r} is not a practice setting that can be changed here")
+            if k == "shortcuts":
+                v = [str(x).strip() for x in (v or []) if str(x).strip()]
+                for t in v:
+                    if t.startswith("start:"):
+                        try:
+                            self.workflow(t[6:])
+                        except HubError:
+                            raise Invalid(f"shortcuts: there is no workflow {t[6:]!r}") from None
+                    elif not self.record_type(t):
+                        raise Invalid(f"shortcuts: there is no record type {t!r}")
+            else:
+                v = str(v or "").strip()
+            if k == "name" and not v:
+                raise Invalid("the practice needs a name")
+            if k == "name" and len(v) > 120:
+                raise Invalid("name: at most 120 characters")
+            if k == "code" and v and not re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", v):
+                raise Invalid("code: 2 to 6 capital letters or digits, starting with a letter (it begins every work "
+                              "item's key, like HFM-12)")
+            if k == "timezone" and v:
+                import zoneinfo
+                if v not in zoneinfo.available_timezones():
+                    raise Invalid(f"timezone: {v!r} is not a time zone name like America/Halifax")
+            if k == "email" and v and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", v):
+                raise Invalid("email: that is not an email address")
+            if k == "website" and v and not re.fullmatch(r"https://\S+", v):
+                raise Invalid("website: give the full address, starting https://")
+            if k == "escalation_role" and v not in {r["id"] for r in self.roles()}:
+                raise Invalid(f"escalation_role: there is no role {v!r}")
+            if now.get(k, "" if k != "shortcuts" else []) != v:
+                clean[k] = v
+        if clean:
+            local = {**(self.db.get_setting("practice_local", {}) or {}), **clean}
+            with self.db:
+                self.db.set_setting("practice_local", local)
+                self.track.append(actor, "practice.changed", f"practice:{now.get('id', 'main')}",
+                                  data={"changed": {k: {"from": now.get(k), "to": v} for k, v in clean.items()}})
+        return self.practice
 
     # ------------------------------------------------------------------ members
     def member(self, mid: str) -> dict:

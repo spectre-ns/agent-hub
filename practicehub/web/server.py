@@ -148,6 +148,8 @@ class App(RecordPages, DefinitionPages):
         R("GET", r"/start/(?P<wid>[a-z][a-z0-9-]*)", self.page_start_one)
         R("GET", r"/team/new", self.page_team_new)
         R("GET", r"/settings", self.page_admin)
+        R("GET", r"/settings/practice", self.page_practice)
+        R("POST", r"/settings/practice", self.post_practice)
         R("GET", r"/team", self.page_team)
         R("GET", r"/team/(?P<mid>[\w-]+)", self.page_member)
         R("POST", r"/team", self.post_team_add)
@@ -460,7 +462,7 @@ class App(RecordPages, DefinitionPages):
                 f'<a href="{e(h)}">{e(t)}</a>' if h else e(t) for h, t in crumbs) + "</div>")
         page = (f'{crumb}<div class="pagehead"><h1{"" if heading else " class=visually-hidden"}>{e(title)}</h1>'
                 f'{f"<div class=actions>{actions}</div>" if actions else ""}</div>{body}')
-        mark = f'<span class="mark">{e(self._initials(name))}</span>'
+        mark = f'<span class="mark">{e(self._code())}</span>'
         if not me:
             return (head + f'<header class="top"><span class="logo">{mark}{e(name)}</span></header>'
                     f'<main style="max-width:560px;margin:0 auto">{page}</main></body></html>')
@@ -487,7 +489,8 @@ class App(RecordPages, DefinitionPages):
         """The practice's settings, grouped: how it works (set up) and what it did (audit), each link with an icon. The
         admin ribbon and the settings landing list them; the work sidebar keeps to the work."""
         owner = bool(me and self.hub.is_policy_owner(me))
-        setup = [("/team", "Team", "who works here, their roles and sponsors", "team"),
+        setup = ([("/settings/practice", "Practice", "its name, code, contact details and time zone", "settings")]
+                 if owner else []) + [("/team", "Team", "who works here, their roles and sponsors", "team"),
                  ("/modules", "Modules", "what the practice has installed", "module"),
                  ("/workflows", "Workflows", "how work moves, step by step", "flow"),
                  ("/define/types", "Record types", "what the practice keeps records of", "records"),
@@ -565,9 +568,83 @@ class App(RecordPages, DefinitionPages):
                  ("Privacy law", p.get("privacy_law")), ("Data stays in", p.get("data_residency"))]
         rows = "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in facts if v)
         if rows:
-            body.append('<section class="admin-group"><h2>Practice</h2><p class="muted">Set when the practice was '
-                        f'created.</p><table class="kv">{rows}</table></section>')
+            edit = (' <a href="/settings/practice">Change the practice\'s settings</a>'
+                    if self.hub.is_policy_owner(me) else "")
+            body.append('<section class="admin-group"><h2>Practice</h2><p class="muted">Who the practice is comes from '
+                        f'its pack.{edit}</p><table class="kv">{rows}</table></section>')
         return self.layout(req, "Settings", "".join(body))
+
+    PRACTICE_FIELDS = (("name", "Name", "text", "what the practice is called, on every page and message"),
+                       ("code", "Short code", "text", "2 to 6 capital letters: the mark top left and the start of every "
+                                                       "work item's key, like HFM-12; empty uses the name's initials"),
+                       ("phone", "Phone", "tel", ""), ("email", "Email", "email", "the practice's own address"),
+                       ("address", "Address", "textarea", ""), ("website", "Website", "url", "starting https://"),
+                       ("timezone", "Time zone", "text", "a name like America/Halifax: when the day starts and ends"))
+
+    def page_practice(self, req, error: str = "", done: bool = False, kept: dict | None = None):
+        """The practice's own settings, for its policy owners: its name and contact details, who hears when work is
+        stuck, and the shortcuts on the work sidebar. Who the practice is (its law, where data stays) is shown, fixed."""
+        me = req["me"]
+        if not self.hub.is_policy_owner(me):
+            raise Denied("only a policy owner changes the practice's settings")
+        p = {**self.hub.practice, **(kept or {})}
+        err = f'<div class="error" role="alert" tabindex="-1">{e(error)}</div>' if error else ""
+        ok = '<div class="ok" role="status">The practice\'s settings are saved.</div>' if done else ""
+        inputs = []
+        for k, label, kind, help_ in self.PRACTICE_FIELDS:
+            hid = f' aria-describedby="h-{k}"' if help_ else ""
+            hint = f'<small class="help" id="h-{k}">{e(help_)}</small>' if help_ else ""
+            v = p.get(k) or ""
+            ctl = (f'<textarea name="{k}" rows="3"{hid}>{e(v)}</textarea>' if kind == "textarea" else
+                   f'<input name="{k}" type="{kind}" value="{e(v)}"{hid}'
+                   + (' required maxlength="120"' if k == "name" else "")
+                   + (f' placeholder="{e(self._initials(p.get("name", "")))}" pattern="[A-Z][A-Z0-9]{{1,5}}"'
+                      if k == "code" else "") + (' list="tz-list"' if k == "timezone" else "") + ">")
+            inputs.append(f'<div class="field"><label>{e(label)}'
+                          f'{" <span class=req aria-hidden=true>*</span>" if k == "name" else ""}{ctl}</label>{hint}</div>')
+        import zoneinfo
+        tzs = "".join(f'<option value="{e(z)}">' for z in sorted(zoneinfo.available_timezones()) if "/" in z)
+        roles = "".join(f'<option value="{e(r["id"])}"{" selected" if r["id"] == p.get("escalation_role") else ""}>'
+                        f'{e(r["name"])}</option>' for r in self.hub.roles() if r["id"] != "everyone")
+        members = set(self.hub.member_types())
+        types = sorted((t for t in self.hub.record_types().values() if not t.part_of and t.id not in members),
+                       key=lambda t: t.plural.lower())
+        chosen = p.get("shortcuts") or []
+        chip = lambda v, words: (f'<label class="radio multi"><input type="checkbox" class="opt-input" name="shortcuts" '
+                                 f'value="{e(v)}"{" checked" if v in chosen else ""}> <span>{e(words)}</span></label>')
+        chips = "".join(chip(t.id, t.plural) for t in types)
+        starts = "".join(chip("start:" + w.id, w.title or w.id) for w in (x["workflow"] for x in self.hub.workflows()))
+        fixed = [("Kind", (p.get("kind") or "").replace("-", " ")), ("Jurisdiction", p.get("jurisdiction")),
+                 ("Privacy law", p.get("privacy_law")), ("Data stays in", p.get("data_residency"))]
+        rows = "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in fixed if v)
+        body = (f'{ok}{err}<form method="post" action="/settings/practice" class="card settings stack" style="max-width:760px">'
+                f'<h2>The practice</h2>{"".join(inputs)}<datalist id="tz-list">{tzs}</datalist>'
+                f'<h2>When work is stuck</h2><div class="field"><label>Who hears<select name="escalation_role" '
+                f'aria-describedby="h-esc">{roles}</select></label><small class="help" id="h-esc">the role told when a '
+                f'step fails, is overdue with no one to escalate to, or a message cannot be sent</small></div>'
+                f'<h2>Shortcuts</h2><p class="muted">On the work sidebar and the top bar, for everyone who may use '
+                f'them. Modules add their own.</p><fieldset class="choices options"><legend>Records</legend>{chips}'
+                f'</fieldset>' + (f'<fieldset class="choices options"><legend>Start work</legend>{starts}</fieldset>'
+                                  if starts else "")
+                + '<input type="hidden" name="_shortcuts" value="1"><div class="filters"><button class="primary">'
+                f'Save the practice\'s settings</button><a class="btn" href="/settings">Cancel</a></div></form>'
+                f'<section class="admin-group"><h2>Who the practice is</h2><p class="muted">From its pack: these change '
+                f'only when a policy owner reviews a pack upgrade and another puts it into force.</p>'
+                f'<table class="kv">{rows}</table></section>')
+        return self.layout(req, "Practice", body, crumbs=[("/settings", "Settings"), (None, "Practice")])
+
+    def post_practice(self, req):
+        f = self.form(req)
+        changes = {k: f.get(k, "") for k, *_ in self.PRACTICE_FIELDS}
+        changes["escalation_role"] = f.get("escalation_role", "")
+        if f.get("_shortcuts"):
+            got = f.get("shortcuts", [])
+            changes["shortcuts"] = got if isinstance(got, list) else [got]
+        try:
+            self.hub.set_practice(req["me"], changes)
+        except Invalid as exc:
+            raise Rendered(422, self.page_practice(req, error=str(exc), kept=changes)) from None
+        return self.page_practice(req, done=True)
 
     def _me_menu(self, me) -> str:
         """The signed-in member's menu, top right: their profile, their settings, signing out."""
@@ -623,6 +700,12 @@ class App(RecordPages, DefinitionPages):
         except HubError:
             return False
 
+    def _code(self) -> str:
+        """The practice's short code: its mark and the start of every work item's key (HFM-12). A policy owner may set
+        it on the practice settings page; else the initials of its name."""
+        p = self.hub.practice
+        return p.get("code") or self._initials(p.get("name", ""))
+
     @staticmethod
     def _initials(name: str) -> str:
         words = [w for w in re.split(r"[\s,.\-]+", name or "") if w and w[0].isalpha()]
@@ -649,7 +732,7 @@ class App(RecordPages, DefinitionPages):
     def _key(self, iid: str) -> str:
         """A short, readable key for a work item, like HFM-12."""
         row = self.hub.db.items.find_one({"_id": iid}, fields=["n"])
-        return f'{self._initials(self.hub.practice.get("name", ""))}-{row["n"] if row else "?"}'
+        return f'{self._code()}-{row["n"] if row else "?"}'
 
     ITEM_STATUS = {"open": ("To do", ""), "claimed": ("In progress", "prog"), "held": ("Waiting for sponsor", "wait"),
                    "done": ("Done", "done"), "cancelled": ("Cancelled", "")}

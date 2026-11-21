@@ -77,8 +77,14 @@ class CatalogMixin:
     # ------------------------------------------------------------------ record types
     def record_type(self, tid: str, version: int | None = None) -> schema.RecordType | None:
         """The record type the practice uses now. A type a pack names in a data class but ships no schema for is
-        permissive (any keys). A type that was retired is gone: its records can be read, not written."""
-        rt = self._def_get("type", tid, version)
+        permissive (any keys). A type that was retired is gone: its records can be read, not written. A type stored
+        before a check that now refuses it is treated as absent (no page fails on it) and named on the record types
+        page, until a fixed version is proposed and approved."""
+        try:
+            rt = self._def_get("type", tid, version)
+        except DefinitionError as exc:
+            self.__dict__.setdefault("broken_types", {})[tid] = str(exc)
+            return None
         if rt is not None or version is not None:
             return rt
         if self._ever_defined("type", tid):
@@ -361,8 +367,11 @@ class CatalogMixin:
                 row = self.db[table].find_one({col: did, "status": "proposed"}, sort=[("version", DESC)])
                 row = {**row, "version": None}
             pending = self.db[table].count({col: did, "status": "proposed"})
-            out.append({"id": did, "row": row, "proposed": pending,
-                        "definition": self._def_parse(kind, row["source"])})
+            try:
+                df, problem = self._def_parse(kind, row["source"]), None
+            except DefinitionError as exc:  # stored before a check that now refuses it: listed, with why
+                df, problem = None, str(exc)
+            out.append({"id": did, "row": row, "proposed": pending, "definition": df, "problem": problem})
         return out
 
     def definition_versions(self, kind: str, did: str) -> list[dict]:

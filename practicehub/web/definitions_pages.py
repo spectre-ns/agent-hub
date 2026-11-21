@@ -54,7 +54,9 @@ class DefinitionPages:
             df, row = d["definition"], d["row"]
             label = getattr(df, "label", None) or getattr(df, "title", None) or d["id"]
             what = ""
-            if kind == "type":
+            if df is None:
+                what = "no longer passes the checks: " + (d.get("problem") or "")
+            elif kind == "type":
                 what = f"{len(df.fields)} fields" + (f", {len(df.lifecycle['states'])} states" if df.lifecycle else "") \
                     + (f", {len(df.signatures)} signatures" if df.signatures else "")
             elif kind == "view":
@@ -64,8 +66,17 @@ class DefinitionPages:
             rows.append(f'<tr><td><a href="/define/{kinds}/{e(d["id"])}">{e(label)}</a>{pending}<br>'
                         f'<code class="muted">{e(d["id"])}</code></td><td>{e(what)}</td><td>'
                         f'{"v" + str(row["version"]) if row["version"] else "not yet active"}</td><td>{module}</td></tr>')
-        body = (f'<p class="muted">Every {noun} the practice runs, under change control: a change is proposed, and a '
-                f'policy owner who did not write it approves and signs it.</p>'
+        broken = ""
+        if kind == "type":
+            hub.record_types()
+            bad = getattr(hub, "broken_types", {})
+            if bad:  # stored before a check that now refuses them: hidden from the work until a fixed version is approved
+                broken = ('<div class="error" role="alert"><b>These record types no longer pass the checks, so the '
+                          'hub hides them until a fixed version is proposed and approved:</b><ul>' + "".join(
+                              f'<li><a href="/define/types/{e(t)}"><code>{e(t)}</code></a>: {e(m)}</li>'
+                              for t, m in sorted(bad.items())) + '</ul></div>')
+        body = (f'{broken}<p class="muted">Every {noun} the practice runs, under change control: a change is proposed, '
+                f'and a policy owner who did not write it approves and signs it.</p>'
                 f'<div class="tablewrap"><table><thead><tr><th scope="col">{e(noun.capitalize())}</th>'
                 f'<th scope="col">What it has</th><th scope="col">Active</th><th scope="col">From</th></tr></thead>'
                 f'<tbody>{"".join(rows)}</tbody></table></div>')

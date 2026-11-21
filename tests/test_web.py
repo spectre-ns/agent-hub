@@ -1124,3 +1124,28 @@ def test_the_ribbon_shows_a_member_only_what_they_may_use(hub, server):
     assert 'href="/settings">Settings</a>' in menu and 'href="/">Home</a>' in menu
     for gone in ("/team", "/modules", "/workflows", "/define/", "/blocks", "/track", "/access", "/outbox"):
         assert f'href="{gone}' not in menu
+
+
+def test_a_policy_owner_changes_the_practice_on_its_settings_page(hub, server):
+    """The practice's name, code, contact details, who hears when work is stuck and its shortcuts are a page in the
+    settings for its policy owners; who the practice is (its law, where data stays) is shown and fixed."""
+    rana, jo = token(hub, "rana"), token(hub, "jo")
+    assert 'href="/settings/practice"' in _ribbon(call(server, "GET", "/settings", rana)[1])
+    assert 'href="/settings/practice"' not in _ribbon(call(server, "GET", "/settings", jo)[1])
+    assert call(server, "GET", "/settings/practice", jo)[0] == 403
+    page = html.unescape(call(server, "GET", "/settings/practice", rana)[1])
+    assert '<nav class="ribbon"' in page and "Who the practice is" in page and "PHIA" in page
+    assert 'name="data_residency"' not in page and 'name="privacy_law"' not in page
+    form = {"name": "Harbourview Family Health", "code": "HFH", "phone": "902-555-0100", "email": "front@example.org",
+            "address": "1 Harbour St", "website": "https://example.org", "timezone": "America/Halifax",
+            "escalation_role": "practice-manager", "_shortcuts": "1", "shortcuts": "Appointment"}
+    status, page = call(server, "POST", "/settings/practice", rana, form=form)
+    assert status == 200 and "are saved" in page
+    assert hub.practice["name"] == "Harbourview Family Health" and hub.practice["shortcuts"] == ["Appointment"]
+    home = call(server, "GET", "/", rana)[1]
+    assert "Harbourview Family Health" in home and '<span class="mark">HFH</span>' in home
+    assert 'href="/records/Encounter"' not in home.split('<nav class="sidebar"')[-1].split("</nav>")[0]
+    status, page = call(server, "POST", "/settings/practice", rana, form={**form, "timezone": "Mars/Base",
+                                                                          "name": "Kept while refused"})
+    assert status == 422 and "Mars/Base" in page and "Kept while refused" in page and "time zone" in page
+    assert hub.practice["name"] == "Harbourview Family Health"
