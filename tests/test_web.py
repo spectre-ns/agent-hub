@@ -621,7 +621,7 @@ def test_a_chart_reads_in_words_not_json(hub):
     """A clinician reads a result as '5.2 mmol/L', a code as its name, a time as a time, and opens the record."""
     app = App(hub, dev=False)
     pat = hub.records.search("Patient")[0]
-    hub.create_record(M(hub, "dr-liam"), "Observation", {
+    hub.create_record({"id": "lab-feed", "kind": "automation"}, "Observation", {   # a final result comes from the lab
         "status": "final", "subject": {"reference": f"Patient/{pat['id']}"},
         "code": {"coding": [{"system": "http://loinc.org", "code": "2345-7", "display": "Glucose"}]},
         "effectiveDateTime": "2026-11-20T08:30:00Z",

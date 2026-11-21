@@ -76,3 +76,14 @@ def item_for(hub, run, step_id, status=("open", "claimed")):
                                  "status": {"$in": list(status)}}, sort="n")
     assert row, f"no open item for {step_id}"
     return row["id"]
+
+
+def pytest_collection_modifyitems(config, items):
+    """PH_SHARD=i/n keeps every n-th test from the i-th: scripts/test-parallel.sh runs n shards at once."""
+    shard = os.environ.get("PH_SHARD")
+    if not shard:
+        return
+    i, n = (int(x) for x in shard.split("/"))
+    keep = [t for k, t in enumerate(items) if k % n == i]
+    config.hook.pytest_deselected(items=[t for t in items if t not in keep])
+    items[:] = keep
