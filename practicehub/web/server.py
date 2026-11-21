@@ -1058,7 +1058,7 @@ class App(RecordPages, DefinitionPages):
                          self._field(f, [{"value": c, "label": c} for c in f["choices"]] if f.get("choices") else None,
                                      kept.get(f["name"])) for f in wf.inputs)
         err = f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>' if error else ""
-        body = (f'<div data-modal-body>{err}<p class="muted">{e(wf.summary.strip()[:300])}</p>'
+        body = (f'<div data-modal-body>{err}<p class="muted">{e(self._brief(wf.summary))}</p>'
                 f'<form method="post" action="/start" class="card stack"><input type="hidden" name="_workflow" '
                 f'value="{e(wf.id)}">{self._req_note(pick + fields)}{pick}{fields}<div class="filters">'
                 f'<button class="primary">Start</button>'
@@ -1066,6 +1066,16 @@ class App(RecordPages, DefinitionPages):
                 f'Cancel</a>' + ("" if about else '<a class="btn subtle back" href="/start" data-modal>← Back</a>')
                 + '</div></form></div>')
         return self.layout(req, wf.title, body, crumbs=[("/", "Practice"), ("/start", "Start work"), ("", wf.title)])
+
+    @staticmethod
+    def _brief(text: str, limit: int = 300) -> str:
+        """A summary short enough to read above a form: whole sentences up to the limit, else whole words and "…"."""
+        text = " ".join(text.split())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        end = cut.rfind(". ")
+        return cut[:end + 1] if end > limit // 3 else cut.rsplit(" ", 1)[0] + "…"
 
     def _record_field(self, wf) -> dict:
         rt = self.hub.record_type(wf.record)
