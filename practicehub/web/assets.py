@@ -352,11 +352,21 @@ margin:0;padding:8px 12px;background:var(--raised);border-radius:3px;box-shadow:
 .page-text .md-bar{top:var(--page-bar-bottom,150px);border:1px solid var(--border);border-radius:3px}
 .page-text .md-surface{max-height:none;min-height:60vh;padding:16px 0}
 .page-text .md-help{display:block;margin-top:8px}
-/* a board: a card can be dragged to a column it may move to */
-.tile[draggable=true]{cursor:grab}.tile.dragging{opacity:.5}
+/* a board: a card is dragged to a column it may move to, or moved with its Move to… list (a plain form) */
+.tile.movable{padding:0;-webkit-touch-callout:none}.tile.movable[draggable=true]{cursor:grab}
+.tile.movable .tile-link{display:block;padding:12px 12px 4px;color:inherit}
+.tile.movable .tile-link:hover{text-decoration:none}
+.tile .move-to{display:flex;gap:4px;padding:4px 12px 12px;margin:0}
+.tile .move-to select{flex:1;min-width:0;width:auto;margin:0;height:32px;font-size:12px}
+.tile .move-to button{flex:none;font-size:12px;padding:0 10px}
+.tile.dragging{opacity:.5}.tile.pending{opacity:.6;pointer-events:none;outline:2px dashed var(--border);outline-offset:-2px}
+.board .col{transition:opacity .1s}
 .board .col.drop-ok{outline:2px dashed var(--brand);outline-offset:-2px}
-.board .col.drop-over{background:var(--selected,var(--neutral))}
-.board .col.drop-no{opacity:.6}
+.board .col.drop-over{background:var(--selected-bg);outline-style:solid}
+.board .col.drop-no{opacity:.45;cursor:no-drop}
+.drag-ghost{position:fixed;z-index:100;pointer-events:none;margin:0;opacity:.9;box-shadow:var(--shadow-overlay);transform:rotate(2deg)}
+.touch-dragging,.touch-dragging *{user-select:none;-webkit-user-select:none}
+@media (prefers-reduced-motion:reduce){.board .col{transition:none}.drag-ghost{transform:none}}
 /* a form in a dialog over the page (Create, and a move that asks for fields) */
 dialog.form-modal{width:min(720px,calc(100vw - 32px));max-height:calc(100vh - 64px);padding:0;border:0;border-radius:3px;
 background:var(--raised);color:var(--fg);box-shadow:var(--shadow-overlay,var(--shadow-raised))}
@@ -1847,7 +1857,7 @@ function kindFields(root) {
 function formModal() {
   let dlg = null, dirty = false, busy = false, downOnBackdrop = false;
   const DISCARD = "Discard what you typed?";
-  function close() { if (dlg) { dlg.close(); dlg.remove(); dlg = null; } dirty = false; }
+  function close() { if (dlg) { dlg.close(); dlg.remove(); dlg = null; } dirty = false; back = ""; }
   function mayLeave() { return !dirty || confirm(DISCARD); }
   function tryClose() { if (mayLeave()) close(); }
   function frame(title) {
@@ -1858,7 +1868,7 @@ function formModal() {
     dlg.innerHTML = '<div class="fm-head"><h2 id="fm-title"></h2><button type="button" class="fm-close" aria-label="Close" title="Close (Esc)">×</button></div><div class="fm-body"></div>';
     dlg.querySelector(".fm-close").addEventListener("click", tryClose);
     dlg.addEventListener("cancel", (ev) => { if (!mayLeave()) ev.preventDefault(); else dirty = false; });
-    dlg.addEventListener("close", () => { if (dlg) { dlg.remove(); dlg = null; } dirty = false; });
+    dlg.addEventListener("close", () => { if (dlg) { dlg.remove(); dlg = null; } dirty = false; back = ""; });
     // the backdrop closes it only when the press began there too (not a text selection that ended outside)
     dlg.addEventListener("mousedown", (ev) => { downOnBackdrop = ev.target === dlg; });
     dlg.addEventListener("click", (ev) => { if (ev.target === dlg && downOnBackdrop) tryClose(); downOnBackdrop = false; });
@@ -1869,16 +1879,19 @@ function formModal() {
     dlg.querySelector("#fm-title").textContent = title || "";
     dlg.showModal();
   }
-  function show(html, title, refused) {
+  function show(html, title, refused, clean) {
     frame(title);
     dlg.querySelector("#fm-title").textContent = title;
     const body = dlg.querySelector(".fm-body");
     body.innerHTML = html;
-    dirty = !!refused;  // a refused form still holds what was typed
+    dirty = !!refused && !clean;  // a refused form still holds what was typed
     body.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
     formTabs(body);
     kindFields(body);
     body.querySelectorAll("[data-modal-close]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); close(); }));
+    if (back) body.querySelectorAll("form[method=post]").forEach((f) => {  // opened from a board: back to it after
+      if (!f.querySelector("input[name=_back]")) f.appendChild(el("input", { type: "hidden", name: "_back", value: back }));
+    });
     body.querySelectorAll("form").forEach((f) => f.addEventListener("submit", (ev) => send(ev, f)));
     const alert = refused && body.querySelector("[role=alert]");
     if (alert) { alert.tabIndex = -1; alert.focus(); return; }
@@ -1891,9 +1904,11 @@ function formModal() {
     const h1 = doc.querySelector("main h1");
     return { html: part ? part.innerHTML : "", title: h1 ? h1.textContent.trim() : document.title };
   }
-  async function open(href, words) {
+  let back = "";
+  async function open(href, words, from) {
     if (busy) return;  // a second click while the first loads does nothing
     busy = true;
+    if (!dlg) back = from || "";
     try {
       show('<p role="status">Loading…</p>', dlg ? dlg.querySelector("#fm-title").textContent : words);
       const res = await fetch(href, { credentials: "same-origin", headers: { "X-Modal": "1" } });
@@ -1937,11 +1952,188 @@ function formModal() {
     if (dlg && dlg.contains(a) && !mayLeave()) return;  // Back, from a form with something typed
     open(a.getAttribute("href"), a.textContent.trim());
   });
+  return { open, show, extract };
+}
+
+// A board whose cards move between columns. Each movable card says where it may go (data-moves: a column, and
+// whether the move is made at once or asks first on its screen). While a card is dragged, the columns it may go to
+// are outlined and the others fade. A drop posts the card's own Move to… form (the same form that works without the
+// script, and from the keyboard); the card waits in the new column, marked as moving, until the server accepts the
+// move, and the board is then redrawn from the server. A refusal puts the card back and says why in the dialog. A
+// move that asks for fields or a comment opens its screen in the dialog instead. Mouse: native drag and drop; touch
+// and pen: press and hold, then drag.
+function boards(modal) {
+  const live = el("div", { class: "visually-hidden", role: "status", "aria-live": "polite" });
+  document.body.appendChild(live);
+  let drag = null;  // the card being dragged
+  const movesOf = (card) => { try { return JSON.parse(card.dataset.moves || "{}"); } catch (e) { return {}; } };
+  const colsOf = (card) => [...card.closest(".board").querySelectorAll(".col[data-col]")];
+  const colOf = (card, to) => colsOf(card).find((c) => c.dataset.col === to);
+  function mark(card, on) {
+    const m = movesOf(card);
+    colsOf(card).forEach((c) => {
+      const home = c.contains(card), ok = !home && Object.prototype.hasOwnProperty.call(m, c.dataset.col);
+      c.classList.toggle("drop-ok", on && ok);
+      c.classList.toggle("drop-no", on && !ok && !home);
+      c.classList.remove("drop-over");
+    });
+    card.classList.toggle("dragging", on);
+  }
+  function redraw(text) {  // the boards as the server now has them
+    const doc = new DOMParser().parseFromString(text, "text/html");
+    const fresh = doc.querySelectorAll("main .board"), mine = document.querySelectorAll("main .board");
+    if (fresh.length !== mine.length) return false;
+    mine.forEach((b, i) => b.replaceWith(document.adoptNode(fresh[i])));
+    return true;
+  }
+  function count(col, by) { const n = col && col.querySelector("header .n"); if (n) n.textContent = String((parseInt(n.textContent, 10) || 0) + by); }
+  async function move(card, to, viaKeys) {
+    const m = movesOf(card)[to], form = card.querySelector("form.move-to");
+    if (!m || !form) return;
+    const here = location.pathname + location.search;
+    if (m.how === "screen") { modal.open(m.href, m.label, here); return; }
+    const from = card.parentNode, next = card.nextSibling, target = colOf(card, to);
+    const cols = colsOf(card), home = cols.find((c) => c.contains(card));
+    if (target) { target.appendChild(card); count(target, 1); count(home, -1); }
+    card.classList.add("pending"); card.setAttribute("aria-busy", "true");
+    live.textContent = "Moving…";
+    const data = new URLSearchParams(new FormData(form));
+    data.set("to", to);
+    let res = null, text = "";
+    try {
+      res = await fetch(form.action, { method: "POST", body: data, credentials: "same-origin" });
+      text = await res.text();
+    } catch (e) { res = null; }
+    if (res && res.ok) {
+      const at = new URL(res.url, location.href);
+      if (at.pathname !== location.pathname) { location.href = res.url; return; }
+      if (!redraw(text)) { location.reload(); return; }
+      live.textContent = "Moved to " + (m.label || to).replace(/…$/, "") + ".";
+      const again = document.querySelector('[data-card="' + CSS.escape(card.dataset.card) + '"]');
+      if (again && viaKeys) (again.querySelector("select") || again.querySelector("a") || again).focus();
+      return;
+    }
+    // refused, or no answer: back where it was, and why
+    if (target) { count(target, -1); count(home, 1); }
+    from.insertBefore(card, next);
+    card.classList.remove("pending"); card.removeAttribute("aria-busy");
+    live.textContent = "Not moved.";
+    if (!res) { form.submit(); return; }  // no answer from here: the plain form says what happened
+    const got = modal.extract(text);
+    modal.show(got.html || "<p>That did not work.</p>", "Not moved", true, true);
+    try {  // what changed meanwhile (the reason it was refused) shows on the board behind the dialog
+      const now = await fetch(location.href, { credentials: "same-origin" });
+      if (now.ok) redraw(await now.text());
+    } catch (e) { /* the board stays as it was drawn */ }
+  }
+  document.addEventListener("submit", (ev) => {  // Move to…, from the keyboard or a click
+    const f = ev.target.closest && ev.target.closest("form.move-to");
+    const card = f && f.closest("[data-moves]");
+    if (!card || !card.closest(".board")) return;
+    ev.preventDefault();
+    const to = f.elements.to.value;
+    if (to) move(card, to, true);
+  });
+  // ---- mouse: native drag and drop
+  document.addEventListener("dragstart", (ev) => {
+    const card = ev.target.closest && ev.target.closest(".board [data-moves][draggable=true]");
+    if (!card) return;
+    drag = card;
+    ev.dataTransfer.effectAllowed = "move";
+    ev.dataTransfer.setData("text/plain", card.dataset.card);
+    requestAnimationFrame(() => mark(card, true));
+  });
+  document.addEventListener("dragend", () => { if (drag) mark(drag, false); drag = null; });
+  const dropCol = (node) => {
+    const c = drag && node && node.closest && node.closest(".col.drop-ok");
+    return c && c.closest(".board") === drag.closest(".board") ? c : null;
+  };
+  document.addEventListener("dragover", (ev) => {
+    const c = dropCol(ev.target);
+    if (!c) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = "move";
+    colsOf(drag).forEach((x) => x.classList.toggle("drop-over", x === c));
+  });
+  document.addEventListener("dragleave", (ev) => {
+    const c = dropCol(ev.target);
+    if (c && !c.contains(ev.relatedTarget)) c.classList.remove("drop-over");
+  });
+  document.addEventListener("drop", (ev) => {
+    const c = dropCol(ev.target);
+    if (!c) return;
+    ev.preventDefault();
+    const card = drag;
+    mark(card, false); drag = null;
+    move(card, c.dataset.col, false);
+  });
+  // ---- touch and pen: press and hold, then drag a copy of the card; lifting over a column it may go to moves it
+  let press = null;
+  function endPress() {
+    if (!press) return;
+    clearTimeout(press.timer);
+    if (press.ghost) press.ghost.remove();
+    if (press.on) { mark(press.card, false); document.documentElement.classList.remove("touch-dragging"); }
+    press = null;
+  }
+  const under = (x, y) => {
+    const n = document.elementFromPoint(x, y);
+    const c = n && n.closest(".col.drop-ok");
+    return c && press && c.closest(".board") === press.card.closest(".board") ? c : null;
+  };
+  document.addEventListener("pointerdown", (ev) => {
+    if (ev.pointerType === "mouse" || press) return;
+    const card = ev.target.closest && ev.target.closest(".board [data-moves]");
+    if (!card || ev.target.closest("form.move-to")) return;
+    press = { card, x: ev.clientX, y: ev.clientY, on: false, ghost: null, id: ev.pointerId };
+    press.timer = setTimeout(() => {
+      if (!press) return;
+      press.on = true;
+      const r = card.getBoundingClientRect();
+      press.dx = press.x - r.left; press.dy = press.y - r.top;
+      press.ghost = card.cloneNode(true);
+      press.ghost.classList.add("drag-ghost");
+      press.ghost.removeAttribute("data-card");
+      press.ghost.setAttribute("aria-hidden", "true");
+      Object.assign(press.ghost.style, { width: r.width + "px", left: r.left + "px", top: r.top + "px" });
+      document.body.appendChild(press.ghost);
+      document.documentElement.classList.add("touch-dragging");
+      mark(card, true);
+      if (navigator.vibrate) navigator.vibrate(10);
+    }, 350);
+  });
+  document.addEventListener("pointermove", (ev) => {
+    if (!press || ev.pointerId !== press.id) return;
+    if (!press.on) {  // moving before the hold: a scroll, not a drag
+      if (Math.abs(ev.clientX - press.x) > 8 || Math.abs(ev.clientY - press.y) > 8) endPress();
+      return;
+    }
+    press.ghost.style.left = ev.clientX - press.dx + "px";
+    press.ghost.style.top = ev.clientY - press.dy + "px";
+    const c = under(ev.clientX, ev.clientY);
+    colsOf(press.card).forEach((x) => x.classList.toggle("drop-over", x === c));
+  });
+  document.addEventListener("touchmove", (ev) => { if (press && press.on) ev.preventDefault(); }, { passive: false });
+  document.addEventListener("pointerup", (ev) => {
+    if (!press || ev.pointerId !== press.id) return;
+    const was = press.on, card = press.card, c = was ? under(ev.clientX, ev.clientY) : null;
+    endPress();
+    if (was) {
+      const stop = (e) => { e.preventDefault(); e.stopPropagation(); };  // the lift is not also a click on the card
+      document.addEventListener("click", stop, { capture: true, once: true });
+      setTimeout(() => document.removeEventListener("click", stop, { capture: true }), 400);
+    }
+    if (c) move(card, c.dataset.col, false);
+  });
+  document.addEventListener("pointercancel", endPress);
+  document.addEventListener("contextmenu", (ev) => { if (press && press.on) ev.preventDefault(); });
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && press) endPress(); });
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".avatar-menu").forEach(avatarMenu);
-  formModal();
+  const modal = formModal();
+  if (document.querySelector(".board [data-moves]")) boards(modal);
   document.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
   formTabs(document);
   kindFields(document);
