@@ -5,6 +5,8 @@
 #   docker compose -f deploy/docker-compose.yml --profile identity up       # + Keycloak
 #   docker compose -f deploy/docker-compose.yml --profile authz up          # + OpenFGA
 #   docker compose -f deploy/docker-compose.yml --profile models up         # + LiteLLM (with Langfuse callbacks)
+#   docker compose -f deploy/docker-compose.yml --profile office up         # + Collabora Online (office documents;
+#                                                       set the PRACTICEHUB_COLLABORA_* lines in deploy/.env too)
 #   docker compose -f deploy/docker-compose.yml run --rm -v /backups:/backups hub backup /backups/$(date +%F)
 #
 # Ports avoid 8080, 9980 and 11434. Pin image versions to the ones you have tested before going live.
@@ -109,6 +111,23 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]  # Ollama on the host, as a client of port 11434
     ports: ["127.0.0.1:4000:4000"]
     profiles: ["models"]
+
+  collabora:
+    # Collabora Online (MPL-2.0), for editing office documents together; the hub is its WOPI host and keeps the
+    # files. CODE is the development edition: for production use a supported Collabora build or subscription.
+    # The browser loads the editor from 127.0.0.1:9981; Collabora fetches and saves files at http://hub:8200/wopi/
+    # on the compose network only. The hub reads discovery at http://collabora:9980 (PRACTICEHUB_COLLABORA_DISCOVERY_URL).
+    image: collabora/code:26.04.5.2.1
+    environment:
+      aliasgroup1: http://hub:8200  # the only WOPI host it will open files from
+      extra_params: >-
+        --o:ssl.enable=false --o:ssl.termination=false
+        --o:net.frame_ancestors=http://127.0.0.1:8200
+      dictionaries: en_CA en_US fr_FR
+    ports: ["127.0.0.1:9981:9980"]  # never 9980 on the host
+    cap_add: [MKNOD]
+    restart: unless-stopped
+    profiles: ["office"]
 
 volumes:
   mongo-data:    # the practice's data: back it up (practicehub backup) and keep it in Canada

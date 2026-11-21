@@ -248,7 +248,8 @@ class RecordPages:
             size = a.get("size")
             kb = f' <span class="muted">{max(1, round(size / 1024))} KB</span>' if isinstance(size, int) else ""
             href = f"/records/{urllib.parse.quote(str(rec.get('resourceType', '')))}/{urllib.parse.quote(rec['id'])}/files/{a['blob']}"
-            return f'<a href="{e(href)}">{e(name)}</a>{kb}'
+            office = self.office_buttons(rec, a) if hasattr(self, "office_buttons") else ""  # Collabora, if set up
+            return f'<a href="{e(href)}">{e(name)}</a>{kb}{office}'
         url = str(a.get("url") or "")
         if re.match(r"https?://", url):
             return f'<a href="{e(url)}" rel="noopener noreferrer">{e(name if a.get("name") else url)}</a>'
@@ -847,6 +848,8 @@ class RecordPages:
                             + f'<label>File (up to {self.hub.MAX_FILE // (1024 * 1024)} MB) '
                               f'<input type="file" name="file" required></label>'
                               f'<button>Attach</button></form>')
+                if hasattr(self, "office_new_html"):  # a blank office document, when Collabora is set up
+                    main.append(self.office_new_html(rt, rec, files))
             if rt.parent and not editing:
                 kids = hub.children(me, ref)
                 add = (f' <a class="btn secondary" href="/records/{e(rtype)}/new?parent={e(urllib.parse.quote(ref))}" data-modal>'
@@ -1104,8 +1107,9 @@ class RecordPages:
                        if schema.get(v["data"], schema.locate(v["data"], f["path"], f.get("with")))
                        != schema.get(prev, schema.locate(prev, f["path"], f.get("with")))]
             via = f' · <a href="/runs/{e(v["run_id"])}">in a run</a>' if v.get("run_id") else ""
+            note = f'<br><span class="muted">{e(v["comment"])}</span>' if v.get("comment") else ""
             rows.append(f'<tr><td>v{v["version"]}</td><td>{self.who(v["actor"]) if v["actor"] else ""}{via}</td>'
-                        f'<td>{e(", ".join(changed) or "—")}</td><td class="muted">{e(v["at"][:16].replace("T", " "))}</td>'
+                        f'<td>{e(", ".join(changed) or "—")}{note}</td><td class="muted">{e(v["at"][:16].replace("T", " "))}</td>'
                         f'<td><details><summary>record</summary><pre>{e(json.dumps(v["data"], indent=1))}</pre></details></td></tr>')
         out = ("<div class='tablewrap'><table><tr><th>Version</th><th>By</th><th>Changed</th><th>When</th><th><span class='visually-hidden'>Record</span></th></tr>"
                + "".join(rows) + "</table></div>") if rows else "<p class='muted'>No history.</p>"

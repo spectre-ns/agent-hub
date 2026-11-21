@@ -762,6 +762,39 @@ def test_a_signature_stops_covering_a_record_that_changed(quality):
     assert not hub.signatures(amara, dref)[0]["current"]
 
 
+def test_an_office_document_saved_in_collabora_becomes_a_new_version_by_its_editors_and_a_released_one_opens_read_only(
+        quality):
+    """An office document saved in Collabora becomes a new version of the record, by the people who edited it; a
+    released document opens read-only."""
+    from practicehub.integrations import collabora as cool
+    from practicehub.integrations.wopi import EDITED_BY, Wopi
+    hub, rana, amara = quality, M(quality, "rana"), M(quality, "dr-amara")
+    w = Wopi(hub, cool.Collabora("http://127.0.0.1:9", "http://hub"))  # no Collabora: no proof keys to check
+    att = hub.add_file(rana, "Document", cool.blank_document("odt"), "Rota.odt", cool.mime_of("odt"))
+    ref = f"Document/{hub.create_record(rana, 'Document', {'title': 'Rota', 'status': 'draft', 'file': att})['id']}"
+    sess = w.open(rana, ref, "file", att["blob"])
+    assert w.open(amara, ref, "file", att["blob"])["_id"] == sess["_id"]  # both edit the one document
+
+    def put(m, data, **h):
+        tok, _ = w.issue(m, sess["_id"], write=True, origin="")
+        path = f"/wopi/files/{sess['_id']}/contents"
+        return w.handle("POST", path, {"access_token": tok}, h, data, f"{path}?access_token={tok}")[0]
+
+    n = len(hub.record_history(rana, ref))
+    assert put(rana, b"draft one", **{"x-cool-wopi-isautosave": "true"}) == 200
+    assert len(hub.record_history(rana, ref)) == n  # an autosave is not a version
+    assert put(amara, b"draft two", **{"x-cool-wopi-isexitsave": "true"}) == 200
+    v = hub.record_history(rana, ref)[0]
+    assert v["version"] == n + 1 and v["comment"] == EDITED_BY + "Rana Haddad, Dr. Amara Okafor"
+    assert hub.read_file(rana, ref, hub.read_record(rana, ref)["file"]["blob"])[0] == b"draft two"
+
+    installer = {"id": "module:dms", "kind": "automation", "name": "Document control", "status": "active"}
+    released = hub.create_record(installer, "Document", {"title": "Released", "status": "approved", "file": att})
+    assert not w.may_edit(rana, released)
+    sess = w.open(rana, f"Document/{released['id']}", "file", att["blob"])
+    assert put(rana, b"sneaky", **{"x-cool-wopi-isexitsave": "true"}) == 403
+
+
 def test_a_signature_can_be_limited_to_a_role_and_a_state(quality):
     hub = quality
     rana = M(hub, "rana")
