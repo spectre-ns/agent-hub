@@ -1261,3 +1261,71 @@ def test_a_refused_start_from_a_record_keeps_the_record_chosen(hub, server):
     code, page = call(server, "POST", "/start", rana, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}",
                                                           "_fixed": "1"})
     assert code == 422 and f'name="_record" value="CAPA/{capa["id"]}"' in page and 'name="_fixed"' in page
+
+
+def _theme_tokens():
+    """The colour tokens of both themes, parsed from the stylesheet: light is the :root block, dark overrides it."""
+    from practicehub.web import assets
+    light = dict(re.findall(r"--([\w-]+):([^;}]+)", assets.CSS.split(":root{color-scheme:light;", 1)[1].split("}", 1)[0]))
+    dark = {**light, **dict(re.findall(r"--([\w-]+):([^;}]+)", assets._DARK))}
+    return {"light": light, "dark": dark}
+
+
+def _contrast(tokens, fg, bg):
+    """WCAG contrast of token fg over token bg; a bg written "a/b" is token a composited over token b."""
+    def rgba(name):
+        v = tokens[name].strip()
+        while v.startswith("var("):
+            v = tokens[v[4:-1].split(",")[0].strip()[2:]].strip()
+        h = v.lstrip("#")
+        return [int(h[i:i + 2], 16) for i in (0, 2, 4)], (int(h[6:8], 16) / 255 if len(h) == 8 else 1.0)
+
+    def over(top, base):
+        rgb, a = rgba(top)
+        return [c * a + b * (1 - a) for c, b in zip(rgb, base)]
+
+    def lum(rgb):
+        lin = [(c / 255) / 12.92 if c / 255 <= 0.03928 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    *layers, base = bg.split("/")
+    back = rgba(base)[0]
+    for layer in reversed(layers):
+        back = over(layer, back)
+    hi, lo = sorted((lum(over(fg, back)), lum(back)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+_TEXT_PAIRS = [  # text: 4.5:1
+    ("fg", "bg"), ("fg", "raised"), ("fg", "sunken"), ("fg", "input-bg"), ("fg", "neutral/bg"),
+    ("fg", "info-bg"), ("fg", "success-bg"), ("fg", "danger-bg"), ("fg", "warning-bg"),
+    ("subtle", "bg"), ("subtle", "raised"), ("subtle", "sunken"), ("subtle", "neutral/bg"), ("subtle", "neutral-hover/bg"),
+    ("subtlest", "bg"), ("subtlest", "raised"), ("subtlest", "sunken"), ("subtlest", "neutral/bg"), ("subtlest", "raised-hover"),
+    ("selected-fg", "selected-bg"), ("link", "bg"), ("link", "raised"), ("link", "sunken"),
+    ("brand-fg", "brand"), ("brand-fg", "brand-hover"), ("danger-on", "danger"), ("danger-fg", "danger-bg"),
+    ("success-fg", "success-bg"), ("warning-fg", "warning-bg"), ("info-fg", "info-bg"), ("discovery-fg", "discovery-bg"),
+    ("service", "service-bg"), ("surface", "info-icon"), ("surface", "success-icon"), ("surface", "danger-icon"),
+    ("loz-default-fg", "loz-default-bg/bg"), ("loz-default-fg", "loz-default-bg/raised"),
+] + [(f"loz-{k}-fg", f"loz-{k}-bg") for k in ("inprogress", "success", "removed", "moved", "new")] \
+  + [(f"lozb-{k}-fg", f"lozb-{k}-bg") for k in ("default", "inprogress", "success", "removed", "moved", "new")] \
+  + [("ki-fg", f"ki-{k}") for k in ("task", "gate", "notice", "hold", "automation")]
+
+_EDGE_PAIRS = [  # input borders, button and chip edges, card edges, table rules, the focus ring: 3:1
+    ("input-border", "input-bg"), ("input-border", "bg"), ("input-border", "raised"),
+    ("border", "bg"), ("border", "raised"), ("border", "sunken"), ("border-bold", "bg"), ("border-bold", "raised"),
+    ("control-border", "bg"), ("control-border", "raised"), ("card-edge", "bg"), ("card-edge", "sunken"),
+    ("focus", "bg"), ("focus", "raised"), ("focus", "sunken"), ("focus", "input-bg"), ("brand", "bg"), ("danger", "bg"),
+]
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_colour_tokens_keep_wcag_contrast_in_both_themes(theme):
+    tokens = _theme_tokens()[theme]
+    low = [f"{fg} on {bg}: {r:.2f} < {need}" for need, pairs in ((4.5, _TEXT_PAIRS), (3.0, _EDGE_PAIRS))
+           for fg, bg in pairs if (r := _contrast(tokens, fg, bg)) < need]
+    assert not low, low
+    # disabled reads as disabled: fainter than enabled text, yet not invisible
+    assert 2.5 <= _contrast(tokens, "disabled-fg", "disabled-bg/bg") < _contrast(tokens, "subtle", "neutral/bg")
+    # the focus ring and the card edges come from the tokens, not from fixed colours
+    from practicehub.web.assets import CSS
+    assert "#388BFF" not in CSS and "var(--card-edge)" in tokens["shadow-raised"]

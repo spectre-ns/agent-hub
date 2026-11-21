@@ -10,12 +10,13 @@ anything: the editor only builds TOML text, and the server checks it.
 # Dark tokens, used twice: for the system preference and for an explicit data-theme="dark".
 _DARK = """color-scheme:dark;
 --bg:#1D2125;--surface:#1D2125;--raised:#22272B;--raised-hover:#282E33;--overlay:#282E33;--sunken:#161A1D;
---fg:#B6C2CF;--subtle:#9FADBC;--subtlest:#8C9BAB;--border:#A6C5E229;--border-bold:#738496;
---neutral:#A1BDD914;--neutral-hover:#A6C5E229;--neutral-pressed:#BFDBF847;
---disabled-bg:#BCD6F00A;--disabled-fg:#BFDBF847;
+--fg:#C7D1DB;--subtle:#A3B0BF;--subtlest:#96A2B4;--border:#66727F;--border-bold:#8696A7;
+--input-border:#6A7683;--control-border:#66727F;--card-edge:#66727F;--focus:#85B8FF;
+--neutral:#A1BDD91A;--neutral-hover:#A6C5E233;--neutral-pressed:#BFDBF852;
+--disabled-bg:#BCD6F00A;--disabled-fg:#BFDBF870;
 --brand:#579DFF;--brand-hover:#85B8FF;--brand-pressed:#CCE0FF;--brand-fg:#1D2125;
---selected-bg:#1C2B41;--selected-fg:#579DFF;--link:#579DFF;--link-hover:#85B8FF;
---input-bg:#22272B;--input-hover:#282E33;--input-border:#A6C5E229;
+--selected-bg:#1C2B41;--selected-fg:#75AEFF;--link:#75AEFF;--link-hover:#A3C9FF;
+--input-bg:#22272B;--input-hover:#282E33;
 --danger:#F87168;--danger-hover:#FD9891;--danger-on:#1D2125;--danger-bg:#42221F;--danger-fg:#FD9891;--danger-icon:#F87168;
 --success:#4BCE97;--success-bg:#1C3329;--success-fg:#7EE2B8;--success-icon:#4BCE97;
 --warning:#F5CD47;--warning-bg:#332E1B;--warning-fg:#FEC195;--warning-icon:#F38A3F;
@@ -29,7 +30,7 @@ _DARK = """color-scheme:dark;
 --lozb-moved-bg:#F5CD47;--lozb-moved-fg:#1D2125;--lozb-new-bg:#9F8FEF;--lozb-new-fg:#1D2125;
 --ki-task:#579DFF;--ki-gate:#9F8FEF;--ki-notice:#F38A3F;--ki-hold:#F87168;--ki-automation:#8C9BAB;--ki-fg:#1D2125;
 --service:#FEC195;--service-bg:#332E1B;
---shadow-raised:0 0 0 1px #00000000,0 1px 1px #03040480,0 0 1px #03040480;
+--shadow-raised:0 0 0 1px var(--card-edge),0 1px 1px #03040480;
 --shadow-overlay:0 0 0 1px #BCD6F00A,0 8px 12px #0304045C,0 0 1px 1px #03040480;
 --backdrop:#10121499;
 """
@@ -37,14 +38,15 @@ _DARK = """color-scheme:dark;
 CSS = (r"""
 :root{color-scheme:light;
 --bg:#FFFFFF;--surface:#FFFFFF;--raised:#FFFFFF;--raised-hover:#F1F2F4;--overlay:#FFFFFF;--sunken:#F7F8F9;
---fg:#172B4D;--subtle:#44546F;--subtlest:#626F86;--border:#091E4224;--border-bold:#758195;
---neutral:#091E420F;--neutral-hover:#091E4224;--neutral-pressed:#091E424F;
---disabled-bg:#091E4208;--disabled-fg:#091E424F;
+--fg:#172B4D;--subtle:#44546F;--subtlest:#5A6579;--border:#828C9E;--border-bold:#6B778C;
+--input-border:#7D8799;--control-border:#828C9E;--card-edge:#828C9E;--focus:#0C66E4;
+--neutral:#091E4214;--neutral-hover:#091E422B;--neutral-pressed:#091E4252;
+--disabled-bg:#091E4208;--disabled-fg:#091E4280;
 --brand:#0C66E4;--brand-hover:#0055CC;--brand-pressed:#09326C;--brand-fg:#FFFFFF;
---selected-bg:#E9F2FF;--selected-fg:#0C66E4;--link:#0C66E4;--link-hover:#0055CC;
---input-bg:#F7F8F9;--input-hover:#FFFFFF;--input-border:#091E4224;
+--selected-bg:#E9F2FF;--selected-fg:#0055CC;--link:#0055CC;--link-hover:#09326C;
+--input-bg:#F7F8F9;--input-hover:#FFFFFF;
 --danger:#C9372C;--danger-hover:#AE2E24;--danger-on:#FFFFFF;--danger-bg:#FFECEB;--danger-fg:#AE2E24;--danger-icon:#C9372C;
---success:#1F845A;--success-bg:#DCFFF1;--success-fg:#216E4E;--success-icon:#22A06B;
+--success:#1F845A;--success-bg:#DCFFF1;--success-fg:#216E4E;--success-icon:#1F845A;
 --warning:#E2B203;--warning-bg:#FFF7D6;--warning-fg:#A54800;--warning-icon:#E56910;
 --info-bg:#E9F2FF;--info-fg:#0055CC;--info-icon:#0C66E4;
 --discovery:#6E5DC6;--discovery-bg:#F3F0FF;--discovery-fg:#5E4DB2;
@@ -56,7 +58,7 @@ CSS = (r"""
 --lozb-moved-bg:#F5CD47;--lozb-moved-fg:#172B4D;--lozb-new-bg:#6E5DC6;--lozb-new-fg:#FFFFFF;
 --ki-task:#0C66E4;--ki-gate:#6E5DC6;--ki-notice:#A54800;--ki-hold:#C9372C;--ki-automation:#626F86;--ki-fg:#FFFFFF;
 --service:#A54800;--service-bg:#FFF7D6;
---shadow-raised:0 1px 1px #091E4240,0 0 1px #091E424F;
+--shadow-raised:0 0 0 1px var(--card-edge),0 1px 1px #091E4240;
 --shadow-overlay:0 8px 12px #091E4226,0 0 1px #091E424F;
 --backdrop:#091E427A;
 /* older names, kept so existing markup and the diagram keep working; they follow the tokens above */
@@ -82,7 +84,7 @@ p{margin:0 0 12px}
 code{font:12px/16px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--neutral);padding:0 4px;
 border-radius:3px;overflow-wrap:anywhere}
 [hidden]{display:none!important}
-:focus-visible{outline:2px solid #388BFF;outline-offset:2px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
 clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 .muted{color:var(--subtlest)}.off{color:var(--danger-fg);font-weight:600}
@@ -367,7 +369,7 @@ dialog.form-modal .fm-body{padding:0 24px;overflow:auto;max-height:calc(100vh - 
 dialog.form-modal .fm-body form.card{box-shadow:none;padding:0;background:transparent}
 dialog.form-modal .fm-close{background:transparent;border:0;color:var(--fg);font-size:20px;min-width:32px;height:32px}
 dialog.form-modal .fm-close:hover{background:var(--neutral-hover)}
-dialog.form-modal .fm-close:focus-visible{outline:2px solid #388BFF;outline-offset:2px}
+dialog.form-modal .fm-close:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 /* a list to choose from: what to create, what work to start */
 ul.pick{list-style:none;margin:8px 0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:8px}
 ul.pick a{display:flex;flex-direction:column;gap:2px;padding:8px 12px;border-radius:3px;border:1px solid var(--border);color:var(--fg);text-decoration:none}
@@ -453,10 +455,10 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;f
 input,select,textarea{display:block;width:100%;min-height:32px;margin-top:4px;padding:4px 8px;border:2px solid var(--input-border);
 border-radius:3px;background:var(--input-bg);color:var(--fg);font:inherit;font-size:14px;line-height:20px;font-weight:400}
 input:hover,select:hover,textarea:hover{background:var(--input-hover)}
-input:focus,select:focus,textarea:focus{background:var(--input-hover);border-color:#388BFF;box-shadow:inset 0 0 0 1px #388BFF}
+input:focus,select:focus,textarea:focus{background:var(--input-hover);border-color:var(--focus);box-shadow:inset 0 0 0 1px var(--focus)}
 /* the border is the focus ring for text controls; a transparent outline keeps it visible in forced-colours mode */
 input:not([type=checkbox]):not([type=radio]):focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid transparent}
-input:disabled,select:disabled,textarea:disabled{background:var(--disabled-bg);color:var(--disabled-fg);cursor:not-allowed}
+input:disabled,select:disabled,textarea:disabled{background:var(--disabled-bg);color:var(--disabled-fg);cursor:not-allowed;border-style:dashed}
 input[aria-invalid=true],select[aria-invalid=true],textarea[aria-invalid=true]{border-color:var(--danger)}
 input[type=checkbox],input[type=radio]{display:inline-block;width:16px;height:16px;min-height:0;margin:0 8px 0 0;padding:0;
 vertical-align:middle;accent-color:var(--brand);box-shadow:none}
@@ -535,6 +537,10 @@ button.danger:hover,.btn.danger:hover{background:var(--danger-hover);color:var(-
 button.danger-subtle,.btn.danger-subtle{background:transparent;color:var(--danger-fg);box-shadow:inset 0 0 0 1px var(--danger)}
 button.danger-subtle:hover,.btn.danger-subtle:hover{background:var(--danger-bg);color:var(--danger-fg)}
 button:disabled,.btn[aria-disabled=true]{background:var(--disabled-bg);color:var(--disabled-fg);cursor:not-allowed}
+/* neutral buttons carry a hairline edge so they read as controls; filled, subtle and disabled ones do not */
+button:not([class]),button.secondary,.btn{box-shadow:inset 0 0 0 1px var(--control-border)}
+button.primary,.btn.primary,button.create,.btn.create,button.danger,.btn.danger,button.subtle,.btn.subtle,button.link,
+header.top .btn.quick,.avatar-menu>button,.ed-tabs button,button:disabled,.btn[aria-disabled=true]{box-shadow:none}
 button.link{background:transparent;color:var(--link);padding:0 4px}
 button.link:hover{text-decoration:underline;color:var(--link-hover)}
 
@@ -564,7 +570,8 @@ form p.about{margin:0;color:var(--subtle)}
 .chip{display:inline-flex;align-items:center;gap:4px;height:32px;padding:0 12px;border-radius:3px;font-weight:500;
 color:var(--subtle);background:var(--neutral)}
 .chip:hover{background:var(--neutral-hover);color:var(--subtle);text-decoration:none}
-.chip.on,.chip[aria-current],.chip[aria-pressed=true]{background:var(--selected-bg);color:var(--selected-fg)}
+.chip{box-shadow:inset 0 0 0 1px var(--control-border)}
+.chip.on,.chip[aria-current],.chip[aria-pressed=true]{background:var(--selected-bg);color:var(--selected-fg);box-shadow:inset 0 0 0 1px var(--selected-fg)}
 .filters .gap{width:8px}.filters .lbl{font-size:12px;line-height:16px;color:var(--subtle);font-weight:600}
 
 /* ---- board */
@@ -612,7 +619,7 @@ color:var(--subtle);text-transform:uppercase}.col>header .n{font-weight:600}
 .fl-node.st-done rect.box{fill:var(--success-bg);stroke:var(--success)}.fl-node.st-active rect.box{fill:var(--selected-bg);stroke:var(--brand)}
 .fl-node.st-failed rect.box{fill:var(--danger-bg);stroke:var(--danger)}.fl-node.st-skipped{opacity:.45}
 .fl-node.sel rect.box{stroke:var(--brand);stroke-width:2.6}.fl-node.click{cursor:pointer}.fl-node.click:hover rect.box{stroke:var(--brand)}
-.fl-node:focus-visible{outline:2px solid #388BFF}
+.fl-node:focus-visible{outline:2px solid var(--focus)}
 .fl-node .ai{fill:var(--discovery-bg)}.fl-node text.ai-t{fill:var(--discovery-fg);font-size:9px;font-weight:800}
 .legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;line-height:16px;color:var(--subtle);margin:8px 4px}
 .legend span{display:inline-flex;align-items:center;gap:4px}
