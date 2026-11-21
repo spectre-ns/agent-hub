@@ -347,17 +347,44 @@ def parse(source: str, catalog=None) -> Workflow:
     return wf
 
 
-TEMPLATE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_\-\.]*)\s*\}\}")
+TEMPLATE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_\-\.]*)\s*(?:([+-])\s*(\d{1,4})\s*([dwmy]))?\s*\}\}")
+
+
+def shift_date(value, sign: str, n: int, unit: str):
+    """A date (``YYYY-MM-DD``, or the date of a time) moved by n days, weeks, months or years. A month or year from
+    the 31st, or from 29 February, lands on the last day of the shorter month. Anything else is None."""
+    import calendar
+    from datetime import date, timedelta
+    try:
+        d = date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+    k = n if sign == "+" else -n
+    if unit in ("d", "w"):
+        return (d + timedelta(days=k * (7 if unit == "w" else 1))).isoformat()
+    months = d.year * 12 + d.month - 1 + (k * 12 if unit == "y" else k)
+    y, m = divmod(months, 12)
+    if not 1 <= y <= 9999:
+        return None
+    return date(y, m + 1, min(d.day, calendar.monthrange(y, m + 1)[1])).isoformat()
+
+
+def _fill(m, ctx: dict):
+    v = expr.lookup(ctx, m.group(1))
+    if m.group(2):  # {{run.today + 1y}}: date arithmetic, in days (d), weeks (w), months (m) or years (y)
+        v = shift_date(v, m.group(2), int(m.group(3)), m.group(4))
+    return v
 
 
 def render(value, ctx: dict):
     """Fill {{path}} placeholders from the run context. A string that is exactly one placeholder keeps the value's
-    type (a list stays a list)."""
+    type (a list stays a list). ``{{run.today + 1y}}`` is a date moved on: ``+``/``-`` a number of days, weeks,
+    months or years (``30d``, ``2w``, ``6m``, ``1y``)."""
     if isinstance(value, str):
         m = TEMPLATE.fullmatch(value.strip())
         if m:
-            return expr.lookup(ctx, m.group(1))
-        return TEMPLATE.sub(lambda mm: _text(expr.lookup(ctx, mm.group(1))), value)
+            return _fill(m, ctx)
+        return TEMPLATE.sub(lambda mm: _text(_fill(mm, ctx)), value)
     if isinstance(value, dict):
         return {k: render(v, ctx) for k, v in value.items()}
     if isinstance(value, list):

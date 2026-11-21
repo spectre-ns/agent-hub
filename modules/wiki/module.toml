@@ -9,7 +9,7 @@ id = "wiki"
 name = "Wiki"
 version = "1"
 summary = "Pages of formatted text in spaces and trees, linked to records and work, checked for being out of date."
-shortcuts = ["WikiPage"]
+shortcuts = ["WikiPage", "Procedure"]
 
 [[roles]]
 id = "wiki-owner"
@@ -20,6 +20,11 @@ description = "Keeps the wiki current: checks pages flagged as out of date, and 
 id = "wiki-editor"
 name = "Wiki editor"
 description = "Writes and changes wiki pages. Give it to everyone who should write in the wiki."
+
+[[roles]]
+id = "sop-approver"
+name = "SOP approver"
+description = "Releases SOPs for use: reads a revision someone else wrote, and releases it or returns it with why."
 
 [[data_classes]]
 id = "wiki"
@@ -34,5 +39,9 @@ read = ["wiki"]
 write = ["wiki"]
 
 [grants.wiki-owner]
+read = ["wiki"]
+write = ["wiki"]
+
+[grants.sop-approver]
 read = ["wiki"]
 write = ["wiki"]

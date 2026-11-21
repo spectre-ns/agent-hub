@@ -1,0 +1,54 @@
+id = "wiki-sop-release"
+title = "Release a SOP"
+summary = "A SOP sent for release review is released by a SOP approver who did not write it, or returned with why."
+record = "Procedure"
+
+[trigger]
+event = "record.transitioned:Procedure"
+when = "record.status == 'in-review'"
+
+[[steps]]
+id = "release"
+title = "Release the SOP for use"
+kind = "gate"
+role = "sop-approver"
+signer = "person"
+not_by = ["record.editors"]   # nobody who wrote this revision, alone or in a live session, releases it
+meaning = "I release this SOP for use at this revision"
+meanings = { return = "I return this SOP to its authors unreleased" }
+outcomes = ["release", "return"]
+context = ["record:wiki"]
+due = "5d"
+escalate_to = "wiki-owner"
+instructions = """Read the SOP in full, and what changed since the released revision (its page: History, then
+Compare). What you sign is the text shown here, at this revision. Release it, or return it to its authors and say
+what to change."""
+
+[[steps]]
+id = "publish"
+title = "Put the released revision in use"
+kind = "automation"
+after = ["release"]
+when = "release.outcome == 'release'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+increment = ["revision"]
+[steps.params.set]
+status = "released"
+effective = "{{run.today}}"
+review_by = "{{run.today + 1y}}"
+returned_because = ""
+
+[[steps]]
+id = "return"
+title = "Return it to its authors"
+kind = "automation"
+after = ["release"]
+when = "release.outcome == 'return'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+status = "draft"
+returned_because = "{{release.comment}}"

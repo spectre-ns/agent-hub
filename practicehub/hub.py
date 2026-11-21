@@ -1506,7 +1506,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             strip = (lambda x: {k: v for k, v in x.items() if not (lc and k == lc["path"].split(".")[0])
                                 and k not in ("meta", "revision")})
             if prev is None or strip(d) != strip(prev):
-                authors.add(r["actor"])
+                authors.update(r.get("authors") or [r["actor"]])  # a version several people wrote together names them
             prev = d
         return authors
 
@@ -1693,12 +1693,19 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
 
-    def _write_version(self, rt: schema.RecordType, rec: dict, member: dict, run_id: str | None) -> None:
+    def _write_version(self, rt: schema.RecordType, rec: dict, member: dict, run_id: str | None, *,
+                       comment: str | None = None, authors: list[str] | None = None) -> None:
+        """A version of the record. ``comment``: what the change was, in words; ``authors``: everyone who wrote it,
+        when several people wrote it together (a live editing session), besides the member who saved it."""
         ref = f"{rt.id}/{rec['id']}"
         version = (self.db.record_versions.max("version", {"type": rt.id, "id": rec["id"]}) or 0) + 1
-        self.db.record_versions.insert({"_id": f"{ref}@{version}", "type": rt.id, "id": rec["id"], "version": version,
-                                        "data": rec, "refs": _refs_in(rec), "actor": member.get("id", ""),
-                                        "run_id": run_id, "at": utcnow()})
+        row = {"_id": f"{ref}@{version}", "type": rt.id, "id": rec["id"], "version": version, "data": rec,
+               "refs": _refs_in(rec), "actor": member.get("id", ""), "run_id": run_id, "at": utcnow()}
+        if comment and comment.strip():
+            row["comment"] = comment.strip()[:500]
+        if authors:
+            row["authors"] = list(dict.fromkeys(authors))
+        self.db.record_versions.insert(row)
         if any(f["type"] == "markdown" for f in rt.fields):
             self._retitle(rt, rec)
         self._relink(rt, rec)
@@ -1767,8 +1774,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
-                      expected_version: str | None = None, comment: str | None = None) -> dict:
-        """``_signature``: the move is made by a signature the record type allows (``moves_to``), which the signer's
+                      expected_version: str | None = None, comment: str | None = None,
+                      authors: list[str] | None = None) -> dict:
+        """``comment``: why, kept on the version (and on the move, if the record moves). ``authors``: who wrote the
+        change, when several people did (each must be a member who may write the record).
+
+        ``_signature``: the move is made by a signature the record type allows (``moves_to``), which the signer's
         role was checked for; it may make moves reserved to workflows. ``expected_version``: the version the editor
         saw; when someone changed the record since, nothing is saved (their change is never silently overwritten)."""
         rtype, rid = ref.split("/", 1)
@@ -1815,8 +1826,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
                     moved = (old, new)
             self._check_record(rt, after)
+            if authors:
+                for a in authors:
+                    if a != member.get("id") and not self.may_write(self.member(a), rtype):
+                        raise Denied(f"{a} may not write {rtype} records")
             rec = self.records.update(rtype, rid, after)  # a store replaces the record: store what was validated
-            self._write_version(rt, rec, member, run_id)
+            self._write_version(rt, rec, member, run_id, comment=comment, authors=authors)
             changed = sorted(k for k in set(before) | set(rec) if k != "meta" and before.get(k) != rec.get(k))
             ev = self.track.append(member, "record.updated", ref, cause=cause, run_id=run_id,
                                    data={"changed": changed})

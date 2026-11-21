@@ -166,7 +166,7 @@ KEYS = {
          "part_of",
          "navigator", "layout"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "max_length", "min",
-              "max", "list", "show", "advanced", "with", "fact", "match", "by"},
+              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
     "signature": {"meaning", "roles", "states", "moves_to"},
@@ -174,7 +174,7 @@ KEYS = {
     "tab": {"label", "fields"},
     "navigator": {"tops", "hide"},
 }
-FIELD_BOOLS = ("required", "list", "show", "advanced", "fact", "match")
+FIELD_BOOLS = ("required", "list", "show", "advanced", "fact", "match", "live")
 
 
 def _unknown(where: str, table: dict, kind: str) -> list[str]:
@@ -244,6 +244,8 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
         problems.append(f"{where}: target is for a reference field (this one is {typ})")
     if "with" in raw and not isinstance(raw["with"], dict):
         problems.append(f"{where}: with is a table of sibling keys and values, e.g. {{ system = \"phone\" }}")
+    if raw.get("live") is True and typ != "markdown":
+        problems.append(f"{where}: live is for a markdown field (several people write it at once)")
     by = raw.get("by", "anyone")
     if by not in BY:
         problems.append(f"{where}: by is 'anyone' or 'workflow' (only a workflow step changes it, like stock on hand)")
@@ -262,7 +264,8 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
          "choices": list(choices or []), "max_length": ml, "min": raw.get("min"), "max": raw.get("max"),
          "list": raw.get("list", False), "show": raw.get("show", True),
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
-         "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by}
+         "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
+         "live": raw.get("live", False)}
     if typ == "reference" and not f["rel"]:
         f["rel"] = name
     return f, []
