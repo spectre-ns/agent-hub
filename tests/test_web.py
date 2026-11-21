@@ -344,7 +344,7 @@ def test_views_show_in_the_sidebar_and_work_starts_about_any_record(hub, server)
     assert call(server, "GET", "/views/no-such-view", who)[0] == 404
     capa = hub.create_record(hub.member(qm["id"]), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
     code, page = call(server, "GET", f"/start?workflow=qms-capa&record=CAPA/{capa['id']}", who)
-    assert code == 200 and f'value="CAPA/{capa["id"]}" selected' in page
+    assert code == 200 and f'name="_record" value="CAPA/{capa["id"]}"' in page and 'class="about"' in page  # fixed
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": "Patient/x"})
     assert code == 422  # a CAPA workflow is about a CAPA
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
@@ -1225,3 +1225,39 @@ def test_a_refused_move_in_the_dialog_says_why_in_the_dialog(hub, server):
     capa = hub.create_record(hub.member("rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
     code, page = call(server, "POST", f"/records/CAPA/{capa['id']}/move", rana, form={"to": "investigating"})
     assert code == 422 and "data-modal-body" in page and "fill in Owner" in page
+
+
+def test_work_about_a_record_starts_from_a_button_whose_form_opens_in_the_dialog(hub, server):
+    """A patient page offers each workflow about a patient as a button; its form opens in the dialog with the patient
+    already chosen (shown, not asked), and starting it from there runs it about that patient. Record pages do the same."""
+    amara = token(hub, "dr-amara")
+    pat = hub.records.search("Patient")[0]
+    ref = f"Patient/{pat['id']}"
+    me = hub.member("dr-amara")
+    wfs = [w["workflow"] for w in hub.workflows() if w["workflow"].record == "Patient"
+           and hub.can(me, "starter", f"workflow:{w['workflow'].id}")]
+    assert wfs, "the pack has work about a patient"
+    page = call(server, "GET", f"/patients/{pat['id']}", amara)[1]
+    assert "<details><summary>" not in page.split("class='starts'")[0][-200:] and "class='starts'" in page
+    quoted = ref.replace("/", "%2F")
+    for wf in wfs:
+        assert f'href="/start/{wf.id}?record={quoted}" data-modal>' in page, wf.id
+    wf = wfs[0]
+    code, form = call(server, "GET", f"/start/{wf.id}?record={quoted}", amara)
+    assert code == 200 and "data-modal-body" in form and f'name="_record" value="{ref}"' in form
+    assert 'name="_fixed"' in form and "← Back" not in form
+    rec_page = call(server, "GET", f"/records/Patient/{pat['id']}", amara)[1]
+    assert "start?workflow=" not in rec_page
+
+
+def test_a_refused_start_from_a_record_keeps_the_record_chosen(hub, server):
+    """If a start opened from a record is refused, the form comes back with the same record still fixed."""
+    rana = _modules(hub, server)
+    capa = hub.create_record(hub.member("rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
+    wf = hub.workflow("qms-capa")[0]
+    required = [i for i in wf.inputs if i.get("required")]
+    if not required:
+        return
+    code, page = call(server, "POST", "/start", rana, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}",
+                                                          "_fixed": "1"})
+    assert code == 422 and f'name="_record" value="CAPA/{capa["id"]}"' in page and 'name="_fixed"' in page

@@ -1,5 +1,6 @@
 """The clinic's create forms: plain inputs for what a person types, and a new record lands where its lifecycle starts."""
 
+import urllib.parse
 import threading
 from http.server import ThreadingHTTPServer
 
@@ -114,7 +115,10 @@ def test_a_create_form_is_plain_inputs_and_starts_the_record(clinic, rtype):
     hub, base, patient, visit = clinic
     who, sent = FORMS[rtype]
     rt = hub.record_type(rtype)
-    code, page = call(base, "GET", f"/records/{rtype}/new", token(hub, who))
+    own = ""
+    if rt.part_of:  # a part is added from its owner's page, which names the owner (without it: "Which patient?")
+        own = "?" + urllib.parse.urlencode({rt.field(rt.part_of["field"])["path"]: patient})
+    code, page = call(base, "GET", f"/records/{rtype}/new{own}", token(hub, who))
     assert code == 200, page
     form = page.split('id="new"', 1)[1].split("</form>", 1)[0]
     assert 'class="mono"' not in form and "<small>JSON</small>" not in form  # nothing typed as JSON

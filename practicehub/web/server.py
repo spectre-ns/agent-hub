@@ -126,7 +126,6 @@ class App(RecordPages, DefinitionPages):
         R("GET", rf"/{sp}", self.page_subjects)
         R("POST", rf"/{sp}", self.post_subject)
         R("GET", rf"/{sp}/(?P<pid>[\w.-]+)", self.page_subject)
-        R("POST", rf"/{sp}/(?P<pid>[\w.-]+)/start", self.post_start)
         R("GET", r"/runs", self.page_runs)
         R("GET", r"/start", self.page_start)
         R("POST", r"/start", self.post_start_any)
@@ -1042,10 +1041,17 @@ class App(RecordPages, DefinitionPages):
         wf = hub.workflow(wid)[0]
         if not hub.can(me, "starter", f"workflow:{wf.id}"):
             raise Denied(f"{me['name']} may not start {wf.title}")
-        pick = ""
+        pick, about = "", ""
         if wf.record:
             want = q.get("record", "") or (kept or {}).get("_record", "")
-            pick = self._input(self._record_field(wf), {"_record": {"reference": want}} if want else None, me)
+            fixed = (q.get("record") or (kept or {}).get("_fixed")) and want.startswith(wf.record + "/") \
+                and self._may_read(me, wf.record) and hub.records.read(wf.record, want.split("/", 1)[1])
+            if fixed:  # opened from the record itself: it is what the work is about, shown, not asked
+                about = want
+                pick = (f'<input type="hidden" name="_record" value="{e(want)}"><input type="hidden" name="_fixed" '
+                        f'value="1"><p class="about">About {self.record_link(want)}</p>')
+            else:
+                pick = self._input(self._record_field(wf), {"_record": {"reference": want}} if want else None, me)
         kept = kept or {}
         fields = "".join(self._input(self._ref_input(f), {f["name"]: kept[f["name"]]} if kept.get(f["name"]) else None,
                                      me) if f["type"] == "reference" else
@@ -1056,8 +1062,9 @@ class App(RecordPages, DefinitionPages):
                 f'<form method="post" action="/start" class="card stack"><input type="hidden" name="_workflow" '
                 f'value="{e(wf.id)}">{self._req_note(pick + fields)}{pick}{fields}<div class="filters">'
                 f'<button class="primary">Start</button>'
-                f'<a class="btn secondary" href="/start" data-modal-close>Cancel</a>'
-                f'<a class="btn subtle back" href="/start" data-modal>← Back</a></div></form></div>')
+                f'<a class="btn secondary" href="{e(self.record_href(about)) if about else "/start"}" data-modal-close>'
+                f'Cancel</a>' + ("" if about else '<a class="btn subtle back" href="/start" data-modal>← Back</a>')
+                + '</div></form></div>')
         return self.layout(req, wf.title, body, crumbs=[("/", "Practice"), ("/start", "Start work"), ("", wf.title)])
 
     def _record_field(self, wf) -> dict:
@@ -1082,6 +1089,7 @@ class App(RecordPages, DefinitionPages):
 
     def _start_from(self, req, f: dict):
         wid, rec = f.pop("_workflow", ""), f.pop("_record", "") or None
+        f.pop("_fixed", None)
         wf, _ = self.hub.workflow(wid)
         for i in wf.inputs:  # a name typed in a picker becomes the record it names (refused if it fits two)
             if i["type"] == "reference" and f.get(i["name"]):
@@ -1966,27 +1974,13 @@ class App(RecordPages, DefinitionPages):
             "<table>" + "".join(f'<tr><td><a href="/runs/{r["id"]}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
                                 f'<td class="muted">{e(r["created_at"][:16].replace("T", " "))}</td></tr>' for r in runs)
             + "</table>" if runs else "<p class='muted'>None.</p>"))
-        starts = []
-        for w in self.hub.workflows():
-            wf = w["workflow"]
-            if wf.record == st and self.hub.can(me, "starter", f"workflow:{wf.id}"):
-                fields = "".join(self._field(f, [{"value": c, "label": c} for c in f["choices"]] if f.get("choices") else None,
-                                             None) for f in wf.inputs)
-                starts.append(f'<details><summary>{e(wf.title)}</summary><form method="post" action="/{e(self.subj['path'])}/{e(pid)}/start"'
-                              f' class="card"><input type="hidden" name="_workflow" value="{e(wf.id)}">'
-                              f'<p class="muted">{e(wf.summary)}</p>{fields}<button>Start</button></form></details>')
-        if starts:
-            parts.append("<h2 id='start-work'>Start work</h2>" + "".join(starts))
-        extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))] + ([("start-work", "Start work", None)] if starts else [])
+        starts = self.start_buttons(me, st, ref)
+        if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
+            parts.insert(1, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
+        extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))]
         return self.layout(req, self.hub.title(p), "".join(parts), heading=False,
                            crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.title(p))],
                            subnav=self.owner_rail(self.hub.title(p), rail, extra, label=self.subj["label"]))
-
-    def post_start(self, req, pid):
-        f = self._form_output(self.form(req))
-        wid = f.pop("_workflow", "")
-        run = self.hub.engine.start(req["me"], wid, record=f"{self.subj['type']}/{pid}", inputs=f)
-        raise Redirect(f"/runs/{run['id']}")
 
     # ------------------------------------------------------------------------------------------ runs
     def post_retry(self, req, rid, sid):

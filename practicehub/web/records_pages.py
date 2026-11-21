@@ -135,6 +135,15 @@ class RecordPages:
         local = getattr(self, "_local", None)
         return getattr(local, "me", None) if local is not None else None
 
+    def start_buttons(self, me, rtype: str, ref: str) -> str:
+        """The workflows this member may start about a record of this type: one button each, opening its start
+        form in the dialog with the record already chosen. Every page that offers work about a record uses these."""
+        hub = self.hub
+        return "".join(
+            f'<a class="btn" href="/start/{e(wf.id)}?record={e(urllib.parse.quote(ref, safe=""))}" data-modal>{e(wf.title)}</a>'
+            for wf in (w["workflow"] for w in hub.workflows())
+            if wf.record == rtype and hub.can(me, "starter", f"workflow:{wf.id}"))
+
     def record_link(self, ref: str) -> str:
         t, _, rid = ref.partition("/")
         if t in self.hub.member_types():
@@ -1154,13 +1163,9 @@ class RecordPages:
                 f'<tr><td><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
                 f'<td class="muted">{e(r["created_at"][:16].replace("T", " "))}</td></tr>' for r in runs)
                 + "</table></div>") if runs else "<p class='muted'>No work about this record.</p>")
-            from urllib.parse import quote
-            starts = [w["workflow"] for w in hub.workflows() if w["workflow"].record == rtype
-                      and hub.can(me, "starter", f"workflow:{w['workflow'].id}")]
+            starts = self.start_buttons(me, rtype, ref)
             if starts:
-                main.append("<div class='filters'>" + "".join(
-                    f'<a class="btn" href="/start?workflow={e(wf.id)}&amp;record={e(quote(ref))}#">Start: '
-                    f'{e(wf.title)}</a>' for wf in starts) + "</div>")
+                main.append(f"<div class='starts' role='group' aria-label='Start work'>{starts}</div>")
 
         def move(t):
             kind = "danger-subtle" if self._undoing(t) else "primary"
