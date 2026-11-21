@@ -209,7 +209,7 @@ class RecordPages:
     @staticmethod
     def _editable(rt) -> list[dict]:
         return [f for f in rt.fields if (SIMPLE.fullmatch(f["path"]) or (NESTED.fullmatch(f["path"])
-                                                                          and f["type"] in SCALAR))
+                                                                          and f["type"] in (*SCALAR, "reference")))
                 and f.get("show", True) is not False and f.get("by") != "workflow"
                 and f["type"] != "attachment" and not (rt.lifecycle and f["path"] == rt.lifecycle["path"])
                 and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields))]
@@ -576,6 +576,11 @@ class RecordPages:
                 current = {top: data[top]} if top in data else (before or {})
                 where = schema.locate(current, key, f.get("with"))
                 old = schema.first(before or {}, schema.locate(before or {}, key, f.get("with")))
+                if f["type"] == "reference":  # one inside a list or object (participant.0.actor): sent as Type/id
+                    if val == schema.ref_of(old):
+                        continue
+                    if isinstance(old, dict) and val:  # kept in the shape the record holds it in, display dropped
+                        val = {**{k: v for k, v in old.items() if k != "display"}, "reference": val}
                 if f["type"] == "datetime" and isinstance(old, str) and isinstance(val, str) and old.startswith(val):
                     continue  # the input shows minutes; an unchanged value keeps its seconds and zone
                 if val == old or (val in (None, "") and old in (None, "")):
