@@ -22,6 +22,7 @@ Configuration is by environment, so secrets never sit in files the hub writes:
     OPENFGA_URL, OPENFGA_TOKEN                      use OpenFGA (after ``openfga init``)
     MEDPLUM_URL, MEDPLUM_CLIENT_ID, MEDPLUM_CLIENT_SECRET   keep records in Medplum
     KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_CLIENT_SECRET    accept Keycloak tokens (client ``practicehub``)
+    PRACTICEHUB_COLLABORA_URL, PRACTICEHUB_WOPI_BASE, PRACTICEHUB_COLLABORA_DISCOVERY_URL   office documents (Collabora)
     PRACTICEHUB_PACKS       where packs live (default: packs/ next to the source)
     OLLAMA_URL, LITELLM_URL, LITELLM_API_KEY, ANTHROPIC_API_KEY, PRACTICEHUB_ALLOW_EXTERNAL_MODELS   model backends
 """
@@ -123,7 +124,10 @@ def cmd_serve(args):
     start_clock(hub, args.tick_interval)
     if args.agents:
         start_agent_loop(hub, args.agent_interval)
-    serve(hub, args.host, args.port, dev=args.dev, oidc=oidc)
+    wopi_hosts = tuple(args.wopi_host or ())
+    if any(h in ("0.0.0.0", "::", "") for h in wopi_hosts):
+        raise SystemExit("--wopi-host names one address (the docker bridge, say), never every address")
+    serve(hub, args.host, args.port, dev=args.dev, oidc=oidc, wopi_hosts=wopi_hosts)
 
 
 def start_clock(hub, interval: float = 60.0):
@@ -629,6 +633,8 @@ def main(argv=None):
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8200)
     p.add_argument("--dev", action="store_true", help="sign in as any member without a token (local only)")
+    p.add_argument("--wopi-host", action="append", metavar="ADDRESS",
+                   help="also listen here, for Collabora's WOPI calls only (e.g. the docker bridge, 172.17.0.1)")
     p.add_argument("--agents", action="store_true", help="also run the agents in this process, as work appears")
     p.add_argument("--agent-interval", type=float, default=30.0, help="seconds between agent rounds when idle")
     p.add_argument("--tick-interval", type=float, default=60.0, help="seconds between ticks (scheduled work, overdue items); 0 turns it off")

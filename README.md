@@ -184,6 +184,34 @@ sealed marker, and from then on verify holds the track to the anchors again. Not
 Searches ignore accents and case: "cote" and "helene" find "Hélène Côté". Records are stored as written, with a folded copy for searching. On
 Medplum the hub matches every page of results itself.
 
+### Office documents
+
+Practice Hub can open office documents (ODF: .odt, .ods, .odp, .odg; and .docx, .xlsx, .pptx, plus .csv and .txt
+where Collabora offers them) in **Collabora Online**, so several people edit one document at the same time. It is
+optional and off until you point the hub at a Collabora server; nothing about it is bundled.
+
+- Set `PRACTICEHUB_COLLABORA_URL` (Collabora as browsers reach it), `PRACTICEHUB_WOPI_BASE` (the hub as Collabora
+  reaches it) and, if the hub must use another address, `PRACTICEHUB_COLLABORA_DISCOVERY_URL`. Collabora's
+  `aliasgroup1` names the WOPI base, so it opens files from this hub only. `docker compose --profile office`
+  runs one; for local work, `practicehub serve --wopi-host 172.17.0.1` also listens on the docker bridge, for
+  `/wopi/` calls only.
+- An office attachment gets **Open** and **Edit together**; a record with a free attachment field gets **New
+  document** (a blank text document, spreadsheet or presentation). The editor is a full page with the record's
+  title, a way back, and who has it open.
+- The hub is the WOPI host: files stay in its database, and Collabora holds a copy only while it is open. Every call
+  carries a 10-hour access token bound to the member, record, field and file, and is checked against the hub's own
+  rules; WOPI proof keys are verified (RSA-SHA256, standard library) whenever Collabora's discovery publishes them.
+- Autosaves are a working copy, not a version. Closing the document, or saving it, makes a new version of the record
+  whose history names everyone who edited. A working copy left an hour (Collabora gone without a final save) becomes a
+  version as its last editor. Collabora saves with the token of whoever changed the document last, so the names are
+  the people whose changes were saved; someone who typed but whose change reached the hub in another person's save
+  is not named.
+- A released document (a locked lifecycle state) opens read-only; Revise it first. A signed file saved again is a new
+  version, which is not signed, and the page says so.
+- Licensing: Collabora Online is MPL-2.0. The `collabora/code` image is CODE, the development edition, with a welcome
+  banner and limits on connections; for production, use a supported Collabora build or subscription. The practice
+  decides.
+
 ## Crafting workflows for your practice
 
 Open **Workflows → Create workflow**, or **Edit workflow** on an existing one. The editor draws the workflow as a
@@ -276,7 +304,7 @@ The wiki rests on three core features that any module can use:
 ```
 practicehub/          the core: hub, engine, workflows, blocks, sandbox, backends, track, authz, records, models, web, cli
   agents/runner.py    an agent's loop: inbox → context → model → answer (or escalate)
-  integrations/       Keycloak
+  integrations/       Keycloak; Collabora (discovery, proof keys, blank documents) and its WOPI host
 packs/general-practice/  roles, data classes, grants, members, 8 workflows, 8 skills, 3 blocks, stand-in answers
 modules/              dms (document control), qms (quality), wiki
 tests/                rules, web (real HTTP), another practice (accounting)

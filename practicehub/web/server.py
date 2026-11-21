@@ -30,6 +30,7 @@ from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
+from .office_pages import OfficePages
 from .records_pages import Download, RecordPages, a_an
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
@@ -64,7 +65,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(RecordPages, DefinitionPages):
+class App(RecordPages, DefinitionPages, OfficePages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -162,6 +163,7 @@ class App(RecordPages, DefinitionPages):
         R("GET", r"/schedule", self.page_schedule)
         self.record_routes(R)
         self.definition_routes(R)
+        self.office_routes(R)
 
     def route(self, method, pattern, fn, auth=True):
         self.routes.append((method, re.compile(pattern + r"/?$"), fn, auth))
@@ -174,6 +176,8 @@ class App(RecordPages, DefinitionPages):
         req = {"method": method, "path": path, "query": query, "headers": headers, "body": body, "me": None}
         self._local.me = None
         try:
+            if path.startswith("/wopi/"):  # Collabora, with an access token of its own (office_pages, wopi.py)
+                return self.handle_wopi(method, raw_path, headers, body)
             return self._dispatch(method, path, query, is_api, req, headers)
         except Exception:  # a bug is a 500 with no detail to the client; the traceback goes to stderr
             import traceback
@@ -804,8 +808,8 @@ class App(RecordPages, DefinitionPages):
     def page_login(self, req):
         q = req["query"]
         if self.dev and q.get("as"):
-            nxt = q.get("next", "/")
-            nxt = nxt if nxt.startswith("/") and not nxt.startswith("//") and "\\" not in nxt else "/"
+            nxt = str(q.get("next") or "/")
+            nxt = nxt if re.fullmatch(r"/(?![/\\])[^\s\\]*", nxt) else "/"  # a page here, never another site
             raise Redirect(nxt, f"ph_as={urllib.parse.quote(q['as'])}; Path=/; HttpOnly; SameSite=Strict")
         dev = ""
         if self.dev:
@@ -2848,15 +2852,42 @@ meaning = "I approve this"
 
 
 # ================================================================================================== server
-def make_handler(app: App):
+def make_handler(app: App, only: str | None = None):
+    """``only``: a path prefix this listener serves, and nothing else (the WOPI listener Collabora reaches)."""
     class Handler(BaseHTTPRequestHandler):
         server_version = "PracticeHub"
 
+        def _chunked(self) -> bytes | None:
+            out = b""
+            while True:
+                line = self.rfile.readline(64)
+                try:
+                    size = int(line.split(b";", 1)[0].strip(), 16)
+                except ValueError:
+                    return None
+                if size == 0:
+                    while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
+                        pass
+                    return out
+                if len(out) + size > MAX_BODY:
+                    return None
+                out += self.rfile.read(size)
+                self.rfile.readline(4)
+
         def _do(self):
+            if only and not self.path.startswith(only):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             try:
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 n = -1
+            chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
+            body = self._chunked() if chunked else None
+            if chunked and body is None:
+                n = MAX_BODY + 1
             if n < 0 or n > MAX_BODY:  # refused before it is read: a request is never larger than a file and a form
                 self.send_response(413 if n > 0 else 400)
                 self.send_header("Content-Length", "0")
@@ -2864,7 +2895,8 @@ def make_handler(app: App):
                 self.end_headers()
                 self.close_connection = True
                 return
-            body = self.rfile.read(n) if n else b""
+            if not chunked:
+                body = self.rfile.read(n) if n else b""
             headers = {k.lower(): v for k, v in self.headers.items()}
             status, h, payload = app.handle(self.command, self.path, headers, body)
             self.send_response(status)
@@ -2884,10 +2916,18 @@ def make_handler(app: App):
     return Handler
 
 
-def serve(hub, host: str = "127.0.0.1", port: int = 8200, *, dev: bool = False, oidc=None) -> None:
+def serve(hub, host: str = "127.0.0.1", port: int = 8200, *, dev: bool = False, oidc=None,
+          wopi_hosts: tuple[str, ...] = ()) -> None:
+    """``wopi_hosts``: more addresses to listen on, on the same port, for Collabora's WOPI calls only (a docker
+    bridge address, say): nothing else, dev sign-in included, is served there."""
     if port in FORBIDDEN_PORTS:
         raise SystemExit(f"port {port} is reserved on this machine; pick another (default 8200)")
-    httpd = ThreadingHTTPServer((host, port), make_handler(App(hub, dev=dev, oidc=oidc)))
+    app = App(hub, dev=dev, oidc=oidc)
+    httpd = ThreadingHTTPServer((host, port), make_handler(app))
+    for extra in wopi_hosts:
+        side = ThreadingHTTPServer((extra, port), make_handler(app, only="/wopi/"))
+        threading.Thread(target=side.serve_forever, daemon=True).start()
+        print(f"WOPI (Collabora) on http://{extra}:{port}/wopi/")
     print(f"Practice Hub on http://{host}:{port}/" + (" (dev sign-in on)" if dev else ""))
     try:
         httpd.serve_forever()

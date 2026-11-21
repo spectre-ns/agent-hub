@@ -46,3 +46,11 @@ ingress:
   host: ""
   tls: []
   annotations: {}
+
+# Office documents (optional): run Collabora Online yourself (its own chart, e.g. collabora/collabora-online, pinned
+# to a tested version; CODE is a development edition, so production wants a supported build or subscription), set
+# its aliasgroup1 to this hub's in-cluster URL, and give the hub, in hub.env or hub.envFrom:
+#   PRACTICEHUB_COLLABORA_URL            Collabora's URL as browsers reach it (through your ingress)
+#   PRACTICEHUB_WOPI_BASE                this hub's URL as Collabora reaches it (http://<release>-practicehub:8200)
+#   PRACTICEHUB_COLLABORA_DISCOVERY_URL  Collabora's in-cluster URL, if the hub cannot use the browser URL
+# Unset, the hub shows no office buttons. Files never leave the hub's database: Collabora holds them only while open.

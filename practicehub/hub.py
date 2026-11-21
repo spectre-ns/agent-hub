@@ -1778,12 +1778,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
 
-    def _write_version(self, rt: schema.RecordType, rec: dict, member: dict, run_id: str | None) -> None:
+    def _write_version(self, rt: schema.RecordType, rec: dict, member: dict, run_id: str | None,
+                       comment: str | None = None) -> None:
         ref = f"{rt.id}/{rec['id']}"
         version = (self.db.record_versions.max("version", {"type": rt.id, "id": rec["id"]}) or 0) + 1
         self.db.record_versions.insert({"_id": f"{ref}@{version}", "type": rt.id, "id": rec["id"], "version": version,
                                         "data": rec, "refs": _refs_in(rec), "actor": member.get("id", ""),
-                                        "run_id": run_id, "at": utcnow()})
+                                        "run_id": run_id, "at": utcnow(),
+                                        **({"comment": comment} if comment else {})})
         if any(f["type"] == "markdown" for f in rt.fields):
             self._retitle(rt, rec)
         self._relink(rt, rec)
@@ -1901,10 +1903,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     moved = (old, new)
             self._check_record(rt, after)
             rec = self.records.update(rtype, rid, after)  # a store replaces the record: store what was validated
-            self._write_version(rt, rec, member, run_id)
+            note = comment.strip() if comment and comment.strip() else None
+            self._write_version(rt, rec, member, run_id, note)  # the version keeps the comment (who edited it, why)
             changed = sorted(k for k in set(before) | set(rec) if k != "meta" and before.get(k) != rec.get(k))
             ev = self.track.append(member, "record.updated", ref, cause=cause, run_id=run_id,
-                                   data={"changed": changed})
+                                   data={"changed": changed, **({"comment": note} if note and not moved else {})})
             if moved:
                 ev = self.track.append(member, "record.transitioned", ref, cause=ev, run_id=run_id,
                                        data={"from": moved[0], "to": moved[1],

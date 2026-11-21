@@ -27,6 +27,7 @@ view_versions       "view_id@version"                      view_id ...
 skill_versions      "skill_id@version"                     skill_id ...
 data_classes        id                                     id name description module
 record_versions     "Type/id@version"                      type id version data{} refs[] actor run_id at
+office_drafts       file id (signed, opaque)              ref field base working name editors[] lock modified
 links               "from_ref|rel|to_ref"                  from_ref rel to_ref
 titles              "Type/id"                              type key (the title folded), for types with formatted text
 mention_names       "Type/id|key"                          from_ref type key: a title named by [[...]] in that record
@@ -63,6 +64,7 @@ INDEXES = {
     "tokens": ["member"],
     "tuples": ["subject", "object"],
     "records": [("type", "updated_at"), ("subject", "updated_at"), "updated_at"],
+    "office_drafts": [("ref", "field", "base"), ("ref", "working")],
     "workflow_versions": [("workflow_id", "status"), "status"],
     "block_versions": [("block_id", "status"), "status"],
     "type_versions": [("type_id", "status"), "status"],
