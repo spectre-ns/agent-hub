@@ -663,8 +663,28 @@ class App(RecordPages, DefinitionPages, OfficePages):
                 + item(f"/team/{me['id']}", "Your profile") + item("/me/settings", "Settings")
                 + '<div role="separator"></div>' + item("/logout", "Sign out") + '</div></div>')
 
-    def _sidebar(self, req, me) -> str:
+    def _nav_path(self, req, me) -> str:
+        """The page the sidebar lights a link for: a part's page (an allergy, a visit's note) is lit as its owner's,
+        up to the first owner that is not itself a part."""
         path = req["path"]
+        for _ in range(4):  # a part of a part of a part, at most
+            m = re.fullmatch(r"/records/([A-Za-z][A-Za-z0-9_]*)/(new|[A-Za-z0-9_.-]+)(/.*)?", path)
+            rt = self.hub.record_type(m.group(1)) if m else None
+            if not (rt and rt.part_of and me and self._may_read(me, rt.id)):
+                break
+            if m.group(2) == "new":  # adding a part from its owner's page: the owner is in the query
+                of = self._owner_field(rt)
+                owner = str(req["query"].get(of["name"]) or req["query"].get(of["path"]) or "") if of else ""
+            else:
+                rec = self.hub.records.read(rt.id, m.group(2))
+                owner = self.hub.owner_of(rec) if rec else None
+            if not owner or not schema.REF_TEXT.fullmatch(owner):
+                break
+            path = self.record_href(owner)
+        return path
+
+    def _sidebar(self, req, me) -> str:
+        path = self._nav_path(req, me)
         mine = [i for i in self.hub.engine.inbox(me) if i["kind"] != "notice"]
         sp = f'/{self.subj["path"]}'
         hrefs = ["/", "/board", "/runs", sp, "/schedule", "/records"] + [f"/records/{t}" for t in self.shortcuts(me)] \
