@@ -853,7 +853,8 @@ class RecordPages:
                        f'Add {e(a_an(self._lower(rt.label)))} under this one</a>' if may_write else "")
                 main.append(f"<section class='children'><h2>Under this {e(self._lower(rt.label))}{add}</h2>" + (
                     "<ul class='plain'>" + "".join(
-                        f'<li><a href="{e(self.record_href(f"{rtype}/{k["id"]}"))}">{e(hub.title(k))}</a></li>'
+                        f'<li><a href="{e(self.record_href(f"{k["resourceType"]}/{k["id"]}"))}">{e(hub.title(k))}</a>'
+                        f'{self._kind_badge(rtype, k)}</li>'
                         for k in kids) + "</ul>" if kids else "<p class='muted'>Nothing yet.</p>") + "</section>")
         elif tab == "signatures":
             main.append(self._signatures_panel(me, rt, rec, ref, st, None if typed else kept, error))
@@ -895,7 +896,7 @@ class RecordPages:
         if is_page:
             body = refused + self._page_body(req, rt, shown if editing else rec, main, prose, st, tab, editing, url,
                                              ver, moves_html, edit_btn, auto, sigs, cur, may_write)
-            above = [(self.record_href(f"{rtype}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
+            above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
             return self.layout(req, hub.title(rec), body, heading=not editing,
                                crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
                                        (None, hub.title(rec))], subnav=self.navigator(me, rtype, ref))
@@ -921,7 +922,7 @@ class RecordPages:
                 + "</ul>")
         title = hub.title(rec)
         body = (f'<div class="issue"><div>{"".join(main)}</div><aside class="issue-side">{"".join(side)}</aside></div>')
-        above = [(self.record_href(f"{rtype}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
+        above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
         return self.layout(req, title, body, crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural),
                                                        *above, (None, title)], subnav=self.navigator(me, rtype, ref),
                            actions=edit_btn)
@@ -994,11 +995,13 @@ class RecordPages:
         if not nav:
             return ""
         hub, label = self.hub, nav["label"]
-        link = lambda r: f"{rtype}/{r['id']}"
+        rtype = nav["type"]
+        link = lambda r: f"{r['resourceType']}/{r['id']}"
 
         def a(r, cls=""):
             here = ' aria-current="page"' if link(r) == ref else ""
-            return f'<a class="{cls}" href="{e(self.record_href(link(r)))}"{here}>{e(hub.title(r))}</a>'
+            return (f'<a class="{cls}" href="{e(self.record_href(link(r)))}"{here}>{e(hub.title(r))}'
+                    f'{self._kind_badge(rtype, r)}</a>')
         tops = "".join(f'<li>{a(r, "top")}</li>' for r in nav["tops"]) or '<li class="muted">None yet</li>'
         top = next((r for r in nav["tops"] if link(r) == nav["top"]), None)
         rows = nav["tree"]
@@ -1021,11 +1024,22 @@ class RecordPages:
             inner, _ = branch(0, 0)
             add = (f'<a class="btn subtle add" href="/records/{e(rtype)}/new?parent={e(urllib.parse.quote(nav["top"]))}" data-modal>'
                    f'+ Add under {e(hub.title(top))}</a>' if hub.may_write(me, rtype) else "")
+            add += "".join(f'<a class="btn subtle add" href="/records/{e(t)}/new?parent={e(urllib.parse.quote(nav["top"]))}"'
+                           f' data-modal>+ New {e(hub.record_type(t).label)}</a>'
+                           for t in hub.tree_types(rtype)[1:] if hub.may_write(me, t))
             pages = (f'<div class="sec">{e(hub.title(top))}</div>{add}'
                      + (f'<ul class="pagetree">{inner}</ul>' if inner else '<p class="muted">No pages under it yet.</p>'))
         return (f'<nav class="subnav" aria-label="{e(label)} and pages"><details class="spaces" '
                 f'{"" if top is not None else "open"}><summary class="sec">{e(label)}</summary><ul class="tops">{tops}'
                 f'</ul></details>{pages}</nav>')
+
+    def _kind_badge(self, rtype: str, r: dict) -> str:
+        """In a tree of several types, a record of another type than the tree's carries its type's name."""
+        t = r.get("resourceType")
+        if not t or t == rtype:
+            return ""
+        other = self.hub.record_type(t)
+        return f' <span class="kind-badge">{e(other.label if other else t)}</span>' if other else ""
 
     def _signatures_panel(self, me, rt, rec, ref, st, kept: dict | None = None, error: Exception | None = None) -> str:
         kept = kept or {}

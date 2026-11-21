@@ -2,11 +2,14 @@
 
 
 def summarize(rec: dict) -> str:
-    if rec.get("resourceType") != "WikiPage":
+    if rec.get("resourceType") not in ("WikiPage", "Procedure"):
         return ""
     from practicehub.markup import plain
     words = plain(rec.get("body") or "", 140)
-    return f"{rec.get('title', '')}: {words}" if words else str(rec.get("title", ""))
+    title = str(rec.get("title", ""))
+    if rec.get("resourceType") == "Procedure":
+        title = f"{rec.get('number', '')} {title}, revision {rec.get('revision') or 0} ({rec.get('status', '')})"
+    return f"{title}: {words}" if words else title
 
 
 def demo(hub) -> None:
@@ -18,7 +21,10 @@ def demo(hub) -> None:
         return
     hub.authz.write([("role:wiki-owner", "assignee", member_ref(m["id"])) for m in owners]
                     + [("role:wiki-editor", "assignee", member_ref(m["id"])) for m in hub.members("person")
-                       if m["status"] == "active"])
+                       if m["status"] == "active"]
+                    # the physicians release procedures (none of them writes the demo's procedure in review)
+                    + [("role:sop-approver", "assignee", member_ref(m["id"])) for m in hub.members("person")
+                       if m["status"] == "active" and "physician" in m["roles"]])
     me = {"id": "module:wiki", "kind": "automation", "name": "Wiki demo", "status": "active"}
     owner = owners[0]["id"]
 
@@ -89,3 +95,63 @@ practicehub verify
 
 Restores are done by IT only, and every restore is written to the track.
 """, it, labels=["backup"])
+
+    # two procedures under release control: one released, one waiting for its release review
+    procs = page("Procedures", """
+The clinic's standard operating procedures. A procedure is released by a SOP approver who did not write it; while it
+is revised, everyone keeps working from the released revision. Read each one you work under, and sign that you have.
+""", home, labels=["sop"])
+    import datetime as _dt
+    today = _dt.date.today()
+    hub.create_record(me, "Procedure", {
+        "title": "Hand hygiene", "number": "SOP-021", "revision": 2, "status": "released", "owner": owner,
+        "parent": {"reference": f"WikiPage/{procs['id']}"},
+        "effective": (today - _dt.timedelta(days=120)).isoformat(),
+        "review_by": (today + _dt.timedelta(days=245)).isoformat(),
+        "change_summary": "Alcohol rub is now the default; soap and water only when hands are visibly dirty.",
+        "body": """
+## When
+
+Clean your hands **before** touching a patient, **before** a clean or aseptic task, **after** contact with body
+fluids, **after** touching a patient, and **after** touching their surroundings.
+
+## How
+
+1. Use alcohol hand rub unless your hands are visibly dirty.
+2. Rub every surface of both hands for 20 to 30 seconds, until dry.
+3. If your hands are visibly dirty, or after caring for a patient with diarrhoea, wash with soap and water for
+   40 to 60 seconds, and dry with a single-use towel.
+
+## Checklist for each room
+
+- [x] Hand rub at the door and at the sink
+- [x] Soap and paper towels stocked
+- [ ] Poster at the sink
+
+> [!note]
+> Gloves are not a substitute for clean hands. Clean your hands before you put gloves on and after you take them off.
+""".strip()})
+    try:
+        author = hub.member("noor")
+    except Exception:  # noqa: BLE001
+        author = owners[0]
+    draft = hub.create_record(author, "Procedure", {
+        "title": "Cleaning the treatment rooms", "number": "SOP-022", "status": "draft", "owner": author["id"],
+        "parent": {"reference": f"WikiPage/{procs['id']}"},
+        "change_summary": "First issue.",
+        "body": """
+## Between patients
+
+1. Wipe the couch, the trolley top and anything the patient touched with a detergent wipe.
+2. Change the couch roll.
+3. Empty the sharps bin when it is three-quarters full.
+
+## At the end of the day
+
+| Surface | With | Who |
+|---|---|---|
+| Floors | mop and detergent | cleaner |
+| Sinks and taps | detergent wipe | clinic nurse |
+| Fridge (vaccines) | do not clean: report anything spilt | clinic nurse |
+""".strip()})
+    hub.update_record(author, f"Procedure/{draft['id']}", {"status": "in-review"})  # its release review starts

@@ -1583,50 +1583,79 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def parent_of(self, rt: schema.RecordType, rec: dict) -> str | None:
         return schema.ref_of(schema.first(rec, rt.parent)) if rt.parent else None
 
+    def tree_types(self, rtype: str) -> list[str]:
+        """The types that share a tree with this one: it, then each type whose parent may be one of this type and
+        which this type may sit under (a wiki's pages and its procedures). One tree, one navigator."""
+        rt = self.record_type(rtype)
+        if not rt or not rt.parent:
+            return [rtype] if rt else []
+        mine = set(rt.field(rt.parent)["target"])
+        out = [rtype]
+        for tid, other in sorted(self.record_types().items()):
+            if tid != rtype and other.parent and tid in mine and rtype in other.field(other.parent)["target"]:
+                out.append(tid)
+        return out
+
+    def _rt_of(self, rec: dict):
+        return self.record_type(rec.get("resourceType", ""))
+
     def ancestors(self, member: dict, ref: str) -> list[dict]:
-        """The records above this one in its type's tree, top first, that the member may read."""
+        """The records above this one in its tree, top first, that the member may read (``resourceType`` says which
+        type each is)."""
         t, _, rid = ref.partition("/")
         rt = self.record_type(t)
         out, seen = [], {ref}
         rec = self.records.read(t, rid) if rt and rt.parent else None
         while rec:
-            up = self.parent_of(rt, rec)
+            rrt = self._rt_of(rec)
+            up = self.parent_of(rrt, rec) if rrt else None
             if not up or up in seen or len(out) > 50:
                 break
             seen.add(up)
             rec = self.records.read(*up.split("/", 1))
-            if rec:
+            if rec and self.may_read(member, rec["resourceType"]):
                 out.append(rec)
+            elif rec is None or not self.may_read(member, up.split("/", 1)[0]):
+                break
         return list(reversed(out)) if self.may_read(member, t) else []
 
     def children(self, member: dict, ref: str) -> list[dict]:
-        """The records directly under this one in its type's tree, by title."""
+        """The records directly under this one in its tree, by title, of any type in the tree that the member may
+        read."""
         t = ref.split("/", 1)[0]
         rt = self.record_type(t)
         if not rt or not rt.parent or not self.may_read(member, t):
             return []
-        rel = rt.field(rt.parent)["rel"] if rt.field(rt.parent) else rt.parent
-        kids = [self.records.read(*r["from_ref"].split("/", 1)) for r in self.db.links.find(
-            {"to_ref": ref, "rel": rel, "from_ref": {"$regex": f"^{re.escape(t)}/"}})]
+        kids = []
+        for kt in self.tree_types(t):
+            krt = self.record_type(kt)
+            if not self.may_read(member, kt):
+                continue
+            rel = krt.field(krt.parent)["rel"] or krt.parent
+            kids += [self.records.read(*r["from_ref"].split("/", 1)) for r in self.db.links.find(
+                {"to_ref": ref, "rel": rel, "from_ref": {"$regex": f"^{re.escape(kt)}/"}})]
         return sorted((k for k in kids if k), key=lambda r: self.title(r).casefold())
 
     def tree(self, member: dict, rtype: str, where=None) -> list[tuple[int, dict]]:
-        """Every record of a type that has a tree, as (depth, record) in reading order: each under its parent, each
-        level by title. A record whose parent is missing or filtered out sits at the top."""
+        """Every record in a tree, as (depth, record) in reading order: each under its parent, each level by title.
+        A record whose parent is missing or filtered out sits at the top. The tree holds every type that shares
+        it (``tree_types``) that the member may read; ``resourceType`` says which each is."""
         rt = self.record_type(rtype)
         if not rt or not self.may_read(member, rtype):
             return []
-        recs = [r for r in self.records.search(rtype, limit=None) if where is None or where(r)]
-        ids = {f"{rtype}/{r['id']}" for r in recs}
+        recs = [r for t in self.tree_types(rtype) if self.may_read(member, t)
+                for r in self.records.search(t, limit=None) if where is None or where(r)]
+        ids = {f"{r['resourceType']}/{r['id']}" for r in recs}
         under: dict = {}
         for r in recs:
-            up = self.parent_of(rt, r) if rt.parent else None
+            rrt = self._rt_of(r)
+            up = self.parent_of(rrt, r) if rrt and rrt.parent else None
             under.setdefault(up if up in ids else None, []).append(r)
         out, seen = [], set()
 
         def walk(key, depth):
             for r in sorted(under.get(key, []), key=lambda x: self.title(x).casefold()):
-                ref = f"{rtype}/{r['id']}"
+                ref = f"{r['resourceType']}/{r['id']}"
                 if ref in seen:
                     continue
                 seen.add(ref)
@@ -1634,29 +1663,42 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 walk(ref, depth + 1)
         walk(None, 0)
         for r in recs:  # a loop no write lets in, but never hidden if one is there
-            if f"{rtype}/{r['id']}" not in seen:
+            if f"{r['resourceType']}/{r['id']}" not in seen:
                 out.append((0, r))
         return out
 
     def navigator(self, member: dict, rtype: str, ref: str | None = None) -> dict | None:
-        """A tree type's second navigation column, for the member: its tops (spaces), and the tree of the top the
-        open record is in. Records in the hidden states are left out, but the open one and those above it never."""
+        """A tree's second navigation column, for the member: its tops (spaces), and the tree of the top the open
+        record is in. Records in their type's hidden states are left out, but the open one and those above it
+        never. Opened from any type in the tree, it is the tree of the first type in it that has a navigator."""
         rt = self.record_type(rtype)
+        if rt and not rt.navigator:
+            rtype = next((t for t in self.tree_types(rtype) if self.record_type(t).navigator), rtype)
+            rt = self.record_type(rtype)
         if not rt or not rt.navigator or not self.may_read(member, rtype):
             return None
-        keep = {ref} | {f"{rtype}/{a['id']}" for a in (self.ancestors(member, ref) if ref else [])}
-        hide = set(rt.navigator["hide"])
-        state = (lambda r: schema.first(r, rt.lifecycle["path"])) if rt.lifecycle else (lambda r: None)
-        rows = self.tree(member, rtype, where=lambda r: f"{rtype}/{r['id']}" in keep or state(r) not in hide)
+        refof = lambda r: f"{r['resourceType']}/{r['id']}"
+        above = self.ancestors(member, ref) if ref else []
+        keep = {ref} | {refof(a) for a in above}
+
+        def shown(r):
+            if refof(r) in keep:
+                return True
+            trt = self._rt_of(r)
+            if not trt or not trt.lifecycle:
+                return True
+            hide = set((trt.navigator or rt.navigator)["hide"])
+            return schema.first(r, trt.lifecycle["path"]) not in hide
+        rows = self.tree(member, rtype, where=shown)
         tops = [r for d, r in rows if d == 0]
-        top = next((f"{rtype}/{a['id']}" for a in self.ancestors(member, ref)), ref) if ref else None
+        top = next((refof(a) for a in above), ref) if ref else None
         tree, inside = [], False
         for d, r in rows:
             if d == 0:
-                inside = f"{rtype}/{r['id']}" == top
+                inside = refof(r) == top
             if inside and d > 0:
                 tree.append((d - 1, r))
-        return {"label": rt.navigator["tops"], "tops": tops, "top": top, "tree": tree, "open": keep}
+        return {"label": rt.navigator["tops"], "type": rtype, "tops": tops, "top": top, "tree": tree, "open": keep}
 
     def _member_ids(self) -> set[str]:
         return set(self.db.members.distinct("_id"))
