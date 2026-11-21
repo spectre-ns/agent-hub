@@ -163,6 +163,39 @@ padding:0 8px;min-width:24px;text-align:center}
 .side a[aria-current=page] .count,.side a.nav.on .count{background:var(--brand);color:var(--brand-fg)}
 .side .legal{margin:24px 12px 0;font-size:12px;line-height:16px;color:var(--subtlest)}
 main{padding:24px 32px 32px;min-width:0}main:focus{outline:none}
+/* ---- the admin shell: the settings, a screen of their own, with a ribbon of every setup item */
+.admin-top .logo{padding:4px 8px}
+.admin-top .back-to-work{margin-right:4px;white-space:nowrap}
+.admin-shell{display:grid;grid-template-columns:240px minmax(0,1fr);min-height:calc(100vh - 56px)}
+.ribbon{background:var(--sunken);border-right:1px solid var(--border);padding:16px 8px;position:sticky;top:56px;
+height:calc(100vh - 56px);overflow-y:auto}
+.ribbon .rib-sec{font-size:11px;line-height:16px;font-weight:700;font-variant:small-caps;text-transform:lowercase;
+letter-spacing:.06em;color:var(--subtlest);margin:16px 12px 4px}
+.ribbon a.rib{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:3px;color:var(--subtle);font-weight:500;
+box-shadow:inset 3px 0 0 transparent}
+.ribbon a.rib:hover{background:var(--neutral);color:var(--fg);text-decoration:none}
+.ribbon a.rib.on{background:var(--selected-bg);color:var(--selected-fg);box-shadow:inset 3px 0 0 var(--brand)}
+.ribbon a svg,.admin-cards svg{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;
+stroke-linecap:round;stroke-linejoin:round}
+.admin-group{margin:0 0 24px}.admin-group h2{font-size:16px;line-height:20px;margin:0 0 2px}
+.admin-group>p{margin:0 0 8px}
+ul.admin-cards{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(240px,100%),1fr));gap:8px}
+ul.admin-cards a{display:grid;grid-template-columns:16px minmax(0,1fr);column-gap:8px;row-gap:2px;align-items:center;align-content:start;
+padding:12px;border-radius:3px;border:1px solid var(--border);background:var(--surface);color:var(--fg);text-decoration:none;
+box-shadow:var(--shadow-raised);height:100%}
+ul.admin-cards a svg{color:var(--brand)}ul.admin-cards a .muted{grid-column:2;font-size:12px;line-height:16px}
+ul.admin-cards a:hover,ul.admin-cards a:focus-visible{background:var(--raised-hover);border-color:var(--brand)}
+@media (max-width:767px){
+  .admin-shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr}
+  .ribbon{position:sticky;top:56px;z-index:10;height:auto;display:flex;align-items:center;gap:4px;padding:8px 16px;
+  overflow-x:auto;overflow-y:hidden;border-right:0;border-bottom:1px solid var(--border);scrollbar-width:thin}
+  .ribbon .rib-group{display:flex;gap:4px;padding-left:4px;margin-left:4px;border-left:1px solid var(--border)}
+  .ribbon .rib-sec{display:none}
+  .ribbon a.rib{white-space:nowrap;padding:6px 10px;box-shadow:inset 0 -3px 0 transparent}
+  .ribbon a.rib.on{box-shadow:inset 0 -3px 0 var(--brand)}
+  .admin-top .logo span:not(.mark){max-width:40vw;overflow:hidden;text-overflow:ellipsis}
+}
+@media (max-width:480px){.admin-top .logo span:not(.mark){display:none}.admin-top .me .name{display:none}}
 .skip{position:absolute;left:8px;top:-48px;z-index:50;background:var(--surface,#fff);padding:8px 12px;border-radius:3px}
 .skip:focus{top:8px}
 
@@ -623,6 +656,10 @@ ICONS = {
     "module": '<rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/>'
               '<rect x="3" y="13" width="8" height="8" rx="1"/><path d="M17 13v8M13 17h8"/>',
     "block": '<path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>',
+    "skill": '<path d="M12 3l2.3 5.4 5.7.5-4.3 3.8 1.3 5.6L12 15.4 7 18.3l1.3-5.6L4 8.9l5.7-.5z"/>',
+    "access": '<path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+    "settings": '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1'
+                'M4.9 19.1L7 17M17 7l2.1-2.1"/>',
 }
 
 JS = r"""
@@ -851,6 +888,12 @@ document.querySelectorAll("textarea[data-check]").forEach((t) => {
   t.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(check, 500); });
   if (t.value.trim()) check();
 });
+// The settings ribbon, a strip on a narrow screen: the lit item scrolled into view (the page itself stays put).
+(function () {
+  const r = document.querySelector(".ribbon"), on = r && r.querySelector("a.on");
+  if (!r || !on || r.scrollWidth <= r.clientWidth) return;
+  r.scrollLeft = on.offsetLeft - (r.clientWidth - on.offsetWidth) / 2;
+})();
 // The narrow-screen menu: a real button, so it is reachable and announced.
 document.addEventListener("click", (ev) => {
   const b = ev.target.closest(".menu-toggle");

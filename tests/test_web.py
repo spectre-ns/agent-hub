@@ -986,15 +986,15 @@ def test_start_work_picks_a_record_type_and_settings_live_in_the_practice_menu(h
     code, form = call(server, "GET", "/records/Document/new", rana)
     assert code == 200 and "data-modal-body" in form and 'action="/records/Document"' in form
     home = call(server, "GET", "/", rana)[1]
-    assert 'class="avatar-menu practice-menu"' in home and 'href="/define/types">Record types</a>' in home
+    assert 'class="avatar-menu practice-menu"' in home and 'href="/define/types">Record types</a>' not in home
     side = home.split('<aside class="side"')[1].split("</aside>")[0]
     assert "Set up" not in side and "/define/types" not in side and "/workflows" not in side
     assert 'href="/records/Document"' in side                    # a module's shortcut is in the sidebar
     assert 'href="/start" data-modal accesskey="c"' in home
     code, page = call(server, "GET", "/settings", rana)
-    assert code == 200 and "Record types" in page and "Track" in page
+    assert code == 200 and "Record types" in page and "Track" in page and 'class="admin-cards"' in page
     jo = call(server, "GET", "/settings", token(hub, "jo", by="jo"))[1]
-    assert "Record types" in jo and "/track" not in jo.split("<main")[1]   # audit is for policy owners
+    assert "Record types" in jo and "/track" not in jo   # audit is for policy owners, in the ribbon and the cards
     reg = call(server, "GET", "/patients", token(hub, "jo"))[1]
     assert 'class="tabs form-tabs"' in reg                       # a screen in parts is tabs (the script shows one)
 
@@ -1077,3 +1077,50 @@ def test_short_choices_are_option_cards_and_a_yes_no_is_a_switch(hub):
     from practicehub.web.assets import CSS as css
     assert "input.opt-input{position:absolute;opacity:0;width:1px;height:1px" in css
     assert "label.radio:has(>input.opt-input:checked)" in css and "fieldset.options.decide label.radio{min-width:160px}" in css
+
+
+def _ribbon(page):
+    return page.split('<nav class="ribbon"')[1].split("</nav>")[0] if '<nav class="ribbon"' in page else None
+
+
+def test_settings_are_a_screen_of_their_own_with_a_ribbon(hub, server):
+    """Settings change the whole screen: a slim bar with the way back to the work, and a ribbon, left, of every setup
+    item, the closest one lit. Work pages keep the work sidebar and have no ribbon."""
+    rana = token(hub, "rana")
+    for path, lit in [("/settings", "/settings"), ("/team", "/team"), ("/team/new", "/team"), ("/team/jo", "/team"),
+                      ("/modules", "/modules"), ("/workflows", "/workflows"), ("/workflows/patient-question", "/workflows"),
+                      ("/define/types", "/define/types"), ("/define/types/Patient", "/define/types"),
+                      ("/define/views", "/define/views"), ("/blocks", "/blocks"), ("/define/skills", "/define/skills"),
+                      ("/track", "/track"), ("/access", "/access"), ("/outbox", "/outbox")]:
+        code, page = call(server, "GET", path, rana)
+        assert code == 200, (path, page[:300])
+        rib = _ribbon(page)
+        assert rib is not None and '<aside class="side"' not in page, path
+        assert rib.count('aria-current=page') == 1 and f'href="{lit}" aria-current=page' in rib, path
+        assert 'class="btn subtle back-to-work" href="/"' in page and "settings</span></a>" in page
+        assert "<main" in page and "data-modal" not in rib
+    pat = hub.records.search("Patient")[0]
+    for path in ("/", "/records", f"/records/Patient/{pat['id']}", "/team/rana", "/me/settings"):
+        code, page = call(server, "GET", path, rana)
+        assert code == 200 and '<aside class="side"' in page and _ribbon(page) is None, path
+    # a form opened in a dialog from a settings page still has its body to show
+    assert "data-modal-body" in call(server, "GET", "/team/new", rana)[1]
+
+
+def test_the_ribbon_shows_a_member_only_what_they_may_use(hub, server):
+    """A member who is not a policy owner sees the set up items, and no audit; the practice menu is small: the
+    practice, Settings and Home, the setup items being in the ribbon."""
+    jo = token(hub, "jo")
+    page = call(server, "GET", "/settings", jo)[1]
+    rib = _ribbon(page)
+    assert 'href="/team"' in rib and 'href="/define/types"' in rib and 'href="/workflows"' in rib
+    assert 'href="/track"' not in rib and 'href="/access"' not in rib   # Track and the access report: policy owners
+    sam = _ribbon(call(server, "GET", "/settings", token(hub, "sam"))[1])
+    assert 'href="/team"' in sam and "Audit" not in sam and 'href="/outbox"' not in sam
+    full = _ribbon(call(server, "GET", "/settings", token(hub, "rana"))[1])
+    assert 'href="/track"' in full and 'href="/access"' in full and "Audit" in full
+    home = call(server, "GET", "/", jo)[1]
+    menu = home.split('id="practice-menu"')[1].split("</div></div>")[0]
+    assert 'href="/settings">Settings</a>' in menu and 'href="/">Home</a>' in menu
+    for gone in ("/team", "/modules", "/workflows", "/define/", "/blocks", "/track", "/access", "/outbox"):
+        assert f'href="{gone}' not in menu
