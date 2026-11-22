@@ -7,7 +7,7 @@ import pytest
 
 from conftest import M, item_for, quiet, run_of
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
-from practicehub.hub import Denied, Invalid
+from practicehub.hub import Denied, Invalid, NotFound
 from practicehub.models import ModelError, ModelGateway
 
 
@@ -3312,3 +3312,81 @@ def test_a_field_names_a_declared_data_class(hub):
     with pytest.raises(Invalid) as e:
         hub.propose("type", M(hub, "rana"), bad)
     assert any("no-such-class" in p for p in e.value.problems)
+
+
+# ------------------------------------------------------------------------------------------- modules from another process
+def _two_processes(tmp_path, monkeypatch):
+    """A served hub and a command line on the same database, as two Hub objects (each loads what the track says)."""
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    served = Hub(tmp_path / "served", pack="general-practice")
+    served.install("general-practice", demo=True)
+    return served, Hub(tmp_path / "cli")
+
+
+def test_a_running_hub_loads_a_module_the_command_line_installed(tmp_path, monkeypatch):
+    from practicehub import mcp
+    served, cli = _two_processes(tmp_path, monkeypatch)
+    cli.approve_module_code(M(cli, "dr-amara"), "dms")
+    cli.install_module(M(cli, "rana"), "dms")
+    assert "dms" not in {m.id for m in served.pack.modules}  # not yet: nothing asked the served hub
+    assert served.module_status("dms")["state"] == "running"  # every page asks, and the hub loads it then
+    assert "dms" in {s["id"] for s in mcp.servers(served)}
+    assert any(e["action"] == "modules.reloaded" for e in served.track.list(limit=20))
+    assert not served.sync_modules()  # nothing changed since: two settings rows, nothing loaded again
+    # a module that builds on it installs from the served hub; and removing dms is refused while qms builds on it
+    served.approve_module_code(M(served, "dr-amara"), "qms")
+    served.install_module(M(served, "rana"), "qms")
+    with pytest.raises(Invalid, match="qms builds on dms"):
+        cli.uninstall_module(M(cli, "rana"), "dms")  # the command line saw qms arrive, from the database
+    cli.uninstall_module(M(cli, "rana"), "qms", "not used")
+    served.sync_modules()
+    assert {m.id for m in served.pack.modules} == {"dms"} and "qms" not in {s["id"] for s in mcp.servers(served)}
+
+
+def test_a_running_hub_runs_only_module_code_the_track_sealed(tmp_path, monkeypatch):
+    served, cli = _two_processes(tmp_path, monkeypatch)
+    cli.approve_module_code(M(cli, "dr-amara"), "dms")
+    cli.install_module(M(cli, "rana"), "dms")
+    # someone writes the install into the settings without a sealed install event: the served hub does not run it
+    cli.db.set_setting("modules", ["dms", "wiki"])
+    cli.db.set_setting("modules_rev", "forged")
+    st = served.module_status("wiki")
+    assert st["state"] == "not_running" and "signed install" in st["why"] and st["next"]
+    assert "wiki" not in {m.id for m in served.pack.modules}
+    assert served.module_status("dms")["state"] == "running"
+
+
+# ------------------------------------------------------------------------------------------- MCP: who may connect
+def test_no_mcp_server_is_reachable_until_a_second_policy_owner_approves(hub):
+    from practicehub import mcp
+    jo = M(hub, "jo")
+    assert all(not s["enabled"] for s in mcp.servers(hub))
+    for sid in ("core", "practice"):
+        with pytest.raises((Denied, NotFound)):  # off: as if the server were not there
+            mcp.issue_token(hub, jo, "jo", servers_=[sid], client="app", runs_in=mcp.residency(hub))
+    mcp.ask_access(hub, M(hub, "rana"), "practice", roles=["front-desk"], reason="desk", acknowledged=True)
+    with pytest.raises(Denied):
+        mcp.approve_access(hub, M(hub, "rana"), "practice")  # the asker does not approve
+    with pytest.raises(Denied):
+        mcp.approve_access(hub, jo, "practice")  # nor anyone who is not a policy owner
+    assert not mcp.server(hub, "practice")
+    mcp.approve_access(hub, M(hub, "dr-amara"), "practice")
+    assert mcp.server(hub, "practice") and not mcp.server(hub, "core")  # per server
+
+
+def test_an_mcp_token_is_not_an_api_token_and_an_agent_still_cannot_sign(hub):
+    from practicehub import mcp
+    roles = [r["id"] for r in hub.roles()]
+    mcp.ask_access(hub, M(hub, "rana"), "core", roles=roles, reason="agents", acknowledged=True)
+    mcp.approve_access(hub, M(hub, "dr-amara"), "core")
+    agent = M(hub, "intake-agent")
+    tok = mcp.issue_token(hub, M(hub, agent["sponsor"]), agent["id"], servers_=["core"], client="runner",
+                          runs_in=mcp.residency(hub))
+    assert hub.authenticate(tok) is None  # MCP only
+    member, cred = hub.credential(tok)
+    assert member["id"] == agent["id"] and cred["scope"] == "mcp" and cred["servers"] == ["core"]
+    assert mcp.admit(hub, "core", member, cred) is None and mcp.admit(hub, "practice", member, cred)[0] == 404
+    assert not [t for t in mcp.tools(hub, "core", member) if t["name"].startswith(("sign", "approve", "decide"))]
+    with pytest.raises(Denied):
+        mcp.ask_access(hub, agent, "practice", roles=roles, reason="x", acknowledged=True)  # agents decide nothing

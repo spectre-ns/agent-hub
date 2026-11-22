@@ -187,6 +187,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         req = {"method": method, "path": path, "query": query, "headers": headers, "body": body, "me": None}
         self._local.me = None
         try:
+            if path not in self.STATIC:
+                self.hub.sync_modules()  # a module the command line installed, upgraded or removed: loaded, or taken out
             if path.startswith("/wopi/"):  # Collabora, with an access token of its own (office_pages, wopi.py)
                 return self.handle_wopi(method, raw_path, headers, body)
             if path.startswith("/mcp/"):  # MCP servers, with a member's token (mcp_pages, mcp.py)

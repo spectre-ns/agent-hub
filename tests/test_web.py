@@ -237,13 +237,44 @@ def test_a_policy_owner_installs_modules_from_the_modules_page(hub, server):
     assert call(server, "GET", "/modules/no-such-module", token(hub, "rana"))[0] == 404
     _modules(hub, server)
     page = call(server, "GET", "/modules", token(hub, "rana"))[1]
-    assert page.count("installed</span>") == 2
+    assert page.count("installed, running</span>") == 2
     code, page = call(server, "GET", "/modules/qms", token(hub, "rana"))
     assert code == 200 and "nothing to upgrade" in page
     code, _ = call(server, "POST", "/modules/dms/remove", token(hub, "rana"), form={"reason": "x"})
     assert code == 422  # qms builds on it
     code, _ = call(server, "POST", "/modules/qms/remove", token(hub, "rana"), form={"reason": "trial over"})
     assert code == 303 and "qms" not in hub.installed_modules()
+
+
+def test_connections_are_off_until_a_second_policy_owner_approves_on_the_page(hub, server):
+    rana, amara, jo = token(hub, "rana"), token(hub, "dr-amara"), token(hub, "jo")
+    page = call(server, "GET", "/settings/connections", rana)[1]
+    assert "Data stays in" in page and "Ask to switch it on" in page and 'class="loz success">on' not in page
+    assert "No server is switched on" in page
+    form = {"roles": "front-desk", "reason": "desk", "acknowledged": "1"}
+    code, page = call(server, "POST", "/settings/connections/practice/ask", rana, form={**form, "acknowledged": ""})
+    assert code == 200 and "confirm that you checked" in page  # the residency check is not skipped
+    assert call(server, "POST", "/settings/connections/practice/ask", jo, form=form)[0] in (200, 403)
+    assert not hub.db.get_setting("mcp_request:practice") or hub.db.get_setting("mcp_request:practice")["by"] != "jo"
+    assert call(server, "POST", "/settings/connections/practice/ask", rana, form=form)[0] == 303
+    page = call(server, "GET", "/settings/connections", rana)[1]
+    assert "waiting for a second policy owner" in page and "/practice/approve" not in page  # not the asker's
+    assert "/practice/approve" in call(server, "GET", "/settings/connections", amara)[1]
+    assert call(server, "POST", "/settings/connections/practice/approve", amara)[0] == 303
+    code, page = call(server, "POST", "/settings/connections/token", jo,
+                      form={"member": "jo", "servers": "practice", "client": "Desk app", "runs_in": "Canada"})
+    assert code == 200 and "The new MCP token" in page
+
+
+def test_a_module_not_running_says_so_alike_on_every_page(hub, server):
+    from practicehub import mcp
+    rana = _modules(hub, server)
+    hub.db.set_setting("modules", [*hub.installed_modules(), "wiki"])  # no sealed install: never run
+    hub.db.set_setting("modules_rev", "changed")
+    assert "installed, not running" in call(server, "GET", "/modules", rana)[1]
+    assert "installed, not running" in call(server, "GET", "/modules/wiki", rana)[1].lower()
+    assert "not running" in call(server, "GET", "/settings/connections", rana)[1]
+    assert next(s for s in mcp.servers(hub) if s["id"] == "wiki")["unavailable"]
 
 
 def test_any_record_has_a_page_with_its_fields_links_history_and_signatures(hub, server):

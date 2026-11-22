@@ -36,6 +36,7 @@ from collections import OrderedDict
 from . import fields as fieldmod
 from . import schema, visibility
 from . import views as viewmod
+from .db import utcnow
 from .hub import Denied, HubError, Invalid, NotFound
 
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")  # newest first; what initialize may agree on
@@ -43,7 +44,6 @@ LATEST = VERSIONS[0]
 SERVER_INFO = {"name": "practicehub", "title": "Practice Hub", "version": "1.0"}
 CORE, PRACTICE = "core", "practice"
 RESERVED = (CORE, PRACTICE)
-DISABLED_SETTING = "mcp_disabled"
 
 # JSON-RPC error codes
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS, INTERNAL_ERROR = -32700, -32600, -32601, -32602, -32603
@@ -72,44 +72,222 @@ def slug(text: str) -> str:
 
 
 # ================================================================================================ servers
+# Every server starts switched off. A policy owner asks to switch one on for named roles and members (and attests any
+# client that runs outside the place the practice keeps its data); a second policy owner approves, as for every
+# change that widens who reaches the practice's data. Narrowing it, or switching it off, applies at once.
+ACCESS_SETTING = "mcp_access"          # {server: {roles, members, clients, reason, asked_by, approved_by, at}}
+REQUEST_SETTING = "mcp_request:{}"     # a waiting change for one server
+
+
+def access(hub) -> dict:
+    return dict(hub.db.get_setting(ACCESS_SETTING, {}) or {})
+
+
+def request_of(hub, sid: str) -> dict | None:
+    return hub.db.get_setting(REQUEST_SETTING.format(sid))
+
+
+def residency(hub) -> str:
+    """Where the practice keeps its data (its pack says; changed only by a reviewed pack upgrade), or '' if it
+    names nowhere."""
+    return str(hub.practice.get("data_residency") or "").strip()
+
+
 def servers(hub) -> list[dict]:
-    """Every server this hub has: the core's, the practice pack's, and one per installed module, each with whether a
-    policy owner switched it off."""
-    off = set(hub.db.get_setting(DISABLED_SETTING, []) or [])
+    """Every server this hub has: the core's, the practice pack's, and one per installed module (running here or
+    not), each with who may connect and whether it is on."""
+    hub.sync_modules()
+    pol = access(hub)
     out = [{"id": CORE, "name": "Work", "summary": "your inbox and the items you work on"}]
     if hub.pack:
         out.append({"id": PRACTICE, "name": hub.practice.get("name") or "Practice",
                     "summary": "the practice's own record types, workflows and views"})
-    for m in (hub.pack.modules if hub.pack else []):
-        if m.id in RESERVED:
+    loaded = {m.id: m for m in (hub.pack.modules if hub.pack else [])}
+    for mid in hub.installed_modules():
+        if mid in RESERVED:
             continue  # a module may not take a reserved server's name
-        out.append({"id": m.id, "name": m.practice.get("name", m.id), "summary": m.practice.get("summary", "")})
+        m = loaded.get(mid)
+        st = hub.module_status(mid, sync=False)
+        out.append({"id": mid, "name": m.practice.get("name", mid) if m else mid,
+                    "summary": m.practice.get("summary", "") if m else "",
+                    **({} if st["running"] else {"unavailable": f"{st['why']}: {st['next']}"})})
     for s in out:
-        s["enabled"] = s["id"] not in off
+        s["policy"] = pol.get(s["id"])
+        s["enabled"] = s["policy"] is not None and not s.get("unavailable")
     return out
 
 
 def server(hub, sid: str) -> dict | None:
-    """An enabled server, or None (unknown or switched off: both are a 404)."""
+    """An enabled server, or None (unknown, switched off or not running: each is a 404)."""
     s = next((x for x in servers(hub) if x["id"] == sid), None)
     return s if s and s["enabled"] else None
 
 
-def set_enabled(hub, actor: dict, sid: str, on: bool, reason: str = "") -> None:
-    """A policy owner switches a server on or off; the track records who, and why."""
+def _clean_clients(clients) -> list[dict]:
+    out = []
+    for c in clients or []:
+        name, where = str(c.get("name") or "").strip()[:80], str(c.get("runs_in") or "").strip()[:80]
+        if not name or not where:
+            raise Invalid("each client outside the practice's data residency is named, with where it runs")
+        if (name.casefold(), where.casefold()) not in {(x["name"].casefold(), x["runs_in"].casefold()) for x in out}:
+            out.append({"name": name, "runs_in": where})
+    return out
+
+
+def _wider(new: dict, old: dict | None) -> bool:
+    if old is None:
+        return True
+    key = lambda c: (c["name"].casefold(), c["runs_in"].casefold())  # noqa: E731
+    return bool(set(new["roles"]) - set(old["roles"]) or set(new["members"]) - set(old["members"])
+                or {key(c) for c in new["clients"]} - {key(c) for c in old.get("clients", [])})
+
+
+def ask_access(hub, actor: dict, sid: str, *, roles=(), members=(), clients=(), reason: str = "",
+               acknowledged: bool = False) -> dict:
+    """A policy owner says who may connect to a server. Switching it on, or letting more roles, members or clients
+    in, waits for a second policy owner; narrowing it applies now. Returns the policy in force, or the request."""
     if actor.get("kind") != "person":
-        raise Denied("a person switches MCP servers on and off")
-    hub.require(actor, "policy_owner", "practice:main", "switch MCP servers on and off")
+        raise Denied("a person decides who connects to the MCP servers")
+    hub.require(actor, "policy_owner", "practice:main", "decide who connects to the MCP servers")
+    if not any(s["id"] == sid for s in servers(hub)):
+        raise NotFound(f"there is no MCP server {sid!r}")
+    reason = str(reason or "").strip()
+    if not reason:
+        raise Invalid("say why (it is kept on the track)")
+    if not acknowledged:
+        where = residency(hub) or "where the practice keeps it"
+        raise Invalid(f"confirm that you checked where the connecting clients send what they read: the practice's "
+                      f"data stays in {where}")
+    known = set(hub.db.roles.distinct("_id"))
+    roles = sorted(dict.fromkeys(str(r) for r in roles if str(r)))
+    bad = [r for r in roles if r not in known]
+    if bad:
+        raise Invalid(f"there is no role {', '.join(bad)}")
+    mids = sorted(dict.fromkeys(str(m) for m in members if str(m)))
+    for mid in mids:
+        hub.member(mid)
+    if not roles and not mids:
+        raise Invalid("name the roles or members who may connect (to let nobody in, switch the server off)")
+    new = {"roles": roles, "members": mids, "clients": _clean_clients(clients), "reason": reason}
+    old = access(hub).get(sid)
+    with hub.db:
+        if not _wider(new, old):
+            pol = access(hub)
+            pol[sid] = {**old, **new, "at": utcnow()}
+            hub.db.set_setting(ACCESS_SETTING, pol)
+            hub.db.del_setting(REQUEST_SETTING.format(sid))
+            hub.track.append(actor, "mcp.access_narrowed", f"mcp:{sid}", data={"server": sid, **new})
+            return {"waiting": False, **pol[sid]}
+        req = request_of(hub, sid) or {}
+        asked = list(dict.fromkeys([*req.get("asked_by", []), actor["id"]]))
+        req = {**new, "by": actor["id"], "asked_by": asked, "at": utcnow(), "residency": residency(hub)}
+        hub.db.set_setting(REQUEST_SETTING.format(sid), req)
+        hub.track.append(actor, "mcp.access_requested", f"mcp:{sid}",
+                         data={"server": sid, **new, "residency": residency(hub), "acknowledged": True})
+    return {"waiting": True, **req}
+
+
+def approve_access(hub, actor: dict, sid: str) -> dict:
+    """A second policy owner (not one who asked) switches the server on as asked."""
+    if actor.get("kind") != "person":
+        raise Denied("a person approves who connects to the MCP servers")
+    hub.require(actor, "policy_owner", "practice:main", "approve who connects to the MCP servers")
+    req = request_of(hub, sid)
+    if not req:
+        raise Invalid("there is no change waiting for approval on this server")
+    if actor["id"] in {req["by"], *req.get("asked_by", [])}:
+        raise Denied("who connects to an MCP server is approved by a policy owner other than the one who asked")
+    with hub.db:
+        pol = access(hub)
+        pol[sid] = {k: req[k] for k in ("roles", "members", "clients", "reason")}
+        pol[sid].update({"asked_by": req["asked_by"], "approved_by": actor["id"], "at": utcnow()})
+        hub.db.set_setting(ACCESS_SETTING, pol)
+        hub.db.del_setting(REQUEST_SETTING.format(sid))
+        hub.track.append(actor, "mcp.enabled", f"mcp:{sid}",
+                         data={"server": sid, **pol[sid], "residency": residency(hub)},
+                         signed={"server": sid, "roles": pol[sid]["roles"], "members": pol[sid]["members"],
+                                 "clients": pol[sid]["clients"],
+                                 "meaning": f"I let these roles, members and clients reach the {sid} MCP server"})
+    return pol[sid]
+
+
+def withdraw_access(hub, actor: dict, sid: str) -> None:
+    hub.require(actor, "policy_owner", "practice:main", "withdraw an MCP change")
+    with hub.db:
+        if request_of(hub, sid):
+            hub.db.del_setting(REQUEST_SETTING.format(sid))
+            hub.track.append(actor, "mcp.access_withdrawn", f"mcp:{sid}", data={"server": sid})
+
+
+def switch_off(hub, actor: dict, sid: str, reason: str = "") -> None:
+    """Any policy owner switches a server off, at once; a waiting request goes too."""
+    if actor.get("kind") != "person":
+        raise Denied("a person switches MCP servers off")
+    hub.require(actor, "policy_owner", "practice:main", "switch MCP servers off")
     if not any(s["id"] == sid for s in servers(hub)):
         raise NotFound(f"there is no MCP server {sid!r}")
     with hub.db:
-        off = set(hub.db.get_setting(DISABLED_SETTING, []) or [])
-        if (sid not in off) == on:
-            return
-        off = (off - {sid}) if on else (off | {sid})
-        hub.db.set_setting(DISABLED_SETTING, sorted(off))
-        hub.track.append(actor, "mcp.enabled" if on else "mcp.disabled", f"mcp:{sid}",
-                         data={"server": sid, "reason": reason or ""})
+        pol = access(hub)
+        was = pol.pop(sid, None)
+        hub.db.set_setting(ACCESS_SETTING, pol)
+        hub.db.del_setting(REQUEST_SETTING.format(sid))
+        if was is not None:
+            hub.track.append(actor, "mcp.disabled", f"mcp:{sid}", data={"server": sid, "reason": reason or ""})
+
+
+def may_connect(policy: dict | None, member: dict) -> bool:
+    if not policy:
+        return False
+    return member["id"] in policy.get("members", []) or bool(set(member.get("roles") or []) & set(policy.get("roles", [])))
+
+
+def client_allowed(hub, policy: dict | None, client: dict) -> bool:
+    """A client runs where the practice keeps its data, or a policy owner attested it (and a second approved)."""
+    home = residency(hub)
+    where = str(client.get("runs_in") or "").strip()
+    if not where:
+        return False
+    if not home or where.casefold() == home.casefold():
+        return True
+    return any(c["name"].casefold() == str(client.get("name") or "").strip().casefold()
+               and c["runs_in"].casefold() == where.casefold() for c in (policy or {}).get("clients", []))
+
+
+def admit(hub, sid: str, member: dict, cred: dict) -> tuple[int, str] | None:
+    """Whether this credential may open this server now: (HTTP status, why) if not. Checked on every message."""
+    s = server(hub, sid)
+    if not s:
+        return 404, "there is no such MCP server here, or it is switched off"
+    if cred.get("scope") != "mcp":
+        return 403, "this token is not for MCP: its member issues one for MCP, naming the servers and the client"
+    if sid not in (cred.get("servers") or []):
+        return 403, f"this token is not for the {sid} server"
+    if not may_connect(s["policy"], member):
+        return 403, f"{member['name']} is not one of those a policy owner let connect to the {sid} server"
+    client = cred.get("client") or {}
+    if not client_allowed(hub, s["policy"], client):
+        return 403, (f"the client {client.get('name') or '?'} runs in {client.get('runs_in') or 'a place not named'}: "
+                     f"the practice's data stays in {residency(hub)}, and no policy owner attested this client")
+    return None
+
+
+def issue_token(hub, actor: dict, mid: str, *, servers_: list[str], client: str, runs_in: str,
+                label: str = "") -> str:
+    """A credential for MCP only, for named servers and one named client, issued as any credential is (to the
+    person themselves, or an agent's sponsor). Refused when it could not connect now, so nobody holds a token for a
+    client the practice has not allowed."""
+    want = sorted(dict.fromkeys(servers_ or []))
+    if not want:
+        raise Invalid("name the servers the client connects to")
+    cl = {"name": str(client or "").strip()[:80], "runs_in": str(runs_in or "").strip()[:80]}
+    if not cl["name"] or not cl["runs_in"]:
+        raise Invalid("name the client (the AI app or program) and where it runs: the track keeps both")
+    target = hub.member(mid)
+    for sid in want:
+        why = admit(hub, sid, target, {"scope": "mcp", "servers": want, "client": cl})
+        if why:
+            raise (NotFound if why[0] == 404 else Denied)(why[1])
+    return hub.issue_token(actor, mid, label or f"MCP: {cl['name']}", scope="mcp", servers=want, client=cl)
 
 
 # ================================================================================================ definitions
@@ -471,12 +649,16 @@ def _values(rt, args: dict, rec: dict | None = None, *, only: list[str] | None =
 
 
 # ================================================================================================ calls
-def call_tool(hub, sid: str, member: dict, name: str, args: dict) -> dict:
-    """Run one tool as the member; every call is on the track. Returns an MCP CallToolResult."""
-    mine = {t["name"]: t for t in tools(hub, sid, member)}
+def call_tool(hub, sid: str, member: dict, name: str, args: dict, *, ts: list[dict] | None = None,
+              conn: dict | None = None) -> dict:
+    """Run one tool as the member; every call is on the track, with the client it came from (``conn``: the client
+    its credential names, and what it said it was). ``ts``: the member's tools, if the request has them already.
+    Returns an MCP CallToolResult."""
+    mine = {t["name"]: t for t in (ts if ts is not None else tools(hub, sid, member))}
     tool = mine.get(name)
     seq = hub.track.append(member, "mcp.called", f"mcp:{sid}",
-                           data={"how": "mcp", "server": sid, "tool": name, "listed": tool is not None})
+                           data={"how": "mcp", "server": sid, "tool": name, "listed": tool is not None,
+                                 **_conn_data(conn)})
     try:
         if tool is None:
             raise Refused(f"{name} is not one of the tools {member['name']} may use on the {sid} server")
@@ -490,12 +672,18 @@ def call_tool(hub, sid: str, member: dict, name: str, args: dict) -> dict:
     except (Refused, HubError) as exc:
         problems = list(getattr(exc, "problems", None) or [])
         hub.track.append(member, "mcp.refused", f"mcp:{sid}", cause=seq,
-                         data={"how": "mcp", "server": sid, "tool": name, "reason": str(exc)})
+                         data={"how": "mcp", "server": sid, "tool": name, "reason": str(exc), **_conn_data(conn)})
         kind = ("denied" if isinstance(exc, (Denied, Refused)) else "not_found" if isinstance(exc, NotFound)
                 else "invalid")
         text = str(exc) + (": " + "; ".join(problems) if problems else "")
         return {"content": [{"type": "text", "text": text}],
                 "structuredContent": {"error": kind, "reason": str(exc), "problems": problems}, "isError": True}
+
+
+def _conn_data(conn: dict | None) -> dict:
+    if not conn:
+        return {}
+    return {k: conn[k] for k in ("client", "client_info", "credential") if conn.get(k)}
 
 
 def _summary(hub, rt, rec: dict) -> dict:
@@ -536,6 +724,7 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
         if a.get("state"):
             recs = [r for r in recs if schema.first(r, rt.lifecycle["path"]) == a["state"]][:limit]
         found = [_summary(hub, rt, r) for r in recs]
+        hub.note_views(member, [x["ref"] for x in found], how=f"{how} (search)")  # each one listed was seen
         return {"records": found, "_text": f"{len(found)} {rt.plural.lower()}"}
     if what == "read":
         ref = f"{target}/{a['id']}"
@@ -590,6 +779,8 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
                  "note": w.get("note")}
             rows = w.get("rows") or [r for g in (w.get("groups") or {}).values() for r in g]
             d["rows"] = [_row(hub, w, r) for r in rows]
+            if w["source"] == "records":
+                hub.note_views(member, [x["ref"] for x in d["rows"]], how=f"{how} (view)")
             if "counts" in w:
                 d["counts"] = w["counts"]
             out.append(d)
@@ -662,15 +853,17 @@ def read_resource(hub, sid: str, member: dict, uri: str) -> dict:
 
 # ================================================================================================ the protocol
 class Sessions:
-    """Which tool list each session was last shown, to say when it changed. Nothing else is kept."""
+    """Which tool list each session was last shown, to say when it changed, and what its client said it was (for
+    the track). Nothing else is kept."""
 
     def __init__(self, size: int = 5000):
         self.size, self.rows, self.lock = size, OrderedDict(), threading.Lock()
 
-    def new(self, member: str, sid: str, version: str, tools_fp: str) -> str:
+    def new(self, member: str, sid: str, version: str, tools_fp: str, *, client_info: dict | None = None) -> str:
         key = secrets.token_urlsafe(24)
         with self.lock:
-            self.rows[key] = {"member": member, "server": sid, "version": version, "tools": tools_fp}
+            self.rows[key] = {"member": member, "server": sid, "version": version, "tools": tools_fp,
+                              "client_info": dict(client_info or {})}
             while len(self.rows) > self.size:
                 self.rows.popitem(last=False)
         return key
@@ -693,8 +886,11 @@ def negotiate(asked) -> str:
     return asked if asked in VERSIONS else LATEST
 
 
-def handle(hub, sid: str, member: dict, msg, *, session: str | None = None, sessions: Sessions | None = None):
-    """One JSON-RPC message from a client. Returns (response or None, notifications to send first, new session id)."""
+def handle(hub, sid: str, member: dict, msg, *, session: str | None = None, sessions: Sessions | None = None,
+           conn: dict | None = None):
+    """One JSON-RPC message from a client. Returns (response or None, notifications to send first, new session id).
+    The member's tool list is worked out once per message. ``conn``: the client the credential names; initialize
+    puts the connection on the track (``mcp.connected``), with what the client says it is."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
         return _err(None, INVALID_REQUEST, "not a JSON-RPC 2.0 message"), [], None
     mid, method = msg.get("id"), msg.get("method")
@@ -710,12 +906,27 @@ def handle(hub, sid: str, member: dict, msg, *, session: str | None = None, sess
     if mid is not None and (isinstance(mid, bool) or not isinstance(mid, (str, int))):
         return _err(None, INVALID_REQUEST, "id is a string or a number"), [], None
     notes, new_session = [], None
+    conn = dict(conn or {})
+    row = sessions.get(session) if session and sessions is not None else None
+    if row and row.get("client_info"):
+        conn["client_info"] = row["client_info"]
+    cache: list = []
+
+    def mine() -> list[dict]:
+        if not cache:
+            cache.append(tools(hub, sid, member))
+        return cache[0]
     try:
         if method == "initialize":
             version = negotiate(params.get("protocolVersion"))
-            ts = tools(hub, sid, member)
+            ts = mine()
+            info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+            conn["client_info"] = {k: str(info.get(k))[:80] for k in ("name", "version") if info.get(k)}
             if sessions is not None:
-                new_session = sessions.new(member["id"], sid, version, fingerprint(ts))
+                new_session = sessions.new(member["id"], sid, version, fingerprint(ts),
+                                           client_info=conn["client_info"])
+            hub.track.append(member, "mcp.connected", f"mcp:{sid}",
+                             data={"how": "mcp", "server": sid, "protocol": version, **_conn_data(conn)})
             s = next(x for x in servers(hub) if x["id"] == sid)
             result = {"protocolVersion": version,
                       "capabilities": {"tools": {"listChanged": True}, "resources": {"listChanged": False},
@@ -726,7 +937,7 @@ def handle(hub, sid: str, member: dict, msg, *, session: str | None = None, sess
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            ts = tools(hub, sid, member)
+            ts = mine()
             result = {"tools": listed(ts)}
             if session and sessions is not None:
                 sessions.shown(session, fingerprint(ts))
@@ -734,10 +945,11 @@ def handle(hub, sid: str, member: dict, msg, *, session: str | None = None, sess
             name, args = params.get("name"), params.get("arguments") or {}
             if not isinstance(name, str) or not isinstance(args, dict):
                 raise RpcError(INVALID_PARAMS, "name is text and arguments an object")
-            if name not in {t["name"] for t in tools(hub, sid, _anyone(member))} and \
-                    name not in {t["name"] for t in tools(hub, sid, member)}:
+            known = {t["name"] for t in mine()}
+            if name not in known and not (is_agent(member) and
+                                          name in {t["name"] for t in tools(hub, sid, _anyone(member))}):
                 raise RpcError(INVALID_PARAMS, f"Unknown tool: {name}")
-            result = call_tool(hub, sid, member, name, args)
+            result = call_tool(hub, sid, member, name, args, ts=mine(), conn=conn)
         elif method == "resources/list":
             result = {"resources": resources(hub, sid, member)}
         elif method == "resources/templates/list":
@@ -755,7 +967,7 @@ def handle(hub, sid: str, member: dict, msg, *, session: str | None = None, sess
     except HubError as exc:  # outside a tool: a refusal of the request itself
         return _err(mid, INVALID_PARAMS, str(exc)), [], None
     if session and sessions is not None and method not in ("initialize", "tools/list"):
-        if sessions.get(session) and sessions.shown(session, fingerprint(tools(hub, sid, member))):
+        if sessions.get(session) and sessions.shown(session, fingerprint(mine())):
             notes.append({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
     return {"jsonrpc": "2.0", "id": mid, "result": result}, notes, new_session
 
