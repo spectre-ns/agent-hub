@@ -19,12 +19,15 @@ roles               id                                     id name description m
 tokens              token_hash                             token_hash member label created_at revoked issued_by
 tuples              "object#relation@subject"              object relation subject
 records             "Type/id"                              type id subject data{} version updated_at search
+                                                           words[] search_parts[{c, w[]}]|None ix
 workflow_versions   "workflow_id@version"                  workflow_id version status source author note created_at
                                                            approved_by approved_at module
 block_versions      "block_id@version"                     block_id ... (as workflow_versions)
 type_versions       "type_id@version"                      type_id ...
 view_versions       "view_id@version"                      view_id ...
 skill_versions      "skill_id@version"                     skill_id ...
+agent_profile_versions "agent_id@version"                  agent_id version status profile{} source author note
+                                                           created_at approved_by approved_at based_on
 data_classes        id                                     id name description module
 record_versions     "Type/id@version"                      type id version data{} refs[] actor run_id at
 office_drafts       file id (signed, opaque)              ref field base working name editors[] lock modified
@@ -46,6 +49,10 @@ sessions            session_hash                           session_hash member c
 signin_failures     member                                 member count first_at locked_until
 counters            sequence name                          n
 
+``records.words`` is every word of the record's values, folded (a search matches the start of one, by index);
+``records.search_parts`` the same per data class, for a type with classed fields (the record without any of them as
+``c = "_"``, then with only one class's), so a reader's search looks only where they may read; ``ix`` stamps what
+they were built from (``Hub._search_stamp``).
 ``record_versions.refs`` is every "Type/id" string in that version's data: the access report finds what was ever
 about a subject by it.
 ``items.n`` is the item's number in order of creation (``store.next_seq("items")``), shown as the item's key.
@@ -63,20 +70,23 @@ INDEXES = {
     "members": ["kind", "sponsor"],
     "tokens": ["member"],
     "tuples": ["subject", "object"],
-    "records": [("type", "updated_at"), ("subject", "updated_at"), "updated_at"],
+    "records": [("type", "updated_at"), ("subject", "updated_at"), "updated_at", ("type", "ix"), "words",
+                ("search_parts.c", "search_parts.w")],
     "office_drafts": [("ref", "field", "base"), ("ref", "working")],
     "workflow_versions": [("workflow_id", "status"), "status"],
     "block_versions": [("block_id", "status"), "status"],
     "type_versions": [("type_id", "status"), "status"],
     "view_versions": [("view_id", "status"), "status"],
     "skill_versions": [("skill_id", "status"), "status"],
+    "agent_profile_versions": [("agent_id", "status")],
     "record_versions": [("type", "id", "version"), "refs"],
     "links": ["to_ref", "from_ref"],
     "titles": [("type", "key")],
     "mention_names": [("type", "key"), "from_ref"],
     "runs": ["status", "record", "workflow_id", "refs"],
     "items": ["status", "run_id", ("assignee", "status"), ("role", "status"), "n"],
-    "events": [{"fields": ["hash"], "unique": True}, "run_id", ("subject", "action"), ("action", "seq"), "actor"],
+    "events": [{"fields": ["hash"], "unique": True}, "run_id", ("subject", "action"), ("action", "seq"), "actor",
+               ("action", "data.refs")],
     "outbox": ["status", "channel"],
     "sessions": ["member"],
     "setup_codes": ["member"],

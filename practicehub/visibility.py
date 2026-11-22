@@ -222,19 +222,42 @@ def workflow_classes(wf: Workflow) -> set[str]:
 
 
 class Viewer:
-    """One member's view; caches workflow lookups for a page's worth of events."""
+    """One member's view; caches workflow lookups, and what the member may read, for a page's worth of events (a
+    Viewer lives for one page or call, so a grant changed meanwhile applies from the next)."""
 
     def __init__(self, hub, member: dict):
         self.hub, self.me = hub, member
         self._wf: dict = {}
         self._runs: dict = {}
         self._owner: bool | None = None
+        self._reads: dict[str, bool] = {}
+        self._gone: dict[str, set] = {}
+        self._by_event: dict[str, set] = {}
+
+    def reads(self, dc: str) -> bool:
+        if dc not in self._reads:
+            self._reads[dc] = bool(self.hub.can(self.me, "reader", f"data_class:{dc}"))
+        return self._reads[dc]
 
     def may_read_classes(self, classes: set[str]) -> bool:
-        return all(self.hub.can(self.me, "reader", f"data_class:{c}") for c in classes)
+        return all(self.reads(c) for c in classes)
 
     def missing(self, classes: set[str]) -> list[str]:
-        return sorted(c for c in classes if not self.hub.can(self.me, "reader", f"data_class:{c}"))
+        return sorted(c for c in classes if not self.reads(c))
+
+    def _hidden_keys(self, rtype: str) -> set:
+        if rtype not in self._gone:
+            self._gone[rtype] = hidden_keys(self.hub, self.me, rtype)
+        return self._gone[rtype]
+
+    def _event_classes(self, etype) -> set:
+        if etype not in self._by_event:
+            classes: set = set()
+            for w in self.hub.workflows():
+                if w["workflow"].event == etype:
+                    classes |= workflow_classes(w["workflow"])
+            self._by_event[etype] = classes
+        return self._by_event[etype]
 
     def workflow_of_run(self, run_id: str) -> Workflow | None:
         if run_id not in self._runs:
@@ -325,10 +348,7 @@ class Viewer:
             if not self.may_read_classes(classes) and data.get("input"):
                 hidden = self.missing(classes)
         elif action == "event.received":
-            classes = set()
-            for w in self.hub.workflows():
-                if w["workflow"].event == data.get("type"):
-                    classes |= workflow_classes(w["workflow"])
+            classes = self._event_classes(data.get("type"))
             if not self.may_read_classes(classes):
                 hidden = self.missing(classes)
         elif action in ("record.created", "record.updated"):
@@ -337,7 +357,7 @@ class Viewer:
             if dc and not self.may_read_classes({dc}):
                 hidden = [dc]
             elif rtype and data.get("changed"):  # a change to a field they may not read is not theirs to know of
-                gone = hidden_keys(self.hub, self.me, rtype)
+                gone = self._hidden_keys(rtype)
                 if gone and set(data["changed"]) & gone:
                     data = {**data, "changed": [k for k in data["changed"] if k not in gone]}
                     ev = {**ev, "data": data}
@@ -351,7 +371,7 @@ class Viewer:
                                      "channel", "how", "status") if k in data}
         return {**ev, "data": {**keep, "hidden": f"content needs access to: {', '.join(hidden)}"}}
 
-    ACCESS_EVENTS = frozenset({"record.viewed", "records.exported", "access.reported"})
+    ACCESS_EVENTS = frozenset({"record.viewed", "records.exported", "records.listed", "access.reported"})
 
     def events(self, evs: list[dict]) -> list[dict]:
         """What the member may see of these events. Who opened which file is itself personal health information:

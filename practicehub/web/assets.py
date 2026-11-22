@@ -212,6 +212,9 @@ ul.admin-cards a:hover,ul.admin-cards a:focus-visible{background:var(--raised-ho
 .pagehead{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 16px}
 .pagehead h1{flex:1;min-width:min(240px,100%)}
 .pagehead .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#proposed-profile .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+#proposed-profile td{overflow-wrap:anywhere}#proposed-profile tbody th{vertical-align:top}
+@media (max-width:640px){main .tablewrap table.fates,main #proposed-profile table{white-space:normal}main #proposed-profile table{display:table}table.fates thead{display:none}table.fates,table.fates tbody,table.fates tr,table.fates td{display:block}table.fates td{border:0;padding:4px 0}table.fates tr{padding:8px 0;border-bottom:1px solid var(--border)}table.fates select{width:100%}}
 
 /* ---- avatars: people round, agents hexagons, services square */
 .av{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;font-size:12px;line-height:16px;
@@ -1808,7 +1811,7 @@ function editor(root) {
       put(el("fieldset", {}, el("legend", {}, "Decision and signature"),
         csv("Outcomes", s, "outcomes", { placeholder: "approve, decline" }),
         text("Meaning of the signature", s, "meaning", { placeholder: "I have reviewed this and I am responsible for it" }),
-        select("Who may sign", s, "signer", [["person", "a person only"], ["any", "a person, or an agent within criteria"]], { rebuild: true }),
+        select("Who may decide", s, "signer", [["person", "a person only, who signs"], ["any", "a person, or an agent within criteria (an agent attests, never signs)"]], { rebuild: true }),
         s.signer === "any" ? text("Agents may decide only when", s, "agent_criteria", { placeholder: "e.g. code.amount <= 80" }) : null));
     }
     if (s.kind === "task" && blk) {
@@ -3109,3 +3112,746 @@ ul.threads li.thread{padding:8px 10px}.doc-comments .replies li.by-agent{border-
 """
 
 CSS = CSS + LIVE_CSS
+
+# The dashboard editor (web/dashboard_pages.py): runs after the main script, which leaves PH.el for it.
+DASH_JS = r"""
+(function () {
+"use strict";
+// ------------------------------------------------------------------ the dashboard editor (web/dashboard_pages.py)
+// The view is a document (views.doc_of): widgets with a grid place, set up with pickers. Every change is sent to
+// /api/views/draft, which writes the TOML, checks it and previews each widget with the editor's own data. The script
+// never builds the condition text itself: a filter goes as pickers and the server writes it.
+const { el } = window.PH || {};
+if (!el) return;
+
+function dashEditor(root) {
+  const boot = JSON.parse(document.getElementById("dz-boot").textContent);
+  const spec = boot.spec, cat = boot.catalog, COLS = spec.columns, ROW = 56, GAP = 12;
+  let doc = boot.doc;
+  doc.widget = doc.widget || [];
+  let sel = null, mode = "canvas", last = null, timer = null, seq = 0, touched = !!(boot.doc.widget || []).length;
+  let idTouched = !!doc.id;
+  const keys = new WeakMap(), views = new Map(), asText = new WeakSet();
+  let nextKey = 1;
+  const keyOf = (w) => { if (!keys.has(w)) keys.set(w, nextKey++); return keys.get(w); };
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("dz-canvas"), panel = $("dz-panel"), status = $("dz-status"), toml = $("dz-toml");
+  const form = $("dz-propose"), main = $("dz-main"), code = $("dz-code"), empty = $("dz-empty");
+  const kindOf = (w) => spec.kinds[w.kind] || spec.kinds.table;
+  const has = (w, opt) => (kindOf(w).options || []).includes(opt);
+  const typeOf = (w) => cat.types.find((t) => t.id === w.type);
+  const src = (w) => (w.kind === "links" ? null : w.source || "records");
+  const fieldsOf = (w) => (src(w) === "records" ? (typeOf(w) || { fields: [] }).fields : spec.row_fields[src(w)] || []);
+  // columns, group_by and sort name a record type's field by its name; a filter reads the stored path
+  const colKey = (w, f) => (src(w) === "records" ? f.name : f.path);
+  const fieldBy = (w, key) => fieldsOf(w).find((f) => f.name === key || f.path === key);
+  const labelOf = (w, key) => { const f = fieldBy(w, key); return f ? f.label : key; };
+  const isDate = (f) => f && /^date/.test(f.type);
+
+  // ---- layout: no two widgets overlap; the moved one keeps its place, the others make room, all float up
+  const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  function settle(moved) {
+    const ws = doc.widget.slice().sort((a, b) => (a === moved ? -1 : b === moved ? 1 : a.grid.y - b.grid.y || a.grid.x - b.grid.x));
+    const done = [];
+    for (const w of ws) {
+      const g = w.grid;
+      g.w = Math.max(1, Math.min(COLS, g.w | 0)); g.x = Math.max(0, Math.min(COLS - g.w, g.x | 0));
+      g.h = Math.max(1, Math.min(spec.max_height, g.h | 0)); g.y = Math.max(0, g.y | 0);
+      while (done.some((d) => overlap(d, g))) g.y++;
+      done.push(g);
+    }
+    const up = doc.widget.slice().sort((a, b) => a.grid.y - b.grid.y || a.grid.x - b.grid.x), above = [];
+    for (const w of up) {
+      const g = w.grid;
+      while (g.y > 0 && !above.some((d) => overlap(d, { ...g, y: g.y - 1 }))) g.y--;
+      above.push(g);
+    }
+  }
+  const bottom = () => Math.max(0, ...doc.widget.map((w) => w.grid.y + w.grid.h));
+  function metrics() {
+    const width = canvas.clientWidth;
+    return { colW: (width + GAP) / COLS, rowH: ROW + GAP };
+  }
+
+  // ---- the palette
+  const glyph = { count: "123", table: "▤", list: "☰", board: "▥", chart: "▮▮", tree: "⌥", links: "↗" };
+  const pal = $("dz-palette");
+  for (const [k, ks] of Object.entries(spec.kinds)) {
+    const b = el("button", { type: "button", class: "dz-kind", draggable: "true", "data-kind": k,
+      "aria-label": `Add ${ks.label.toLowerCase()}: ${ks.about}`,
+      onclick: () => add(k),
+      ondragstart: (ev) => { ev.dataTransfer.setData("text/x-dz-kind", k); ev.dataTransfer.effectAllowed = "copy"; } },
+      el("span", { class: "dz-glyph", "aria-hidden": "true" }, glyph[k] || "▢"),
+      el("span", { class: "dz-kl" }, el("b", {}, ks.label), el("small", {}, ks.about)));
+    pal.append(b);
+  }
+  canvas.addEventListener("dragover", (ev) => { if (ev.dataTransfer.types.includes("text/x-dz-kind")) { ev.preventDefault(); canvas.classList.add("drop"); } });
+  canvas.addEventListener("dragleave", () => canvas.classList.remove("drop"));
+  canvas.addEventListener("drop", (ev) => {
+    const k = ev.dataTransfer.getData("text/x-dz-kind");
+    canvas.classList.remove("drop");
+    if (!k) return;
+    ev.preventDefault();
+    const r = canvas.getBoundingClientRect(), m = metrics();
+    add(k, { x: Math.floor((ev.clientX - r.left) / m.colW), y: Math.floor((ev.clientY - r.top) / m.rowH) });
+  });
+
+  function defaults(w) {
+    const t = cat.types.find((x) => (w.kind === "tree" ? x.tree : true)) || cat.types[0];
+    if (kindOf(w).sources.length && !w.type && src(w) === "records" && t) w.type = t.id;
+    if ((w.kind === "board" || w.kind === "chart") && !w.group_by) {
+      const tt = typeOf(w);
+      const f = src(w) === "records" ? (tt && (fieldBy(w, tt.lifecycle || "") || tt.fields.find((x) => x.choices.length)))
+        : fieldsOf(w).find((x) => x.name === "status" || x.name === "role");
+      if (f) w.group_by = colKey(w, f);
+    }
+    if (w.kind === "links" && !(w.links || []).length) w.links = cat.pages.length ? [{ ...cat.pages[0] }] : [{ label: "Inbox", href: "/" }];
+  }
+  function add(kind, at) {
+    const ks = spec.kinds[kind], [gw, gh] = ks.size;
+    const w = { kind, title: ks.label === "Number" ? "How many" : ks.label };
+    w.grid = at ? { x: Math.min(Math.max(0, at.x), COLS - gw), y: Math.max(0, at.y), w: gw, h: gh }
+      : { x: 0, y: bottom(), w: gw, h: gh };
+    defaults(w);
+    doc.widget.push(w);
+    settle(w);
+    select(w);
+    changed();
+    const v = views.get(keyOf(w));
+    if (v) v.focus();
+  }
+  function remove(w) {
+    doc.widget = doc.widget.filter((x) => x !== w);
+    settle(null);
+    if (sel === w) select(null);
+    changed();
+    say(`Removed ${w.title || kindOf(w).label}.`);
+  }
+  function duplicate(w) {
+    const c = JSON.parse(JSON.stringify(w));
+    c.grid.y = w.grid.y + w.grid.h;
+    c.title = (w.title || kindOf(w).label) + " (copy)";
+    doc.widget.push(c);
+    settle(c); select(c); changed();
+  }
+
+  // ---- the canvas
+  function describe(w) {
+    const g = w.grid;
+    return `${kindOf(w).label}: ${w.title || "untitled"}. Column ${g.x + 1}, row ${g.y + 1}, ${g.w} wide, ${g.h} high.`;
+  }
+  function place(w) {
+    const v = views.get(keyOf(w));
+    if (!v) return;
+    const m = metrics(), g = w.grid;
+    v.style.left = g.x * m.colW + "px"; v.style.top = g.y * m.rowH + "px";
+    v.style.width = g.w * m.colW - GAP + "px"; v.style.height = g.h * m.rowH - GAP + "px";
+    v.setAttribute("aria-label", describe(w));
+  }
+  function drawCanvas() {
+    const m = metrics(), seen = new Set();
+    canvas.style.setProperty("--colw", m.colW + "px");
+    canvas.style.setProperty("--rowh", m.rowH + "px");
+    canvas.style.height = Math.max(6, bottom() + 3) * m.rowH + "px";
+    for (const w of doc.widget) {
+      const k = keyOf(w);
+      seen.add(k);
+      let v = views.get(k);
+      if (!v) { v = card(w); views.set(k, v); canvas.append(v); }
+      v.classList.toggle("on", w === sel);
+      v.querySelector(".dz-title").textContent = w.title || "Untitled";
+      v.querySelector(".dz-kindl").textContent = kindOf(w).label;
+      place(w);
+    }
+    for (const [k, v] of views) if (!seen.has(k)) { v.remove(); views.delete(k); }
+    empty.hidden = doc.widget.length > 0;
+  }
+  function card(w) {
+    const body = el("div", { class: "dz-body", inert: "" }, el("p", { class: "muted" }, "…"));
+    const total = el("span", { class: "dz-total badge" });
+    const head = el("div", { class: "dz-head" },
+      el("span", { class: "dz-grip", "aria-hidden": "true" }, "⠿"),
+      el("span", { class: "dz-kindl" }), el("b", { class: "dz-title" }), total,
+      el("button", { type: "button", class: "dz-x subtle", "aria-label": "Remove this widget", title: "Remove",
+        onpointerdown: (ev) => ev.stopPropagation(), onclick: (ev) => { ev.stopPropagation(); remove(w); } }, "×"));
+    const grip = el("span", { class: "dz-resize", "aria-hidden": "true", title: "Drag to resize" });
+    const v = el("div", { class: "dz-w", role: "listitem", tabindex: "0", "data-kind": w.kind }, head, body, grip);
+    v.addEventListener("click", () => select(w));
+    v.addEventListener("focus", () => { if (sel !== w) select(w, true); });
+    v.addEventListener("keydown", (ev) => keys_(ev, w));
+    head.addEventListener("pointerdown", (ev) => drag(ev, w, "move"));
+    grip.addEventListener("pointerdown", (ev) => drag(ev, w, "size"));
+    return v;
+  }
+  function keys_(ev, w) {
+    if (ev.target !== views.get(keyOf(w))) return;
+    const g = w.grid, d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
+    if (d) {
+      ev.preventDefault();
+      if (ev.shiftKey) { g.w += d[0]; g.h += d[1]; } else { g.x += d[0]; g.y += d[1]; }
+      settle(w); drawCanvas(); drawPanel(); changed(true);
+      say(describe(w));
+    } else if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); remove(w); }
+    else if (ev.key === "Escape") { select(null); }
+  }
+  let dragging = null;
+  function drag(ev, w, how) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    select(w, true);
+    const v = views.get(keyOf(w)), m = metrics(), start = { ...w.grid }, x0 = ev.clientX, y0 = ev.clientY;
+    v.setPointerCapture(ev.pointerId);
+    v.classList.add("lifted");
+    const ghost = el("div", { class: "dz-ghost", "aria-hidden": "true" });
+    canvas.append(ghost);
+    dragging = w;
+    const showGhost = () => {
+      const g = w.grid;
+      Object.assign(ghost.style, { left: g.x * m.colW + "px", top: g.y * m.rowH + "px",
+        width: g.w * m.colW - GAP + "px", height: g.h * m.rowH - GAP + "px" });
+    };
+    const moveTo = (e2) => {
+      const dx = (e2.clientX - x0) / m.colW, dy = (e2.clientY - y0) / m.rowH, g = w.grid, was = JSON.stringify(g);
+      if (how === "move") { g.x = Math.round(start.x + dx); g.y = Math.round(start.y + dy); g.w = start.w; g.h = start.h; }
+      else { g.w = Math.round(start.w + dx); g.h = Math.round(start.h + dy); g.x = start.x; g.y = start.y; if (g.x + g.w > COLS) g.w = COLS - g.x; }
+      if (JSON.stringify(g) !== was) {
+        settle(w);
+        for (const o of doc.widget) if (o !== w) place(o);
+        canvas.style.height = Math.max(6, bottom() + 3) * m.rowH + "px";
+      }
+      showGhost();
+      // the lifted card follows the pointer; it lands on the ghost's cells
+      if (how === "move") { v.style.left = start.x * m.colW + (e2.clientX - x0) + "px"; v.style.top = start.y * m.rowH + (e2.clientY - y0) + "px"; }
+      else { v.style.width = Math.max(m.colW - GAP, start.w * m.colW - GAP + (e2.clientX - x0)) + "px";
+        v.style.height = Math.max(ROW, start.h * m.rowH - GAP + (e2.clientY - y0)) + "px"; }
+    };
+    const end = () => {
+      v.removeEventListener("pointermove", moveTo); v.removeEventListener("pointerup", end); v.removeEventListener("pointercancel", end);
+      v.classList.remove("lifted"); ghost.remove(); dragging = null;
+      drawCanvas(); drawPanel();
+      if (JSON.stringify(start) !== JSON.stringify(w.grid)) { changed(true); say(describe(w)); }
+    };
+    showGhost();
+    v.addEventListener("pointermove", moveTo);
+    v.addEventListener("pointerup", end);
+    v.addEventListener("pointercancel", end);
+  }
+  window.addEventListener("resize", () => { if (mode === "canvas") drawCanvas(); });
+
+  // ---- the side panel
+  function select(w, quiet) {
+    sel = w;
+    drawCanvas();
+    drawPanel();
+    if (!quiet && w) { const v = views.get(keyOf(w)); if (v && document.activeElement !== v) v.focus({ preventScroll: true }); }
+  }
+  let uid = 0;
+  const nid = () => "dz-f" + (++uid);
+  function field(label, control, help) {
+    const id = control.id || (control.id = nid());
+    return el("div", { class: "dz-field" }, el("label", { for: id }, label), control,
+      help ? el("small", { class: "help muted" }, help) : null);
+  }
+  function input(value, on, attrs) {
+    return el("input", { value: value == null ? "" : String(value), ...(attrs || {}),
+      oninput: (ev) => on(ev.target.value) });
+  }
+  function select_(options, chosen, on, blank) {
+    const s = el("select", { onchange: (ev) => on(ev.target.value) });
+    if (blank !== undefined) s.append(el("option", { value: "" }, blank));
+    for (const o of options) {
+      const [v, l] = Array.isArray(o) ? o : [o, o];
+      const opt = el("option", { value: v }, l);
+      if (String(v) === String(chosen ?? "")) opt.selected = true;
+      s.append(opt);
+    }
+    return s;
+  }
+  function chips(legend, options, chosen, on) {
+    const set = new Set(chosen || []);
+    return el("fieldset", { class: "choices dz-chips" }, el("legend", {}, legend),
+      options.map(([v, l]) => el("label", { class: "radio" },
+        el("input", { type: "checkbox", value: v, checked: set.has(v), onchange: (ev) => {
+          if (ev.target.checked) set.add(v); else set.delete(v);
+          on(options.map((o) => o[0]).filter((x) => set.has(x)));
+        } }), l)));
+  }
+  const set = (w, k, v, redraw) => {
+    if (v === "" || v === null || v === undefined || (Array.isArray(v) && !v.length)) delete w[k]; else w[k] = v;
+    changed();
+    if (redraw) drawPanel();
+    drawCanvas();
+  };
+  function slug(t) {
+    let s = (t || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (s && !/^[a-z]/.test(s)) s = "view-" + s;
+    return s === "new" ? "new-view" : s;
+  }
+
+  function drawPanel() {
+    if (dragging) return;
+    const focusId = document.activeElement && panel.contains(document.activeElement) ? document.activeElement.id : null;
+    panel.textContent = "";
+    if (!sel) drawViewPanel(); else drawWidgetPanel(sel);
+    if (focusId && $(focusId)) $(focusId).focus();
+  }
+  function drawViewPanel() {
+    const idBox = input(doc.id, (v) => { idTouched = true; set(doc, "id", v.trim()); },
+      { id: "dz-id", pattern: "[a-z][a-z0-9-]*", disabled: boot.locked_id, spellcheck: "false" });
+    panel.append(el("h2", {}, "The view"),
+      el("p", { class: "muted small" }, "Choose a widget on the grid to set it up."),
+      field("Title *", input(doc.title, (v) => {
+        set(doc, "title", v);
+        if (!idTouched && !boot.locked_id) { doc.id = slug(v); idBox.value = doc.id; }
+      }, { id: "dz-title", required: true })),
+      field("Id", idBox, boot.locked_id ? "A view keeps its id." : "Lower case letters, digits and dashes; it is the view's address."),
+      field("Summary", input(doc.summary, (v) => set(doc, "summary", v), { id: "dz-summary" }), "A line under the title."),
+      el("label", { class: "radio dz-check" }, el("input", { type: "checkbox", id: "dz-nav", checked: doc.nav !== false,
+        onchange: (ev) => set(doc, "nav", ev.target.checked ? undefined : false) }), "Show it in the sidebar"),
+      chips("Whose sidebar (none chosen: everyone's)", cat.roles.map((r) => [r.id, r.name]), doc.roles,
+        (v) => set(doc, "roles", v)),
+      el("p", { class: "muted small" }, "Whoever opens it sees only the records and work they may see."));
+  }
+  function drawWidgetPanel(w) {
+    const ks = kindOf(w), s = src(w);
+    const head = el("div", { class: "dz-ph" }, el("h2", {}, ks.label),
+      el("button", { type: "button", class: "subtle", onclick: () => select(null) }, "The view"),
+      el("button", { type: "button", class: "subtle", onclick: () => duplicate(w) }, "Duplicate"),
+      el("button", { type: "button", class: "danger-subtle", onclick: () => remove(w) }, "Remove"));
+    panel.append(head, field("Title", input(w.title, (v) => set(w, "title", v), { id: "dz-w-title" })));
+    panel.append(field("Kind", select_(Object.entries(spec.kinds).map(([k, x]) => [k, x.label]), w.kind, (v) => {
+      w.kind = v;
+      const allowed = spec.kinds[v].sources;
+      if (allowed.length && !allowed.includes(src(w) || "records")) w.source = allowed[0];
+      if (v === "links") for (const k of ["source", "type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort", "descending", "limit"]) delete w[k];
+      defaults(w);
+      changed(); drawCanvas(); drawPanel();
+    }, undefined), ks.about));
+    if (w.kind === "links") return linksPanel(w);
+    if (ks.sources.length > 1) {
+      panel.append(field("Shows", select_(ks.sources.map((k) => [k, spec.sources[k]]), s, (v) => {
+        for (const k of ["type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort"]) delete w[k];
+        w.source = v === "records" ? undefined : v;
+        if (v === "records") delete w.source;
+        defaults(w); changed(); drawCanvas(); drawPanel();
+      })));
+    }
+    if (s === "records") {
+      panel.append(field("Record type", select_(cat.types.map((t) => [t.id, t.label]), w.type, (v) => {
+        for (const k of ["where", "filter", "columns", "group_by", "sort"]) delete w[k];
+        w.type = v; defaults(w); changed(); drawCanvas(); drawPanel();
+      }, w.type ? undefined : "Choose a type")));
+    } else {
+      panel.append(field("Workflow", select_(cat.workflows.map((x) => [x.id, x.title]), w.workflow,
+        (v) => set(w, "workflow", v), "Any workflow")));
+      const sts = s === "items" ? spec.item_status : spec.run_status;
+      panel.append(chips(s === "items" ? "Status (none chosen: open and claimed)" : "Status (none chosen: any)",
+        sts.map((x) => [x, x]), w.status, (v) => set(w, "status", v)));
+      if (s === "items") panel.append(field("For the role", select_(cat.roles.map((r) => [r.id, r.name]), w.role,
+        (v) => set(w, "role", v), "Any role")));
+    }
+    if (has(w, "filter")) filterPanel(w);
+    if (has(w, "group_by")) {
+      const fs = fieldsOf(w).filter((f) => f.filter !== false);
+      panel.append(field(w.kind === "board" ? "A column for each" : "A bar for each",
+        select_(fs.map((f) => [colKey(w, f), f.label]), w.group_by, (v) => set(w, "group_by", v), "Choose a field")));
+    }
+    if (has(w, "columns")) columnsPanel(w);
+    if (has(w, "sort")) {
+      const fs = fieldsOf(w).filter((f) => f.filter !== false);
+      const box = el("div", { class: "dz-row" },
+        select_(fs.map((f) => [colKey(w, f), f.label]), w.sort, (v) => { set(w, "sort", v, true); }, "Newest first"));
+      box.firstChild.id = "dz-sort";
+      if (w.sort) box.append(el("label", { class: "radio" }, el("input", { type: "checkbox", checked: !!w.descending,
+        onchange: (ev) => set(w, "descending", ev.target.checked || undefined) }), "Largest or latest first"));
+      panel.append(el("div", { class: "dz-field" }, el("label", { for: "dz-sort" }, "Order by"), box));
+    }
+    if (has(w, "limit")) panel.append(field("At most", input(w.limit, (v) => set(w, "limit", v === "" ? undefined : Math.max(1, parseInt(v, 10) || 1)),
+      { type: "number", min: "1", max: "1000", placeholder: w.kind === "tree" ? "500" : "25", id: "dz-limit" }), "rows shown"));
+    placePanel(w);
+  }
+  function placePanel(w) {
+    const g = w.grid, num = (k, label, min, max, off) => field(label, input(g[k] + off, (v) => {
+      const n = parseInt(v, 10);
+      if (Number.isNaN(n)) return;
+      g[k] = n - off; settle(w); drawCanvas(); changed(true);
+    }, { type: "number", min: String(min), max: String(max), id: "dz-g-" + k }));
+    panel.append(el("fieldset", { class: "dz-place" }, el("legend", {}, "Place on the grid"),
+      el("div", { class: "dz-quad" }, num("x", "Column", 1, COLS, 1), num("y", "Row", 1, 200, 1),
+        num("w", "Width", 1, COLS, 0), num("h", "Height", 1, spec.max_height, 0)),
+      el("small", { class: "muted" }, "Or drag it by its top bar and its corner; on the grid, arrow keys move it and Shift with an arrow resizes it.")));
+  }
+
+  // ---- filters, with pickers
+  function opsFor(f) {
+    const o = spec.ops, all = ["==", "!=", "in", "not in", "<", "<=", ">", ">=", "empty", "set"];
+    let ks = all;
+    if (!f) ks = all;
+    else if (f.choices && f.choices.length || f.type === "role" || f.type === "choice") ks = ["==", "!=", "in", "not in", "empty", "set"];
+    else if (f.type === "boolean") ks = ["==", "!=", "empty", "set"];
+    else if (f.type === "number" || f.type === "integer" || isDate(f)) ks = ["==", "!=", "<", "<=", ">", ">=", "empty", "set"];
+    else ks = ["==", "!=", "in", "not in", "empty", "set"];
+    const dated = { "<": "is before", "<=": "is on or before", ">": "is after", ">=": "is on or after" };
+    return ks.map((k) => [k, isDate(f) && dated[k] ? dated[k] : o[k]]);
+  }
+  function choicesOf(f) {
+    if (!f) return [];
+    if (f.type === "role") return cat.roles.map((r) => [r.id, r.name]);
+    return (f.choices || []).map((c) => [c, c]);
+  }
+  function filterPanel(w) {
+    const box = el("fieldset", { class: "dz-filter" }, el("legend", {}, "Only those where"));
+    panel.append(box);
+    if ((w.where || asText.has(w)) && !w.filter) {
+      const ta = el("textarea", { class: "code", rows: "3", id: "dz-where", spellcheck: "false",
+        oninput: (ev) => { const v = ev.target.value.trim(); if (v) w.where = v; else delete w.where; changed(); } });
+      ta.value = w.where;
+      box.append(field("Condition", ta, "Written as a condition: it says more than the pickers can show."),
+        el("button", { type: "button", class: "subtle", onclick: () => { delete w.where; asText.delete(w); changed(); drawPanel(); } },
+          "Use pickers instead (clears it)"));
+      return;
+    }
+    const f = w.filter || { match: "all", rules: [] };
+    const fs = fieldsOf(w).filter((x) => x.filter !== false);
+    const commit = (redraw) => { w.filter = f; delete w.where; if (!f.rules.length) { delete w.filter; } changed(); if (redraw) drawPanel(); };
+    if (f.rules.length > 1) box.append(field("Match", select_([["all", "all of these"], ["any", "any of these"]], f.match,
+      (v) => { f.match = v; commit(); })));
+    f.rules.forEach((r, i) => {
+      const fd = fs.find((x) => x.path === r.path);
+      const fsel = select_(fs.map((x) => [x.path, x.label]), r.path, (v) => {
+        f.rules[i] = { path: v, op: "==" };
+        const nf = fs.find((x) => x.path === v), ch = choicesOf(nf);
+        if (ch.length) f.rules[i].value = ch[0][0]; else if (isDate(nf)) { f.rules[i].op = "<="; f.rules[i].today = ""; }
+        else if (nf && nf.type === "boolean") f.rules[i].value = true; else f.rules[i].value = "";
+        commit(true);
+      });
+      fsel.setAttribute("aria-label", `Condition ${i + 1}: field`);
+      const osel = select_(opsFor(fd), r.op, (v) => {
+        r.op = v;
+        if (v === "empty" || v === "set") { delete r.value; delete r.today; }
+        else if (v === "in" || v === "not in") { delete r.today; r.value = Array.isArray(r.value) ? r.value : r.value != null && r.value !== "" ? [r.value] : []; }
+        else if (Array.isArray(r.value)) r.value = r.value[0] ?? "";
+        else if (isDate(fd) && !("value" in r) && !("today" in r)) r.today = "";
+        commit(true);
+      });
+      osel.setAttribute("aria-label", `Condition ${i + 1}: how`);
+      const row = el("div", { class: "dz-rule" }, fsel, osel);
+      const valueBox = ruleValue(r, fd, i, commit);
+      if (valueBox) row.append(valueBox);
+      row.append(el("button", { type: "button", class: "subtle dz-del", "aria-label": `Remove condition ${i + 1}`,
+        onclick: () => { f.rules.splice(i, 1); commit(true); } }, "×"));
+      box.append(row);
+    });
+    box.append(el("div", { class: "dz-row" },
+      el("button", { type: "button", class: "subtle", disabled: !fs.length, onclick: () => {
+        const x = fs[0], ch = choicesOf(x);
+        f.rules.push(ch.length ? { path: x.path, op: "==", value: ch[0][0] } : isDate(x) ? { path: x.path, op: "<=", today: "" }
+          : { path: x.path, op: "==", value: "" });
+        commit(true);
+      } }, "+ Add a condition"),
+      el("button", { type: "button", class: "link", onclick: async () => {
+        const res = await draft();
+        const i = doc.widget.indexOf(w), wh = res && res.widgets[i] && res.widgets[i].where;
+        delete w.filter;
+        if (wh) w.where = wh; else delete w.where;
+        asText.add(w);
+        drawPanel();
+      } }, "Write it as a condition")));
+    if (!f.rules.length) box.append(el("p", { class: "muted small" }, "Every one, for now."));
+  }
+  function ruleValue(r, fd, i, commit) {
+    if (r.op === "empty" || r.op === "set") return null;
+    const ch = choicesOf(fd), lab = `Condition ${i + 1}: value`;
+    if (r.op === "in" || r.op === "not in") {
+      if (ch.length) {
+        const cur = new Set(r.value || []);
+        return el("div", { class: "dz-multi", role: "group", "aria-label": lab }, ch.map(([v, l]) => el("label", { class: "radio" },
+          el("input", { type: "checkbox", checked: cur.has(v), onchange: (ev) => {
+            if (ev.target.checked) cur.add(v); else cur.delete(v);
+            r.value = ch.map((c) => c[0]).filter((x) => cur.has(x)); commit();
+          } }), l)));
+      }
+      return input((r.value || []).join(", "), (v) => { r.value = v.split(",").map((x) => x.trim()).filter(Boolean); commit(); },
+        { "aria-label": lab, placeholder: "a, b, c" });
+    }
+    if (ch.length) { const s = select_(ch, r.value, (v) => { r.value = v; commit(); }); s.setAttribute("aria-label", lab); return s; }
+    if (fd && fd.type === "boolean") {
+      const s = select_([["true", "yes"], ["false", "no"]], String(r.value), (v) => { r.value = v === "true"; commit(); });
+      s.setAttribute("aria-label", lab); return s;
+    }
+    if (isDate(fd)) {
+      const wrap = el("div", { class: "dz-date" });
+      const draw = () => {
+        wrap.textContent = "";
+        const hs = select_([["today", "today"], ["after", "days from today"], ["before", "days ago"], ["date", "a date"]],
+          "today" in r ? (/^\+/.test(r.today || "") ? "after" : /^-/.test(r.today || "") ? "before" : "today") : "date", (v) => {
+            if (v === "date") { delete r.today; r.value = new Date().toISOString().slice(0, 10); }
+            else { delete r.value; const n = (/(\d+)/.exec(r.today || "") || [0, 7])[1]; r.today = v === "today" ? "" : (v === "after" ? "+" : "-") + n + "d"; }
+            commit(); draw();
+          });
+        hs.setAttribute("aria-label", lab);
+        if ("today" in r && r.today) {
+          const n = (/(\d+)/.exec(r.today) || [0, 7])[1];
+          wrap.append(input(n, (v) => { const k = Math.max(0, parseInt(v, 10) || 0); r.today = (r.today[0] === "-" ? "-" : "+") + k + "d"; commit(); },
+            { type: "number", min: "0", max: "3650", class: "dz-n", "aria-label": `Condition ${i + 1}: how many days` }));
+        } else if (!("today" in r)) {
+          wrap.append(input(r.value, (v) => { r.value = v; commit(); }, { type: "date", "aria-label": `Condition ${i + 1}: date` }));
+        }
+        wrap.append(hs);
+      };
+      draw();
+      return wrap;
+    }
+    const numeric = fd && (fd.type === "number" || fd.type === "integer");
+    return input(r.value, (v) => { r.value = numeric && v !== "" && !Number.isNaN(Number(v)) ? Number(v) : v; commit(); },
+      { type: numeric ? "number" : "text", "aria-label": lab });
+  }
+
+  // ---- columns
+  function columnsPanel(w) {
+    const cols = w.columns || [];
+    const box = el("fieldset", { class: "dz-cols" }, el("legend", {}, w.kind === "board" ? "On each card" : "Columns"));
+    const commit = () => { if (cols.length) w.columns = cols; else delete w.columns; changed(); drawPanel(); };
+    cols.forEach((c, i) => {
+      const lab = input(c.label || "", (v) => { if (v) c.label = v; else delete c.label; changed(); },
+        { placeholder: labelOf(w, c.path), "aria-label": `Heading of the column ${labelOf(w, c.path)}` });
+      box.append(el("div", { class: "dz-col" }, el("span", { class: "dz-cn" }, labelOf(w, c.path)), lab,
+        el("button", { type: "button", class: "subtle", "aria-label": `Move ${labelOf(w, c.path)} up`, disabled: i === 0,
+          onclick: () => { cols.splice(i - 1, 0, cols.splice(i, 1)[0]); commit(); } }, "↑"),
+        el("button", { type: "button", class: "subtle", "aria-label": `Move ${labelOf(w, c.path)} down`, disabled: i === cols.length - 1,
+          onclick: () => { cols.splice(i + 1, 0, cols.splice(i, 1)[0]); commit(); } }, "↓"),
+        el("button", { type: "button", class: "subtle", "aria-label": `Remove the column ${labelOf(w, c.path)}`,
+          onclick: () => { cols.splice(i, 1); commit(); } }, "×")));
+    });
+    const used = new Set(cols.map((c) => c.path));
+    const addSel = select_(fieldsOf(w).filter((f) => !used.has(colKey(w, f))).map((f) => [colKey(w, f), f.label]), "",
+      (v) => { if (v) { cols.push({ path: v }); commit(); } }, "+ Add a column");
+    addSel.setAttribute("aria-label", "Add a column");
+    box.append(addSel);
+    if (!cols.length) box.append(el("p", { class: "muted small" }, "None chosen: the title."));
+    panel.append(box);
+  }
+
+  // ---- links
+  function linksPanel(w) {
+    const ls = w.links || (w.links = []);
+    const box = el("fieldset", { class: "dz-cols" }, el("legend", {}, "Links"));
+    const list = "dz-pages";
+    if (!$(list)) document.body.append(el("datalist", { id: list }, cat.pages.map((p) => el("option", { value: p.href }, p.label))));
+    ls.forEach((l, i) => {
+      box.append(el("div", { class: "dz-link" },
+        input(l.label, (v) => { l.label = v; changed(); }, { "aria-label": `Link ${i + 1}: words`, placeholder: "Words" }),
+        input(l.href, (v) => { l.href = v.trim(); changed(); }, { "aria-label": `Link ${i + 1}: where to`, placeholder: "/views/…", list }),
+        el("button", { type: "button", class: "subtle", "aria-label": `Remove link ${i + 1}`, onclick: () => { ls.splice(i, 1); changed(); drawPanel(); } }, "×")));
+    });
+    const pick = select_(cat.pages.map((p, i) => [String(i), p.label]), "", (v) => {
+      if (v !== "") { ls.push({ ...cat.pages[+v] }); changed(); drawPanel(); }
+    }, "+ Add a page of the hub");
+    pick.setAttribute("aria-label", "Add a page of the hub");
+    box.append(pick, el("button", { type: "button", class: "subtle", onclick: () => { ls.push({ label: "", href: "" }); drawPanel(); } }, "+ Another address"));
+    panel.append(box);
+    placePanel(w);
+  }
+
+  // ---- drafts: the text, the checks and the preview, from the hub
+  function clean() { return JSON.parse(JSON.stringify(doc)); }
+  async function post(body) {
+    const r = await fetch("/api/views/draft", { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return r.json();
+  }
+  async function draft() {
+    const mine = ++seq;
+    status.textContent = "Checking…";
+    try {
+      const res = await post({ doc: clean() });
+      if (mine !== seq) return res;
+      last = res;
+      show(res);
+      return res;
+    } catch (err) {
+      status.textContent = "Could not reach the hub to check the view.";
+    }
+  }
+  function show(res) {
+    status.textContent = "";
+    const ps = res.problems || [];
+    if (ps.length && !touched) status.append("Give the view a title and add widgets; the hub checks it as you go.");
+    else if (!ps.length) status.append(el("span", { class: "loz done" }, "ready"), " The hub accepts this.");
+    else status.append(el("span", { class: "loz bad" }, ps.length + " problem" + (ps.length === 1 ? "" : "s")),
+      el("ul", { class: "ed-problems" }, ps.map((p) => el("li", {}, p))));
+    (res.widgets || []).forEach((p, i) => {
+      const w = doc.widget[i];
+      if (!w) return;
+      const v = views.get(keyOf(w));
+      if (!v) return;
+      const body = v.querySelector(".dz-body"), total = v.querySelector(".dz-total");
+      if (p.problems) {
+        body.textContent = "";
+        body.append(el("ul", { class: "dz-wp" }, p.problems.map((x) => el("li", {}, x.replace(/^widget [^:]*: /, "")))));
+        total.textContent = ""; v.classList.add("bad");
+      } else {
+        body.innerHTML = p.html;  // the server's HTML, escaped there
+        total.textContent = w.kind === "links" ? "" : String(p.total);
+        v.classList.remove("bad");
+      }
+    });
+  }
+  function changed(soft) {
+    touched = true;
+    clearTimeout(timer);
+    timer = setTimeout(draft, soft ? 150 : 400);
+  }
+  function say(t) { const s = $("dz-say"); if (s) s.textContent = t; }
+  root.append(el("div", { id: "dz-say", class: "visually-hidden", "aria-live": "polite" }));
+
+  // ---- canvas or code
+  const modeBtns = root.querySelectorAll(".dz-mode button");
+  async function setMode(m) {
+    if (m === mode) return;
+    if (m === "code") {
+      const res = await draft();
+      if (!res) return;
+      toml.value = res.source || "";
+    } else {
+      const res = await post({ source: toml.value });
+      if (!res.doc) { show(res); return; }
+      doc = res.doc; doc.widget = doc.widget || [];
+      for (const [, v] of views) v.remove();
+      views.clear(); sel = null; idTouched = true;
+      last = res;
+    }
+    mode = m;
+    main.hidden = m === "code"; code.hidden = m !== "code";
+    modeBtns.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
+    if (m === "canvas") { drawCanvas(); drawPanel(); show(last); }
+    else toml.focus();
+  }
+  modeBtns.forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+  toml.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => { const res = await post({ source: toml.value }); status.textContent = ""; show({ ...res, widgets: [] }); }, 500);
+  });
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (!form.reportValidity()) return;
+    let source = toml.value;
+    if (mode === "canvas") { const res = await draft(); if (!res) return; source = res.source; }
+    form.elements.source.value = source;
+    HTMLFormElement.prototype.submit.call(form);
+  });
+
+  drawCanvas();
+  drawPanel();
+  const deep = /^#w(\d+)$/.exec(location.hash);  // #w2: open with the second widget chosen
+  if (deep && doc.widget[+deep[1] - 1]) select(doc.widget[+deep[1] - 1], true);
+  if (boot.problems && boot.problems.length) touched = true, show({ problems: boot.problems, widgets: [] });
+  draft();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const ed = document.getElementById("dash-editor");
+  if (ed) dashEditor(ed);
+});
+})();
+"""
+
+JS = JS + DASH_JS
+
+DASH_CSS = r"""
+/* ---- dashboards: a view's widgets on a 12-column grid (/views/<id>) and the editor that places them */
+.dash-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));grid-auto-rows:minmax(56px,auto);gap:12px;
+align-items:stretch;margin:0 0 16px}
+.dash-cell{min-width:0;background:var(--raised);border-radius:3px;box-shadow:var(--shadow-raised);padding:12px 16px;overflow:auto}
+.dash-cell>.section{margin:0}.dash-cell>.section.card{box-shadow:none;padding:0;background:transparent}
+.dash-cell h2{font-size:14px;line-height:20px;margin:0 0 8px}
+.dash-cell .board{overflow-x:auto}
+ul.dash-links,ul.dash-list{list-style:none;padding:0;margin:0}
+ul.dash-links li,ul.dash-list li{padding:6px 0;border-top:1px solid var(--border)}
+ul.dash-links li:first-child,ul.dash-list li:first-child{border-top:0}
+ul.dash-links a{font-weight:500}
+@media (max-width:720px){.dash-grid{display:flex;flex-direction:column}.dash-cell{grid-column:auto!important;grid-row:auto!important}}
+
+.dz-bar{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin:0 0 12px}
+.dz-grow{flex:1}
+.dz-mode{display:inline-flex;border-radius:3px;box-shadow:inset 0 0 0 1px var(--control-border);overflow:hidden}
+.dz-mode button{border-radius:0;box-shadow:none;background:transparent}
+.dz-mode button[aria-pressed=true]{background:var(--selected-bg);color:var(--selected-fg)}
+#dz-status{font-size:13px;line-height:20px;max-width:640px;color:var(--subtle)}
+#dz-status .ed-problems{margin:4px 0 0;padding-left:18px;color:var(--danger-fg)}
+.dz-main{display:grid;grid-template-columns:200px minmax(0,1fr) 320px;gap:16px;align-items:start}
+.dz-main[hidden],.dz-code[hidden]{display:none}
+.dz-palette,.dz-panel{background:var(--raised);border-radius:3px;box-shadow:var(--shadow-raised);padding:12px;
+position:sticky;top:64px;max-height:calc(100vh - 80px);overflow:auto}
+.dz-palette h2,.dz-panel h2{font-size:14px;line-height:20px;margin:0 0 8px}
+.dz-kinds{display:flex;flex-direction:column;gap:6px}
+button.dz-kind{height:auto;justify-content:flex-start;text-align:left;white-space:normal;padding:8px;gap:10px;cursor:grab;
+background:var(--surface);box-shadow:inset 0 0 0 1px var(--border)}
+button.dz-kind:hover{background:var(--neutral-hover)}
+.dz-glyph{flex:0 0 32px;height:32px;border-radius:3px;display:grid;place-items:center;background:var(--selected-bg);
+color:var(--selected-fg);font-size:12px;font-weight:700}
+.dz-kl{display:flex;flex-direction:column;min-width:0}.dz-kl b{color:var(--fg);font-size:13px}
+.dz-kl small{font-weight:400;font-size:11px;line-height:14px;color:var(--subtlest)}
+.dz-stage{position:relative;min-width:0}
+.dz-canvas{position:relative;min-height:336px;border-radius:3px;
+background-color:var(--sunken);
+background-image:linear-gradient(to right,var(--border) 1px,transparent 1px),linear-gradient(to bottom,var(--border) 1px,transparent 1px);
+background-size:var(--colw,60px) var(--rowh,68px);background-position:-6px -6px;outline:1px dashed var(--border-bold);outline-offset:0}
+.dz-canvas.drop{outline:2px solid var(--focus)}
+.dz-empty{position:absolute;top:40px;left:50%;transform:translateX(-50%);width:min(420px,calc(100% - 32px));text-align:center;
+color:var(--subtle);pointer-events:none;margin:0;padding:12px 16px;background:var(--raised);border-radius:3px;box-shadow:var(--shadow-raised)}
+.dz-w{position:absolute;display:flex;flex-direction:column;background:var(--raised);border-radius:3px;
+box-shadow:var(--shadow-raised);overflow:hidden;transition:left .12s,top .12s,width .12s,height .12s}
+.dz-w:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.dz-w.on{box-shadow:0 0 0 2px var(--brand),var(--shadow-raised)}
+.dz-w.bad{box-shadow:0 0 0 2px var(--danger),var(--shadow-raised)}
+.dz-w.lifted{transition:none;z-index:5;box-shadow:var(--shadow-overlay);opacity:.92}
+.dz-ghost{position:absolute;border-radius:3px;background:var(--selected-bg);outline:2px dashed var(--brand);z-index:1;pointer-events:none}
+.dz-head{display:flex;align-items:center;gap:6px;padding:4px 4px 4px 8px;border-bottom:1px solid var(--border);
+cursor:move;touch-action:none;user-select:none;min-height:32px}
+.dz-grip{color:var(--subtlest);font-size:14px}
+.dz-kindl{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--subtlest);white-space:nowrap}
+.dz-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.dz-total:empty{display:none}
+button.dz-x{height:24px;width:24px;padding:0;font-size:16px}
+.dz-body{flex:1;min-height:0;overflow:hidden;padding:8px 12px;font-size:13px}
+.dz-body .section{margin:0}.dz-body .section>h2:first-child{display:none}
+.dz-body .section.card{box-shadow:none;padding:0;background:transparent}
+.dz-body .stat{margin:0;font-size:32px;line-height:40px;font-weight:600}
+.dz-body table{font-size:12px}.dz-body .board .col{min-width:120px}
+.dz-wp{margin:0;padding-left:16px;color:var(--danger-fg);font-size:12px}
+.dz-resize{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;touch-action:none;
+background:linear-gradient(135deg,transparent 50%,var(--border-bold) 50%,var(--border-bold) 60%,transparent 60%,transparent 70%,var(--border-bold) 70%,var(--border-bold) 80%,transparent 80%)}
+.dz-panel .dz-field{margin:0 0 8px}.dz-panel label{margin-top:8px}
+.dz-panel .small,.dz-palette .small{font-size:12px;line-height:16px}
+.dz-ph{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.dz-ph h2{flex:1;margin:0}
+.dz-ph button{height:28px;padding:0 8px;font-size:13px}
+.dz-panel fieldset{border:0;border-top:1px solid var(--border);margin:12px 0 0;padding:8px 0 0;min-width:0}
+.dz-panel legend{font-size:12px;font-weight:600;color:var(--subtle);padding:0 4px 0 0}
+.dz-rule{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 28px;gap:4px;align-items:start;margin:0 0 8px;
+padding:6px;background:var(--sunken);border-radius:3px}
+.dz-rule>:nth-child(3):not(button){grid-column:1/3}
+.dz-rule select,.dz-rule input{margin:0}
+.dz-rule .dz-del{grid-column:3;grid-row:1}
+.dz-multi{grid-column:1/3;display:flex;flex-wrap:wrap}.dz-multi label.radio{margin:2px 10px 2px 0;font-size:13px}
+.dz-date{display:flex;gap:4px}.dz-date .dz-n{width:72px;flex:0 0 72px}
+.dz-row{display:flex;gap:4px 8px;align-items:center;flex-wrap:wrap}.dz-row select{flex:1 1 100%;min-width:0}
+.dz-col,.dz-link{display:flex;gap:4px;align-items:center;margin:0 0 4px}
+.dz-col .dz-cn{flex:0 0 35%;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dz-col input,.dz-link input{margin:0;flex:1;min-width:0}
+.dz-col button,.dz-link button{height:28px;width:28px;padding:0}
+.dz-quad{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}
+.dz-chips label.radio{font-size:13px;margin:2px 12px 2px 0}
+.dz-check{margin-top:12px}
+.dz-code textarea{min-height:28em}
+.dz-foot{margin-top:16px}
+@media (max-width:1100px){.dz-main{grid-template-columns:minmax(0,1fr) 300px}
+  .dz-palette{grid-column:1/-1;position:static;max-height:none}.dz-kinds{flex-direction:row;flex-wrap:wrap}
+  button.dz-kind{flex:1 1 150px}}
+@media (max-width:760px){.dz-main{grid-template-columns:minmax(0,1fr)}.dz-panel{position:static;max-height:none}
+  .dz-kl small{display:none}button.dz-kind{flex:1 1 96px;padding:6px}.dz-glyph{flex-basis:24px;height:24px}
+  .dz-kinds{gap:4px}}
+"""
+
+CSS = CSS + DASH_CSS

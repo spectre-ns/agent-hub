@@ -62,6 +62,34 @@ def search_text(rec: dict) -> str:
     return fold(json.dumps(rec, ensure_ascii=False))
 
 
+_WORD = re.compile(r"\w+")
+
+
+def words_in(rec) -> list[str]:
+    """The words a record is found by: every word of its values (not its keys or ``meta``), folded, once each. A
+    search word matches a word that starts with it ("hel" finds "Hélène"), so an index answers it."""
+    out: set[str] = set()
+
+    def walk(v, depth=0):
+        if depth > 12:
+            return
+        if isinstance(v, dict):
+            for k, x in v.items():
+                if k != "meta":
+                    walk(x, depth + 1)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+        elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
+            out.update(_WORD.findall(fold(v)))
+    walk(rec)
+    return sorted(out)
+
+
+def _prefix(word: str) -> dict:
+    return {"$regex": "^" + re.escape(word)}
+
+
 class RecordStore(Protocol):
     def create(self, rtype: str, data: dict) -> dict: ...
     def read(self, rtype: str, rid: str) -> dict | None: ...
@@ -82,13 +110,31 @@ class LocalRecordStore:
     def __init__(self, db: Database):
         self.db = db
         self.subject_fn = subject_of  # the hub sets its own, from its record types
+        # the hub sets this too: for a record whose type gives some fields a data class of their own, the record as
+        # each reader sees it (``[("_", without any of them), (class, with only that class's)]``) and a stamp of the
+        # type's classes; a search by someone who may not read a class looks only in the parts they may read
+        self.parts_fn = lambda rec: ([], "")
+
+    def _indexed(self, rec: dict) -> dict:
+        parts, stamp = self.parts_fn(rec)
+        return {"search": search_text(rec), "words": words_in(rec), "ix": stamp,
+                "search_parts": [{"c": c, "w": words_in(view)} for c, view in parts] or None}
+
+    def reindex(self, rtype: str, stamp: str) -> int:
+        """Rewrite the search words of ``rtype``'s records indexed under another stamp (their type's data classes
+        changed, or they were written before the words were kept). Returns how many were rewritten."""
+        n = 0
+        for row in self.db.records.find({"type": rtype, "ix": {"$ne": stamp}}, fields=["data"]):
+            self.db.records.set(row["_id"], self._indexed(row["data"]))
+            n += 1
+        return n
 
     def create(self, rtype, data):
         rec = {**data, "resourceType": rtype, "id": data.get("id") or new_id()}
         rec["meta"] = {"versionId": "1", "lastUpdated": utcnow()}
         self.db.records.insert({"_id": f"{rtype}/{rec['id']}", "type": rtype, "id": rec["id"],
                                 "subject": self.subject_fn(rec), "data": rec, "version": 1,
-                                "updated_at": rec["meta"]["lastUpdated"], "search": search_text(rec)})
+                                "updated_at": rec["meta"]["lastUpdated"], **self._indexed(rec)})
         return rec
 
     def read(self, rtype, rid):
@@ -103,19 +149,30 @@ class LocalRecordStore:
             version = row["version"] + 1
             rec = {**data, "resourceType": rtype, "id": rid, "meta": {"versionId": str(version), "lastUpdated": utcnow()}}
             self.db.records.set(row["_id"], {"data": rec, "subject": self.subject_fn(rec), "version": version,
-                                             "updated_at": rec["meta"]["lastUpdated"], "search": search_text(rec)})
+                                             "updated_at": rec["meta"]["lastUpdated"], **self._indexed(rec)})
             return rec
 
-    def search(self, rtype=None, *, subject=None, limit=200, text=None, field=None, since=None, until=None):
+    def search(self, rtype=None, *, subject=None, limit=200, text=None, field=None, since=None, until=None,
+               offset=0, visible=None, plain=None):
+        """``visible`` (with ``plain``): the reader may not read some fields' data classes. Each word must then be
+        in a part of the record they may read: one with a data class in ``visible``, or a record of a type in
+        ``plain`` (whose fields have no classes of their own). A hidden field's value never matches. ``offset``:
+        skip that many (a page further on), counted in the database."""
         flt: dict = {}
         if rtype:
             flt["type"] = rtype
         if subject:
             flt["subject"] = subject
-        words = words_of(text)
+        words = [t for w in words_of(text) for t in _WORD.findall(w)][:8]
         if words:
-            # every word somewhere in the record, folded as the record is: "helene" finds "Hélène"
-            flt["$and"] = [{"search": {"$regex": re.escape(w)}} for w in words]
+            # every word starts a word of the record, folded as the record is: "helene" finds "Hélène"
+            if visible is None:
+                flt["$and"] = [{"words": _prefix(w)} for w in words]
+            else:
+                seen = sorted(set(visible) | {"_"})
+                flt["$and"] = [{"$or": [{"type": {"$in": sorted(plain or [])}, "search_parts": None, "words": _prefix(w)},
+                                        {"search_parts": {"$elemMatch": {"c": {"$in": seen}, "w": _prefix(w)}}}]}
+                               for w in words]
         if field and (since or until):
             if not FIELD.fullmatch(field):
                 raise ValueError(f"cannot search by {field!r}")
@@ -126,7 +183,7 @@ class LocalRecordStore:
                 rng["$lt"] = until
             flt[f"data.{field}"] = rng
         return [r["data"] for r in self.db.records.find(flt, sort=[("updated_at", -1)], limit=limit,
-                                                         fields=["data"])]
+                                                         skip=offset or 0, fields=["data"])]
 
 
 class MedplumRecordStore:
@@ -180,8 +237,13 @@ class MedplumRecordStore:
         rec = {k: v for k, v in data.items() if k != "meta"}
         return self._call("PUT", f"{rtype}/{urllib.parse.quote(rid)}", {**rec, "resourceType": rtype, "id": rid})
 
-    def search(self, rtype=None, *, subject=None, limit=200, text=None, field=None, since=None, until=None):
+    def search(self, rtype=None, *, subject=None, limit=200, text=None, field=None, since=None, until=None,
+               offset=0, **_):
         """FHIR search; the text and time filters are applied here, over pages of results, so none is cut short."""
+        if offset:
+            got = self.search(rtype, subject=subject, limit=None if limit is None else limit + offset, text=text,
+                              field=field, since=since, until=until)
+            return got[offset:]
         if text or field:
             out, want = [], limit
             words = words_of(text)

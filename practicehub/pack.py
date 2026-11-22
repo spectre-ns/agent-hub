@@ -117,13 +117,15 @@ class Pack:
     def subject_type(self) -> str:
         return self.subject["type"]
 
-    def facts(self, rec: dict) -> dict | None:
+    def facts(self, rec: dict, today=None) -> dict | None:
         """The headline facts on a subject's page, when the pack's code says (``facts``); else None, and the core
-        shows the type's ``fact = true`` fields."""
+        shows the type's ``fact = true`` fields. ``today`` (the practice's date) goes to a ``facts`` that takes it."""
         fn = getattr(self.module, "facts", None) if self.module else None
         if fn:
             try:
-                return fn(rec)
+                import inspect
+                takes = "today" in inspect.signature(fn).parameters
+                return fn(rec, today=today) if takes else fn(rec)
             except Exception:  # cosmetic, like summaries
                 pass
         return None
@@ -333,6 +335,12 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
     pack_id = pack_id or pack_dir.name
     from .contract import check_requires
     check_requires(f"the {kind} {pack_dir.name}", doc["practice"].get("requires_core"))
+    if kind == "practice":  # its "now" and "today" (``clock``): a pack that does not say would date notes in UTC
+        from .clock import zone
+        if not str(doc["practice"].get("timezone") or "").strip():
+            raise ValueError(f"the practice {pack_dir.name}: [practice] timezone: say the practice's time zone "
+                             "(a name like America/Halifax)")
+        zone(doc["practice"]["timezone"])
     mod = _load_module(pack_dir, pack_id, code) if run_code else None
     pack = Pack(id=pack_id, dir=pack_dir, practice=doc["practice"], roles=doc.get("roles", []),
                 data_classes=doc.get("data_classes", []), grants=doc.get("grants", {}), members=doc.get("members", []),

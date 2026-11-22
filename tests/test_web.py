@@ -1409,6 +1409,33 @@ def test_every_member_opens_the_calendar(hub, server):
         hub.engine.now().weekday() >= 5  # a weekend's week view starts the coming week's open days
 
 
+def test_the_calendar_today_and_now_are_the_practices(hub, server):
+    """A Halifax practice on a UTC server. At 00:30 UTC on Tuesday it is 20:30 on Monday in Halifax: the calendar
+    opens on Monday, marks Monday as today, and offers no more of Monday's slots."""
+    from datetime import datetime, timezone
+    hub.engine._now = datetime(2030, 1, 8, 0, 30, tzinfo=timezone.utc)
+    page = call(server, "GET", "/schedule", token(hub, "jo"))[1]
+    assert "Monday January 7, 2030" in page and "Tuesday" not in page.split('class="cal-nav"')[0][-400:]
+    assert 'class="cal-day today"' in page and "/schedule/new?with=dr-amara&amp;at=2030-01-07T" not in page
+    week = call(server, "GET", "/schedule?view=week", token(hub, "jo"))[1]
+    assert 'class="cal-day today"' in week and 'href="/schedule?view=day&amp;date=2030-01-07"' in \
+        week.split('class="cal-day today"')[1][:120]
+    # at 10:00 in Halifax (14:00 UTC) the 09:00 slot is past and the 10:00 one is free, and the now line is in it
+    hub.engine._now = datetime(2030, 1, 7, 14, 0, tzinfo=timezone.utc)
+    page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
+    assert f"with=dr-amara&amp;at={DAY}T09%3A00" not in page and f"with=dr-amara&amp;at={DAY}T10%3A00" in page
+    assert page.count('class="cal-now"') == 2  # one per physician's column, at 10:00 (row 5 of 15-minute rows)
+    assert 'class="cal-now" style="grid-row:5;' in page
+
+
+def test_pages_show_times_in_the_practices_zone(hub, server):
+    """Work items and the track keep instants in UTC; a page shows them in the practice's zone (Halifax, -4)."""
+    it = hub.db.items.find_one({"assignee": "jo", "status": "open"}) or hub.db.items.find_one({"status": "open"})
+    hub.db.items.set(it["id"], {"created_at": "2026-11-23T00:30:00Z"})
+    page = call(server, "GET", f"/items/{it['id']}", token(hub, it["assignee"] or "rana"))[1]
+    assert "2026-11-22 20:30" in page and "2026-11-23 00:30" not in page
+
+
 def test_a_free_slot_opens_the_booking_form_with_the_member_and_time(hub, server):
     page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
     href = f'/schedule/new?with=dr-amara&amp;at={DAY}T09%3A00'
@@ -1872,3 +1899,24 @@ def test_the_front_desk_sees_no_step_of_a_branch_it_may_not_read(hub, server):
     # a physician sees them
     page = call(server, "GET", f"/runs/{run['id']}", token(hub, "dr-amara"))[1]
     assert any(s.title in html.unescape(page) for s in hidden)
+
+
+def test_the_track_page_shows_one_page_at_a_time_and_verifies_only_what_is_new(hub, server):
+    """The Track page lists the newest events a page at a time, with a link to older ones (read by index, not the
+    whole track), and its check of the chain reads nothing more when no event was added since the last."""
+    from practicehub.web.server import App
+    rana = token(hub, "rana")
+    total = hub.db.events.count({})
+    assert total > App.TRACK_PAGE, "the demo has more events than one page"
+    code, body = call(server, "GET", "/track", rana)
+    assert code == 200 and "Older events" in body
+    newest = hub.db.events.find_one({}, sort=[("seq", -1)])
+    oldest_shown = hub.db.events.find({}, sort=[("seq", -1)], limit=App.TRACK_PAGE)[-1]["seq"]
+    assert f"before={oldest_shown}" in body
+    code, older = call(server, "GET", f"/track?before={oldest_shown}", rana)
+    assert code == 200 and "Newest" in older and f"/track/{newest['seq']}\"" not in older
+    first = hub.verify(full=False)
+    before = hub.db.get_setting("track_verified")
+    again = hub.verify(full=False)
+    assert again["ok"] and again["head"] == first["head"]
+    assert hub.db.get_setting("track_verified") == before  # nothing new: the sealed result stands, not rewritten

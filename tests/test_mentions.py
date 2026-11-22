@@ -2,7 +2,7 @@
 
 import pytest
 
-from conftest import M
+from conftest import M, snapshot_onto
 from practicehub.hub import Denied, Invalid, member_ref
 from practicehub.live import Live
 from practicehub.mentions import mentioned_ids, mentions_of
@@ -13,11 +13,15 @@ AGENT = "scribe-agent"
 
 @pytest.fixture
 def wiki(hub):
+    snapshot_onto(hub, "mentions:wiki", _wiki, modules=["wiki"])
+    hub._live = Live(hub)
+    return hub
+
+
+def _wiki(hub):
     install(hub, "wiki")
     for m in hub.pack.modules:
         m.module.demo(hub)
-    hub._live = Live(hub)
-    return hub
 
 
 def _let_read(hub, mid=AGENT):

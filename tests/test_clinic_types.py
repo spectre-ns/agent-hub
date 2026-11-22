@@ -6,8 +6,8 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from conftest import snapshot_hub
 from practicehub import schema
-from practicehub.hub import Hub
 from practicehub.web.server import App, make_handler
 from test_web import call, token
 
@@ -68,11 +68,14 @@ def clinic(monkeypatch):
     """The clinic pack with its team and no demo data: one patient, and a server."""
     monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
     monkeypatch.delenv("PRACTICEHUB_ALLOW_EXTERNAL_MODELS", raising=False)
-    hub = Hub(None, pack="general-practice")
-    hub.install("general-practice", demo=False)
-    pat = hub.records.create("Patient", {"name": [{"given": ["Ellen"], "family": "MacLeod"}],
-                                         "birthDate": "1958-03-14"})
-    visit = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": f"Patient/{pat['id']}"}})
+    def build(hub):
+        hub.install("general-practice", demo=False)
+        pat = hub.records.create("Patient", {"name": [{"given": ["Ellen"], "family": "MacLeod"}],
+                                             "birthDate": "1958-03-14"})
+        visit = hub.records.create("Encounter", {"status": "finished",
+                                                 "subject": {"reference": f"Patient/{pat['id']}"}})
+        return pat, visit
+    hub, (pat, visit) = snapshot_hub("clinic_types:clinic", "general-practice", build, result=True)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(App(hub, dev=False)))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield hub, f"http://127.0.0.1:{httpd.server_port}", f"Patient/{pat['id']}", f"Encounter/{visit['id']}"
