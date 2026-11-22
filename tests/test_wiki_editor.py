@@ -16,7 +16,7 @@ import pytest
 from practicehub import markup
 from practicehub.web import assets
 from test_live_web import _live_cfg, _page, wiki  # noqa: F401 - the fixture
-from test_web import call, token
+from test_web import call, server, token  # noqa: F401 - the server fixture
 
 
 def _draft(hub, title="A new page", body="Words."):
