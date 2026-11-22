@@ -184,7 +184,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         from .engine import Engine
         self.engine = Engine(self)
         self.engine.zone()  # an unknown time zone, or no tz data on this machine, fails here: never wrong dates later
-        if self.db.runs.exists({"status": "running", "item": {"$exists": False}}):
+        if self.db.runs.exists({"status": "running", "$or": [{"item": {"$exists": False}}, {"fold_failed": True}]}):
             self.engine.fold_run_items()  # open runs from before one item walked each run's workflow
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
         if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:

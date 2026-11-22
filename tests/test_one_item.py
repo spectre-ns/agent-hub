@@ -181,7 +181,10 @@ def test_a_run_at_a_step_its_version_no_longer_has_still_folds_and_a_failure_is_
     assert hub.engine.fold_run_items() == []
     assert hub.engine.run(run["id"])["item"] is None and hub.engine.run(run["id"])["fold_failed"]
     monkeypatch.setattr(hub.engine, "_fold", real)
-    assert hub.engine.fold_run_items() == [run["id"]]
-    folded = hub.engine.run(run["id"])
+    from practicehub.hub import Hub
+    import conftest
+    conftest._TEST["next"] = hub.db.name  # the same practice, opened again: it tries the failed fold again
+    again = Hub(None, pack="general-practice")
+    folded = again.engine.run(run["id"])
     assert folded["item"] == "item-old1" and "fold_failed" not in folded
     assert [h["title"] for h in _item(hub, "item-old1")["history"]][-1] == "A step since removed"
