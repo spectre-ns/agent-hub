@@ -1095,3 +1095,76 @@ def is_active(rt: RecordType | None, rec: dict) -> bool:
         return expr.holds(rt.active, {"record": rec})
     except expr.ExprError:
         return True
+
+
+# ------------------------------------------------------------------------------------------- module additions
+# What a module adds to a type (or view, or workflow) another part of the practice owns sits in the text between
+# these lines (``hub._extended_source`` writes them). The practice's own text is what lies outside them; a practice's
+# change never adds, alters or removes what is inside, and the module's lines are put back after its text on save.
+ADDED = re.compile(r"# >>> added by the ([a-z][a-z0-9-]*) module\n(.*?)\n# <<< \1(?:\n|$)", re.S)
+ADDED_LINE = re.compile(r"^[ \t]*# (>>>|<<<)", re.M)
+
+
+def module_additions(source: str) -> list[tuple[str, str]]:
+    """``[(module id, the text it added)]``, in the order they stand."""
+    return [(m, t.strip()) for m, t in ADDED.findall(source or "")]
+
+
+def own_text(source: str) -> str:
+    """A definition's text without what modules added to it: what the practice owns and edits."""
+    out = ADDED.sub("", source or "")
+    return re.sub(r"\n{3,}", "\n\n", out).strip() + "\n"
+
+
+def with_additions(own: str, additions: list[tuple[str, str]]) -> str:
+    """The practice's text followed by each module's additions, marked as ``hub._extended_source`` marks them."""
+    src = (own or "").rstrip() + "\n"
+    for mid, text in additions:
+        src += f"\n# >>> added by the {mid} module\n{text.strip()}\n# <<< {mid}\n"
+    return src
+
+
+def _added_names(text: str) -> dict[str, set]:
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return {}
+    pick = lambda key, k: {str(x.get(k)) for x in doc.get(key, []) if isinstance(x, dict) and x.get(k)}  # noqa: E731
+    return {"field": pick("field", "name"), "signature": pick("signature", "meaning"),
+            "column": pick("column", "field"), "widget": pick("widget", "id")}
+
+
+def keep_module_additions(source: str, in_force: str | None) -> tuple[str, list[str]]:
+    """A practice's proposed text, with what modules added to the version in force put back after it.
+
+    The practice owns only its own text: a proposal may leave the modules' marked lines out (they are re-applied) or
+    carry them exactly as they are in force; one that adds, changes or removes them, or that defines in its own text
+    a field (signature, column, widget) a module added, is refused. Returns (the text to propose, problems)."""
+    sent, have = module_additions(source), module_additions(in_force or "")
+    own, problems = own_text(source), []
+    for n, line in enumerate(own.splitlines(), 1):
+        if ADDED_LINE.match(line):
+            problems.append(f"line {n}: {line.strip()!r} marks where a module's additions start or end; the practice's "
+                            f"text does not carry it (leave the module's lines out: they are kept as they are)")
+    held = dict(have)
+    for mid, text in sent:
+        if mid not in held:
+            problems.append(f"the {mid} module: the text carries additions marked as the {mid} module's, which the "
+                            f"version in force does not have; only the module adds them (install or upgrade it)")
+        elif text != held[mid]:
+            problems.append(f"the {mid} module: what it added cannot be changed here; it changes with the module "
+                            f"(upgrade it), and the practice's own fields go outside its marked lines")
+    if sent:
+        for mid in held:
+            if mid not in dict(sent):
+                problems.append(f"the {mid} module: the text leaves out what the {mid} module added; a module's "
+                                f"additions go only when the module is removed")
+    mine = _added_names(own)
+    for mid, text in have:
+        for what, names in _added_names(text).items():
+            for nm in sorted(names & mine.get(what, set())):
+                problems.append(f"{what} {nm}: added by the {mid} module, so the practice's text does not define it "
+                                f"again (to change it, change the module)")
+    if have:
+        return with_additions(own, have), problems
+    return (own if sent else source), problems

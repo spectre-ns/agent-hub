@@ -335,6 +335,120 @@ def test_a_manager_changes_a_record_type_from_the_web(hub, server):
     assert call(server, "GET", "/define/skills", rana)[0] == 200
 
 
+class _BuilderForm(__import__("html.parser").parser.HTMLParser):
+    """What a browser would send from the type builder (form#type-builder): every enabled control but its buttons."""
+
+    def __init__(self, page):
+        super().__init__(convert_charrefs=True)
+        self.pairs, self._in, self._sel, self._opt, self._ta = [], False, None, None, None
+        self.feed(page)
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form":
+            self._in = a.get("id") == "type-builder"
+        if not self._in or "disabled" in a:
+            return
+        if tag == "input" and a.get("name") and a.get("type") not in ("submit", "button"):
+            if a.get("type") not in ("checkbox", "radio") or "checked" in a:
+                self.pairs.append((a["name"], a.get("value", "on" if a.get("type") == "checkbox" else "")))
+        elif tag == "select":
+            self._sel = a.get("name")
+        elif tag == "option" and self._sel and "selected" in a:
+            self.pairs.append((self._sel, a.get("value", "")))
+        elif tag == "textarea" and a.get("name"):
+            self._ta = [a["name"], ""]
+
+    def handle_data(self, data):
+        if self._ta:
+            self._ta[1] += data
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self._in = False
+        elif tag == "select":
+            self._sel = None
+        elif tag == "textarea" and self._ta:
+            self.pairs.append((self._ta[0], self._ta[1].removeprefix("\n")))
+            self._ta = None
+
+
+def _textarea(page, name):
+    return html.unescape(re.search(rf'<textarea name="{name}"[^>]*>(.*?)</textarea>', page, re.S).group(1))
+
+
+def test_the_type_builder_round_trips_through_toml(hub, server):
+    """The form is the default editor; "Edit as TOML" gives the text the validator checks, and back to the form gives
+    the same form: nothing is lost either way."""
+    rana = _modules(hub, server)
+    code, page = call(server, "GET", "/define/types/Document/edit", rana)
+    assert code == 200 and 'id="type-builder"' in page and "Edit as TOML" in page
+    form = _BuilderForm(page).pairs
+    assert ("t.id", "Document") in form and any(k.endswith(".name") for k, _ in form)
+    code, page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "toml")])
+    assert code == 200
+    source = _textarea(page, "source")
+    doc = __import__("tomllib").loads(source)
+    assert doc["id"] == "Document" and doc["field"]
+    code, page = call(server, "POST", "/define/types/build", rana,
+                      form=[("source", source), ("did", "Document"), ("note", ""), ("op", "form")])
+    assert code == 200 and _BuilderForm(page).pairs == form
+    code, page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "check")])
+    assert "The hub accepts this" in page
+
+
+def test_the_type_builder_shows_a_problem_on_the_field_it_is_about(hub, server):
+    rana = _modules(hub, server)
+    form = _BuilderForm(call(server, "GET", "/define/types/Document/edit", rana)[1]).pairs
+    n = int(dict(form)["f.n"])
+    page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "add-field")])[1]
+    form = [(k, v) for k, v in _BuilderForm(page).pairs if k not in (f"f.{n}.name", f"f.{n}.type")]
+    form += [(f"f.{n}.name", "room"), (f"f.{n}.type", "choice"), ("op", "check")]
+    code, page = call(server, "POST", "/define/types/build", rana, form=form)
+    assert code == 200
+    err = re.search(rf'<ul class="fb-errors" id="b-f{n}-choices-err"[^>]*>(.*?)</ul>', page, re.S)
+    assert err and "a choice needs choices" in err.group(1)
+    assert f'href="#b-f{n}-choices"' in page  # the summary at the top links to it
+    assert not any(v["status"] == "proposed" for v in hub.definition_versions("type", "Document"))
+
+
+def test_the_editors_show_what_a_module_added_but_never_let_it_be_changed(hub, server, tmp_path, monkeypatch):
+    import shutil
+
+    from practicehub import pack as packmod
+    d = tmp_path / "modules"
+    for name in ("dms", "qms"):
+        shutil.copytree(packmod.MODULES_DIR / name, d / name)
+    (d / "dms-site" / "extends" / "types").mkdir(parents=True)
+    (d / "dms-site" / "module.toml").write_text(
+        '[module]\nid = "dms-site"\nname = "Sites"\nversion = "1"\nrequires = ["dms"]\n')
+    (d / "dms-site" / "extends" / "types" / "Document.toml").write_text(
+        '[[field]]\nname = "site"\nlabel = "Site"\ntype = "choice"\nchoices = ["north", "south"]\n')
+    monkeypatch.setattr(packmod, "MODULES_DIR", d)
+    rana = _modules(hub, server)
+    hub.approve_module_code(M(hub, "dr-amara"), "dms-site")
+    hub.install_module(M(hub, "rana"), "dms-site")
+    page = call(server, "GET", "/define/types/Document/edit", rana)[1]
+    assert "From modules" in page and "dms-site" in page
+    form = _BuilderForm(page).pairs
+    assert ("f.0.name", "site") not in form and not any(v == "site" for k, v in form if k.endswith(".name"))
+    toml = call(server, "GET", "/define/types/Document/edit?as=toml", rana)[1]
+    own = _textarea(toml, "source")
+    assert "# >>>" not in own and "From modules" in toml
+    full = next(v for v in hub.definition_versions("type", "Document") if v["status"] == "active")["source"]
+    altered = full.replace('choices = ["north", "south"]', 'choices = ["north", "east"]')
+    code, page = call(server, "POST", "/define/types/propose", rana, form={"source": altered, "note": "x"})
+    assert code == 200 and "It was not saved" in page and "cannot be changed here" in html.unescape(page)
+    redefined = own + '\n[[field]]\nname = "site"\ntype = "string"\n'
+    page = call(server, "POST", "/define/types/propose", rana, form={"source": redefined, "note": "x"})[1]
+    assert "added by the dms-site module" in html.unescape(page)
+    assert not any(v["status"] == "proposed" for v in hub.definition_versions("type", "Document"))
+    code, page = call(server, "POST", "/define/types/build", rana, form=form + [("note", "same"), ("op", "propose")])
+    assert code == 303  # the practice's own part, proposed from the form: the module's part comes back on its own
+    prop = next(v for v in hub.definition_versions("type", "Document") if v["status"] == "proposed")["source"]
+    assert "# >>> added by the dms-site module" in prop and 'name = "site"' in prop
+
+
 def test_views_show_in_the_sidebar_and_work_starts_about_any_record(hub, server):
     rana = _modules(hub, server)
     qm = next(m for m in hub.members() if "quality-manager" in (m.get("roles") or []) and m["kind"] == "person")
