@@ -3435,7 +3435,8 @@ def test_a_returned_sop_says_why_and_goes_back_to_its_authors(wiki):
     hub = wiki
     amara = M(hub, "dr-amara")
     sop = _sop(hub, "Cleaning the treatment rooms")
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release")
+    run = next(r for r in hub.engine.runs(status="running") if r["workflow_id"] == "wiki-sop-release"
+               and r["steps"]["release"]["state"] == "active")  # the SOP in review
     i = item_for(hub, run, "release")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "return", "Say which detergent.")

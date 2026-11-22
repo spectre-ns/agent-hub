@@ -401,3 +401,95 @@ def test_upgrading_plm_hands_a_change_under_review_on_to_the_new_version(hub, ol
     assert hub.engine.run(old["id"])["status"] == "completed"
     new = open_run(hub, "plm-change", cref)  # version 1 left it rejected; version 2 holds it with its author
     assert new["version"] > old["version"] and step_state(hub, new, "submit") == "waiting"
+
+
+# ------------------------------------------------------------------------------------------- wiki: WikiPage, Procedure
+@pytest.fixture
+def wiki(hub):
+    def build(h):
+        for name in ("dms", "wiki"):
+            install(h, name)
+        for m in h.pack.modules:
+            m.module.demo(h)
+    snapshot_onto(hub, "modwf:wiki", build, modules=["dms", "wiki"])
+    return hub
+
+
+def _named(hub, rtype, title):
+    return next(p for p in hub.records.search(rtype, limit=None) if p["title"] == title)
+
+
+def test_a_flagged_page_is_walked_by_its_check_and_each_flag_is_one_pass(wiki):
+    hub = wiki
+    rana, sam = M(hub, "rana"), M(hub, "sam")
+    page = _named(hub, "WikiPage", "Booking rules")
+    ref = f"WikiPage/{page['id']}"
+    first = open_run(hub, "wiki-check", ref)
+    _board(hub, first, "check", rana, "confirm")
+    assert hub.records.read("WikiPage", page["id"])["status"] == "published"
+    assert not runs(hub, "wiki-check", ref, "running")  # a page in use is no one's work
+    hub.update_record(sam, ref, {"status": "needs-check"})  # flagged again: the next pass
+    second = open_run(hub, "wiki-check", ref)
+    assert second["ctx"]["run"]["previous"] == first["id"]
+    with pytest.raises(Denied):  # while it is flagged, its check archives it (or puts it back)
+        hub.update_record(sam, ref, {"status": "archived"})
+    _board(hub, second, "check", rana, "archive")
+    assert hub.records.read("WikiPage", page["id"])["status"] == "archived"
+    hub.update_record(sam, ref, {"status": "draft"})  # Restore: being written again is no one else's work
+    assert not runs(hub, "wiki-check", ref, "running")
+
+
+def test_a_sop_revision_is_walked_from_draft_to_in_use_and_its_periodic_review_never_moves_it(wiki):
+    hub = wiki
+    noor, amara, rana = M(hub, "noor"), M(hub, "dr-amara"), M(hub, "rana")
+    sop = hub.create_record(noor, "Procedure", {"title": "Sharps", "number": "SOP-090", "owner": "noor",
+                                                "body": "Use the yellow bin."})
+    ref = f"Procedure/{sop['id']}"
+    first = open_run(hub, "wiki-sop-release", ref)
+    assert step_state(hub, first, "write") == "waiting"
+    hub.update_record(noor, ref, {"change_summary": "First issue.", "status": "in-review"})
+    _board(hub, first, "release", amara, "release")
+    assert hub.records.read("Procedure", sop["id"])["status"] == "released"
+    assert step_state(hub, first, "in-use") == "waiting"
+    # the periodic review comes due: its companion asks for a revision, and the SOP's own run opens it
+    review = hub.engine.start(rana, "wiki-sop-review", record=ref, via_automation=True)
+    _board(hub, review, "review", noor, "revise", "The bins changed colour")
+    assert hub.engine.run(review["id"])["status"] == "completed"
+    assert hub.records.read("Procedure", sop["id"])["status"] == "draft"
+    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "draft"})
+    assert moved["run_id"] == first["id"]  # moved by its owner, never by the review
+    assert hub.engine.run(first["id"])["status"] == "completed"
+    second = open_run(hub, "wiki-sop-release", ref)
+    assert second["ctx"]["run"]["previous"] == first["id"]
+    hub.update_record(noor, ref, {"body": "Use the red bin.", "change_summary": "New bins."})
+    hub.update_record(noor, ref, {"status": "in-review"})
+    with pytest.raises(Denied):  # who wrote this revision does not release it
+        hub.engine.claim(noor, item_for(hub, second, "release"))
+    _board(hub, second, "release", amara, "release")
+    rec = hub.records.read("Procedure", sop["id"])
+    assert rec["status"] == "released" and rec["revision"] == 2 and rec["revise_asked"] is False
+    hub.update_record(rana, ref, {"status": "retired"}, comment="Replaced by SOP-091")
+    assert not runs(hub, "wiki-sop-release", ref, "running")
+
+
+def test_upgrading_the_wiki_hands_a_sop_in_review_on_to_the_new_version(hub, old_modules):
+    for name in ("dms", "wiki"):
+        install(hub, name)
+    for name in ("dms", "wiki"):
+        demo(hub, name)
+    amara = M(hub, "dr-amara")
+    sop = _named(hub, "Procedure", "Cleaning the treatment rooms")
+    ref = f"Procedure/{sop['id']}"
+    old = open_run(hub, "wiki-sop-release", ref)
+    approve_all(hub, old_modules(hub, "dms"), amara)
+    proposed = old_modules(hub, "wiki")
+    for key in (("type", "Procedure"), ("workflow", "wiki-sop-release"), ("type", "WikiPage"),
+                ("workflow", "wiki-check"), ("workflow", "wiki-sop-review")):
+        assert key in proposed
+    approve_all(hub, proposed, amara)
+    _board(hub, old, "release", amara, "release")
+    assert hub.engine.run(old["id"])["version"] == old["version"]
+    new = open_run(hub, "wiki-sop-release", ref)  # in use now, walked by the new version
+    assert new["version"] > old["version"] and step_state(hub, new, "in-use") == "waiting"
+    page = _named(hub, "WikiPage", "Booking rules")  # flagged under version 1: its check goes on as it was
+    assert runs(hub, "wiki-check", f"WikiPage/{page['id']}", "running")[0]["version"] == 1

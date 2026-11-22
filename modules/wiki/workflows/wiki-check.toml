@@ -3,9 +3,8 @@ title = "Check a wiki page"
 summary = "A page flagged as out of date is checked by a wiki owner: confirmed as current (signed), or archived."
 record = "WikiPage"
 
-[trigger]
-event = "record.transitioned:WikiPage"
-when = "record.status == 'needs-check'"
+# The WikiPage type names this workflow: a page flagged as out of date is walked by it until it is checked, and its
+# status is this work's position. Each flag is one run; while it is flagged, its check confirms or archives it.
 
 [[steps]]
 id = "check"
@@ -27,10 +26,10 @@ kind = "automation"
 after = ["check"]
 when = "check.outcome == 'confirm'"
 action = "record.update"
+state = "published"
 [steps.params]
 ref = "{{run.record}}"
 [steps.params.set]
-status = "published"
 checked = "{{run.today}}"
 
 [[steps]]
@@ -39,8 +38,4 @@ title = "Archive the page"
 kind = "automation"
 after = ["check"]
 when = "check.outcome == 'archive'"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "archived"
+state = "archived"
