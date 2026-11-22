@@ -325,6 +325,10 @@ class RecordPages:
                     out.append(self.record_link(schema.ref_of(item)))
                 elif f["type"] == "member" and isinstance(item, str):
                     out.append(self.who(item.removeprefix("member:")))
+                elif f["type"] == "datetime" and isinstance(item, str) and self._datetime_words(item):
+                    out.append(f'<time datetime="{e(item)}">{e(self._datetime_words(item))}</time>')
+                elif f["type"] == "choice" and f["path"].endswith(".code") and self._display_of(rec, f, item):
+                    out.append(e(self._display_of(rec, f, item)))  # a coded value: its display, not its code
                 elif isinstance(item, (dict, list)):
                     out.append(self._plain_html(item))
                 elif isinstance(item, str) and "\n" in item:
@@ -332,6 +336,27 @@ class RecordPages:
                 else:
                     out.append(e(str(item)))
         return "<br>".join(out) if out else "<span class='muted'>—</span>"
+
+    @staticmethod
+    def _datetime_words(v: str) -> str:
+        """A stored date and time in words: Sun 22 Nov 2026, 09:44 (as kept; one with a zone in local time)."""
+        from datetime import datetime
+        try:
+            d = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        if d.tzinfo is not None:
+            d = d.astimezone()
+        return f"{d:%a} {d.day} {d:%b %Y}, {d:%H:%M}"
+
+    @staticmethod
+    def _display_of(rec, f, code) -> str:
+        """The words a coding keeps beside its code (``class.display`` beside ``class.code``), if any."""
+        for c in schema.get(rec, f["path"][:-5]):
+            for x in (c if isinstance(c, list) else [c]):
+                if isinstance(x, dict) and x.get("code") == code and isinstance(x.get("display"), str) and x["display"]:
+                    return x["display"]
+        return ""
 
     def markdown_html(self, text: str, rec: dict | None, me: dict | None = None) -> str:
         """Formatted text as HTML for the member reading it: a ``[[link]]`` to what they may not read shows only its
@@ -358,6 +383,10 @@ class RecordPages:
             r = hub.records.read(*ref.split("/", 1))
             return (self.record_href(ref), hub.title(r), True) if r else None
         return f'<div class="prose">{markup.render(text, resolve)}</div>'
+
+    @staticmethod
+    def _has_value(f, rec) -> bool:
+        return any(v not in (None, "", [], {}) for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))))
 
     def _attachment_html(self, rec, a: dict) -> str:
         name = str(a.get("name") or a.get("title") or "file")
@@ -740,7 +769,7 @@ class RecordPages:
         heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
         rows = "".join(
             f'<tr><td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
-            + (f'<td>{self._state_loz(schema.first(r, lc["path"]))}</td>' if lc else "")
+            + (f'<td>{self._state_loz(schema.first(r, lc["path"]), rt)}</td>' if lc else "")
             + "".join(f"<td>{self._value_html(f, r)}</td>" for f in heads) + "</tr>" for r in recs)
         table = (f'<div class="tablewrap"><table><tr><th>{e(rt.label)}</th>' + ("<th>Status</th>" if lc else "")
                  + "".join(f"<th>{e(f['label'])}</th>" for f in heads) + f"</tr>{rows}</table></div>") if recs else (
@@ -935,8 +964,9 @@ class RecordPages:
         return t["to"] in self.UNDOING or words.startswith(("cancel", "discontinue", "make obsolete", "withdraw",
                                                             "revoke", "retire", "void", "mark entered in error"))
 
-    def _state_loz(self, st) -> str:
-        """A status lozenge. Its tone comes from common, generic state words; a state it does not know is grey."""
+    def _state_loz(self, st, rt=None) -> str:
+        """A status lozenge, in words (the lifecycle's label for it). Its tone comes from common, generic state words;
+        a state it does not know is grey."""
         if st is None:
             return ""
         s = str(st).lower()
@@ -944,13 +974,14 @@ class RecordPages:
                 "removed" if s in self.UNDONE else
                 "inprogress" if "review" in s or s in self.UNDERWAY else
                 "default")
-        return f'<span class="loz {tone}">{e(str(st))}</span>'
+        words = rt.state_label(st) if rt is not None else schema.state_words(st)
+        return f'<span class="loz {tone}">{e(words)}</span>'
 
     # ------------------------------------------------------------------------------------------ parts and links
     def _status_of(self, rt, r) -> str:
         """A record's state in a list: its lifecycle state, else active or inactive when its type says which."""
         if rt.lifecycle:
-            return self._state_loz(schema.first(r, rt.lifecycle["path"]))
+            return self._state_loz(schema.first(r, rt.lifecycle["path"]), rt)
         if rt.active:
             return self._state_loz("active" if schema.is_active(rt, r) else "inactive")
         return ""
@@ -1171,8 +1202,15 @@ class RecordPages:
         unseen = visibility.hidden_fields(hub, me, rt)  # a field of a class they may not read: no row at all
         prose = [f for f in rt.fields if f["type"] == "markdown" and f.get("show", True) is not False
                  and f not in unseen]
-        row = lambda f: ("" if f in prose or f in unseen else
-                         f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, rec)}</td></tr>")
+        empty: list = []  # read, a field with nothing in it is not a row: they are named once, below
+
+        def row(f):
+            if f in prose or f in unseen:
+                return ""
+            if not self._has_value(f, rec) and not req["query"].get("edit"):
+                empty.append(f["label"])
+                return ""
+            return f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, rec)}</td></tr>"
         view = rt.screen("view")
         if view is not None:  # the type's view screen: its tabs as headed groups, its fields in its order
             fields = "".join((f"<tr><th colspan=2 scope=colgroup class='group'>{e(t['label'])}</th></tr>"
@@ -1182,12 +1220,19 @@ class RecordPages:
             fields = "".join(row(f) for f in rt.fields if f.get("show", True) is not False and not f.get("advanced")
                              and not (lc and f["path"] == lc["path"])
                              and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields)))
-        adv_rows = "".join(f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, rec)}</td></tr>"
+        # all values: a raw field another field already shows in words (its parts) is left out, as is an empty one
+        # (a list is not covered: a field on its first entry leaves the others unshown)
+        covered = lambda f: (not any(isinstance(v, list) for v in schema.get(rec, f["path"]))
+                             and any(g is not f and g["path"].startswith(f["path"] + ".") for g in rt.fields))
+        adv_rows = "".join(f"<tr><th>{e(re.sub(r'\s*\(as JSON\)$', '', f['label']))}</th>"
+                           f"<td>{self._value_html(f, rec)}</td></tr>"
                            for f in rt.fields if f.get("advanced") and f.get("show", True) is not False
-                           and f not in unseen)
+                           and f not in unseen and not covered(f) and self._has_value(f, rec))
         if rtype == self.subj["type"] and hub.is_policy_owner(me):
             fields += (f"<tr><th>Privacy</th><td><a href='/access?subject={e(urllib.parse.quote(ref))}'>Who opened or "
                        f"changed this file</a></td></tr>")
+        if empty:
+            fields += (f"<tr><th>Not filled in</th><td class='muted'>{e(', '.join(dict.fromkeys(empty)))}</td></tr>")
         main = [f"<table class='kv'>{fields}</table>"
                 + "".join((f"<h2 class='prose-label'>{e(f['label'])}</h2>" if len(prose) > 1 else "")
                           + self._value_html(f, rec) for f in prose)
@@ -1227,7 +1272,7 @@ class RecordPages:
                             f'revision is {e(lc["in_use"])}, work from this version (saved {e(str(used["at"])[:16])}).'
                             f'</p><table class="kv">{body}</table></section>')
             if locked:
-                main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(str(st))}</b> is not edited. '
+                main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(rt.state_label(st))}</b> is not edited. '
                             + e("; ".join(t["label"] for t in lc["transition"] if st in t["from"] and t["by"] != "workflow")
                                 or "A workflow moves it on") + ' to change it.</p></div>')
             elif editing and not is_page:
@@ -1289,7 +1334,7 @@ class RecordPages:
             if t["fields"] or t["comment"]:  # a transition screen asks for what the move needs first
                 return (f'<a class="btn {kind}" href="{url}/move?to={e(urllib.parse.quote(t["to"]))}" data-modal>'
                         f'{e(t["label"])}…</a>')
-            confirm = f' data-confirm="Move it to {e(t["to"])}?"' if kind != "primary" else ""
+            confirm = f' data-confirm="Move it to {e(rt.state_label(t["to"]).lower())}?"' if kind != "primary" else ""
             return (f'<form method="post" action="{url}/move" class="inline">'
                     f'<input type="hidden" name="to" value="{e(t["to"])}"><button class="{kind}"{confirm}>'
                     f'{e(t["label"])}</button></form>')
@@ -1316,22 +1361,21 @@ class RecordPages:
             nav = self.owner_rail(title, rail, label=rt.label)
         if is_page:
             lp = self.live_parts(req, rt, rec, ref, st, tab, may_write, locked) if not editing else {}
+            if lc and not editing:  # its lifecycle, drawn, beside its moves
+                moves_html = f'<a class="btn subtle" href="{url}/workflow" data-modal>View workflow</a>' + moves_html
+            work = self.work_panel(me, ref) if not editing and tab == "details" else ""
             body = refused + self._page_body(req, rt, shown if editing else lp.get("rec", rec), main, prose, st, tab,
                                              editing, url, ver, moves_html, lp.get("edit") or edit_btn, auto, sigs,
-                                             cur, may_write, live=lp)
+                                             cur, may_write, live=lp, work=work)
             above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
             return self.layout(req, hub.title(rec), body, heading=not editing,
                                crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
                                                       (None, hub.title(rec))], subnav=nav, above=banner)
 
         # side column: state, moves a person may make, signatures at a glance
-        side = []
-        if lc:
-            side.append(f"<h2>Status</h2><p>{self._state_loz(st)}</p>")
-            if moves_html:
-                side.append(moves_html)
-            if auto:
-                side.append("<p class='muted'>A workflow moves it to " + e(", ".join(t["to"] for t in auto)) + ".</p>")
+        # side column: the lifecycle (state, moves a person may make, the diagram), the open work about it, then
+        # signatures at a glance
+        side = [self.work_panel(me, ref, rt=rt, st=st, moves_html=moves_html, auto=auto, url=url)]
         side.append(f"<h2>Signatures</h2><p>{len(cur)} on this version"
                     + (f", {len(sigs) - len(cur)} on earlier ones" if len(sigs) > len(cur) else "") + "</p>")
         side.append(f'<h2>Record</h2><p class="muted">{e(rt.label)} · {e(rt.data_class)}<br>version '
@@ -1351,14 +1395,14 @@ class RecordPages:
                            actions=edit_btn, above=banner)
 
     def _page_body(self, req, rt, rec, main, prose, st, tab, editing, url, ver, moves_html, edit_btn, auto, sigs, cur,
-                   may_write, live=None) -> str:
+                   may_write, live=None, work: str = "") -> str:
         """A type with ``layout = "page"``: its formatted text is the page. Above it, one bar holds what it is (status,
         its other fields, version, signatures) and what can be done (the sections, moves, Edit). Edit turns the page
         itself into its editor, where it stood, with Save and Cancel in the bar."""
         from .. import markup
         me = req["me"]
         lc = rt.lifecycle
-        meta = [self._state_loz(st)] if lc else []
+        meta = [self._state_loz(st, rt)] if lc else []
         if editing:
             meta.insert(0, '<span class="lozenge editing-flag">Editing</span>')
         else:
@@ -1377,7 +1421,7 @@ class RecordPages:
             meta.append(f'<a class="meta-item" href="?tab=signatures">{len(cur)} signature{"s" if len(cur) != 1 else ""}'
                         + (f' ({len(sigs) - len(cur)} on earlier versions)' if len(sigs) > len(cur) else "") + "</a>")
             if auto:
-                meta.append(f'<span class="meta-item">a workflow moves it to {e(", ".join(t["to"] for t in auto))}</span>')
+                meta.append(f'<span class="meta-item">a workflow moves it to {e(", ".join(rt.state_label(t["to"]) for t in auto))}</span>')
             if not may_write:
                 meta.append('<span class="meta-item">read only</span>')
         if editing:
@@ -1401,7 +1445,8 @@ class RecordPages:
                     + self._value_html(f, rec) for f in prose) + "</article>"
                 if live.get("side"):  # its comments beside it
                     rest[1] = f'<div class="page-with-side">{rest[1]}{live["side"]}</div>'
-            return bar + live.get("banner", "") + "".join(rest) + live.get("after", "")
+            work = f'<div class="wp-inline">{work}</div>' if work else ""
+            return bar + live.get("banner", "") + work + "".join(rest) + live.get("after", "")
         fields = self._editable(rt)
         title_f = next((f for f in fields if f["name"] == "title"), None)
         texts = [f for f in fields if f["type"] == "markdown"]
@@ -1591,7 +1636,7 @@ class RecordPages:
         err = f'<div class="flash error" role="alert"><p>{e(problem)}</p></div>' if problem else ""
         ver = e(str((rec.get("meta") or {}).get("versionId", "")))
         st = schema.first(rec, rt.lifecycle["path"])
-        body = (f'<div data-modal-body>{err}<p>{e(self.hub.title(rec))}: from {self._state_loz(st)} to {self._state_loz(t["to"])}.</p>'
+        body = (f'<div data-modal-body>{err}<p>{e(self.hub.title(rec))}: from {self._state_loz(st, rt)} to {self._state_loz(t["to"], rt)}.</p>'
                 f'<form method="post" action="/records/{e(rt.id)}/{e(rec["id"])}/move" class="card stack">'
                 f'<input type="hidden" name="to" value="{e(t["to"])}"><input type="hidden" name="_version" '
                 f'value="{ver}">' + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")
@@ -1748,7 +1793,7 @@ class RecordPages:
                     counts = {k: counts.get(k, 0) for k in groups}
                 back = self.here(req)
                 cols = "".join(
-                    f'<section class="col" data-col="{e(k)}" aria-label="{e(k)}"><header>{self._state_loz(k)}'
+                    f'<section class="col" data-col="{e(k)}" aria-label="{e(k)}"><header>{self._state_loz(k, moving)}'
                     f'<span class="n">{counts[k]}</span></header>'
                     + "".join(self._view_tile(w, r, moving, back) for r in rows) + "</section>"
                     for k, rows in groups.items())

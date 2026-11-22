@@ -1795,3 +1795,80 @@ def test_a_type_that_is_not_a_fhir_resource_has_no_fhir_export_on_the_web(server
     assert fetch(server, f"/records/{t}/{rid}/export?format=fhir", tok)[0] == 422
     st, h, body = fetch(server, f"/api/records/{t}/{rid}?format=json", tok)
     assert st == 200 and h["content-type"] == "application/json" and json.loads(body)["id"] == rid
+
+
+# ---- the record's own panel: its lifecycle and the open work about it, on its default view
+
+def _panel(page):
+    """The side panel of a record page (status, moves, open work), or of a patient's chart."""
+    m = re.search(r'<section class="wp-status".*?</aside>|<section class="wp-work".*?</aside>', page, re.S)
+    return m.group(0) if m else ""
+
+
+def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
+    """A visit a documentation run is about shows that run on its own page, though the run's record is the patient;
+    the status and moves are in words, and the workflow opens as a drawing with where it is now."""
+    run = run_of(hub, "visit-documentation")
+    visit = next(r for r in run["refs"] if r.startswith("Encounter/"))
+    page = call(server, "GET", f"/records/{visit}", token(hub, "dr-amara"))[1]
+    panel = _panel(page)
+    assert "Open work" in panel and f'href="/runs/{run["id"]}"' in panel and "Draft the note" in panel
+    assert "In progress" in panel and ">On leave<" in panel and "Move to" not in page  # words, not codes
+    assert "View workflow" in panel and f'/records/{visit}/workflow" data-modal' in panel
+    status, modal = call(server, "GET", f"/records/{visit}/workflow", token(hub, "dr-amara"))
+    assert status == 200 and "data-modal-body" in modal and "<svg" in modal
+    assert re.search(r'class="lc-node [a-z]+ current"><title>In progress', modal)
+    # the chart of the patient lists the same run beside it
+    chart = call(server, "GET", f"/patients/{run['record'].split('/')[1]}", token(hub, "dr-amara"))[1]
+    assert f'href="/runs/{run["id"]}"' in _panel(chart) and "On this patient" in chart
+
+
+def test_a_record_page_reads_in_words(hub, server):
+    run = run_of(hub, "visit-documentation")
+    visit = next(r for r in run["refs"] if r.startswith("Encounter/"))
+    page = call(server, "GET", f"/records/{visit}", token(hub, "dr-amara"))[1]
+    shown = re.sub(r'<time datetime="[^"]*"', "<time", page)
+    rec = hub.records.read(*visit.split("/"))
+    assert rec["plannedStartDate"][:16] not in shown and re.search(r">\w{3} \d{1,2} \w{3} \d{4}, \d\d:\d\d<", page)
+    assert ">AMB<" not in page and "(as JSON)" not in page and "Not filled in" in page
+
+
+def test_only_a_member_who_may_move_a_record_sees_its_moves(hub, server):
+    run = run_of(hub, "visit-documentation")
+    visit = next(r for r in run["refs"] if r.startswith("Encounter/"))
+    seen = set()
+    for mid in ("rana", "dr-amara", "jo", "noor", "sam"):
+        status, page = call(server, "GET", f"/records/{visit}", token(hub, mid))
+        if status != 200:
+            continue
+        may = hub.may_write(M(hub, mid), "Encounter")
+        assert ("Move it to" in _panel(page)) is may, mid
+        assert "View workflow" in _panel(page), mid  # the drawing is for everyone who reads the record
+        seen.add(may)
+    assert True in seen
+
+
+def test_the_front_desk_sees_no_step_of_a_branch_it_may_not_read(hub, server):
+    """A lab result's run: which clinical branch it takes is not shown to the front desk, in the API, on the run's
+    page, or in the panel beside the patient's chart."""
+    from practicehub.visibility import Viewer
+    run = run_of(hub, "lab-result-review")
+    wf, _ = hub.workflow(run["workflow_id"])
+    jo = Viewer(hub, M(hub, "jo"))
+    hidden = [s for s in wf.steps if not jo.step_visible(wf, s.id)[0]]
+    assert hidden, "the lab result review has steps the front desk may not read"
+    tok = token(hub, "jo")
+    listed = next(r for r in json.loads(call(server, "GET", "/api/runs", tok)[1])["runs"] if r["id"] == run["id"])
+    seen = [json.dumps(listed), call(server, "GET", f"/api/runs/{run['id']}", tok)[1],
+            call(server, "GET", f"/runs/{run['id']}", tok)[1],
+            _panel(call(server, "GET", f"/patients/{run['record'].split('/')[1]}", tok)[1])]
+    assert all(seen)
+    for text in seen:
+        for s in hidden:
+            assert s.title not in html.unescape(text), s.id
+            assert f'"{s.id}"' not in text, s.id
+            if s.when:
+                assert s.when not in html.unescape(text), s.id
+    # a physician sees them
+    page = call(server, "GET", f"/runs/{run['id']}", token(hub, "dr-amara"))[1]
+    assert any(s.title in html.unescape(page) for s in hidden)

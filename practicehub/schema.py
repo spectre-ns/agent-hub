@@ -59,6 +59,8 @@ answer that becomes a record, an engine calling the API.
     from = ["preliminary"]
     to = "final"
     by = "workflow"               # "anyone" who may write the class (default), or only a "workflow" step
+    # label = "Finalise"          # the move's words (default: the state it goes to, in words)
+    # [lifecycle.labels]          # a state's words, where its code is not words: onleave = "On leave"
 
 A path may use ``*`` for every item of a list (``participant.*.actor``).
 
@@ -173,6 +175,12 @@ class RecordType:
     def states(self) -> list[str]:
         return list((self.lifecycle or {}).get("states") or [])
 
+    def state_label(self, st) -> str:
+        """A lifecycle state in words: its label, else its code with the dashes as spaces."""
+        if st is None:
+            return ""
+        return ((self.lifecycle or {}).get("labels") or {}).get(st) or state_words(st)
+
     def transition(self, old, new) -> dict | None:
         for t in (self.lifecycle or {}).get("transition", []):
             if new == t["to"] and (old in t["from"] or "*" in t["from"]):
@@ -188,7 +196,7 @@ KEYS = {
          "navigator", "layout", "standard", "consent"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class"},
-    "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
+    "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use", "labels"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "screen": {"id", "on", "tab", "fields", "label"},
@@ -414,6 +422,14 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         states = list(states)
         if not states:
             problems.append("lifecycle: list its states (or make its field a choice)")
+        labels = lc.get("labels") or {}  # a state's words where its code is not (onleave: "On leave")
+        if not isinstance(labels, dict) or not all(isinstance(v, str) for v in labels.values()):
+            problems.append("lifecycle.labels: a table of state = its words")
+            labels = {}
+        for st in labels:
+            if st not in states:
+                problems.append(f"lifecycle.labels: {st!r} is not one of its states")
+        labels = {st: labels.get(st) or state_words(st) for st in states}
         initial = lc.get("initial")
         if initial is None:
             problems.append("lifecycle.initial: say which state a new record starts in")
@@ -445,7 +461,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                 problems.append(f"{where}: comment is true or false")
             if t.get("screen") is not None and not isinstance(t["screen"], str):
                 problems.append(f"{where}: screen is a screen id")
-            trans.append({"from": frm, "to": to, "by": by, "label": str(t.get("label") or f"Move to {to}"),
+            trans.append({"from": frm, "to": to, "by": by, "label": str(t.get("label") or labels.get(to) or state_words(to)),
                           "screen": t.get("screen") if isinstance(t.get("screen"), str) else None,
                           "fields": list(tf), "require": list(req), "comment": t.get("comment") is True})
         locked = lc.get("locked") or []  # states in which people change nothing but the state itself
@@ -487,7 +503,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                             grew = True
             revising = [x for x in states if x in reach and x != in_use]
         lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial,
-              "transition": trans, "locked": locked, "abandoned": abandoned, "in_use": in_use, "revising": revising}
+              "transition": trans, "locked": locked, "abandoned": abandoned, "in_use": in_use, "revising": revising,
+              "labels": labels}
     for key in ("date", "flag"):
         p = doc.get(key)
         if p and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.([A-Za-z0-9_]+))*", str(p)):
@@ -845,6 +862,12 @@ def bases() -> dict[str, RecordType]:
             out[rt.id] = rt
         _BASES = out
     return _BASES
+
+
+def state_words(st) -> str:
+    """A state's code as words, where it has no label: in-progress, entered_in_error -> In progress, ..."""
+    text = str(st).replace("-", " ").replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text and not text.isupper() else text
 
 
 def words(v) -> str:

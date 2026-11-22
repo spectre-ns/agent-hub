@@ -256,11 +256,66 @@ class Viewer:
         classes = step_classes(wf, step)
         return self.may_read_classes(classes), self.missing(classes)
 
+    def full(self, wf: Workflow) -> bool:
+        """Whether the member may read everything the workflow reads (then a run's path tells them nothing new)."""
+        key = ("full", id(wf))
+        if key not in self._wf:
+            self._wf[key] = (wf, self.may_read_classes(workflow_classes(wf)))  # wf kept: its id stays its own
+        return self._wf[key][1]
+
+    def conditional(self, wf: Workflow) -> set[str]:
+        """Steps that run only under a condition, or after one: whether they ran is the run's path."""
+        key = ("cond", id(wf))
+        if key not in self._wf:
+            out: set[str] = set()
+            for s in wf.steps:  # steps come after the steps they follow
+                if s.when or any(a in out for a in s.after):
+                    out.add(s.id)
+            self._wf[key] = (wf, out)
+        return self._wf[key][1]
+
+    HIDDEN_STEP = "a step needing access to"
+
+    def step_state(self, wf: Workflow, run: dict, sid: str) -> str | None:
+        """A step's state as the member may know it: None when the step itself is not theirs to see (its title, its
+        state, whether it ran); ``if-needed`` for a conditional step that has not run, when the member may not read
+        what the condition reads (that it was skipped would tell them which way the run went)."""
+        if not self.step_visible(wf, sid)[0]:
+            return None
+        state = (run.get("steps", {}).get(sid) or {}).get("state", "pending")
+        if state in ("pending", "skipped") and sid in self.conditional(wf) and not self.full(wf):
+            return "if-needed"
+        return state
+
+    def run_steps(self, wf: Workflow, run: dict) -> dict:
+        """The run's steps as the member may know them: hidden steps left out, conditional ones masked."""
+        out = {}
+        for sid, st in (run.get("steps") or {}).items():
+            shown = self.step_state(wf, run, sid)
+            if shown is None:
+                continue
+            out[sid] = dict(st) if shown == st.get("state") else {"state": shown}
+        return out
+
+    def _step_of(self, ev: dict) -> str | None:
+        data = ev.get("data") or {}
+        if isinstance(data.get("step"), str):
+            return data["step"]
+        subj = ev.get("subject") or ""
+        return subj[5:] if subj.startswith("step:") else None
+
     def event(self, ev: dict) -> dict:
         """The event with record content replaced by a note when the member may not read it."""
         data, action = ev.get("data") or {}, ev["action"]
         hidden: list[str] | None = None
         wf = self.workflow_of_run(ev["run_id"]) if ev.get("run_id") else None
+        sid = self._step_of(ev) if wf else None
+        if sid:  # a step the member may not see: not even which one (the run's path is clinical, say)
+            ok, missing = self.step_visible(wf, sid)
+            masked = not ok or (action == "step.skipped" and sid in self.conditional(wf) and not self.full(wf))
+            if masked:
+                missing = missing or self.missing(workflow_classes(wf))
+                return {**ev, "subject": "step", "data": {"hidden": f"{self.HIDDEN_STEP}: {', '.join(missing)}"}}
         if action in ("item.completed", "gate.decided", "action.ran", "step.failed", "item.held") and wf and data.get("step"):
             ok, missing = self.step_visible(wf, data["step"])
             if not ok:

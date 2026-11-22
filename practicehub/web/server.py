@@ -28,10 +28,11 @@ from .. import workflows as wfmod
 from ..backends import engines
 from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, HubError, Invalid, NotFound, member_ref
-from ..visibility import Viewer
+from ..visibility import Viewer, workflow_classes as visibility_classes
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
 from .calendar_pages import CalendarPages
+from .work_panel import WorkPanel
 from .mcp_pages import McpPages
 from .office_pages import OfficePages
 from .live_pages import LivePages
@@ -69,7 +70,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, McpPages):
+class App(CalendarPages, WorkPanel, RecordPages, DefinitionPages, OfficePages, LivePages, McpPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -171,6 +172,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         R("POST", r"/outbox/(?P<oid>\d+)/delivered", self.post_outbox_delivered)
         self.calendar_routes(R)
         self.live_routes(R)
+        self.work_routes(R)
         self.record_routes(R)
         self.definition_routes(R)
         self.office_routes(R)
@@ -337,8 +339,11 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
 
     def _run_view(self, me, run):
         """A run as the member may see it: step outputs only for steps whose data the member may read."""
-        return {**{k: run[k] for k in ("id", "workflow_id", "version", "record", "status", "steps", "started_by",
-                                       "created_at", "updated_at")}, "title": self.hub.run_title(me, run)}
+        viewer = Viewer(self.hub, me)
+        wf = viewer.workflow_of_run(run["id"])
+        steps = viewer.run_steps(wf, run) if wf else run["steps"]  # a step they may not see: not even which ran
+        return {**{k: run[k] for k in ("id", "workflow_id", "version", "record", "status", "started_by",
+                                       "created_at", "updated_at")}, "steps": steps, "title": self.hub.run_title(me, run)}
 
     def _note_run_view(self, me, run) -> None:
         """A run's page shows its record's name, the run's input and its steps' results: what a member sees there
@@ -796,7 +801,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
     ITEM_STATUS = {"open": ("To do", ""), "claimed": ("In progress", "prog"), "held": ("Waiting for sponsor", "wait"),
                    "done": ("Done", "done"), "cancelled": ("Cancelled", "")}
     STEP_STATE = {"pending": ("Waiting", ""), "active": ("In progress", "prog"), "done": ("Done", "done"),
-                  "skipped": ("Skipped", ""), "failed": ("Failed", "bad")}
+                  "skipped": ("Skipped", ""), "failed": ("Failed", "bad"), "waiting": ("Waiting", "wait"),
+                  "if-needed": ("If needed", "")}
     RUN_STATUS = {"running": ("In progress", "prog"), "completed": ("Done", "done"), "cancelled": ("Cancelled", "")}
 
     @staticmethod
@@ -1121,10 +1127,14 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             runs = [r for r in runs if text in self.hub.run_title(req["me"], r).lower()]
         wfs = {w["workflow"].id: w["workflow"] for w in self.hub.workflows()}
         rows = []
+        viewer = Viewer(self.hub, req["me"])
         for r in runs:
-            wf = wfs.get(r["workflow_id"])
-            now = [wf.step(sid).title if wf else sid for sid, st in r["steps"].items()
-                   if st["state"] == "active" and (not wf or any(s.id == sid for s in wf.steps))]
+            wf = viewer.workflow_of_run(r["id"])
+            shown = viewer.run_steps(wf, r) if wf else {}
+            now = [wf.step(sid).title for sid, st in shown.items() if st["state"] == "active"]
+            if wf and any(st["state"] == "active" for st in r["steps"].values()) and not now:
+                now = ["a step you may not see"]
+            wf = wf or wfs.get(r["workflow_id"])
             rows.append(f'<tr><td><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(req["me"], r))}</a></td>'
                         f'<td>{e(wf.title if wf else r["workflow_id"])} <span class="muted">v{r["version"]}</span></td>'
                         f'<td>{e(", ".join(now))}</td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'
@@ -1411,23 +1421,34 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
 
     # ------------------------------------------------------------------------------------------ runs
     @staticmethod
-    def _flow_json(wf, run=None, links=None) -> str:
-        data = {"steps": [{"id": s.id, "title": s.title, "kind": s.kind, "role": s.role, "action": s.action,
-                           "after": s.after, "when": s.when, "agents_may": s.agents_may and s.kind != "automation"}
+    def _flow_json(wf, run=None, links=None, viewer=None) -> str:
+        """The workflow as the flow diagram draws it. With a run and a ``viewer``: a step the member may not see
+        is drawn as one, without its title, condition or state (which branch ran is what it would tell)."""
+        hide = {s.id for s in wf.steps if viewer and run and viewer.step_state(wf, run, s.id) is None}
+        alias = {sid: f"hidden-{i + 1}" for i, sid in enumerate(s.id for s in wf.steps if s.id in hide)}
+        name = lambda sid: alias.get(sid, sid)
+        data = {"steps": [{"id": name(s.id), "after": [name(a) for a in s.after],
+                           **({"title": "A step you may not see", "kind": "task", "role": None, "action": None,
+                               "when": None, "agents_may": False} if s.id in hide else
+                              {"title": s.title, "kind": s.kind, "role": s.role, "action": s.action,
+                               "when": None if viewer and run and viewer.step_state(wf, run, s.id) == "if-needed"
+                               and not viewer.full(wf) else s.when,
+                               "agents_may": s.agents_may and s.kind != "automation"})}
                           for s in wf.steps]}
         if run:
-            data["states"] = {sid: st["state"] for sid, st in run["steps"].items()}
+            states = viewer.run_steps(wf, run) if viewer else run["steps"]
+            data["states"] = {sid: st["state"] for sid, st in states.items()}
         if links:
-            data["links"] = links
+            data["links"] = {k: v for k, v in links.items() if k not in hide}
         return json.dumps(data).replace("</", "<\\/")
 
-    def _flow(self, wf, run=None, links=None, legend=True) -> str:
+    def _flow(self, wf, run=None, links=None, legend=True, viewer=None) -> str:
         fid = f"flow-{wf.id}-{run['id'] if run else 'def'}"
         leg = ('<div class="legend"><span><span class="ki task">T</span> task</span><span><span class="ki gate">D</span> '
                'decision (signed)</span><span><span class="ki automation">A</span> automation</span><span><span class="badge '
                'agent">AI</span> an agent may do it</span><span>- - - only under a condition</span></div>') if legend else ""
         return (f'<div class="flowwrap"><svg data-flow="{fid}"></svg></div>{leg}'
-                f'<script type="application/json" id="{fid}">{self._flow_json(wf, run, links)}</script>')
+                f'<script type="application/json" id="{fid}">{self._flow_json(wf, run, links, viewer)}</script>')
 
     def page_run(self, req, rid):
         me, hub = req["me"], self.hub
@@ -1435,9 +1456,14 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         self._note_run_view(me, run)
         wf, _ = hub.workflow(run["workflow_id"], run["version"])
         viewer = Viewer(hub, me)
-        rows, links = [], {}
+        rows, links, unseen = [], {}, 0
+        shown_steps = viewer.run_steps(wf, run)
         for s in wf.steps:
-            st = run["steps"][s.id]
+            if s.id not in shown_steps:  # not theirs to see: not its title, not whether it ran
+                unseen += 1
+                continue
+            st = {**run["steps"][s.id], **shown_steps[s.id]} if shown_steps[s.id]["state"] != "if-needed" \
+                else shown_steps[s.id]
             out = run["ctx"].get(s.id)
             if st.get("item"):
                 links[s.id] = f'/items/{st["item"]}'
@@ -1457,10 +1483,15 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                                f'required><button>Retry this step</button></form>')
             title = (f'<a href="/items/{e(st["item"])}">{e(s.title)}</a>' if st.get("item") else e(s.title))
             key = f'<span class="key">{self._key(st["item"])}</span>' if st.get("item") else ""
-            meta = " · ".join(x for x in [s.role or s.action or "", f"only when {s.when}" if s.when else ""] if x)
+            cond = (f"only when {s.when}" if s.when and viewer.full(wf) else "only if needed" if s.when else "")
+            meta = " · ".join(x for x in [s.role or s.action or "", cond] if x)
             rows.append(f'<div class="row{" skipped" if st["state"] == "skipped" else ""}">{self._ki(s.kind)}{key}'
                         f'<div class="t">{title} <span class="muted">{e(meta)}</span>{detail}</div>'
                         f'{self._av(st["by"]) if st.get("by") else ""}{self._loz(self.STEP_STATE, st["state"])}</div>')
+        if unseen:
+            missing = viewer.missing(visibility_classes(wf))
+            rows.append(f'<div class="row muted"><div class="t">{unseen} step{"s" if unseen != 1 else ""} you may not '
+                        f'see (they need access to {e(", ".join(missing))})</div></div>')
         events = list(reversed(hub.track.list(run_id=rid, limit=500)))
         actions = ""
         if run["status"] == "running" and (run["started_by"] == me["id"] or hub.is_policy_owner(me)):
@@ -1476,7 +1507,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             dl.append(("Caused by", f'<a href="/track/{run["root_event"]}">event #{run["root_event"]}</a>'))
         details = ('<aside class="details"><h3>Details</h3><dl>'
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
-        main = (f'<div class="section"><h2>Workflow</h2>{self._flow(wf, run, links)}</div>'
+        main = (f'<div class="section"><h2>Workflow</h2>{self._flow(wf, run, links, viewer=viewer)}</div>'
                 f'<div class="section"><h2>Steps</h2><div class="subtasks">{"".join(rows)}</div></div>'
                 f'<div class="section"><h2>Activity</h2>{self._activity(events, me)}</div>')
         return self.layout(req, self.hub.run_title(req["me"], run), f'<div class="issue"><div>{main}</div>{details}</div>',
@@ -2131,7 +2162,13 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
             parts.insert(2, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
         extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))]
-        return self.layout(req, self.hub.title(p), "".join(parts), heading=False,
+        # beside the chart, like any record's: the work under way about them (finished work is in the list below)
+        panel = self.work_panel(me, ref)
+        body = "".join(parts)
+        if panel:
+            body = (parts[0] + f'<div class="issue side-after"><div>{"".join(parts[1:])}</div>'
+                    f'<aside class="issue-side" aria-label="Open work">{panel}</aside></div>')
+        return self.layout(req, self.hub.title(p), body, heading=False,
                            crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.title(p))],
                            subnav=self.owner_rail(self.hub.title(p), rail, extra, label=self.subj["label"]))
 

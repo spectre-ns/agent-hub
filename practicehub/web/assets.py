@@ -609,6 +609,52 @@ color:var(--subtle);text-transform:uppercase}.col>header .n{font-weight:600}
 .details dl{display:grid;grid-template-columns:112px minmax(0,1fr);gap:12px 8px;margin:12px 0}
 .details dt{color:var(--subtle);font-weight:600}.details dd{margin:0;min-width:0;overflow-wrap:anywhere}
 .details h3{margin:12px 0 0;color:var(--fg)}
+/* ---- the record's side panel: its lifecycle, then the open work about it (a card per run) */
+.issue-side section>h2:first-child{margin-top:0}
+.issue-side .count,.wp-inline .count{font-size:12px;line-height:16px;background:var(--neutral);color:var(--fg);border-radius:8px;padding:0 6px;margin-left:4px;letter-spacing:0}
+.wf-link{font-size:14px}
+.wp-status .side-actions{margin-top:8px}
+.wcard{border:1px solid var(--border);border-radius:3px;background:var(--surface);padding:8px 12px;margin:0 0 8px;box-shadow:var(--shadow-raised,none)}
+.wcard-head a{font-weight:600}
+.wnow{display:grid;grid-template-columns:40px minmax(0,1fr);gap:4px;margin:6px 0;font-size:14px}
+.wnow .k{color:var(--subtle);font-size:12px;font-weight:600;padding-top:2px}
+.wnow li{margin:0 0 2px;overflow-wrap:anywhere}
+.wstrip{display:flex;gap:2px;list-style:none;padding:0;margin:8px 0 4px}
+.wstrip .seg{flex:1;height:6px;border-radius:2px;background:var(--neutral);min-width:4px}
+.wstrip .seg.done{background:var(--loz-success-fg)}
+.wstrip .seg.now{background:var(--brand)}
+.wstrip .seg.maybe{background:transparent;border:1px dashed var(--border)}
+.wstrip .seg.hidden{background:repeating-linear-gradient(45deg,var(--neutral),var(--neutral) 3px,transparent 3px,transparent 6px);flex:2}
+.wsteps summary{font-size:12px;color:var(--subtle);cursor:pointer}
+.wsteps ol{margin:4px 0 0;font-size:13px}.wsteps li{padding:2px 0}
+.sw{display:inline-block;min-width:64px;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--subtle)}
+.sw.done{color:var(--loz-success-fg)}.sw.now{color:var(--selected-fg)}
+.wp-mine{display:block;text-align:center;margin-top:8px}
+.wp-inline{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin:8px 0 16px}
+.wp-inline section{display:contents}.wp-inline section>h2{grid-column:1/-1;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--subtle);margin:0}
+.issue.side-after .issue-side{order:0}
+@media (max-width:900px){.issue.side-after .issue-side{order:1}}
+/* ---- a lifecycle drawn: states as boxes, moves as arrows */
+.lc-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:3px;background:var(--sunken);padding:8px;margin:8px 0}
+.lc-svg{display:block;margin:0 auto;width:100%;min-width:600px;height:auto}
+.lc-node rect{fill:var(--loz-default-bg);stroke:var(--border);stroke-width:1}
+.lc-node text{fill:var(--loz-default-fg);font-size:11px;font-weight:700;text-anchor:middle;letter-spacing:.02em}
+.lc-node.success rect{fill:var(--loz-success-bg)}.lc-node.success text{fill:var(--loz-success-fg)}
+.lc-node.removed rect{fill:var(--loz-removed-bg)}.lc-node.removed text{fill:var(--loz-removed-fg)}
+.lc-node.inprogress rect{fill:var(--loz-inprogress-bg)}.lc-node.inprogress text{fill:var(--loz-inprogress-fg)}
+.lc-node.start rect{stroke-width:2}
+.lc-node.current rect{stroke:var(--brand);stroke-width:3}
+.lc-edge{fill:none;stroke:var(--border-bold);stroke-width:1.5;stroke-linejoin:round}
+.lc-edge.auto{stroke-dasharray:5 4}
+.lc-edge.here{stroke:var(--brand);stroke-width:2.5}
+.lc-head{fill:var(--border-bold)}.lc-head.here{fill:var(--brand)}
+.lc-any rect{fill:var(--surface);stroke:var(--border)}.lc-any text{fill:var(--subtle);font-size:10px;text-anchor:middle}
+.lc-any.here rect{stroke:var(--brand)}
+.lc-key{display:inline-block;width:18px;height:10px;vertical-align:middle;margin:0 4px 0 12px;border-radius:2px}
+.lc-key:first-child{margin-left:0}
+.lc-key.cur{border:3px solid var(--brand)}.lc-key.here{height:0;border-top:3px solid var(--brand)}
+.lc-key.auto{height:0;border-top:2px dashed var(--border-bold)}
+.lc-moves tr.here td{background:var(--selected-bg)}
 .activity{list-style:none;padding:0;margin:0}.activity li{display:flex;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
 .activity li:last-child{border-bottom:0}.activity .body{flex:1;min-width:0}
 .activity .meta{font-size:12px;line-height:16px;color:var(--subtlest)}
