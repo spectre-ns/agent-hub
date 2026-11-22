@@ -808,6 +808,18 @@ a.cal-ev:hover{background:var(--selected-bg);text-decoration:none}
 .cal-listday .cal-ev{margin:0;display:block;white-space:normal}.cal-listday .who{font-size:12px}
 .cal-free{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
 .cal-legend{font-size:12px;margin-top:8px}
+.cal-col>.cal-ev[style*="--lanes"]{width:calc(100% / var(--lanes) - 4px);margin-left:calc(var(--lane) * 100% / var(--lanes) + 2px);
+  margin-right:0;box-sizing:border-box}
+.cal-ev.marked-raised{border-left-color:var(--warning-icon)}
+.cal-ev.marked-high{border-left-color:var(--danger);background:var(--danger-bg)}
+.cal-ev.over{box-shadow:inset 0 0 0 1px var(--danger)}
+.cal-pri{font-size:10px;line-height:14px;padding:0 4px;border-radius:3px;font-weight:700;text-transform:uppercase}
+.cal-pri.high{background:var(--danger);color:var(--danger-on)}
+.cal-pri.raised{background:var(--warning-bg);color:var(--warning-fg);box-shadow:inset 0 0 0 1px var(--warning-icon)}
+.cal-key{display:inline-block;width:12px;height:10px;border-radius:2px;vertical-align:-1px}
+.cal-key.over{box-shadow:inset 0 0 0 1px var(--danger);background:var(--danger-bg)}
+.cal-squeeze{margin-left:auto}
+fieldset.overbook{border:1px solid var(--border);border-radius:4px;padding:8px 10px;margin:0;display:grid;gap:6px}
 .booking-when{font-size:14px;margin:0}
 @media (max-width:600px){.cal-wrap{display:none}.cal-list{display:block}.cal-title{margin:0;flex-basis:100%}}
 @media (max-width:480px){

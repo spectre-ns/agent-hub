@@ -202,7 +202,9 @@ def bookings(hub, *, active_only: bool = True, since: str | None = None, until: 
                 continue
             out.append({"record": rec, "type": rtype, "start": start, "end": str(seen.get("end") or ""),
                         "reason": seen.get("reason") or "", "subject": seen.get("subject"),
-                        "with": list(seen.get("with") or []), "cancelled": bool(seen.get("cancelled"))})
+                        "with": list(seen.get("with") or []), "cancelled": bool(seen.get("cancelled")),
+                        "kind": seen.get("kind") or "", "priority": seen.get("priority") or "",
+                        "overbooked": seen.get("overbooked") or ""})
     return out
 
 
@@ -229,7 +231,9 @@ def act_booking_book(engine, run, step, params, actor):
         "start": start.isoformat(timespec="minutes"),
         "end": (start + timedelta(minutes=minutes)).isoformat(timespec="minutes"),
         "reason": str(params.get("reason") or ""), "subject": params.get("subject") or run["record"],
-        "with": [member]}, hub.member_ref_type(), dict(params.get("defaults") or {}))
+        "with": [member],
+        **{k: str(params[k]) for k in ("kind", "priority") if params.get(k) and k in hub.record_type(rtype).base_map}},
+        hub.member_ref_type(), dict(params.get("defaults") or {}))
     made = hub.create_record(actor, rtype, rec, run_id=run["id"])
     return {"reference": f"{rtype}/{made['id']}", "when": start.strftime("%A %B %d at %H:%M"),
             "member": member, "member_name": who["name"]}
@@ -443,6 +447,8 @@ class Engine:
                 continue
             if record and f.get("of_record", True) and hub.subject_of(rec) != about:
                 bad.append(f"{f['label']}: {val} is about someone else, not this {record.split('/')[0].lower()}")
+            elif f.get("active") and not schema.is_active(hub.record_type(rtype), rec):
+                bad.append(f"{f['label']}: {val} is no longer active (it is over or cancelled)")
         return bad
 
     def start(self, actor: dict, wid: str, *, record: str | None = None, inputs: dict | None = None,

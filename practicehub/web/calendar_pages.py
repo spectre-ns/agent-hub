@@ -5,6 +5,11 @@ Everyone may open it. A booking the member may not read (its type, or whom it is
 free slot opens the new-booking form in the dialog with the member and time filled in: it asks whom for and why.
 A booking is moved (another time, another member) from its own page. The core's clash rule refuses a member booked
 twice (``Hub.booking_clashes``); the form says so in the dialog. Nothing here knows what the practice books.
+
+A booking type's ``[booking]`` says the rest, in the practice's words: the priorities the calendar marks; the roles
+that may book over another booking (a squeeze-in), saying why, which the calendar then shows side by side; and the
+workflow a member who may not give the reason books through (the form asks that workflow's inputs, gives it the slot,
+and says what became of it: booked, or sent on to someone first).
 """
 
 from __future__ import annotations
@@ -71,32 +76,71 @@ class CalendarPages:
         span = self.hub.booking_span(b, self._slot())
         out = {"ref": f'{b["type"]}/{b["record"]["id"]}', "start": span[0] if span else None,
                "end": span[1] if span else None, "with": b["with"], "cancelled": b["cancelled"], "sees": sees,
-               "name": "Busy", "reason": "", "state": ""}
+               "name": "Busy", "reason": "", "state": "", "kind": "", "priority": "", "mark": "", "over": ""}
+        rt = self.hub.record_type(b["type"])
+        marked = list(((rt.booking if rt else None) or {}).get("marked") or [])
+        if b.get("priority") in marked:  # how soon is shown even as Busy: the time is the practice's to plan
+            out["priority"] = str(b["priority"])
+            out["mark"] = "high" if b["priority"] == marked[-1] else "raised"
+        out["over"] = "yes" if b.get("overbooked") is not None and b.get("overbooked") != "" else ""
         if sees:
             rec = self.hub.redact(me, self.hub.records.read(*subj.split("/", 1))) if subj else None
             full = self.hub.short_title(rec) if rec else (subj or self.hub.record_type(b["type"]).label)
             out["name"] = re.split(r" \(| · ", full, maxsplit=1)[0].strip() or full  # its name part: the grid is narrow
             out["full"] = full
             out["reason"] = str(b.get("reason") or "")
-            rt = self.hub.record_type(b["type"])
+            out["kind"] = str(b.get("kind") or "")
+            out["overbooked"] = str(b.get("overbooked") or "")
             st = str(schema.first(b["record"], rt.lifecycle["path"]) or "") if rt and rt.lifecycle else ""
             out["state"] = self._state_words(rt, st).lower() if st else ""  # in words: in progress, not in-progress
         return out
 
+    @staticmethod
+    def _lanes(items: list[dict]) -> None:
+        """Bookings that overlap in one column (one booked over another) side by side: each gets ``lane`` of ``lanes``
+        in its group of overlapping ones. A cancelled booking holds no time and takes no lane."""
+        live = sorted((x for x in items if not x["cancelled"]), key=lambda x: (x["start"], x["end"]))
+        group, ends, group_end = [], [], None
+        for x in live + [None]:
+            if x is None or (group_end is not None and x["start"] >= group_end):
+                for y in group:
+                    y["lanes"] = len(ends)
+                group, ends, group_end = [], [], None
+                if x is None:
+                    break
+            lane = next((i for i, end in enumerate(ends) if end <= x["start"]), len(ends))
+            if lane == len(ends):
+                ends.append(x["end"])
+            else:
+                ends[lane] = x["end"]
+            x["lane"] = lane
+            group.append(x)
+            group_end = max(group_end, x["end"]) if group_end else x["end"]
+
     def _block(self, x: dict, *, row0: datetime | None = None, slot: int = 15) -> str:
         """A booking in a column (placed on the column's grid) or in the list."""
         when = f'{x["start"]:%H:%M}–{x["end"]:%H:%M}' if x["start"] else ""
-        cls = "cal-ev" + (" cancelled" if x["cancelled"] else "") + ("" if x["sees"] else " busy")
+        cls = ("cal-ev" + (" cancelled" if x["cancelled"] else "") + ("" if x["sees"] else " busy")
+               + (f' marked-{x["mark"]}' if x.get("mark") and not x["cancelled"] else "")
+               + (" over" if x.get("over") and not x["cancelled"] else ""))
         place = ""
         if row0 is not None and x["start"]:
             top = max(0, int((x["start"] - row0).total_seconds() // 60))
             span = max(1, -(-int((x["end"] - x["start"]).total_seconds() // 60) // slot))
-            place = f' style="grid-row:{top // slot + 1} / span {span}"'
-        text = (f'<span class="t">{e(when)}</span> <b>{e(x["name"])}</b>'
-                + (f' <span class="why">{e(x["reason"])}</span>' if x["reason"] else "")
+            lanes = (f';--lane:{x["lane"]};--lanes:{x["lanes"]}' if x.get("lanes", 1) > 1 else "")
+            place = f' style="grid-row:{top // slot + 1} / span {span}{lanes}"'
+        what = x["reason"] or self.human(x["kind"]) if x.get("kind") or x["reason"] else ""
+        mark = (f'<span class="loz cal-pri {e(x["mark"])}">{e(self.human(x["priority"]))}</span> '
+                if x.get("mark") and not x["cancelled"] else "")
+        text = (f'{mark}<span class="t">{e(when)}</span> <b>{e(x["name"])}</b>'
+                + (f' <span class="why">{e(what)}</span>' if what else "")
+                + (' <span class="visually-hidden">(booked over another booking)</span>'
+                   if x.get("over") and not x["cancelled"] else "")
                 + (' <span class="visually-hidden">(cancelled)</span>' if x["cancelled"] else "")
                 + (f' <span class="st">{e(x["state"])}</span>' if x["state"] and not x["cancelled"] else ""))
-        tip = e(x.get("full") or x["name"]) + (f" · {e(x['reason'])}" if x["reason"] else "")
+        tip = (e(x.get("full") or x["name"]) + (f" · {e(what)}" if what else "")
+               + (f" · {e(self.human(x['priority']))}" if x.get("mark") else "")
+               + (f" · booked over another: {e(x['overbooked'])}" if x.get("overbooked") else ""))
         if not x["sees"]:
             return f'<div class="{cls}"{place} title="Booked">{text}</div>'
         return f'<a class="{cls}"{place} href="{e(self.record_href(x["ref"]))}" title="{tip}">{text}</a>'
@@ -139,6 +183,8 @@ class CalendarPages:
             open_days = [d for d in days if d in open_days or d in booked_days]
         writable = bool(self.booking_kinds(me, write=True))
         slot = self._slot()
+        squeeze = next(((t, self.hub.record_type(t)) for t in self.booking_kinds(me, write=True)
+                        if self.hub.may_overbook(me, self.hub.record_type(t))), None)
 
         step = timedelta(days=1 if view == "day" else 7)
         base = {"view": view, "who": who}
@@ -159,7 +205,11 @@ class CalendarPages:
                + f'</div><form method="get" action="/schedule" class="cal-who"><input type="hidden" name="view" '
                  f'value="{view}"><input type="hidden" name="date" value="{day.isoformat()}"><label>'
                  f'<span class="visually-hidden">Whose calendar</span><select name="who">{pick}</select></label>'
-                 f'<button class="secondary">Show</button></form></div>')
+                 f'<button class="secondary">Show</button></form>'
+               + (f'<a class="btn secondary cal-squeeze" href="/schedule/new?'
+                  f'{e(urllib.parse.urlencode({"overbook": "1", "type": squeeze[0], "date": day.isoformat()}))}" '
+                  f'data-modal>{e(squeeze[1].booking["overbook_label"])}</a>' if squeeze else "")
+               + '</div>')
         if not cols:
             body = bar + ('<p class="muted">Nobody is booked on this calendar: the practice names no one whose time '
                           'it books.</p>')
@@ -185,6 +235,9 @@ class CalendarPages:
             listing = self._listing(me, open_days, cols, shown, now, writable)
         hidden = sum(1 for x in shown if not x["sees"])
         legend = ('<p class="muted cal-legend">Busy: booked, for someone you may not read about.</p>' if hidden else "")
+        if any(x.get("over") and not x["cancelled"] for x in shown):
+            legend += ('<p class="muted cal-legend"><span class="cal-key over" aria-hidden="true"></span> Booked over '
+                       'another booking: both are kept, side by side.</p>')
         body = (bar + f'<div class="cal-wrap">{grid}</div><div class="cal-list">{listing}</div>{legend}')
         return self.layout(req, "Schedule", body, crumbs=[(None, "Schedule")])
 
@@ -219,8 +272,9 @@ class CalendarPages:
                                      f'{t:%a %b} {t.day} at </span>{t:%H:%M}</a>')
                     else:
                         cells.append(f'<div class="cal-cell" style="grid-row:{i + 1}"></div>')
-                mine = sorted((x for x in shown if c["id"] in x["with"] and x["start"].date() == d),
+                mine = sorted(({**x} for x in shown if c["id"] in x["with"] and x["start"].date() == d),
                               key=lambda x: (x["cancelled"], x["start"]))
+                self._lanes(mine)
                 evs = "".join(self._block(x, row0=row0, slot=slot) for x in mine)
                 mark = ""
                 if today and row0 <= now < row0 + timedelta(minutes=rows * slot):
@@ -283,6 +337,45 @@ class CalendarPages:
         fs = [rt.field(n) for n in held if rt.field(n)]
         return bool(fs) and all(visibility.may_field(self.hub, me, f, write=True) for f in fs)
 
+    def _base_field(self, me, rt, base: str) -> dict | None:
+        """The one field the type keeps a base field in, when this member may write it."""
+        held = (rt.base_map.get(base) or {}).get("fields") or []
+        f = rt.field(held[0]) if len(held) == 1 else None
+        return f if f and visibility.may_field(self.hub, me, f, write=True) else None
+
+    def _request(self, me, rt):
+        """The workflow a member who may not give the reason books through (``[booking] request``), when there is one
+        they may start: ``(workflow, the inputs the form asks)``; else None, and they book the time alone."""
+        wid = (rt.booking or {}).get("request")
+        if not wid or self._may_give_reason(me, rt):
+            return None
+        try:
+            wf = self.hub.workflow(wid)[0]
+        except (NotFound, KeyError):
+            return None
+        if not self.hub.can(me, "starter", f"workflow:{wf.id}"):
+            return None
+        want = rt.booking.get("request_inputs") or []
+        return wf, [i for i in wf.inputs if i["name"] in want and i["type"] != "reference"]
+
+    def _choice_field(self, f: dict, name: str, value) -> str:
+        choices = [{"value": c, "label": c} for c in f.get("choices") or []] or None
+        return self._field({**f, "name": name, "required": False}, choices, value or None)
+
+    def _overbook_rows(self, me, rt, q: dict) -> str:
+        """For a member who may book over another booking: the type's words for doing so, and for why."""
+        if not self.hub.may_overbook(me, rt):
+            return ""
+        b = rt.booking
+        on = str(q.get("overbook") or "") in ("1", "on", "true")
+        return (f'<fieldset class="overbook"><legend class="visually-hidden">{e(b["overbook_label"])}</legend>'
+                f'<label class="check"><input type="checkbox" name="overbook" value="1"{" checked" if on else ""}> '
+                f'{e(b["overbook_label"])}</label>'
+                f'<label>{e(b["overbook_reason"])} <input name="overbook_reason" maxlength="300" autocomplete="off" '
+                f'value="{e(str(q.get("overbook_reason") or ""))}"></label>'
+                f'<small class="help">Books it even when the time is taken: both bookings are kept, side by side, '
+                f'and the calendar marks it.</small></fieldset>')
+
     def _subject_field(self, rt) -> dict | None:
         held = (rt.base_map.get("subject") or {}).get("fields") or []
         return rt.field(held[0]) if len(held) == 1 else None
@@ -319,10 +412,26 @@ class CalendarPages:
             ctl = self._input({**sf, "required": True, "name": "subject"}, seed, me).replace(
                 f'name="{e(sf["path"].removesuffix(".*"))}"', 'name="subject"', 1)
             rows.append(ctl)
+        request = self._request(me, rt)
+        asked = {i["name"] for i in request[1]} if request else set()
+        kf = self._base_field(me, rt, "kind")
+        if kf and "kind" not in asked:
+            rows.append(self._choice_field(kf, "kind", q.get("kind")))
         if self._may_give_reason(me, rt):
             rows.append(f'<label>Reason <input name="reason" value="{e(str(q.get("reason") or ""))}" maxlength="200" '
                         f'autocomplete="off"></label>')
-        if len(self.booking_kinds(me, write=True)) > 1:
+            pf = self._base_field(me, rt, "priority")
+            if pf:
+                rows.append(self._choice_field(pf, "priority", q.get("priority")))
+        for i in request[1] if request else []:  # the request's own inputs: its screen reads the reason
+            rows.append(self._field({**i, "name": f"req_{i['name']}"},
+                                    [{"value": c, "label": c} for c in i["choices"]] if i.get("choices") else None,
+                                    q.get(f"req_{i['name']}") or None))
+        if request:
+            rows.append(f'<p class="muted help">Booked through {e(request[0].title.lower())}: if the reason may be '
+                        f'urgent it goes to the clinical team first, and is not booked until they have seen it.</p>')
+        rows.append(self._overbook_rows(me, rt, q))
+        if len(self.booking_kinds(me, write=True)) > 1 or q.get("type"):
             rows.append(f'<input type="hidden" name="type" value="{e(rtype)}">')
         lc = rt.lifecycle
         start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
@@ -362,16 +471,54 @@ class CalendarPages:
                 self.hub.read_record(me, subject)  # one the member may read: never booked blind
             minutes = self._slot()
             why = str(f.get("reason") or "").strip()
+            extra = {k: str(f[k]) for k in ("kind", "priority") if f.get(k) and self._base_field(me, rt, k)}
+            if "priority" in extra and not why:
+                extra.pop("priority")
             rec = schema.compose(rt, {"start": start.isoformat(timespec="minutes"),
                                       "end": (start + timedelta(minutes=minutes)).isoformat(timespec="minutes"),
                                       **({"reason": why} if why else {}), "subject": subject,
-                                      "with": [who]}, self.hub.member_ref_type())
-            self.hub.create_record(me, rtype, rec)
+                                      "with": [who], **extra}, self.hub.member_ref_type())
+            over = str(f.get("overbook_reason") or "").strip() if f.get("overbook") else ""
+            if f.get("overbook") and not over:
+                raise Invalid(f"say {(rt.booking or {}).get('overbook_reason', 'why').lower()}")
+            request = self._request(me, rt)
+            if request and not why and subject and subject.split("/")[0] == request[0].record:
+                return self._book_by_request(req, me, rt, request[0], rec, subject, start, who, f)
+            self.hub.create_record(me, rtype, rec, overbook=over or None)
         except (Invalid, NotFound, Denied) as exc:
             if isinstance(exc, NotFound):
                 exc = Invalid(str(exc))
             raise Rendered(422, self.page_booking_new({**req, "query": {}}, kept=f, error=exc)) from None
         raise self._redirect(f"/schedule?date={start.date().isoformat()}#cal")
+
+    def _book_by_request(self, req, me, rt, wf, rec: dict, subject: str, start: datetime, who: str, f: dict):
+        """Book through the type's request workflow: the time must be free now; the workflow is given the slot and
+        what the member typed, and books it, or sends it on to someone first. The page says which."""
+        clashes = self.hub.booking_clashes(rt, {"resourceType": rt.id, **rec})
+        if clashes:
+            raise Invalid(f"the {rt.label.lower()} clashes with another booking",
+                          [self.hub._clash_text(c, w) for c, w in clashes])
+        inputs = {i["name"]: f[f"req_{i['name']}"] for i in wf.inputs if f.get(f"req_{i['name']}") not in (None, "")}
+        inputs["slot"] = f"{start.isoformat(timespec='minutes')}|{who}"
+        run = self.hub.engine.start(me, wf.id, record=subject, inputs=inputs)
+        if self._run_bookings(run["id"]):
+            raise self._redirect(f"/schedule?date={start.date().isoformat()}#cal")
+        waiting = [it for it in self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})]
+        roles = sorted({it.get("role") or "" for it in waiting} - {""})
+        names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r)) or "someone"
+        body = (f'<div data-modal-body><div class="flash warning" role="status"><p><b>Not booked yet.</b> '
+                f'{e(self.member_name(who))}, {start:%A %B} {start.day} at {start:%H:%M} is still free: the reason '
+                f'went to {e(names)} first.</p></div><div class="card stack"><ul>'
+                + "".join(f'<li>{e(it.get("title") or it.get("step_id") or "")}</li>' for it in waiting)
+                + f'</ul><div class="filters"><a class="btn primary" href="/runs/{e(run["id"])}">See the request</a>'
+                  f'<a class="btn secondary" href="/schedule?date={start.date().isoformat()}" data-modal-close>'
+                  f'Back to the calendar</a></div></div></div>')
+        return self.layout(req, "Not booked yet", body, crumbs=[("/schedule", "Schedule"), (None, "Not booked yet")])
+
+    def _run_bookings(self, run_id: str) -> list[str]:
+        """The bookings a run made (``booking.book`` steps that ran)."""
+        ev = self.hub.db.events.find({"run_id": run_id, "action": "record.created"})
+        return [x["subject"] for x in ev if self.hub.is_a((x.get("subject") or "/").split("/")[0], "Booking")]
 
     # ------------------------------------------------------------------------------------------ moving a booking
     def _booking(self, me, rtype, rid):
@@ -387,6 +534,8 @@ class CalendarPages:
         rt, rec, seen = self._booking(me, rtype, rid)
         if not self.hub.may_write(me, rtype):
             raise Denied(f"{me['name']} may not move {rt.plural.lower()}")
+        if seen.get("cancelled") or not schema.is_active(rt, rec):
+            raise Invalid(f"this {rt.label.lower()} no longer holds its time (cancelled or over): book a new one")
         span = self.hub.booking_span(seen, self._slot())
         k = kept or {}
         at = str(k.get("at") or (span[0].isoformat(timespec="minutes") if span else ""))[:16]
@@ -410,6 +559,7 @@ class CalendarPages:
                 f'<label>When <input type="datetime-local" name="at" value="{e(at)}" required '
                 f'step="{self._slot() * 60}"></label>'
                 + (f'<label>With <select name="with" required>{opts}</select></label>' if members and held else "")
+                + self._overbook_rows(me, rt, k)
                 + f'<div class="filters"><button class="primary">Move</button>'
                   f'<a class="btn secondary" href="{e(self.record_href(f"{rtype}/{rid}"))}" data-modal-close>Cancel</a>'
                   f'</div></form></div>')
@@ -438,7 +588,13 @@ class CalendarPages:
                 if to not in {m["id"] for m in self.calendar_members()}:
                     raise Invalid(f"{to} is not on the calendar")
                 new = self._swap_member(rt, new, old, to)
-            self.hub.update_record(me, f"{rtype}/{rid}", new, expected_version=f.get("_version") or None)
+            over = str(f.get("overbook_reason") or "").strip() if f.get("overbook") else ""
+            if f.get("overbook") and not over:
+                raise Invalid(f"say {(rt.booking or {}).get('overbook_reason', 'why').lower()}")
+            self.hub.update_record(me, f"{rtype}/{rid}", new, expected_version=f.get("_version") or None,
+                                   overbook=over or None)
+        except Denied as exc:
+            raise Rendered(403, self.page_reschedule({**req, "query": {}}, rtype, rid, kept=f, error=exc)) from None
         except Invalid as exc:
             raise Rendered(409 if exc.__class__.__name__ == "Conflict" else 422,
                            self.page_reschedule({**req, "query": {}}, rtype, rid, kept=f, error=exc)) from None

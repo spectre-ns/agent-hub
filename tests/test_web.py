@@ -1494,10 +1494,15 @@ def test_booking_a_slot_makes_a_visit_in_its_first_state(hub, server):
     assert "Sore throat" not in page  # the front desk sees the booking, not why
     assert "Sore throat" in call(server, "GET", f"/schedule?date={DAY}", token(hub, "dr-amara"))[1]
     assert f'with=dr-amara&amp;at={DAY}T09%3A00' not in page  # the slot is taken
-    # the front desk books without a reason; one they send anyway is refused, in the dialog
-    assert _book(server, hub, who="jo", at=f"{DAY}T10:00", reason="")[0] == 303
-    status, page = _book(server, hub, who="jo", at=f"{DAY}T10:30")
-    assert status == 422 and "Reason" in page and "clinical" in page
+    # the front desk books through the appointment request (its red-flag screen), saying what the visit is for
+    status, _ = call(server, "POST", "/schedule/new", token(hub, "jo"),
+                     form={"with": "dr-amara", "at": f"{DAY}T10:00", "subject": _ellen(hub), "req_kind": "forms",
+                           "req_reason": "a form for my employer"})
+    assert status == 303
+    (desk,) = [v for v in hub.records.search("Encounter", limit=None) if v.get("plannedStartDate") == f"{DAY}T10:00"]
+    assert desk["serviceType"][0]["concept"]["text"] == "forms"
+    status, page = _book(server, hub, who="jo", at=f"{DAY}T10:30")  # a reason sent past the form is refused
+    assert status == 422 and "clinical" in page
     assert call(server, "GET", f"/schedule/new?with=dr-amara&at={DAY}T09:00", token(hub, "sam"))[0] == 403
 
 
@@ -1511,6 +1516,36 @@ def test_a_double_booking_is_refused_in_the_dialog(hub, server):
     assert "Kept reason" in page and "Ellen" not in alert  # what was typed is kept; whom the other is for is not said
     assert f'value="Patient/{other["id"]}" selected' in page
     assert _book(server, hub, member="dr-liam", subject=f"Patient/{other['id']}")[0] == 303  # someone else is free
+
+
+def test_a_physician_squeezes_in_an_urgent_visit_and_the_calendar_shows_both(hub, server):
+    assert _book(server, hub)[0] == 303
+    (other,) = hub.records.search("Patient", text="Omar Haddad")
+    form = call(server, "GET", f"/schedule/new?with=dr-amara&at={DAY}T09:00", token(hub, "dr-amara"))[1]
+    assert 'name="overbook"' in form and "Squeeze in as urgent" in form and "Why it cannot wait" in form
+    assert 'name="overbook"' not in call(server, "GET", f"/schedule/new?with=dr-amara&at={DAY}T09:00",
+                                         token(hub, "jo"))[1]
+    status, page = _book(server, hub, subject=f"Patient/{other['id']}", reason="Chest tightness")
+    assert status == 422 and "Squeeze in as urgent" in page
+    status, _ = call(server, "POST", "/schedule/new", token(hub, "dr-amara"), form={
+        "with": "dr-amara", "at": f"{DAY}T09:00", "subject": f"Patient/{other['id']}", "reason": "Chest tightness",
+        "overbook": "1", "overbook_reason": "tightness since this morning"})
+    assert status == 303
+    for who in ("jo", "dr-amara"):
+        page = call(server, "GET", f"/schedule?date={DAY}", token(hub, who))[1]
+        assert page.count("--lanes:2") == 2 and 'class="loz cal-pri high">Urgent' in page
+        assert ("tightness since this morning" in page) == (who == "dr-amara")  # why is clinical
+    assert "Squeeze in as urgent</a>" in page and "Squeeze in as urgent</a>" not in call(
+        server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
+
+
+def test_the_front_desk_red_flag_goes_to_a_nurse_not_the_calendar(hub, server):
+    status, page = call(server, "POST", "/schedule/new", token(hub, "jo"), form={
+        "with": "dr-amara", "at": f"{DAY}T11:00", "subject": _ellen(hub), "req_kind": "new-concern",
+        "req_reason": "chest pain and short of breath", "req_urgency": "routine"})
+    assert status == 200 and "Not booked yet" in page and "Nurse" in page and "/runs/" in page
+    assert not [v for v in hub.records.search("Encounter", limit=None)
+                if v.get("plannedStartDate") == f"{DAY}T11:00"]
 
 
 def test_moving_a_visit(hub, server):
@@ -1562,7 +1597,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """Version 2 of the clinic pack merged Appointment into Visit (tests/test_rules.py upgrades a version 1)."""
-    assert hub.pack.version == "2" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "3" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do

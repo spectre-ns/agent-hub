@@ -361,6 +361,10 @@ class Viewer:
                 if gone and set(data["changed"]) & gone:
                     data = {**data, "changed": [k for k in data["changed"] if k not in gone]}
                     ev = {**ev, "data": data}
+        elif action == "booking.overbooked" and data.get("classes"):  # why it was booked over another: its field's class
+            classes = set(data["classes"])
+            if not self.may_read_classes(classes) and "reason" in data:
+                hidden = self.missing(classes)
         elif action.startswith("outbox.") and data.get("classes"):  # a connector's reason, a by-hand note
             classes = set(data["classes"])
             if not self.may_read_classes(classes) and any(k in data for k in ("note", "reason", "reference")):
@@ -368,7 +372,7 @@ class Viewer:
         if hidden is None:
             return ev
         keep = {k: data[k] for k in ("step", "action", "workflow", "version", "title", "type", "signed", "message",
-                                     "channel", "how", "status") if k in data}
+                                     "channel", "how", "status", "with", "over") if k in data}
         return {**ev, "data": {**keep, "hidden": f"content needs access to: {', '.join(hidden)}"}}
 
     ACCESS_EVENTS = frozenset({"record.viewed", "records.exported", "records.listed", "access.reported"})

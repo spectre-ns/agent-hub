@@ -1,6 +1,7 @@
 """The rules the practice relies on. Each test names the rule it holds the hub to."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -2925,6 +2926,175 @@ def test_a_member_is_never_booked_twice(hub):
     hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:00"))  # the cancelled time is free
 
 
+def _pat(hub, given="Ellen", family="MacLeod"):
+    return f"Patient/{hub.records.create('Patient', {'name': [{'given': [given], 'family': family}]})['id']}"
+
+
+def test_a_clinician_may_squeeze_in_an_urgent_visit_saying_why(hub):
+    """Booking over another booking is refused, unless the member holds a role the type's [booking] overbook names
+    and says why: then both visits are kept, the new one is marked urgent, and the track says who, over what, why.
+    The front desk may not; nobody may without a reason. The visit booked first is still checked in as usual."""
+    jo, amara, noor = M(hub, "jo"), M(hub, "dr-amara"), M(hub, "noor")
+    pat, other = _pat(hub), _pat(hub, "Omar", "Haddad")
+    first = hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:00", "2027-03-02T09:15"))
+    with pytest.raises(Invalid, match="Squeeze in as urgent"):  # told how, not just no
+        hub.create_record(amara, "Encounter", _visit(other, "dr-liam", "2027-03-02T09:00"))
+    with pytest.raises(Denied, match="may not book over"):
+        hub.create_record(jo, "Encounter", _visit(other, "dr-liam", "2027-03-02T09:00"), overbook="urgent: chest pain")
+    with pytest.raises(Invalid, match="clashes"):
+        hub.create_record(amara, "Encounter", _visit(other, "dr-liam", "2027-03-02T09:00"), overbook="  ")
+    over = hub.create_record(noor, "Encounter", _visit(other, "dr-liam", "2027-03-02T09:00"),
+                             overbook="urgent: chest pain since this morning")
+    assert over["priority"] == {"coding": [{"code": "urgent"}], "text": "urgent: chest pain since this morning"}
+    (ev,) = hub.db.events.find({"action": "booking.overbooked", "subject": f"Encounter/{over['id']}"})
+    assert ev["actor"] == "noor"
+    assert ev["data"]["over"] == [f"Encounter/{first['id']}"] and ev["data"]["with"] == ["dr-liam"]
+    assert "chest pain" in ev["data"]["reason"]
+    from practicehub.visibility import Viewer
+    assert "chest pain" not in json.dumps(Viewer(hub, jo).event(ev))  # the reason is clinical: not the desk's
+    assert "chest pain" in json.dumps(Viewer(hub, amara).event(ev))
+    assert "text" not in hub.read_record(jo, f"Encounter/{over['id']}")["priority"]  # urgent, yes; why, no
+    for st in ("arrived", "in-progress"):  # nothing about the first visit's time changed: no clash to refuse
+        hub.update_record(jo, f"Encounter/{first['id']}", {"status": st})
+    from practicehub.engine import bookings
+    held = {b["record"]["id"]: b for b in bookings(hub, since="2027-03-02", until="2027-03-03")}
+    assert held[over["id"]]["priority"] == "urgent" and not held[first["id"]]["priority"]
+
+
+def test_a_type_says_who_may_overbook_never_the_core(hub):
+    """The roles and words come from the type's [booking]; a type naming none lets nobody book over another, and a
+    [booking] on a type that is no booking, or naming a priority it does not keep, is refused."""
+    from practicehub import schema
+    rt = hub.record_type("Encounter")
+    assert rt.booking["overbook"] == ["physician", "nurse"] and rt.booking["overbook_label"] == "Squeeze in as urgent"
+    assert hub.may_overbook(M(hub, "dr-amara"), rt) and not hub.may_overbook(M(hub, "jo"), rt)
+    import dataclasses
+    assert not hub.may_overbook(M(hub, "dr-amara"), dataclasses.replace(rt, booking={}))
+    src = (hub.pack.dir / "types" / "Encounter.toml").read_text()
+    bad = src.replace('overbook_priority = "urgent"', 'overbook_priority = "today"')
+    with pytest.raises(schema.DefinitionError, match="today"):
+        hub._def_parse("type", bad)
+    patient = (hub.pack.dir / "types" / "Patient.toml").read_text() + '\n[booking]\nmarked = ["x"]\n'
+    with pytest.raises(schema.DefinitionError, match="only a type that extends Booking"):
+        hub._def_parse("type", patient)
+
+
+def test_a_visit_that_is_over_or_cancelled_is_not_moved(hub):
+    """The hub refuses moving a finished or cancelled visit (not only the page): it no longer holds its time."""
+    jo = M(hub, "jo")
+    pat = _pat(hub)
+    for end_state in ("cancelled", "noshow"):
+        v = hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-03T09:00"))
+        hub.update_record(jo, f"Encounter/{v['id']}", {"status": end_state})
+        with pytest.raises(Invalid, match="no longer holds its time"):
+            hub.update_record(jo, f"Encounter/{v['id']}", {"plannedStartDate": "2027-03-03T10:00"})
+        with pytest.raises(Invalid, match="no longer holds its time"):
+            hub.update_record(jo, f"Encounter/{v['id']}", {
+                "participant": [{"individual": {"reference": "Practitioner/dr-amara"}}]})
+    done = hub.records.create("Encounter", _visit(pat, "dr-amara", "2027-03-03T11:00", status="finished"))
+    with pytest.raises(Invalid, match="no longer holds its time"):
+        hub.update_record(jo, f"Encounter/{done['id']}", {"plannedStartDate": "2027-03-04T11:00"})
+    hub.update_record(jo, f"Encounter/{done['id']}", {"length": {"value": 20, "unit": "min"}})  # other fields: yes
+
+
+def test_the_clash_check_is_inside_the_write(hub, monkeypatch):
+    """Two bookings of one time: the second is checked inside the transaction that writes it, so it sees the first
+    even when both passed every check made before the write."""
+    jo = M(hub, "jo")
+    pat = _pat(hub)
+    seen = []
+    real = type(hub).booking_clashes
+
+    def spy(self, rt, rec):
+        seen.append(self.db.in_transaction())
+        return real(self, rt, rec)
+    monkeypatch.setattr(type(hub), "booking_clashes", spy)
+    hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-05T09:00"))
+    assert seen and all(seen)
+
+
+def test_the_front_desk_books_through_the_red_flag_screen(hub):
+    """The front desk may not read why a patient comes, so it books through the appointment request with the slot it
+    picked: what the visit is for (not clinical) is kept on the visit; a routine reason is booked at once; a red flag
+    or a request marked urgent is not booked but goes to a nurse to call back, with the slot the desk picked."""
+    jo = M(hub, "jo")
+    pat = _pat(hub)
+    slot = "2027-03-08T09:00|dr-liam"
+    run = hub.engine.start(jo, "appointment-request", record=pat,
+                           inputs={"reason": "a sick note form for work", "kind": "forms", "slot": slot})
+    (v,) = [v for v in hub.records.search("Encounter", limit=None) if v.get("plannedStartDate") == "2027-03-08T09:00"]
+    assert v["serviceType"][0]["concept"]["text"] == "forms" and v["reasonCode"][0]["text"] == "a sick note form for work"
+    assert v["status"] == "planned" and v["subject"]["reference"] == pat
+    assert "reasonCode" not in hub.read_record(jo, f"Encounter/{v['id']}")  # clinical: the desk wrote it, cannot read it
+    assert "serviceType" in hub.read_record(jo, f"Encounter/{v['id']}")
+    assert not hub.db.items.find_one({"run_id": run["id"], "step_id": "triage"})
+    for reason, urgency in (("crushing chest pain and short of breath", "routine"), ("a form", "urgent")):
+        run = hub.engine.start(jo, "appointment-request", record=pat, inputs={
+            "reason": reason, "kind": "new-concern", "urgency": urgency, "slot": "2027-03-08T10:00|dr-liam"})
+        assert not [v for v in hub.records.search("Encounter", limit=None)
+                    if v.get("plannedStartDate") == "2027-03-08T10:00"]  # not booked
+        nurse = item_for(hub, run, "nurse-call")
+        assert hub.db.items.get(nurse)["role"] == "nurse"
+        assert hub.engine.run(run["id"])["steps"]["book-chosen"]["state"] == "skipped"
+
+
+def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub, monkeypatch):
+    """The diagnosis codes billed go in the visit's diagnosis; why it was booked stays its reason. A practice that
+    upgrades gets the codes moved off the reason, and the reason it was booked with back."""
+    amara = M(hub, "dr-amara")
+    pat = _pat(hub)
+    wf = hub.workflow("visit-documentation")[0]
+    finish = next(st for st in wf.steps if st.id == "finish-visit")
+    assert "diagnosis" in finish.params["set"] and "reasonCode" not in finish.params["set"]
+    # a visit finished by version 2, which wrote the codes over the reason it was booked with
+    v = hub.create_record(amara, "Encounter", {**_visit(pat, "dr-amara", "2026-03-09T09:00"),
+                                               "reasonCode": [{"text": "Knee pain"}]})
+    v = hub.update_record(amara, f"Encounter/{v['id']}", {"reasonCode": [{"text": "ICD-9 719.46"}]})
+    hub.records.update("Encounter", v["id"], {**{k: x for k, x in v.items() if k != "meta"}, "status": "finished"})
+    walk_in = hub.records.create("Encounter", {**_visit(pat, "dr-amara", "2026-03-09T10:00", status="finished"),
+                                               "reasonCode": [{"text": "ICD-9 034"}]})
+    hub.db.set_setting("pack_upgrades_done", [u for u in hub.db.get_setting("pack_upgrades_done") or []
+                                              if u != "3-diagnosis-apart-from-reason"])
+    monkeypatch.setattr(hub, "UPGRADE_BATCH", 1)  # one visit a batch: the two take two
+    (got,) = hub.run_pack_upgrades(M(hub, "rana"))
+    assert got["upgrade"] == "3-diagnosis-apart-from-reason"
+    (ev,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": got["upgrade"]})
+    assert ev["data"]["batches"] == 2
+    assert got["visits_with_diagnosis_apart"] == 2 and got["booked_reason_restored"] == 1
+    fixed = hub.records.read("Encounter", v["id"])
+    assert fixed["reasonCode"] == [{"text": "Knee pain"}] and fixed["status"] == "finished"
+    assert fixed["diagnosis"] == [{"condition": [{"concept": {"text": "ICD-9 719.46"}}]}]
+    w = hub.records.read("Encounter", walk_in["id"])
+    assert "reasonCode" not in w and w["diagnosis"][0]["condition"][0]["concept"]["text"] == "ICD-9 034"
+    assert hub.run_pack_upgrades(M(hub, "rana")) == []  # once
+
+
+def test_the_visit_a_note_is_for_is_one_of_this_patients_active_visits(hub):
+    """The visit-documentation start form offers only this patient's visits that are still under way (by time and
+    physician, the one in progress chosen); a finished one, or another patient's, is refused at the start."""
+    from practicehub.web.server import App
+    amara = M(hub, "dr-amara")
+    pat, other = _pat(hub), _pat(hub, "Omar", "Haddad")
+    now = hub.engine.now().replace(second=0, microsecond=0)
+    at = lambda m: (now + __import__("datetime").timedelta(minutes=m)).isoformat(timespec="minutes")
+    here = hub.create_record(amara, "Encounter", _visit(pat, "dr-amara", at(-600)))
+    later = hub.create_record(amara, "Encounter", _visit(pat, "dr-liam", at(1440 * 3)))
+    for st in ("arrived", "in-progress"):
+        hub.update_record(amara, f"Encounter/{here['id']}", {"status": st})
+    done = hub.records.create("Encounter", _visit(pat, "dr-amara", at(-3000), status="finished"))
+    theirs = hub.create_record(amara, "Encounter", _visit(other, "dr-amara", at(1440 * 4)))
+    wf = hub.workflow("visit-documentation")[0]
+    (f,) = [i for i in wf.inputs if i["name"] == "appointment"]
+    page = App(hub)._active_ref_input(amara, f, pat, None)
+    assert f'value="Encounter/{here["id"]}" selected' in page and f'value="Encounter/{later["id"]}"' in page
+    assert done["id"] not in page and theirs["id"] not in page and "Dr. Liam Fraser" in page
+    for bad in (done, theirs):
+        with pytest.raises(Invalid) as err:
+            hub.engine.start(amara, "visit-documentation", record=pat,
+                             inputs={"appointment": f"Encounter/{bad['id']}", "transcript": "x"})
+        assert re.search("no longer active|someone else|another|not about", " ".join(err.value.problems)), err.value.problems
+
+
 def _practice_on_version_1(tmp_path, monkeypatch):
     """A practice installed on version 1 (Appointment and Visit apart), with appointments, a visit filed for one and
     work under way about one; then version 2's files on disk, reviewed and upgraded to. Returns (state, made)."""
@@ -3023,7 +3193,7 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     state, made = _practice_on_version_1(tmp_path, monkeypatch)
     _approve_the_new_visit(state)
     hub = _converted_as_version_2_says(state, made)
-    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": "2-appointments-are-visits"})
     assert done["data"]["appointments_now_visits"] == 2 and done["data"]["appointments_merged_into_their_visit"] == 1
 
 
@@ -3056,7 +3226,7 @@ def test_the_appointment_upgrade_runs_in_batches_and_a_stopped_one_goes_on_where
     assert len(hub.db.events.find({"action": "practice.upgrade_progress"})) == 2
     monkeypatch.setattr(Hub, "convert_record", real)  # the next start
     hub = _converted_as_version_2_says(state, made)
-    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": "2-appointments-are-visits"})
     assert done["data"]["appointments_now_visits"] + done["data"]["appointments_merged_into_their_visit"] == 3
     assert done["data"]["batches"] >= 5
 

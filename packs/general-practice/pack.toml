@@ -4,7 +4,10 @@
 
 # 2: appointments and visits are one record, the Visit (an Encounter from booking to the end). pack.py's UPGRADES turns
 # the appointments of a practice on version 1 into visits.
-version = "2"
+# 3: a visit keeps what it is booked for (serviceType, read by the front desk), how soon (priority) and what was billed
+# (diagnosis) apart from the clinical reason; an urgent visit may be squeezed in over another; the front desk books
+# through the appointment request's red-flag screen. UPGRADES moves diagnosis codes written over a reason.
+version = "3"
 
 [practice]
 requires_core = "1.0"
@@ -247,7 +250,7 @@ fields = []
 [[events]]
 id = "appointment.requested"
 label = "A patient asked for an appointment"
-fields = ["reason", "urgency", "preferences"]
+fields = ["reason", "urgency", "preferences", "kind", "slot"]
 
 [[events]]
 id = "lab.result"

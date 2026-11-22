@@ -3,6 +3,9 @@
 # clinical: the front desk and the scheduling agent book and move a visit without ever seeing them; billing is given
 # the codes by the visit-documentation workflow, on the claim. FHIR R5 Encounter: a booked visit is
 # ``planned`` with plannedStartDate/plannedEndDate; it is the calendar's Booking. There is no separate appointment.
+# What the visit is for (serviceType: a check-up, forms) and how soon (priority) are not clinical: the front desk
+# books with them and the calendar shows them. Why the patient comes, why an urgent visit was squeezed in over another
+# and the diagnosis billed (diagnosis, kept apart from the booked reason) are clinical.
 id = "Encounter"
 label = "Visit"
 plural = "Visits"
@@ -24,6 +27,21 @@ reason = "reason_text"
 subject = "subject"
 with = "practitioners"
 cancelled = { when = "record.status in ['cancelled', 'noshow', 'entered-in-error']" }
+kind = "booking_reason"
+priority = "urgency"
+overbooked = "urgency_reason"
+
+# How the calendar books a visit. A nurse or physician may squeeze an urgent visit in over a booked one, saying why;
+# the calendar marks the urgent and soon ones. The front desk (who may not read the reason) books through the
+# appointment request, whose red-flag screen sends a worrying reason to a nurse instead of booking it.
+[booking]
+marked = ["soon", "urgent"]
+overbook = ["physician", "nurse"]
+overbook_label = "Squeeze in as urgent"
+overbook_reason = "Why it cannot wait"
+overbook_priority = "urgent"
+request = "appointment-request"
+request_inputs = ["kind", "reason", "urgency"]
 
 [[field]]
 name = "status"
@@ -84,6 +102,44 @@ type = "choice"
 choices = ["minor", "complete", "counselling"]
 
 [[field]]
+name = "serviceType"
+label = "Visit for (as JSON)"
+type = "list"
+advanced = true
+help = "CodeableReference list: [{concept: {text: check-up | follow-up | ...}}]"
+
+[[field]]
+name = "booking_reason"
+label = "Visit for"
+path = "serviceType.0.concept.text"
+type = "choice"
+choices = ["check-up", "follow-up", "new-concern", "prescription-renewal", "test-results", "forms", "immunization",
+           "prenatal", "well-baby", "counselling", "procedure"]
+help = "what the visit is booked for, as the front desk and the calendar see it; why the patient comes is the reason"
+
+[[field]]
+name = "priority"
+label = "Priority (as JSON)"
+type = "object"
+advanced = true
+help = "a CodeableConcept: {coding: [{code: routine | soon | urgent}], text: why it cannot wait}"
+
+[[field]]
+name = "urgency"
+label = "How soon"
+path = "priority.coding.0.code"
+type = "choice"
+choices = ["routine", "soon", "urgent"]
+
+[[field]]
+name = "urgency_reason"
+label = "Why it cannot wait"
+path = "priority.text"
+type = "string"
+data_class = "clinical"
+help = "said by the nurse or physician who squeezed the visit in over another booking"
+
+[[field]]
 name = "period"
 label = "Period (as JSON)"
 type = "object"
@@ -132,6 +188,21 @@ type = "string"
 data_class = "clinical"
 
 [[field]]
+name = "diagnosis"
+label = "Diagnoses (as JSON)"
+type = "list"
+advanced = true
+data_class = "clinical"
+help = "[{condition: [{concept: {text: ICD-9 ...}}]}]: what was billed, apart from the booked reason"
+
+[[field]]
+name = "diagnosis_text"
+label = "Diagnosis codes"
+path = "diagnosis.0.condition.0.concept.text"
+type = "string"
+data_class = "clinical"
+
+[[field]]
 name = "participant"
 label = "Participants (as JSON)"
 type = "list"
@@ -170,7 +241,8 @@ advanced = true
 [[screen]]
 id = "visit"
 on = ["create"]
-fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "reason_text", "visit_type", "setting"]
+fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "booking_reason", "reason_text", "urgency",
+          "visit_type", "setting"]
 
 # A visit is booked (planned), the patient arrives, is triaged and seen, and the visit ends; or it is cancelled, or the
 # patient does not come. The visit-documentation workflow finishes the booked visit the note is for (or files one that

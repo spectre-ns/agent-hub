@@ -1267,7 +1267,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             else:
                 pick = self._input(self._record_field(wf), {"_record": {"reference": want}} if want else None, me)
         kept = kept or {}
-        fields = "".join(self._input(self._ref_input(f), {f["name"]: kept[f["name"]]} if kept.get(f["name"]) else None,
+        fields = "".join(self._active_ref_input(me, f, about, kept.get(f["name"]))
+                         if f["type"] == "reference" and f.get("active") and about else
+                         self._input(self._ref_input(f), {f["name"]: kept[f["name"]]} if kept.get(f["name"]) else None,
                                      me) if f["type"] == "reference" else
                          self._field(f, [{"value": c, "label": c} for c in f["choices"]] if f.get("choices") else None,
                                      kept.get(f["name"])) for f in wf.inputs)
@@ -1295,6 +1297,46 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         rt = self.hub.record_type(wf.record)
         return {"path": "_record", "name": "_record", "label": rt.label if rt else wf.record, "type": "reference",
                 "target": [wf.record], "required": True}
+
+    def _active_ref_input(self, me, f: dict, about: str, kept) -> str:
+        """A start-form input that takes an active record (``active = true``), for work about a known record: a
+        choice of that record's own active ones the member may read, newest first, each by its title (a booking by
+        its time and members), the one under way (a booking started and not over) chosen."""
+        hub = self.hub
+        targets = f.get("target") or []
+        opts, now = [], hub.engine.now().isoformat(timespec="minutes")
+        for t in hub.concrete([targets] if isinstance(targets, str) else targets):
+            rt = hub.record_type(t)
+            if not rt or not self._may_read(me, t):
+                continue
+            for rec in hub.records.search(t, limit=None):
+                if hub.subject_of(rec) != about or not schema.is_active(rt, rec):
+                    continue
+                label, key, under_way = self.hub.title(hub.redact(me, rec)), "", False
+                if rt.is_a("Booking"):
+                    seen = schema.project(rt, rec, hub.member_types())
+                    if seen.get("cancelled"):
+                        continue
+                    key = str(seen.get("start") or "")
+                    who = ", ".join(self.member_name(m) for m in seen.get("with") or [])
+                    try:
+                        when = datetime.fromisoformat(key[:16]).strftime("%a %b %d, %H:%M")
+                    except ValueError:
+                        when = key
+                    label = " · ".join(x for x in (when, who) if x)
+                    state = schema.first(rec, rt.lifecycle["path"]) if rt.lifecycle else None
+                    under_way = bool(state and state != rt.lifecycle.get("initial")) or \
+                        key[:16] <= now < str(seen.get("end") or "~")[:16]
+                opts.append((key, f"{t}/{rec['id']}", label, under_way))
+        opts.sort(key=lambda o: o[0], reverse=True)
+        chosen = kept or next((o[1] for o in opts if o[3]), "")
+        req = " required" if f.get("required") else ""
+        none = "" if f.get("required") else '<option value="">None</option>'
+        body = "".join(f'<option value="{e(o[1])}"{" selected" if o[1] == chosen else ""}>{e(o[2])}</option>'
+                       for o in opts)
+        helps = f'<small class="help">{e(f["help"])}</small>' if f.get("help") else ""
+        return (f'<div class="field"><label>{e(f["label"])}<select name="{e(f["name"])}"{req}>{none}{body}</select>'
+                f'</label>{helps}</div>')
 
     @staticmethod
     def _ref_input(f: dict) -> dict:
