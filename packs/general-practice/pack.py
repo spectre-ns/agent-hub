@@ -862,16 +862,21 @@ def upgrade_diagnosis_apart_from_reason(hub, actor):
     """Version 3 keeps what was billed (diagnosis) apart from why the visit was booked (reasonCode): before, finishing a
     visit wrote the diagnosis codes over the booked reason. Once the Visit with a diagnosis is in force, each visit
     whose reason is the codes ("ICD-9 ...") gets them as its diagnosis, and its reason back from the version before
-    the codes were written (none, if it never had another). None until the new Visit is approved."""
+    the codes were written (none, if it never had another). None until the new Visit is approved.
+
+    It works in batches of ``hub.UPGRADE_BATCH``: a visit done has a diagnosis, so the next batch finds the rest."""
     rt = hub.record_type("Encounter")
     if rt is None or rt.field("diagnosis_text") is None:
         return None
-    moved, restored = [], []
+    moved, restored, more = [], [], False
     for v in hub.records.search("Encounter", limit=None):
         reasons = [r for r in v.get("reasonCode") or [] if isinstance(r, dict)]
         codes = [r for r in reasons if str(r.get("text") or "").startswith("ICD-9 ")]
         if not codes or v.get("diagnosis"):
             continue
+        if len(moved) >= hub.UPGRADE_BATCH:
+            more = True
+            break
         earlier = None
         for row in hub.db.record_versions.find({"type": "Encounter", "id": v["id"]}, sort=[("version", -1)],
                                                fields=["data"]):
@@ -885,7 +890,7 @@ def upgrade_diagnosis_apart_from_reason(hub, actor):
         moved.append(f"Encounter/{v['id']}")
         if earlier:
             restored.append(f"Encounter/{v['id']}")
-    return {"visits_with_diagnosis_apart": moved, "booked_reason_restored": restored}
+    return {"visits_with_diagnosis_apart": moved, "booked_reason_restored": restored, "more": more}
 
 
 UPGRADES = {"2-appointments-are-visits": upgrade_appointments_to_visits,

@@ -3038,7 +3038,7 @@ def test_the_front_desk_books_through_the_red_flag_screen(hub):
         assert hub.engine.run(run["id"])["steps"]["book-chosen"]["state"] == "skipped"
 
 
-def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub):
+def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub, monkeypatch):
     """The diagnosis codes billed go in the visit's diagnosis; why it was booked stays its reason. A practice that
     upgrades gets the codes moved off the reason, and the reason it was booked with back."""
     amara = M(hub, "dr-amara")
@@ -3055,9 +3055,12 @@ def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub):
                                                "reasonCode": [{"text": "ICD-9 034"}]})
     hub.db.set_setting("pack_upgrades_done", [u for u in hub.db.get_setting("pack_upgrades_done") or []
                                               if u != "3-diagnosis-apart-from-reason"])
+    monkeypatch.setattr(hub, "UPGRADE_BATCH", 1)  # one visit a batch: the two take two
     (got,) = hub.run_pack_upgrades(M(hub, "rana"))
     assert got["upgrade"] == "3-diagnosis-apart-from-reason"
-    assert got["booked_reason_restored"] == [f"Encounter/{v['id']}"]
+    (ev,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": got["upgrade"]})
+    assert ev["data"]["batches"] == 2
+    assert got["visits_with_diagnosis_apart"] == 2 and got["booked_reason_restored"] == 1
     fixed = hub.records.read("Encounter", v["id"])
     assert fixed["reasonCode"] == [{"text": "Knee pain"}] and fixed["status"] == "finished"
     assert fixed["diagnosis"] == [{"condition": [{"concept": {"text": "ICD-9 719.46"}}]}]
@@ -3190,7 +3193,7 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     state, made = _practice_on_version_1(tmp_path, monkeypatch)
     _approve_the_new_visit(state)
     hub = _converted_as_version_2_says(state, made)
-    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": "2-appointments-are-visits"})
     assert done["data"]["appointments_now_visits"] == 2 and done["data"]["appointments_merged_into_their_visit"] == 1
 
 
@@ -3223,7 +3226,7 @@ def test_the_appointment_upgrade_runs_in_batches_and_a_stopped_one_goes_on_where
     assert len(hub.db.events.find({"action": "practice.upgrade_progress"})) == 2
     monkeypatch.setattr(Hub, "convert_record", real)  # the next start
     hub = _converted_as_version_2_says(state, made)
-    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": "2-appointments-are-visits"})
     assert done["data"]["appointments_now_visits"] + done["data"]["appointments_merged_into_their_visit"] == 3
     assert done["data"]["batches"] >= 5
 
