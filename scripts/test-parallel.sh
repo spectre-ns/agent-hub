@@ -5,13 +5,14 @@
 # contend for one server's locks; every test still gets a database of its own inside it.
 # Each shard's server is on a free port docker picks, so several runs at once never collide.
 set -u
-# A few runs at a time on the machine (PH_TEST_SLOTS, default 2): more agents or terminals queue here instead of
-# starving each other. A run holds its slot's lock on fd 9, which pytest and docker inherit until the run ends.
+# Several runs at a time share the machine (PH_TEST_SLOTS, default half the cores): more queue here instead of
+# starving each other, and each run takes at most its share of cores and of free memory. A run holds its slot's lock on fd 9, which pytest and docker inherit until the run ends.
 lock="${XDG_RUNTIME_DIR:-/tmp}/practicehub-tests.lock"
+slots=${PH_TEST_SLOTS:-$(( $(nproc) / 2 ))}; [ "$slots" -lt 1 ] && slots=1
 if [ -z "${PH_TEST_LOCKED:-}" ]; then
   said=""
   while :; do
-    for k in $(seq 1 "${PH_TEST_SLOTS:-2}"); do
+    for k in $(seq 1 "$slots"); do
       f=$lock; [ "$k" -gt 1 ] && f=$lock.$k
       exec 9>"$f"
       if flock -n 9; then PH_TEST_LOCKED=1 exec "$0" "$@"; fi
@@ -24,8 +25,12 @@ fi
 N=${1:-auto}; [ $# -gt 0 ] && shift
 if [ "$N" = auto ]; then
   mem=$(awk '/MemAvailable/ {print int($2 / 1024 / 700)}' /proc/meminfo); cpu=$(nproc)
-  N=$(( cpu < mem ? cpu : mem )); [ "$N" -gt 24 ] && N=24; [ "$N" -lt 1 ] && N=1
+  N=$(( cpu < mem ? cpu : mem )); [ "$N" -gt 24 ] && N=24
 fi
+# This run's share: the cores over the slots, and what free memory allows now (about 700 MB a shard).
+share=$(( $(nproc) / slots )); mem=$(awk '/MemAvailable/ {print int($2 / 1024 / 700)}' /proc/meminfo)
+[ "$mem" -lt "$share" ] && share=$mem
+[ "$N" -gt "$share" ] && N=$share; [ "$N" -lt 1 ] && N=1
 echo "$N shards" >&2; out=$(mktemp -d); tag=$$
 names=""
 cleanup() { [ -n "$names" ] && docker rm -f $names >/dev/null 2>&1; }
