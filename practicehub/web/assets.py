@@ -2071,7 +2071,10 @@ function formModal() {
     dlg.innerHTML = '<div class="fm-head"><h2 id="fm-title"></h2><button type="button" class="fm-close" aria-label="Close" title="Close (Esc)">×</button></div><div class="fm-body"></div>';
     dlg.querySelector(".fm-close").addEventListener("click", tryClose);
     dlg.addEventListener("cancel", (ev) => { if (!mayLeave()) ev.preventDefault(); else dirty = false; });
-    dlg.addEventListener("close", () => { if (dlg) { dlg.remove(); dlg = null; } dirty = false; back = ""; });
+    dlg.addEventListener("close", () => {  // Esc or the backdrop: a reply that stayed still reloads the page
+      if (dlg) { dlg.remove(); dlg = null; } dirty = false; back = "";
+      if (stayed) { stayed = false; location.reload(); }
+    });
     // the backdrop closes it only when the press began there too (not a text selection that ended outside)
     dlg.addEventListener("mousedown", (ev) => { downOnBackdrop = ev.target === dlg; });
     dlg.addEventListener("click", (ev) => { if (ev.target === dlg && downOnBackdrop) tryClose(); downOnBackdrop = false; });
@@ -2141,7 +2144,10 @@ function formModal() {
       const text = await res.text();
       if (res.ok && text.indexOf("data-modal-stay") >= 0) {  // what to tell the caller now: shown, not reloaded away
         const said = extract(text);
-        show(said.html, said.title, false, true); stayed = true; return;
+        show(said.html, said.title, false, true); stayed = true;
+        const advice = dlg && dlg.querySelector(".fm-body [role=alert]");  // read first by a screen reader
+        if (advice) { advice.tabIndex = -1; advice.focus(); }
+        return;
       }
       if (res.ok) { dirty = false; location.reload(); return; }
       const got = extract(text);

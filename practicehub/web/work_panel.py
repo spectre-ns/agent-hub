@@ -38,6 +38,29 @@ class WorkPanel:
                 out.append((run, wf))
         return out
 
+    def forward_move(self, lc: dict, st, moves: list[dict]):
+        """The one move from ``st`` drawn as the main button; the rest are secondary. Read from the lifecycle's shape,
+        not from state names: not a move that undoes or ends the record (cancel, entered in error), not one that
+        leads back here (a pause that returns), and a state that leads on before an end no move leaves (a no-show).
+        Ties go to the lifecycle's own order. None when every move undoes."""
+        trans = [t for t in lc.get("transition", []) if "*" not in t["from"]]
+
+        def reach(s):
+            seen, todo = set(), [s]
+            while todo:
+                x = todo.pop()
+                for t in trans:
+                    if x in t["from"] and t["to"] not in seen:
+                        seen.add(t["to"])
+                        todo.append(t["to"])
+            return seen
+
+        ok = [t for t in moves if not self._undoing(t)]
+        if not ok:
+            return None
+        rank = lambda t: (st in reach(t["to"]), not any(t["to"] in x["from"] for x in trans), moves.index(t))
+        return min(ok, key=rank)
+
     def work_panel(self, me, ref: str, *, rt=None, st=None, moves_html: str = "", auto=(), url: str = "") -> str:
         """The side panel's lifecycle and open-work sections, as HTML (empty when there is neither)."""
         out = []
@@ -166,7 +189,7 @@ class WorkPanel:
         rows = []
         for t in lc["transition"]:
             frm = "any state" if "*" in t["from"] else ", ".join(rt.state_label(f) for f in t["from"])
-            here = st in t["from"] or "*" in t["from"]
+            here = (st in t["from"] or "*" in t["from"]) and t["by"] != "workflow"
             who = "only a workflow" if t["by"] == "workflow" else "anyone who may change it"
             rows.append(f'<tr{" class=here" if here and t["to"] != st else ""}><td>{e(frm)}</td>'
                         f'<td>{e(rt.state_label(t["to"]))}</td><td>{e(t["label"])}</td><td>{e(who)}</td></tr>')
@@ -227,11 +250,15 @@ class WorkPanel:
                           "inprogress" if "review" in s.lower() or s.lower() in self.UNDERWAY else "default")
         edges, any_tabs = [], []
         for t in trans:
-            cur = (st in t["from"] or "*" in t["from"]) and t["to"] != st
-            cls = "lc-edge" + (" auto" if t["by"] == "workflow" else "") + (" here" if cur else "")
-            mk = "url(#lc-arrow-here)" if cur else "url(#lc-arrow)"
+            # "a move from here" is per source: only the arrow that leaves the current state, and never one only a
+            # workflow makes (the viewer cannot make it)
+            mine = t["by"] != "workflow" and t["to"] != st
+            look = lambda cur: ("lc-edge" + (" auto" if t["by"] == "workflow" else "") + (" here" if cur else ""),
+                                "url(#lc-arrow-here)" if cur else "url(#lc-arrow)")
             tx, ty = pos[t["to"]]
             if "*" in t["from"]:
+                cur = mine
+                cls, mk = look(cur)
                 ax, ay = tx + W / 2, ty - 24
                 any_tabs.append(f'<g class="lc-any{" here" if cur else ""}"><rect x="{ax - 38}" y="{ay - 10}" width="76" '
                                 f'height="18" rx="9"/><text x="{ax}" y="{ay + 3}">any state</text></g>'
@@ -241,6 +268,7 @@ class WorkPanel:
                 if f == t["to"] or f not in pos:
                     continue
                 fx, fy = pos[f]
+                cls, mk = look(mine and f == st)
                 if (id(t), f) in lanes:  # down into the gap, along to its lane, down, along, into the target
                     side, k = lanes[(id(t), f)]
                     lx = gl - 8 - k * LANE if side == "L" else gl + inner - 4 + k * LANE

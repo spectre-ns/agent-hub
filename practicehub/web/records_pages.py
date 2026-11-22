@@ -1448,7 +1448,8 @@ class RecordPages:
                 main.append(f"<div class='starts' role='group' aria-label='Start work'>{starts}</div>")
 
         def move(t):
-            kind = "danger-subtle" if self._undoing(t) else "primary"
+            # only the forward move is loud; the others (a no-show, a pause) are secondary, undoing ones in red
+            kind = "danger-subtle" if self._undoing(t) else "primary" if t is ahead else "secondary"
             if t["fields"] or t["comment"]:  # a transition screen asks for what the move needs first
                 return (f'<a class="btn {kind}" href="{url}/move?to={e(urllib.parse.quote(t["to"]))}" data-modal>'
                         f'{e(t["label"])}…</a>')
@@ -1461,6 +1462,7 @@ class RecordPages:
             if lc else []
         mine = [t for t in moves if t["by"] != "workflow"] if may_write else []
         auto = [t for t in moves if t["by"] == "workflow"]
+        ahead = self.forward_move(lc, st, mine) if mine else None
         moves_html = "".join(move(t) for t in mine) if not editing else ""
         sigs = hub.signatures(me, ref)
         cur = [s for s in sigs if s["current"]]
