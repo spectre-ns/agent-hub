@@ -299,3 +299,105 @@ def test_upgrading_qms_hands_a_capa_under_way_on_to_the_new_version(hub, old_mod
     hub.engine.decide(amara, v, "not-effective")
     new = open_run(hub, "qms-capa", ref)  # version 1 ended in actions with nothing to walk it; now handed on
     assert new["version"] > old["version"] and item_for(hub, new, "act")
+
+
+# ------------------------------------------------------------------------------------------- plm: ChangeOrder
+@pytest.fixture
+def products(hub):
+    def build(h):
+        for name in ("dms", "qms", "plm"):
+            install(h, name)
+        for m in h.pack.modules:
+            m.module.demo(h)
+    snapshot_onto(hub, "modwf:products", build, modules=["dms", "qms", "plm"])
+    return hub
+
+
+def _board(hub, run, step, who, outcome, note=None):
+    i = item_for(hub, run, step)
+    hub.engine.claim(who, i)
+    hub.engine.decide(who, i, outcome, note)
+
+
+def test_a_change_order_is_walked_from_draft_and_a_rejected_or_returned_one_is_walked_again(products):
+    hub = products
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    co = hub.records.search("ChangeOrder", limit=None)[0]
+    cref = f"ChangeOrder/{co['id']}"
+    first = open_run(hub, "plm-change", cref)  # made as a draft: its workflow holds it with its author
+    assert step_state(hub, first, "submit") == "waiting"
+    hub.update_record(rana, cref, {"reason": co["reason"] + " Agreed."})
+    hub.update_record(rana, cref, {"status": "review"})
+    with pytest.raises(Denied):  # whoever wrote it does not review it
+        hub.engine.claim(rana, item_for(hub, first, "review"))
+    _board(hub, first, "review", amara, "reject", "Say what is done with stock on hand")
+    assert hub.records.read("ChangeOrder", co["id"])["status"] == "rejected"
+    assert hub.engine.run(first["id"])["status"] == "completed"
+    second = open_run(hub, "plm-change", cref)  # back with its author: the next pass holds it
+    assert second["ctx"]["run"]["previous"] == first["id"]
+    assert step_state(hub, second, "submit") == "waiting"
+    hub.update_record(rana, cref, {"status": "draft"})  # Revise
+    assert step_state(hub, second, "submit") == "waiting"
+    hub.update_record(rana, cref, {"impact": "Use up the 10x10 stock first."})
+    hub.update_record(rana, cref, {"status": "review"})
+    _board(hub, second, "review", amara, "approve")
+    kit = next(p for p in hub.records.search("Product", limit=None) if p["number"] == "WC-100")
+    assert kit["status"] == "design" and kit["revision"] == 2
+    spec = co["documents"][0]
+    hub.update_record(rana, spec, {"status": "in-review"})
+    _board(hub, open_run(hub, "dms-review", spec), "approve", amara, "approve")
+    _board(hub, second, "release", rana, "return", "Packing photo missing")
+    assert hub.records.read("ChangeOrder", co["id"])["status"] == "draft"
+    third = open_run(hub, "plm-change", cref)  # returned: the next pass, which does not open the kit again
+    hub.update_record(rana, cref, {"status": "review"})
+    _board(hub, third, "review", amara, "approve")
+    assert hub.records.read("Product", kit["id"])["revision"] == 2
+    assert step_state(hub, third, "open-products") == "skipped"
+    with pytest.raises(Denied):  # amara reviewed this pass: she does not release it
+        hub.engine.claim(amara, item_for(hub, third, "release"))
+    _board(hub, third, "release", rana, "release")
+    assert hub.records.read("ChangeOrder", co["id"])["status"] == "implemented"
+    assert hub.records.read("Product", kit["id"])["status"] == "released"
+    assert not runs(hub, "plm-change", cref, "running")
+
+
+def test_a_change_order_under_review_moves_only_by_its_workflow_and_cancelled_work_goes_back(products):
+    hub = products
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    co = hub.create_record(rana, "ChangeOrder", {"title": "T", "reason": "R"})
+    ref = f"ChangeOrder/{co['id']}"
+    run = open_run(hub, "plm-change", ref)
+    hub.update_record(rana, ref, {"status": "review"})
+    with pytest.raises(Denied):
+        hub.update_record(rana, ref, {"status": "approved"})
+    with pytest.raises((Denied, Invalid)):  # not while the board has it
+        hub.update_record(rana, ref, {"status": "cancelled", "cancel_reason": "Duplicate"})
+    hub.engine.cancel(amara, run["id"], "Raised twice")
+    assert hub.records.read("ChangeOrder", co["id"])["status"] == "draft"  # abandoned: back to its author
+    nxt = open_run(hub, "plm-change", ref)  # and walked from there
+    assert step_state(hub, nxt, "submit") == "waiting"
+    hub.update_record(rana, ref, {"status": "cancelled", "cancel_reason": "Duplicate"})
+    assert hub.engine.run(nxt["id"])["status"] != "running"
+    assert not runs(hub, "plm-change", ref, "running")
+
+
+def test_upgrading_plm_hands_a_change_under_review_on_to_the_new_version(hub, old_modules):
+    for name in ("dms", "qms", "plm"):
+        install(hub, name)
+    for name in ("dms", "qms", "plm"):
+        demo(hub, name)
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    co = hub.records.search("ChangeOrder", limit=None)[0]
+    cref = f"ChangeOrder/{co['id']}"
+    assert not runs(hub, "plm-change", cref)  # version 1: a draft is not walked
+    hub.update_record(rana, cref, {"status": "review"})
+    old = open_run(hub, "plm-change", cref)
+    approve_all(hub, old_modules(hub, "dms"), amara)
+    approve_all(hub, old_modules(hub, "qms"), amara)
+    proposed = old_modules(hub, "plm")
+    assert ("type", "ChangeOrder") in proposed and ("workflow", "plm-change") in proposed
+    approve_all(hub, proposed, amara)
+    _board(hub, old, "review", amara, "reject")
+    assert hub.engine.run(old["id"])["status"] == "completed"
+    new = open_run(hub, "plm-change", cref)  # version 1 left it rejected; version 2 holds it with its author
+    assert new["version"] > old["version"] and step_state(hub, new, "submit") == "waiting"

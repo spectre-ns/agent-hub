@@ -1,5 +1,6 @@
 # A change order: why a product changes, which products and documents it changes, and (when it came from one) the
-# CAPA it answers. Sending it for review starts the plm-change workflow.
+# CAPA it answers. It names the plm-change workflow, which walks its status from draft to implemented: making one starts
+# it, and a change order returned or rejected and revised is walked again from draft.
 id = "ChangeOrder"
 label = "Change order"
 plural = "Change orders"
@@ -7,6 +8,7 @@ data_class = "products"
 date = "raised"
 flag = "status"
 order = 31
+workflow = { id = "plm-change", when = "record.status in ['draft', 'review', 'approved', 'rejected']" }
 summary = "A change to released products and their documents: reviewed, implemented at new revisions, released."
 
 [[field]]

@@ -2814,7 +2814,7 @@ def test_a_released_product_changes_only_through_a_signed_change_order(products)
     # the specification goes through document control again (dms), by someone who did not write it
     hub.update_record(rana, spec, {"body": doc["body"].replace("10x10", "15x15")})
     hub.update_record(rana, spec, {"status": "in-review"})
-    review = next(r for r in hub.db.runs.find({"workflow_id": "dms-review", "status": "running"}))
+    review = next(r for r in hub.db.runs.find({"workflow_id": "dms-review", "record": spec, "status": "running"}))
     d = item_for(hub, hub.engine.run(review["id"]), "approve")
     hub.engine.claim(amara, d)
     hub.engine.decide(amara, d, "approve")

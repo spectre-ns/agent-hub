@@ -1,18 +1,31 @@
 id = "plm-change"
 title = "Change a product"
-summary = """The change board reviews a change order and signs it. An approved change opens each product and document it
-names at the next revision; the documents go through document control again; once every one is approved, a product
-owner signs the release and the products are released at their new revision."""
+summary = """A change order from draft to released: its author writes it and sends it for review; the change board
+reviews and signs it. An approved change opens each product and document it names at the next revision; the documents
+go through document control again; once every one is approved, a product owner signs the release and the products are
+released at their new revision. Rejected or returned, it goes back to its author and the next pass walks it again."""
 record = "ChangeOrder"
 
-[trigger]
-event = "record.transitioned:ChangeOrder"
-when = "record.status == 'review'"
+# The ChangeOrder type names this workflow: making a change order starts it, and its status is this work's position.
+# One pass is one run (a workflow has no loops): returned or rejected, the next run walks the next pass,
+# and who reviewed it before still does not release it. Nothing else starts it.
+
+[[steps]]
+id = "submit"
+title = "Write the change and send it for review"
+kind = "wait"
+until = "record.status != 'draft' and record.status != 'rejected'"   # sent for review (or cancelled)
+moves = ["draft"]   # revised after the board rejected it: still with its author
+instructions = """Say why it changes, which products and documents it changes and what else it touches, then send it
+for review on its page. Rejected, the board's note says what is missing: revise it and send it again, or cancel it.
+Whoever writes it does not review it."""
 
 [[steps]]
 id = "review"
 title = "Review the change"
 kind = "gate"
+after = ["submit"]
+when = "record.status == 'review'"
 role = "change-board"
 signer = "person"
 not_by = ["record.editors"]   # whoever wrote the change does not approve it
@@ -30,11 +43,7 @@ title = "Return the change to its author"
 kind = "automation"
 after = ["review"]
 when = "review.outcome == 'reject'"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "rejected"
+state = "rejected"   # back with its author: the next pass is the next run's
 
 [[steps]]
 id = "approve"
@@ -42,11 +51,7 @@ title = "Record the approval"
 kind = "automation"
 after = ["review"]
 when = "review.outcome == 'approve'"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "approved"
+state = "approved"
 
 [[steps]]
 id = "open-products"
@@ -76,7 +81,7 @@ where = "each_record.status == 'approved'"
 ref = "{{each}}"
 increment = ["revision"]
 [steps.params.set]
-status = "draft"   # its author revises it and sends it for review (dms); staff keep reading the approved revision
+status = "draft"   # a move the document's own workflow waits on: its author revises it and sends it for review
 
 [[steps]]
 id = "mark-opened"
@@ -104,7 +109,7 @@ title = "Release the new revisions"
 kind = "gate"
 role = "product-owner"
 signer = "person"
-not_by = ["review"]    # the board member who approved it is not also the one who releases it
+not_by = ["review"]    # the board member who approved it (in this pass or one before) does not release it
 meaning = "I release these products at their new revision"
 meanings = { return = "I return this change order without releasing it" }
 outcomes = ["release", "return"]
@@ -136,19 +141,11 @@ title = "Return the change to its author"
 kind = "automation"
 after = ["release"]
 when = "release.outcome == 'return'"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "draft"
+state = "draft"   # the next pass is the next run's
 
 [[steps]]
 id = "implemented"
 title = "Close the change order"
 kind = "automation"
 after = ["release-products"]
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "implemented"
+state = "implemented"

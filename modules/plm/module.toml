@@ -9,7 +9,7 @@
 requires_core = "1.0"
 id = "plm"
 name = "Product lifecycle"
-version = "1"
+version = "2"
 summary = "Products at revisions, their parts and specifications, and change orders that release new revisions."
 shortcuts = ["Product", "ChangeOrder"]
 requires = ["dms", "qms"]
