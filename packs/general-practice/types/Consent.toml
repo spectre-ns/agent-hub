@@ -1,0 +1,105 @@
+# A patient's consent directive (PHIA lets a patient limit or revoke consent to the collection, use or disclosure of
+# their personal health information). While it is active, what it names is withheld from everyone it does not allow,
+# everywhere (the core's Restriction): the chart says "information withheld at the patient's request". A physician or
+# nurse may open it in an emergency, giving a reason that the privacy officer reviews.
+# Only the privacy officer (the practice manager: grants.practice-manager writes "privacy") records or changes one.
+id = "Consent"
+label = "Consent directive"
+plural = "Consent directives"
+data_class = "privacy"
+extends = "Restriction"
+strict = true
+date = "received"
+title = "Consent directive[ of {received}][ ({status})]"
+alert = true
+active = "record.status == 'active'"
+order = 5
+part_of = "patient"
+summary = "A patient's limit on who sees what of their file: what is withheld, and who is still allowed."
+
+[base]
+subject = "patient"
+classes = "withhold_classes"
+types = "withhold_types"
+records = "withhold_records"
+members = "allow_members"
+roles = "allow_roles"
+active = { when = "record.status == 'active'" }
+reason = "request"
+
+[[field]]
+name = "patient"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["active", "withdrawn"]
+required = true
+help = "withdrawn: the patient lifted it; what it withheld is seen again as the roles allow"
+
+[[field]]
+name = "received"
+label = "Asked on"
+type = "date"
+required = true
+
+[[field]]
+name = "request"
+label = "What the patient asked"
+type = "text"
+required = true
+help = "in the patient's words: what they want withheld, and from whom"
+
+[[field]]
+name = "withhold_classes"
+label = "Withhold these kinds of information"
+type = "list"
+help = "one a line: clinical, intake, visits, correspondence, billing (visits: bookings and their reasons)"
+
+[[field]]
+name = "withhold_types"
+label = "Withhold these kinds of record"
+type = "list"
+advanced = true
+help = "one a line, by type: Observation (results), Composition (notes), Condition (problems), DiagnosticReport"
+
+[[field]]
+name = "withhold_records"
+label = "Withhold these records"
+path = "withhold_records.*"
+type = "reference"
+target = ["Observation", "Composition", "Condition", "DiagnosticReport", "MedicationRequest", "MedicationStatement",
+          "AllergyIntolerance", "Immunization", "ServiceRequest", "Encounter", "Communication",
+          "QuestionnaireResponse"]
+help = "particular records of the patient's file"
+
+[[field]]
+name = "allow_members"
+label = "Still allowed: people"
+path = "allow_members.*"
+type = "reference"
+target = ["Practitioner"]
+help = "who still sees what is withheld (the patient's own physician, say)"
+
+[[field]]
+name = "allow_roles"
+label = "Still allowed: roles"
+type = "list"
+help = "one a line: physician, nurse ... (everyone holding the role still sees it)"
+
+[[field]]
+name = "told"
+label = "What the patient was told"
+type = "text"
+help = "that the people caring for them may not see it, and what that can mean for their care"
+
+[[screen]]
+id = "directive"
+on = ["create", "edit"]
+fields = ["patient", "status", "received", "request", "withhold_classes", "withhold_records", "withhold_types",
+          "allow_members", "allow_roles", "told"]

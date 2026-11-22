@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from . import blocks as blockmod
 from . import expr
 from . import schema
+from . import visibility
 from . import workflows as wfmod
 from .db import utcnow
 from .backends import backend_for
@@ -54,10 +55,14 @@ def act_message_send(engine, run, step, params, actor):
     if why:
         raise ValueError(f"message.send refused: {why}")
     classes = message_classes(hub, run, step)
+    body = str(params.get("body", ""))
+    gap = hub.restrictions.incomplete(run.get("record"), classes) if str(to) != run.get("record") else None
+    if gap and gap not in body:  # a letter written from a file the patient limited says it is incomplete
+        body = f"{body.rstrip()}\n\n{gap}"
     oid = hub.db.next_seq("outbox")
     hub.db.outbox.insert({"_id": oid, "id": oid, "at": utcnow(), "channel": params.get("channel", "message"),
                           "recipient": str(to), "subject": str(params.get("subject", "")),
-                          "body": str(params.get("body", "")), "run_id": run["id"], "sent_by": actor["id"],
+                          "body": body, "run_id": run["id"], "sent_by": actor["id"],
                           "status": "queued", "classes": ",".join(sorted(classes)), "claimed_by": None,
                           "claimed_at": None, "done_at": None, "done_by": None, "note": "", "escalated": 0,
                           "purpose": purpose})
@@ -1236,10 +1241,15 @@ class Engine:
                 data[c] = fn(self, run, step, member)
             else:
                 data[c] = expr.lookup(run["ctx"], c)
-        for c, recs in data.items():  # what the member is shown is a view of each record in it
+        for c, recs in list(data.items()):  # what the member is shown is a view of each record in it
             if c.startswith("record:"):
                 for r in recs:
+                    if (visibility.withheld(r) or {}).get("whole"):
+                        continue  # a stub: nothing of it was seen
                     hub.note_view(member, f"{r['resourceType']}/{r['id']}", how=f"work item {item_id}")
+                if any(visibility.withheld(r) for r in recs):  # never silently incomplete, for a person or an agent
+                    data["withheld"] = hub.restrictions.note(run["record"]) + (
+                        ": what you were given of this file is incomplete; say so in anything you write from it")
         ctx_for_choices = {**run["ctx"], **{k.replace(":", "_"): v for k, v in data.items()}}
         fields = self.fields_for(step, run)
         draft = run["ctx"].get(step.review_of) if step.review_of else None

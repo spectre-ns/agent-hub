@@ -1795,3 +1795,55 @@ def test_a_type_that_is_not_a_fhir_resource_has_no_fhir_export_on_the_web(server
     assert fetch(server, f"/records/{t}/{rid}/export?format=fhir", tok)[0] == 422
     st, h, body = fetch(server, f"/api/records/{t}/{rid}?format=json", tok)
     assert st == 200 and h["content-type"] == "application/json" and json.loads(body)["id"] == rid
+
+
+# ------------------------------------------------------------------------- a patient's consent directive on the pages
+def _nadia(hub):
+    """The demo patient whose clinical information is withheld from all but her own physician (Dr. Fraser)."""
+    p = next(r for r in hub.records.search("Patient", limit=None) if r["name"][0]["family"] == "Rahimi")
+    cond = hub.records.search("Condition", subject=f"Patient/{p['id']}")[0]
+    return p["id"], f"Condition/{cond['id']}"
+
+
+def test_the_chart_says_what_is_withheld_and_never_what_it_says(hub, server):
+    pid, cond = _nadia(hub)
+    noor, liam = token(hub, "noor"), token(hub, "dr-liam")
+    code, page = call(server, "GET", f"/patients/{pid}", noor)
+    page = html.unescape(page)
+    assert code == 200 and "Information withheld at the patient's request" in page
+    assert "Depressive" not in page and "Sertraline" not in page and "Withheld" in page
+    assert 'action="/records/Patient/' in page and 'name="reason"' in page  # a nurse may break the glass
+    code, page = call(server, "GET", f"/records/{cond}", noor)
+    assert code == 200 and "Depressive" not in page and "withheld-panel" in page
+    page = html.unescape(call(server, "GET", f"/patients/{pid}", liam)[1])
+    assert "Depressive disorder" in page and "Their directive still allows you" in page
+    jo_page = html.unescape(call(server, "GET", f"/patients/{pid}", token(hub, "jo"))[1])
+    assert "Information withheld at the patient's request" in jo_page and 'name="reason"' not in jo_page
+    assert "ask the privacy officer" in jo_page
+    api = json.loads(call(server, "GET", f"/api/records/{cond}", noor)[1])
+    assert "code" not in api and api["meta"]["withheld"]["whole"]
+
+
+def test_breaking_the_glass_from_the_page_opens_it_under_a_banner(hub, server):
+    pid, cond = _nadia(hub)
+    noor = token(hub, "noor")
+    code, _ = call(server, "POST", f"/records/{cond}/override", noor, form={"reason": "no"})
+    assert code in (400, 422) and "Depressive" not in call(server, "GET", f"/records/{cond}", noor)[1]
+    code, _ = call(server, "POST", f"/records/{cond}/override", noor,
+                   form={"reason": "Unresponsive in the waiting room; need her medications"})
+    assert code == 303
+    page = html.unescape(call(server, "GET", f"/records/{cond}", noor)[1])
+    assert "Emergency access" in page and "Depressive disorder" in page and "privacy officer reviews it" in page
+    rana = html.unescape(call(server, "GET", "/", token(hub, "rana"))[1])
+    assert "Review: Noor Siddiqui opened information" in rana
+
+
+def test_a_withheld_export_says_it_is_incomplete(hub, server):
+    pid, cond = _nadia(hub)
+    from practicehub import export
+    got = export.subject_file(hub, M(hub, "noor"), f"Patient/{pid}", "print")
+    body = got.body.decode() if isinstance(got.body, bytes) else got.body
+    assert "Incomplete: information withheld at the patient" in html.unescape(body) and "Depressive" not in body
+    fhir = json.loads(export.subject_file(hub, M(hub, "noor"), f"Patient/{pid}", "fhir").body)
+    stub = next(e["resource"] for e in fhir["entry"] if e["resource"]["resourceType"] == "Condition")
+    assert stub["meta"]["security"][0]["code"] == "REDACTED" and "code" not in stub

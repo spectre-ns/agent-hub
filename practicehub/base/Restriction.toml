@@ -1,0 +1,65 @@
+# Core base type: a limit the person a file is about puts on who sees what of it (a consent directive, a lockbox, a
+# staff member's own chart masked from colleagues). The core reads a restriction through these fields only
+# (``practicehub/restrictions.py``): while it is active, what it masks of its subject's file is withheld from every
+# member it does not allow, on every page, list, search, export, MCP call and agent context, and the reader is told
+# that something is withheld. A member whose role may override (``break_glass``) opens it with a reason, on the track.
+id = "Restriction"
+label = "Restriction"
+abstract = true
+summary = "A subject's limit on who sees what of their file, and who is still allowed."
+title = "Restriction"
+
+[[field]]
+name = "subject"
+label = "About"
+type = "reference"
+target = ["Subject"]
+required = true
+help = "whose file it limits"
+
+[[field]]
+name = "classes"
+label = "Masked data classes"
+type = "string"
+list = true
+help = "every record of these data classes in the file is withheld (and fields of these classes in other records)"
+
+[[field]]
+name = "types"
+label = "Masked record types"
+type = "string"
+list = true
+help = "every record of these types in the file is withheld"
+
+[[field]]
+name = "records"
+label = "Masked records"
+type = "reference"
+target = ["Record"]
+list = true
+help = "these records of the file are withheld"
+
+[[field]]
+name = "members"
+label = "Still allowed: members"
+type = "member"
+list = true
+help = "who still sees what it masks"
+
+[[field]]
+name = "roles"
+label = "Still allowed: roles"
+type = "string"
+list = true
+help = "holders of these roles still see what it masks"
+
+[[field]]
+name = "active"
+label = "In force"
+type = "boolean"
+help = "false once it is withdrawn: what it masked is seen again as the grants allow"
+
+[[field]]
+name = "reason"
+label = "What was asked"
+type = "text"

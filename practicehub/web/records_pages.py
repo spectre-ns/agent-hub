@@ -104,6 +104,7 @@ class RecordPages:
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>edit|move|sign)", self.post_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/move", self.page_move)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/attach", self.post_attach)
+        R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/override", self.post_override)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
         R("GET", r"/api/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
         R("POST", r"/api/files/(?P<rtype>[A-Za-z][\w]*)", self.api_add_file)
@@ -988,9 +989,13 @@ class RecordPages:
         lower = self._lower(rt.label)
         def row(r):
             ref = f"{rt.id}/{r['id']}"
+            if (visibility.withheld(r) or {}).get("whole"):  # a stub: what it is, never what it says
+                return (f'<tr class="withheld"><td class="t"><a href="{e(self.record_href(ref))}">{e(self.hub.title(r))}'
+                        f'</a></td><td class="muted nowrap"></td><td colspan=2><span class="loz moved">Withheld'
+                        f'</span></td></tr>')
             look = (f'<details class="peek"><summary><span class="visually-hidden">Read this {e(lower)} here'
                     f'</span></summary>{self._plain_html(r)}</details>' if peek else "")
-            return (f'<tr><td class="t"><a href="{e(self.record_href(ref))}">{e(self.hub.title(r))}</a>{look}</td>'
+            return (f'<tr><td class="t"><a href="{e(self.record_href(ref))}">{e(self.hub.title(r, seen=True))}</a>{look}</td>'
                     f'<td class="muted nowrap">{e(self._day(schema.record_date(rt, r)))}</td>'
                     f'<td>{self._status_of(rt, r)}</td><td>{self._flag_of(rt, r)}</td></tr>')
         return ('<div class="tablewrap"><table class="parts"><tr><th>' + e(rt.label) + '</th><th>Date</th>'
@@ -1030,7 +1035,8 @@ class RecordPages:
                 r = hub.redact(me, hub.records.read(t, rid))
                 if r:
                     g["recs"][rid] = r
-                    hub.note_view(me, x["ref"], how=f"linked to {ref}")
+                    if not (visibility.withheld(r) or {}).get("whole"):
+                        hub.note_view(me, x["ref"], how=f"linked to {ref}")
         links = []
         for t in sorted(groups, key=lambda t: (hub.record_type(t).order, t)):
             rt, g = hub.record_type(t), groups[t]
@@ -1099,7 +1105,8 @@ class RecordPages:
                         for k, v in hub.facts(p).items() if v not in (None, ""))
         name = (f'<h1 class="name">{e(hub.title(p))}</h1>' if heading else
                 f'<p class="name"><a href="{e(self.record_href(ref))}">{e(hub.title(p))}</a></p>')
-        return f'<div class="subject-banner">{name}<dl class="facts">{facts}</dl></div>' + self.alerts(me, ref)
+        return (f'<div class="subject-banner">{name}<dl class="facts">{facts}</dl></div>' + self.alerts(me, ref)
+                + self.withheld_banner(me, ref))
 
     def record_banner(self, me, rec: dict) -> str:
         """An owner that is not a subject (a visit), as the banner over its parts: its name (a link), status and
@@ -1151,6 +1158,68 @@ class RecordPages:
         o = self.hub.redact(me, self.hub.records.read(*owner.split("/", 1)))
         return self.record_banner(me, o) if o and self._may_read(me, t) else ""
 
+    # ------------------------------------------------------------------------------------------ restrictions
+    def withheld_banner(self, me, subject: str) -> str:
+        """Above every page of a file a restriction limits: that something is withheld at the subject's request
+        (and the emergency form, for a role that may override), that an emergency access is in force (and that
+        it is reviewed), or that the reader is one the restriction still allows."""
+        info = self.hub.withheld(me, subject)
+        if not info:
+            return ""
+        word = self.subj["label"].lower() if subject.split("/")[0] == self.subj["type"] else "subject"
+        over = info.get("override")
+        if over:
+            until = str(over["until"])[11:16]
+            return (f'<div class="flash warning restriction" role="status" id="override-banner">'
+                    f'<h2>Emergency access: you are seeing information this {e(word)} asked to have withheld</h2>'
+                    f'<p>Until {e(until)} UTC. Your reason: “{e(over["reason"])}”. This access is on the track, and '
+                    f'the privacy officer reviews it. Use only what the emergency needs.</p></div>')
+        if info["allowed"]:
+            return (f'<div class="flash info restriction" role="status"><p>This {e(word)} limited who sees part of their '
+                    f'file. Their directive still allows you; everyone else sees '
+                    f'“{e(info["note"].lower())}”.</p></div>')
+        return (f'<div class="flash warning restriction" role="status" id="withheld-banner"><h2>{e(info["note"])}</h2>'
+                f'<p>Part of this file is not shown to you: the {e(word)} limited who sees it. What is withheld is '
+                f'listed as <span class="loz moved">Withheld</span>, and nothing of it is given to an agent.'
+                f'</p>{self.override_form(me, subject, info)}</div>')
+
+    def override_form(self, me, ref: str, info: dict, *, open_: bool = False) -> str:
+        """Break the glass: a role that may override opens what is withheld, giving a reason the privacy officer
+        reviews. Anyone else is told who to ask."""
+        if not info.get("may_override"):
+            return "<p class='muted'>If you need it, ask the privacy officer.</p>"
+        t, _, rid = ref.partition("/")
+        mins = int(self.hub.restrictions.window.total_seconds() // 60)
+        return (f'<details class="break-glass"{" open" if open_ else ""}><summary>Open it in an emergency…</summary>'
+                f'<form method="post" action="/records/{e(t)}/{e(rid)}/override" class="stack break-glass-form">'
+                f'<label for="override-reason">Why you need it now <span class="req" aria-hidden="true">*</span>'
+                f'</label><textarea id="override-reason" name="reason" required minlength="8" rows="3" '
+                f'aria-describedby="override-help"></textarea>'
+                f'<p class="muted" id="override-help">You will see the whole file for {mins} minutes. Your name, the '
+                f'time and this reason go on the track, and the privacy officer is asked to review it.</p>'
+                f'<div class="filters"><button class="danger">Open the withheld information</button></div>'
+                f'</form></details>')
+
+    def withheld_panel(self, me, rec: dict, ref: str) -> str:
+        """A record a restriction withholds from the member, in place of its fields."""
+        gone = visibility.withheld(rec) or {}
+        subject = gone.get("subject") or self.hub.restrictions.subject_of(rec) or ref
+        info = self.hub.withheld(me, subject) or {"note": gone.get("note", "")}
+        if gone.get("whole"):
+            return (f'<section class="card withheld-panel" aria-labelledby="withheld-h"><h3 id="withheld-h">'
+                    f'{e(gone["note"])}</h3><p>What this record says is not shown to you. Its existence is shown so '
+                    f'the file is never mistaken for complete.</p>{self.override_form(me, subject, info, open_=True)}'
+                    f'</section>')
+        return (f'<div class="flash info" role="status"><p>{e(gone["note"])}: '
+                f'{e(", ".join(gone.get("fields") or []))}.</p></div>')
+
+    def post_override(self, req, rtype, rid):
+        """Break the glass (``hub.break_glass``), then back to the record, now open, under the banner."""
+        reason = str(self.form(req).get("reason") or "")
+        got = self.hub.break_glass(req["me"], f"{rtype}/{rid}", reason)
+        raise self._redirect(self.record_href(f"{rtype}/{rid}") if rtype != self.subj["type"]
+                             else self.record_href(got["subject"]))
+
     # ------------------------------------------------------------------------------------------ one record
     def page_record(self, req, rtype, rid, kept: dict | None = None, error: Exception | None = None):
         me, hub = req["me"], self.hub
@@ -1188,7 +1257,10 @@ class RecordPages:
         if rtype == self.subj["type"] and hub.is_policy_owner(me):
             fields += (f"<tr><th>Privacy</th><td><a href='/access?subject={e(urllib.parse.quote(ref))}'>Who opened or "
                        f"changed this file</a></td></tr>")
-        main = [f"<table class='kv'>{fields}</table>"
+        gone = visibility.withheld(rec)
+        if gone and gone.get("whole"):
+            fields, prose, adv_rows = "", [], ""
+        main = [(self.withheld_panel(me, rec, ref) if gone else "") + f"<table class='kv'>{fields}</table>"
                 + "".join((f"<h2 class='prose-label'>{e(f['label'])}</h2>" if len(prose) > 1 else "")
                           + self._value_html(f, rec) for f in prose)
                 + (f"<details class='advanced'><summary>All values</summary><table class='kv'>{adv_rows}</table>"
@@ -1201,7 +1273,7 @@ class RecordPages:
         locked = bool(lc and st in lc.get("locked", []))
         url = f"/records/{e(rtype)}/{e(rid)}"
         ver = e(str((rec.get("meta") or {}).get("versionId", "")))
-        editable = may_write and not locked and bool(self._editable(rt))
+        editable = may_write and not locked and bool(self._editable(rt)) and not (gone and gone.get("whole"))
         # one place for a record: it is read, and an Edit button turns it into its form where it stood (?edit=1)
         editing = tab == "details" and editable and bool(req["query"].get("edit"))
         typed = (kept or {}).get("_typed") if editing else None  # a refused edit: what was typed, not what is saved
@@ -1301,7 +1373,7 @@ class RecordPages:
         moves_html = "".join(move(t) for t in mine) if not editing else ""
         sigs = hub.signatures(me, ref)
         cur = [s for s in sigs if s["current"]]
-        title = hub.title(rec)
+        title = hub.title(rec, seen=True)
         owner = hub.owner_of(rec)
         part_crumbs = self.owner_crumbs(me, rt, rec)
         banner = ""

@@ -596,6 +596,28 @@ def demo(hub):
     def ago(days):
         return (today - timedelta(days=days)).isoformat()
 
+    # A patient who asked that her mental-health care be kept from everyone but her own physician (a consent
+    # directive, PHIA): the rest of the practice sees that something is withheld at her request, never what.
+    rana, liam = hub.member("rana"), hub.member("dr-liam")
+    nadia = hub.create_record(jo, "Patient", _patient_rec(
+        "Nadia", "Rahimi", "1979-05-08", "female", card="4444 222 111", phone="902-555-0166",
+        street="88 Quinpool Road", postal="B3L 1A2", gp="dr-liam"))
+    nref = {"reference": f"Patient/{nadia['id']}"}
+    hub.create_record(liam, "Condition", {
+        "subject": nref, "clinicalStatus": _cc("active", CLINICAL_STATUS),
+        "verificationStatus": _cc("confirmed", "http://terminology.hl7.org/CodeSystem/condition-ver-status"),
+        "category": [{"text": "problem-list-item"}], "code": _cc("311", ICD9, "Depressive disorder"),
+        "onsetDateTime": ago(400), "recordedDate": ago(400), "recorder": {"reference": "Practitioner/dr-liam"}})
+    rx = hub.create_record(liam, "MedicationRequest", {**_order(nref, "Sertraline 50 mg daily", "1 tablet by mouth daily",
+                                                                30, "tablet", 2, 30, ago(60)), "status": "draft"})
+    hub.update_record(liam, f"MedicationRequest/{rx['id']}", {"status": "active"})
+    hub.create_record(rana, "Consent", {
+        "patient": nref, "status": "active", "received": ago(30),
+        "request": "Only Dr. Fraser should see my mental-health care. Not the front desk, not other staff.",
+        "withhold_classes": ["clinical"], "allow_members": [{"reference": "Practitioner/dr-liam"}],
+        "told": "Other staff, and the practice's agents, will see that information is withheld but not what it is. "
+                "In an emergency a physician or nurse may open it; each time is reviewed by the privacy officer."})
+
     # An established patient with a history: an allergy, an active problem, active medications, results.
     ellen = hub.create_record(jo, "Patient", _patient_rec(
         "Ellen", "MacLeod", "1958-03-14", "female", card="1234 567 890", phone="902-555-0142",

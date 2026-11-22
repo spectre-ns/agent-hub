@@ -42,6 +42,8 @@ class CatalogMixin:
     # ------------------------------------------------------------------ cache
     def _defs_reset(self) -> None:
         self._defs: dict = {}
+        if hasattr(self, "restrictions"):
+            self.restrictions.reset()
 
     def _def_row(self, kind: str, did: str, version: int | None = None) -> dict | None:
         table, col, _ = DEFINITIONS[kind]
@@ -156,12 +158,17 @@ class CatalogMixin:
         rt = self.record_type_for_reading(rec.get("resourceType") or "")
         return schema.project(rt, rec, self.member_types())
 
-    def title(self, rec: dict | None) -> str:
+    def title(self, rec: dict | None, *, seen: bool = False) -> str:
         """What a record is called: its type's own ``title``, else the pack's ``summarize``, else its base type's
-        title, else its type and id. Every page, picker and notice names records this way."""
+        title, else its type and id. Every page, picker and notice names records this way. A record a restriction
+        withholds from anyone is named neutrally (a title travels), except to a reader shown it whole: ``seen``
+        says ``rec`` is that reader's own view of it (``redact``), and it is not a stub."""
         if not rec:
             return ""
         rtype = rec.get("resourceType") or ""
+        if hasattr(self, "restrictions") and self.restrictions.restricted(rec) and not (
+                seen and not ((rec.get("meta") or {}).get("withheld") or {}).get("whole")):
+            return self.restrictions.neutral_title(rec)
         rt = self.record_type_for_reading(rtype) if rtype else None
         values = None
         if rt is not None and rt.classed_fields:  # a title travels (notices, pickers, the track): never from those
