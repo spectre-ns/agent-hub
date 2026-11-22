@@ -1668,7 +1668,7 @@ class RecordPages:
             out.append('<div class="flash warning"><p><b>There is open work on this record.</b> A review, decision or '
                        'approval is made in that work, not by signing here: a signature on the record does not '
                        'complete it.</p><ul class="plain">' + "".join(
-                           f'<li><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(req["me"], r))}</a></li>' for r in open_work) + "</ul></div>")
+                           f'<li><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(me, r))}</a></li>' for r in open_work) + "</ul></div>")
         if rt.signatures:
             open_ = [g for g in rt.signatures if (not g["states"] or st in g["states"])
                      and (not g["roles"] or set(g["roles"]) & set(me["roles"]))]

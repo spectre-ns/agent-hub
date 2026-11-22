@@ -695,15 +695,9 @@ class Engine:
         try:
             rt = hub.record_type(ref.split("/", 1)[0])
             rec = hub.records.read(*ref.split("/", 1))
-            if rt is None or rec is None or schema.starts_workflow(rt, rec) != run["workflow_id"] \
-                    or hub.record_workflow(rt) != run["workflow_id"]:
-                return
-            row = hub.workflow(run["workflow_id"])[1]
-            if row["version"] != run["version"] or self.runs(record=ref, status="running"):
+            if rt is None or rec is None or self._walked_again(run, rt, rec) != "re-enter" \
+                    or self.runs(record=ref, status="running"):
                 return  # an older version hands on (``_hand_on``); work still open walks it
-            if not hub.db.events.find_one({"action": "record.transitioned", "subject": ref,
-                                           "seq": {"$gt": run.get("root_event") or 0}}, fields=["seq"]):
-                return
             with hub.db:
                 self.start({"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"},
                            run["workflow_id"], record=ref, inputs=dict((run.get("ctx") or {}).get("input") or {}),
@@ -711,6 +705,21 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - the run that ended stays ended; the hand-on is noted
             hub.track.append(self.automation_actor(run), "trigger.failed", ref, run_id=run["id"], cause=cause,
                              data={"workflow": run["workflow_id"], "error": f"walking the next pass: {exc}"})
+
+    def _walked_again(self, run: dict, rt, rec: dict) -> str | None:
+        """Whether the record a run of its type's own workflow ended on is walked on by another run of it: "hand-on"
+        (the run was an older version: ``_hand_on``), "re-enter" (it moved during the run and is back where its
+        workflow starts: ``_re_enter``), or None (it is left where it is)."""
+        hub = self.hub
+        wid = run["workflow_id"]
+        if schema.starts_workflow(rt, rec) != wid or hub.record_workflow(rt) != wid:
+            return None
+        if hub.workflow(wid)[1]["version"] != run["version"]:
+            return "hand-on"
+        if hub.db.events.find_one({"action": "record.transitioned", "subject": run.get("record"),
+                                   "seq": {"$gt": run.get("root_event") or 0}}, fields=["seq"]):
+            return "re-enter"
+        return None
 
     def stop(self, actor: dict, run_id: str, why: str, cause: int | None) -> None:
         """Stop a record's own run because its record was moved out of its hands (entered in error, cancelled): its
@@ -1287,6 +1296,8 @@ class Engine:
         rec = hub.records.read(*ref.split("/", 1))
         if rec is None:
             return
+        if stranded_only and self._walked_again(run, rt, rec):
+            return  # not stranded: its own workflow walks the next pass (``_re_enter``)
         st = schema.first(rec, lc["path"])
         to = lc["abandoned"].get(st)
         if to and stranded_only:
