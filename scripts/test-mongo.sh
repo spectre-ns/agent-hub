@@ -4,13 +4,15 @@
 set -eu
 NAME=${PH_TEST_MONGO:-ph-test-mongo}
 PORT=${PH_TEST_MONGO_PORT:-27118}   # "auto": a free port docker picks (printed last)
+# Data lives on disk (an anonymous volume, removed with the container), not on a tmpfs: tmpfs pages can only be
+# swapped, while disk pages are page cache the kernel drops at once when memory is short.
 CACHE=${PH_TEST_MONGO_CACHE_GB:-0.25}   # a test server holds little: keep its cache small, so many can run at once
 if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   # every test makes its own database (dozens of collections and index files): raise the open-file limit,
   # and keep the data in memory, since it is thrown away
   bind="127.0.0.1:$PORT:27017"; [ "$PORT" = auto ] && bind="127.0.0.1::27017"
-  docker run -d --name "$NAME" -p "$bind" --ulimit nofile=1048576:1048576 --tmpfs /data/db \
+  docker run -d --name "$NAME" -p "$bind" --ulimit nofile=1048576:1048576 --rm \
     mongo:7.0 --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB "$CACHE" >/dev/null
 fi
 i=0
