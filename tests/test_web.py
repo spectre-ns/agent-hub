@@ -1329,7 +1329,7 @@ def test_a_part_page_reads_inside_its_owner(hub, server):
     r = hub.parts(me, ref)[0][part.id][0]    # the demo has one
     page = call(server, "GET", f"/records/{part.id}/{r['id']}", token(hub, "dr-amara"))[1]
     crumbs = page.split('class="crumbs"')[1].split("</nav>")[0] if 'class="crumbs"' in page else page
-    assert html.escape(hub.title(pat)) in crumbs and f'#part-{part.id}"' in crumbs and html.escape(part.plural) in crumbs
+    assert html.escape(hub.short_title(pat)) in crumbs and f'#part-{part.id}"' in crumbs and html.escape(part.plural) in crumbs
     assert 'class="subject-banner"' in page
 
 
@@ -1599,7 +1599,7 @@ def test_a_board_marks_where_each_card_may_be_dropped_by_the_same_rules_as_its_m
     assert f'action="/records/Document/{doc["id"]}/move"' in card and '<select name="to"' in card \
         and '<option value="in-review">' in card and 'value="approved"' not in card and 'type="radio"' not in card
     moves = _moves(call(server, "GET", "/views/qms-capas", rana)[1], f"CAPA/{capa['id']}")
-    assert moves["investigating"] == {"how": "screen", "label": "investigating…",
+    assert moves["investigating"] == {"how": "screen", "label": "Start investigating…",
                                       "href": f"/records/CAPA/{capa['id']}/move?to=investigating"}
     # the work board: what the item page's buttons allow, for whoever looks
     jo = token(hub, "jo")

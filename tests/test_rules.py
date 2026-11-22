@@ -1654,7 +1654,7 @@ def test_a_rebuilt_unsealed_chain_is_never_sealed_on_start(tmp_path, monkeypatch
 def test_a_run_names_its_patient_only_to_those_who_may_read_them(hub):
     pat = _patient(hub)
     run = hub.engine.start(M(hub, "jo"), "patient-question", record=pat, inputs={"question": "Can I book a physical?"})
-    name = hub.title(hub.records.read(*pat.split("/", 1)))
+    name = hub.short_title(hub.records.read(*pat.split("/", 1)))  # a work title names them without the card number
     assert name not in json.dumps(hub.engine.run(run["id"])) and name not in json.dumps(hub.track.list(run_id=run["id"]))
     assert name in hub.run_title(M(hub, "jo"), run)
     lab = M(hub, "lab-feed")
@@ -3259,13 +3259,13 @@ def test_a_field_of_a_class_a_member_may_not_read_is_never_shown_nor_written(hub
     assert all("Zebrafinch" not in json.dumps(row) for row in hub.record_history(jo, ref))
     assert any("Zebrafinch" in json.dumps(row) for row in hub.record_history(amara, ref))
     # exports: one record, a list, a subject's file
-    for fmt in ("json", "print"):  # (an .odt is zipped: its words are not in its bytes)
+    for fmt in ("fhir", "print"):  # a visit is a FHIR resource (an .odt is zipped: its words are not in its bytes)
         assert b"Zebrafinch" not in export.record(hub, jo, ref, fmt).body
-    assert b"Zebrafinch" in export.record(hub, amara, ref, "json").body
+    assert b"Zebrafinch" in export.record(hub, amara, ref, "fhir").body
     for fmt in ("csv", "print"):
         assert b"Zebrafinch" not in export.records_list(hub, jo, "Encounter", fmt).body
     assert b"Zebrafinch" not in export.records_list(hub, jo, "Encounter", "csv", text="zebrafinch").body
-    for fmt in ("fhir", "print"):  # a subject's whole file (the visit is in it, not as FHIR)
+    for fmt in ("fhir", "print"):  # a subject's whole file (the visit is in it)
         assert b"Zebrafinch" not in export.subject_file(hub, jo, v["subject"]["reference"], fmt).body
     assert b"Zebrafinch" in export.subject_file(hub, amara, v["subject"]["reference"], "print").body
     # MCP: read, search, and the tools it is given
