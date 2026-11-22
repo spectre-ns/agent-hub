@@ -817,7 +817,7 @@ def test_a_person_sets_a_passphrase_with_a_setup_code_from_a_member_admin(hub, s
     rana = token(hub, "rana")
     assert call(server, "POST", "/team/dr-liam/setup-code", token(hub, "jo"))[0] == 403  # not a member admin
     assert call(server, "POST", "/team/dr-liam/setup-code", rana)[0] == 403  # beyond her reach
-    assert "a policy owner who does issues" in call(server, "GET", "/team/dr-liam", rana)[1]
+    assert "someone who does issues" in call(server, "GET", "/team/dr-liam", rana)[1]
     assert call(server, "POST", "/team/dr-liam/setup-code", token(hub, "dr-amara"))[0] == 403  # a directive keeps from her
     hub.add_member(M(hub, "rana"), {"id": "locum", "name": "Dr. Locum", "roles": []})  # reaches nothing she does not
     page = call(server, "GET", "/team/locum", rana)[1]
@@ -1276,7 +1276,7 @@ def test_the_ribbon_shows_a_member_only_what_they_may_use(hub, server):
     assert 'href="/track"' in full and 'href="/access"' in full and "Audit" in full
     home = call(server, "GET", "/", jo)[1]
     menu = home.split('id="practice-menu"')[1].split("</div></div>")[0]
-    assert 'href="/settings">Settings</a>' in menu and 'href="/">Home</a>' in menu
+    assert 'href="/settings">Practice settings</a>' in menu and 'href="/">Home</a>' in menu
     for gone in ("/team", "/modules", "/workflows", "/define/", "/blocks", "/track", "/access", "/outbox"):
         assert f'href="{gone}' not in menu
 
@@ -2145,6 +2145,8 @@ def test_breaking_the_glass_from_the_page_opens_it_under_a_banner(hub, server):
     assert code == 303
     page = html.unescape(call(server, "GET", f"/records/{cond}", noor)[1])
     assert "Emergency access" in page and "Depressive disorder" in page and "privacy officer reviews it" in page
+    banner = page.split('id="override-banner"', 1)[1].split("</div>", 1)[0]
+    assert "UTC" not in banner and re.search(r"Until \d\d:\d\d\.", banner)  # practice time
     rana = html.unescape(call(server, "GET", "/", token(hub, "rana"))[1])
     assert "Review: Noor Siddiqui used emergency access to" in rana and "Unresponsive" not in rana
 
@@ -2332,3 +2334,68 @@ def test_everyday_pages_say_roles_and_choices_in_words(hub, server):
     assert code.replace("-", " ").capitalize() in page and f"</span> {code}</span>" not in page
     assert f">{code}<" not in page.split("<summary>All values</summary>")[0]   # the raw values stay in reach
     assert "· visits<br>" not in page
+
+
+def test_the_setup_code_card_offers_the_button_exactly_when_issuing_is_allowed(hub, server):
+    for viewer in ("rana", "dr-amara"):
+        tok = token(hub, viewer)
+        for target in ("dr-liam", "noor", "jo", "sam", "dr-amara", "rana"):
+            if target == viewer:
+                continue
+            page = html.unescape(call(server, "GET", f"/team/{target}", tok)[1])
+            allowed = hub.setup_code_refusal(M(hub, viewer), target) is None
+            assert ("Issue a setup code" in page) == allowed, (viewer, target)
+    page = html.unescape(call(server, "GET", "/team/dr-liam", token(hub, "rana"))[1])
+    assert "practicehub member passphrase-link dr-liam --as dr-liam" in page or "they may issue it" in page
+
+
+def test_signing_out_clears_the_demo_sign_in_as_cookie_too(server):
+    import http.client
+    host, port = server.removeprefix("http://").split(":")
+    conn = http.client.HTTPConnection(host, int(port))
+    conn.request("GET", "/logout", headers={"Cookie": "ph_session=x; ph_as=jo"})
+    r = conn.getresponse()
+    got = r.headers.get_all("Set-Cookie")
+    conn.close()
+    assert r.status in (302, 303)
+    assert any(c.startswith("ph_session=;") and "Max-Age=0" in c for c in got)
+    assert any(c.startswith("ph_as=;") and "Max-Age=0" in c for c in got)
+
+
+def test_the_top_bar_names_practice_settings_and_my_settings_apart(hub, server):
+    page = call(server, "GET", "/", token(hub, "rana"))[1]
+    assert ">Practice settings</a>" in page and ">My settings</a>" in page
+    assert ">Settings</a>" not in page
+
+
+def test_set_up_pages_a_member_may_not_change_are_marked_view_only(hub, server):
+    page = html.unescape(call(server, "GET", "/settings", token(hub, "sam"))[1])
+    assert "View only" in page
+    setup = page.split("Set up", 1)[1].split("View only", 1)[0]
+    assert 'href="/team"' in setup and 'href="/workflows"' not in setup
+    assert 'href="/workflows"' in page.split("View only", 1)[1]
+    owner = html.unescape(call(server, "GET", "/settings", token(hub, "rana"))[1])
+    assert "View only" not in owner
+
+
+def test_the_sign_in_page_names_the_member_admins(hub, server):
+    page = html.unescape(call(server, "GET", "/login")[1])
+    admins = [m["name"] for m in hub.member_admins()]
+    assert admins and all(n in page for n in admins)
+    assert "rana" not in page.split("No passphrase yet", 1)[1].split("</p>", 1)[0]  # names, not ids
+
+
+def test_your_work_lists_what_waits_for_a_second_policy_owner(hub, server):
+    hub.set_roles(M(hub, "rana"), "jo", ["front-desk", "physician"])
+    page = html.unescape(call(server, "GET", "/", token(hub, "dr-amara"))[1])
+    assert "Waiting for a second policy owner (1)" in page and 'href="/team/jo"' in page
+    assert "Rana Haddad" in page.split("Waiting for a second policy owner", 1)[1]
+    assert "Waiting for a second policy owner" not in call(server, "GET", "/", token(hub, "rana"))[1]
+    assert "Waiting for a second policy owner" not in call(server, "GET", "/", token(hub, "jo"))[1]
+
+
+def test_the_client_address_trusts_a_forwarded_address_only_from_a_proxy_nearby():
+    from practicehub.web.server import client_address
+    assert client_address("8.8.8.8", {"x-forwarded-for": "1.1.1.1"}) == "8.8.8.8"  # a public peer
+    assert client_address("127.0.0.1", {"x-forwarded-for": "10.0.0.1, 198.51.100.4"}) == "198.51.100.4"
+    assert client_address("192.168.1.5", {}) == "192.168.1.5"

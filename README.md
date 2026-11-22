@@ -65,7 +65,7 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
 - **No puppets.** An agent's or service's token is issued only by its sponsor. Giving an agent or service a role that
   reads or writes restricted data (every data class, unless the pack marks it `restricted = false`), or raising an
   agent's `max_risk`, waits for a second policy owner, who is neither the one who asked nor the member. Lowering
-  `max_risk` or taking a role away applies at once.
+  `max_risk`, taking skills away (nothing added) or taking a role away applies at once, as a version on the track.
 - **Two policy owners.** Changes are approved by a second policy owner, so the hub refuses whatever leaves fewer than
   two active ones: switching one off, or taking away their role. If the practice is already down to one (someone
   left in a hurry), whoever holds the server and its secret adds one: `practicehub owners recover --grant <member>`.
@@ -86,8 +86,9 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
     agent)". It never appears among a record's signatures.
 - **A person signs with their passphrase.** Each signature, on a decision, an approval or a record, asks again for
   the signer's passphrase. A passphrase is stored only as a salted scrypt hash and is never in the track. After five
-  failed attempts in 15 minutes (signing in, signing, or a setup code), that member is locked out for 15 minutes.
-  Each failure is on the track. Tokens are for agents, services and API calls. A member admin issues setup codes,
+  failed attempts in 15 minutes (signing in, signing, or a setup code) from one address, that address is locked out
+  for 15 minutes; the member is locked only after 20 failures on them from several places (or five when signing,
+  where there is no address), and is then sent a notice. Each failure is on the track. Tokens are for agents, services and API calls. A member admin issues setup codes,
   but never one for themselves.
 - **The outbox is delivered, or someone is told.** A connector delivers only on the channels it has been granted,
   and claims only messages whose every data class it reads. Each claim, send, failure and hand delivery is on the

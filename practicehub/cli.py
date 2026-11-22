@@ -325,8 +325,12 @@ def cmd_member(args):
         if args.skill is not None:
             changes["skills"] = args.skill
         out = hub.propose_agent_profile(actor, args.id, changes, args.note or "")
-        print(f"proposed version {out['version']} of {args.id}'s profile; it takes effect when another policy owner "
-              f"approves it: practicehub member approve-profile {args.id} {out['version']} --as <policy owner>")
+        if out["status"] == "active":  # a pure reduction: it only lets the agent do less
+            print(f"version {out['version']} of {args.id}'s profile is in force: it only takes away, so it needs no "
+                  f"approval (it is on the track)")
+        else:
+            print(f"proposed version {out['version']} of {args.id}'s profile; it takes effect when another policy "
+                  f"owner approves it: practicehub member approve-profile {args.id} {out['version']} --as <policy owner>")
     elif args.sub == "approve-profile":
         out = hub.approve_agent_profile(actor, args.id, args.version)
         print(f"version {args.version} of {out['name']}'s profile is in force")

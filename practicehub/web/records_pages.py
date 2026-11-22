@@ -1245,10 +1245,11 @@ class RecordPages:
         word = self.subj["label"].lower() if subject.split("/")[0] == self.subj["type"] else "subject"
         over = info.get("override")
         if over:
-            until = str(over["until"])[11:16]
+            from .. import clock
+            until = clock.shown(over["until"], self.hub.engine.zone())[11:16]  # practice time, as the hub shows times
             return (f'<div class="flash warning restriction" role="status" id="override-banner">'
                     f'<h2>Emergency access: you are seeing information this {e(word)} asked to have withheld</h2>'
-                    f'<p>Until {e(until)} UTC. Your reason: “{e(over["reason"])}”. This access is on the track, and '
+                    f'<p>Until {e(until)}. Your reason: “{e(over["reason"])}”. This access is on the track, and '
                     f'the privacy officer reviews it. Use only what the emergency needs.</p></div>')
         if info["allowed"]:
             return (f'<div class="flash info restriction" role="status"><p>This {e(word)} limited who sees part of their '
