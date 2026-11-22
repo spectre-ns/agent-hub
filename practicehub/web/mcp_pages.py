@@ -162,7 +162,7 @@ class McpPages:
             if owner and not s.get("unavailable"):
                 manage.append(self._manage_form(s, req_ or s["policy"] or {}, home))
         warn = (f'<div class="flash warning" role="note"><p><b>Data stays in {e(home or "the practice")}.</b> An MCP client '
-                f'reads and changes whatever its member may, patient records included, and many AI apps send what '
+                f'reads and changes whatever its member may, the most private records included, and many AI apps send what '
                 f'they read to servers elsewhere. Every server starts switched off. A policy owner names who may '
                 f'connect{" and attests any client that runs outside " + e(home) if home else ""}; a second policy '
                 f'owner approves. Every connection, call and record read is on the track.</p></div>')
@@ -240,7 +240,7 @@ class McpPages:
                 '<form method="post" action="/settings/connections/token" class="card">'
                 f'<label>For<select name="member">{who}</select></label>'
                 f'<fieldset class="choices options"><legend>Servers</legend>{boxes}</fieldset>'
-                '<label>Client (the AI app or program) *<input name="client" required></label>'
+                '<label>The AI app or program *<input name="client" required></label>'
                 f'<label>Where it runs *<input name="runs_in" required value="{e(home)}"></label>'
                 '<button>Issue an MCP token</button></form>'
                 "<p>Then, over HTTP:</p>"

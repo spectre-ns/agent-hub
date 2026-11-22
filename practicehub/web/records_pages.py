@@ -327,7 +327,8 @@ class RecordPages:
                     out.append(self.who(item.removeprefix("member:")))
                 elif f["type"] == "datetime" and isinstance(item, str) and self._datetime_words(item):
                     out.append(f'<time datetime="{e(item)}">{e(self._datetime_words(item))}</time>')
-                elif f["type"] == "choice" and f["path"].endswith(".code") and self._display_of(rec, f, item):
+                elif (f["type"] == "choice" and f["path"].endswith(".code") and str(item) not in (f.get("labels") or {})
+                      and self._display_of(rec, f, item)):  # the type's own words for a code come first
                     out.append(e(self._display_of(rec, f, item)))  # a coded value: its display, not its code
                 elif isinstance(item, (dict, list)):
                     out.append(self._plain_html(item))

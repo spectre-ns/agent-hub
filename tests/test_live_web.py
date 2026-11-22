@@ -73,7 +73,7 @@ def test_a_comment_is_made_on_words_and_resolved(wiki):
     assert code == 303
     c = hub.db.live_comments.find_one({"ref": f"WikiPage/{p['id']}"})
     page = call(srv, "GET", url, jo)[1]
-    assert f'id="{c["id"]}"' in page and 'class="at">@noor' in page and 'data-quote="17:00"' in page
+    assert f'id="{c["id"]}"' in page and 'data-member="noor"' in page and 'data-quote="17:00"' in page
     assert call(srv, "POST", f"{url}/comments/{c['id']}/resolve", jo, form={})[0] == 303
     assert hub.db.live_comments.get(c["id"])["resolved"] is True
     assert "Resolved (1)" in call(srv, "GET", url, jo)[1]
