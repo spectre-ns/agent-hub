@@ -1,6 +1,6 @@
 import copy
 import os
-import secrets
+import re
 import sys
 from pathlib import Path
 
@@ -18,27 +18,122 @@ def quiet(*_):
 
 
 # Tests run against a MongoDB replica set: PRACTICEHUB_TEST_DATABASE, else a one-node set on 127.0.0.1:27118
-# (scripts/test-mongo.sh starts one in docker). Every test gets a database of its own, dropped afterwards.
+# (scripts/test-mongo.sh starts one in docker).
 TEST_URI = os.environ.get("PRACTICEHUB_TEST_DATABASE",
                           "mongodb://127.0.0.1:27118/?replicaSet=rs0&directConnection=true")
+
+# Every test still has databases of its own, but a test process makes them once and hands them on: making a database
+# means dozens of collections and index files, seconds a test and thousands of files on the server. A test asks for
+# a new database as the hub does (``ph_<random>``: PRACTICEHUB_DATABASE_NAME, scratch_store, Hub(None)); each name
+# it uses is given one of this process's databases instead, and after the test each is put back as it was handed
+# out, in place: an empty one emptied, a prepared hub's (below) given back its documents. Its collections and
+# indexes are kept; no test sees what another left.
+_PREFIX = f"pht{os.getpid()}"
+_RANDOM = re.compile(r"ph_[0-9a-f]{12}")
+_EMPTY_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
+_DATABASES: set = set()   # every database this process made: dropped when it ends
+_BASELINE: dict = {}      # database -> (snapshot it is put back to, or None for empty; dbHash of that state)
+_TEST: dict = {}          # this test's: random name -> database given, "used" -> databases to put back
+
+
+def _db(name: str):
+    from practicehub.store import client_for
+    return client_for(TEST_URI)[name]
+
+
+def _hashes(name: str) -> dict:
+    return _db(name).command("dbHash")["collections"]
+
+
+def _put_back(name: str) -> None:
+    """``name`` as it was handed out: each collection that differs (one dbHash says which) refilled or emptied."""
+    snap, want = _BASELINE[name]
+    db = _db(name)
+    for coll, md5 in _hashes(name).items():
+        if coll.startswith("system.") or md5 == want.get(coll, _EMPTY_MD5):
+            continue
+        db[coll].delete_many({})
+        docs = snap[coll][0] if snap and coll in snap else None
+        if docs:
+            db[coll].insert_many(docs, ordered=False)
+    if set(want) - set(db.list_collection_names()):  # the test dropped some (or all) of it: made again
+        _fill(name, snap)
+
+
+def _fill(name: str, snap: dict | None) -> None:
+    """Make ``name`` hold ``snap`` (None: nothing), the state it is put back to after each test from now on."""
+    db = _db(name)
+    have = set(db.list_collection_names())
+    for coll in have:
+        if not coll.startswith("system."):
+            db[coll].delete_many({})
+    for coll, (docs, idx) in (snap or {}).items():
+        if coll not in have:
+            db.create_collection(coll)
+        if idx:
+            db[coll].create_indexes([pymongo.IndexModel(k, **o) for k, o in idx])
+        if docs:
+            db[coll].insert_many(docs, ordered=False)
+    _BASELINE[name] = (snap, _hashes(name))
+
+
+def _take(name: str) -> str:
+    """Hand out database ``name`` to this test (made, empty, the first time)."""
+    if name not in _DATABASES:
+        _db(name).client.drop_database(name)  # one a process with this pid left
+        _DATABASES.add(name)
+        _BASELINE[name] = (None, {})
+    _TEST["used"].append(name)
+    return name
+
+
+def _scratch() -> str:
+    """An empty database for this test: the first of this process's not handed out yet."""
+    k = 0
+    while f"{_PREFIX}_s{k}" in _TEST["used"]:
+        k += 1
+    name = _take(f"{_PREFIX}_s{k}")
+    if _BASELINE[name][0] is not None:  # it held a second copy of a prepared hub (snapshot_hub)
+        _fill(name, None)
+    return name
+
+
+def _given(name: str) -> str:
+    """The database a test that asked for ``name`` gets: a new name (``ph_<random>``) is one of the pool's."""
+    if not _TEST or not _RANDOM.fullmatch(name):
+        return name
+    if name not in _TEST["names"]:
+        _TEST["names"][name] = _TEST.pop("next", None) or _scratch()
+    return _TEST["names"][name]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _databases():
+    yield
+    from practicehub.store import client_for
+    for name in _DATABASES:
+        client_for(TEST_URI).drop_database(name)
 
 
 @pytest.fixture(autouse=True)
 def _database(monkeypatch):
+    _TEST.update(names={}, used=[])
     monkeypatch.setenv("PRACTICEHUB_DATABASE", TEST_URI)
-    monkeypatch.setenv("PRACTICEHUB_DATABASE_NAME", f"ph_{secrets.token_hex(6)}")
-    made = []
+    monkeypatch.setenv("PRACTICEHUB_DATABASE_NAME", _scratch())  # the name itself: a subprocess opens it too
     import practicehub.store as st
     real = st.Store.__init__
 
-    def tracked(self, *a, **k):
-        real(self, *a, **k)
-        made.append(self)
-    monkeypatch.setattr(st.Store, "__init__", tracked)
-    yield
-    from practicehub.store import client_for
-    for name in {s.name for s in made if s.name.startswith("ph_")}:
-        client_for(TEST_URI).drop_database(name)
+    def given(self, uri=None, database=None, **k):
+        real(self, uri, database, **k)
+        if _given(self.name) != self.name:
+            real(self, uri, _given(self.name), **k)
+    monkeypatch.setattr(st.Store, "__init__", given)
+    try:
+        yield
+    finally:
+        used, _ = _TEST.pop("used"), _TEST.clear()
+        for name in dict.fromkeys(used):
+            _put_back(name)
 
 
 @pytest.fixture
@@ -48,9 +143,9 @@ def store():
 
 
 # Installing a pack (and its demo) takes seconds of database round trips; the result is the same every time. So the
-# first test that asks for a given hub builds it for real, its database is copied (raw BSON, every collection and its
-# indexes), and every later test gets a new database of its own with that copy put back into it: same documents,
-# same indexes, a new Hub object over them. Nothing is shared between tests but the bytes of the copy.
+# first test that asks for a given hub builds it for real, in a database this process keeps for it, and its
+# documents are kept (raw BSON, every collection and its indexes); after every test that used it, that database is
+# put back to them, and the next test gets a new Hub object over it.
 # PH_SNAPSHOTS (scripts/test-parallel.sh sets it, one directory per run): the copies are files there, so the shards
 # of one run build each of them once between them (the first shard to need one builds it; the others wait for it).
 _SNAPSHOTS: dict = {}
@@ -99,22 +194,9 @@ def _snapshot(h) -> dict:
     return snap
 
 
-def _restore(h, snap: dict, modules, *, fresh: bool) -> None:
-    """Put a snapshot into ``h``'s database: a new Hub's (``fresh``: Hub() made the INDEXES ones already), or one
-    that is emptied first. Then the hub's memory as the build left it: the modules it installed, no cached parse."""
+def _as_built(h, modules) -> None:
+    """The hub's memory as the build left it: the modules it installed (in memory), no cached parse."""
     from practicehub import pack as packmod
-    from practicehub.db import INDEXES
-    if not fresh:
-        h.db.drop_database()
-    have = set(h.db.db.list_collection_names())
-    for name, (docs, idx) in snap.items():
-        if name not in have:
-            h.db.db.create_collection(name)
-        idx = [(k, o) for k, o in idx if not (fresh and name in INDEXES)]
-        if idx:
-            h.db.db[name].create_indexes([pymongo.IndexModel(k, **o) for k, o in idx])
-        if docs:
-            h.db.db[name].insert_many(docs, ordered=False)
     for name in modules:  # what install_module did in memory: the module's code runs in this hub
         packmod.add_module(h.pack, packmod.load_module(name))
     h._defs_reset()
@@ -123,25 +205,47 @@ def _restore(h, snap: dict, modules, *, fresh: bool) -> None:
 
 
 def snapshot_hub(key: str, pack: str, build, modules=(), *, result: bool = False):
-    """A new Hub with ``pack``, as ``build(hub)`` leaves it: built once under ``key``, then copied.
-    ``modules``: the modules ``build`` installs (install_module), which a copy loads again. ``result``: return
+    """A new Hub with ``pack``, as ``build(hub)`` leaves it: built once under ``key``, then put back after each test.
+    ``modules``: the modules ``build`` installs (install_module), which a later hub loads again. ``result``: return
     ``(hub, what build returned)``; the value is kept with the copy, so it must be plain data (ids, refs)."""
-    h = Hub(None, pack=pack)
+    name = f"{_PREFIX}_{re.sub(r'[^a-z0-9]', '_', key)}"
+    if name in _TEST["used"]:  # a second hub of the same kind in one test: an empty database, filled
+        name = _scratch()
+        _TEST["used"].pop()
+        got, _ = _shared(key, lambda: pytest.fail(f"{key} is built in its own database first"))
+    elif name in _DATABASES and _BASELINE[name][0] is not None:
+        got = _shared(key, None)[0]
+    else:
+        got = None
+    _TEST["next"] = _take(name)
     out = []
-
-    def make():
-        out.append(build(h))
-        return _snapshot(h), copy.deepcopy(out[0])
-    got, made = _shared(key, make)
-    if not made:
-        _restore(h, got[0], modules, fresh=True)
-        out.append(copy.deepcopy(got[1]))
-    return (h, out[0]) if result else h
+    if got is None:  # this process has not got it yet: build it, or take the run's copy
+        def make():
+            out.append(build(h))
+            return _snapshot(h), copy.deepcopy(out[0])
+        h = Hub(None, pack=pack)
+        got, made = _shared(key, make)
+        if made:
+            _BASELINE[name] = (got[0], _hashes(name))
+            return (h, out[0]) if result else h
+        _fill(name, got[0])
+    elif _BASELINE[name][0] is not got[0]:
+        _fill(name, got[0])
+        h = None
+    else:
+        h = None
+    if h is None:
+        h = Hub(None, pack=pack)
+    else:
+        h._defs_reset()
+    _as_built(h, modules)
+    return (h, copy.deepcopy(got[1])) if result else h
 
 
 def snapshot_onto(h, key: str, build, modules=()):
     """``h`` (a hub fixture just made) as ``build(h)`` leaves it, from a copy after the first time. What ``build``
-    returns is kept with the copy (plain data: ids, refs) and returned."""
+    returns is kept with the copy (plain data: ids, refs) and returned. Its database is put back to ``h``'s own
+    starting state after the test."""
     out = []
 
     def make():
@@ -150,7 +254,18 @@ def snapshot_onto(h, key: str, build, modules=()):
     got, made = _shared(key, make)
     if made:
         return out[0]
-    _restore(h, got[0], modules, fresh=False)
+    snap, _ = _BASELINE[h.db.name]
+    db = h.db.db
+    for coll in db.list_collection_names():
+        if not coll.startswith("system.") and coll not in got[0]:
+            db[coll].delete_many({})
+    for coll, (docs, idx) in got[0].items():
+        db[coll].delete_many({})
+        if idx and not (snap and coll in snap and snap[coll][1] == idx):
+            db[coll].create_indexes([pymongo.IndexModel(k, **o) for k, o in idx])
+        if docs:
+            db[coll].insert_many(docs, ordered=False)
+    _as_built(h, modules)
     return copy.deepcopy(got[1])
 
 
