@@ -83,7 +83,7 @@ INDEXES = {
     "links": ["to_ref", "from_ref"],
     "titles": [("type", "key")],
     "mention_names": [("type", "key"), "from_ref"],
-    "runs": ["status", "record", "workflow_id"],
+    "runs": ["status", "record", "workflow_id", "refs"],
     "items": ["status", "run_id", ("assignee", "status"), ("role", "status"), "n"],
     "events": [{"fields": ["hash"], "unique": True}, "run_id", ("subject", "action"), ("action", "seq"), "actor",
                ("action", "data.refs")],

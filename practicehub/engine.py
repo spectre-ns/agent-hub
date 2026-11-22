@@ -18,6 +18,7 @@ Rules that apply to everyone: separation of duties (``not_by``) and data-class r
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -303,6 +304,33 @@ def _mentions(value, ref: str) -> bool:
     return False
 
 
+_REF = re.compile(r"[A-Z][A-Za-z0-9_]*/[A-Za-z0-9_.-]+")
+
+
+def _refs_in(value, out: set) -> set:
+    """Every record reference in this value (a string, or a key), as ``Type/id``."""
+    if isinstance(value, str):
+        if _REF.fullmatch(value):
+            out.add(value)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _refs_in(k, out)
+            _refs_in(v, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _refs_in(v, out)
+    return out
+
+
+def run_refs(run: dict) -> list[str]:
+    """The records a run is about: its own, and every one its input and steps carry (the visit a note documents,
+    the result a review is of). A run shows on each of their pages."""
+    out = _refs_in(run.get("ctx"), set())
+    if run.get("record"):
+        out.add(run["record"])
+    return sorted(out)
+
+
 # runs with a step waiting: a step's state is ``steps.<step id>.state``
 _WAITING = {"$expr": {"$in": ["waiting", {"$map": {"input": {"$objectToArray": {"$ifNull": ["$steps", {}]}},
                                                     "as": "s", "in": "$$s.v.state"}}]}}
@@ -369,10 +397,12 @@ class Engine:
         order = [("created_at", -1)]
         if not mentions:
             return [_plain(r) for r in self.hub.db.runs.find(flt, sort=order, limit=limit)]
-        # about it, or carrying it anywhere in the run's data
+        # about it, or carrying it anywhere in the run's data (runs keep the records they carry in ``refs``; one
+        # saved before it did is searched)
         out = []
+        flt = {**flt, "$or": [{"record": mentions}, {"refs": mentions}, {"refs": {"$exists": False}}]}
         for r in self.hub.db.runs.find(flt, sort=order):
-            if r.get("record") == mentions or _mentions(r.get("ctx"), mentions):
+            if r.get("record") == mentions or mentions in (r.get("refs") or ()) or _mentions(r.get("ctx"), mentions):
                 out.append(_plain(r))
                 if len(out) >= limit:
                     break
@@ -380,7 +410,7 @@ class Engine:
 
     def _save(self, run: dict) -> None:
         self.hub.db.runs.set(run["id"], {"ctx": run["ctx"], "steps": run["steps"], "status": run["status"],
-                                         "updated_at": utcnow()})
+                                         "refs": run_refs(run), "updated_at": utcnow()})
 
     def automation_actor(self, run: dict) -> dict:
         return {"id": f"workflow:{run['workflow_id']}@v{run['version']}", "kind": "automation", "name": run["title"],
@@ -468,6 +498,7 @@ class Engine:
             hub.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": wid, "version": row["version"],
                                 "title": title, "record": record, "status": "running", "ctx": ctx,
                                 "steps": {s.id: {"state": "pending"} for s in wf.steps}, "started_by": actor["id"],
+                                "refs": run_refs({"ctx": ctx, "record": record}),
                                 "root_event": None, "created_at": utcnow(), "updated_at": utcnow()})
             seq = hub.track.append(actor, "run.started", record or "", run_id=run_id, cause=cause,
                                    data={"workflow": wid, "version": row["version"], "title": title, "input": values,
