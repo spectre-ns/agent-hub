@@ -152,10 +152,12 @@ advanced = true
 [[field]]
 name = "generalPractitioner"
 label = "Physician"
-path = "generalPractitioner.*"
+path = "generalPractitioner.0"
 type = "reference"
 target = ["Practitioner"]
+roles = ["physician"]
 rel = "physician"
+help = "the patient's own physician at the practice"
 
 # Screens: which fields each form shows, in what parts and order. What a field is (required, help, choices) stays
 # with the field above. Registration is the create screen; a module adds a part with extends/types/Patient.toml.
@@ -168,6 +170,9 @@ fields = ["given", "family", "birthDate", "gender"]
 [[screen.tab]]
 label = "How to reach them"
 fields = ["phone", "street", "city", "province", "postal_code"]
+[[screen.tab]]
+label = "Emergency contact"
+fields = ["contact_name", "contact_relationship", "contact_phone"]
 [[screen.tab]]
 label = "Care"
 fields = ["health_card", "generalPractitioner"]

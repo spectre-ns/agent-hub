@@ -697,6 +697,30 @@ def test_a_patients_physician_is_picked_from_the_team_and_shown_by_name(hub):
     assert 'href="/team/dr-amara"' in link and "Practitioner/dr-amara" not in link
 
 
+def test_registering_a_patient_offers_one_physician_and_their_emergency_contact(hub):
+    """The physician is one choice, among the members who hold the physician role (the field's ``roles``), never a
+    tick-box per member of the team; saving someone else is refused; registration asks for the emergency contact."""
+    app = App(hub, dev=False)
+    rt = hub.record_type("Patient")
+    f = next(f for f in rt.fields if f["name"] == "generalPractitioner")
+    assert f["roles"] == ["physician"]
+    ctl = app._input(f, None, M(hub, "jo"))
+    assert "<select" in ctl and "multiple" not in ctl and 'type="checkbox"' not in ctl
+    holders = {m["id"] for m in hub.active_holders("physician", persons_only=True)}
+    assert {"dr-amara", "dr-liam"} <= holders
+    offered = set(re.findall(r'value="Practitioner/([^"]+)"', ctl))
+    assert offered == holders and "noor" not in offered and "jo" not in offered
+    reg = rt.screens["register"]
+    shown = [x for t in reg["tabs"] for x in t["fields"]]
+    assert {"contact_name", "contact_relationship", "contact_phone"} <= set(shown)
+    body = {"name": [{"given": ["Ada"], "family": "Lane"}], "birthDate": "1990-02-03"}
+    with pytest.raises(Invalid) as no:
+        hub.create_record(hub.member("jo"), "Patient", {**body, "generalPractitioner": [{"reference": "Practitioner/noor"}]})
+    assert "physician" in " ".join(no.value.problems)
+    pat = hub.create_record(hub.member("jo"), "Patient", {**body, "generalPractitioner": [{"reference": "Practitioner/dr-liam"}]})
+    assert hub.records.read("Patient", pat["id"])["generalPractitioner"] == [{"reference": "Practitioner/dr-liam"}]
+
+
 def test_a_task_offers_its_outcomes_in_words(hub):
     app = App(hub, dev=False)
     html = app._field({"name": "action", "type": "choice"}, [{"value": "could-not-reach", "label": "could-not-reach"}], None)
@@ -1505,12 +1529,17 @@ def test_booking_a_slot_makes_a_visit_in_its_first_state(hub, server):
     assert "Sore throat" in call(server, "GET", f"/schedule?date={DAY}", token(hub, "dr-amara"))[1]
     assert f'with=dr-amara&amp;at={DAY}T09%3A00' not in page  # the slot is taken
     # the front desk books through the appointment request (its red-flag screen), saying what the visit is for
-    status, _ = call(server, "POST", "/schedule/new", token(hub, "jo"),
-                     form={"with": "dr-amara", "at": f"{DAY}T10:00", "subject": _ellen(hub), "req_kind": "forms",
-                           "req_reason": "a form for my employer"})
-    assert status == 303
+    status, page = call(server, "POST", "/schedule/new", token(hub, "jo"),
+                        form={"with": "dr-amara", "at": f"{DAY}T10:00", "subject": _ellen(hub), "req_kind": "forms",
+                              "req_reason": "a form for my employer"})
+    assert status == 200 and "data-modal-stay" in page
     (desk,) = [v for v in hub.records.search("Encounter", limit=None) if v.get("plannedStartDate") == f"{DAY}T10:00"]
     assert desk["serviceType"][0]["concept"]["text"] == "forms"
+    # said back: when, with whom, for whom, and the visit to open; nothing to read out for a plain form request
+    booked = page.split('<div class="flash success" role="status">', 1)[1].split("</div>", 1)[0]
+    assert "Booked for Monday January 7 at 10:00" in booked and "Dr. Amara Okafor" in booked
+    assert "Ellen MacLeod" in booked and f'href="/records/Encounter/{desk["id"]}"' in booked
+    assert "Tell the caller now" not in page and "Not booked yet" not in page
     status, page = _book(server, hub, who="jo", at=f"{DAY}T10:30")  # a reason sent past the form is refused
     assert status == 422 and "clinical" in page
     assert call(server, "GET", f"/schedule/new?with=dr-amara&at={DAY}T09:00", token(hub, "sam"))[0] == 403
@@ -1559,6 +1588,46 @@ def test_the_front_desk_red_flag_goes_to_a_nurse_not_the_calendar(hub, server):
     assert tell < page.index("<b>Not booked yet.</b>") and "call 911" in page[tell:tell + 300] and 'role="alert"' in page
     assert not [v for v in hub.records.search("Encounter", limit=None)
                 if v.get("plannedStartDate") == f"{DAY}T11:00"]
+    # one script, to the caller, in one voice; what is for the desk is apart from it; what went to the patient apart
+    script = page[tell:].split("&ldquo;", 1)[1].split("&rdquo;", 1)[0]
+    assert "call 911" in script and "call you back" in script
+    assert "They" not in script and "they" not in script and "Stay on the line" not in script
+    assert "We have your message" not in script and "within one working day" not in script
+    assert "For you, not to read out" in page and "Stay on the line" in page
+    sent = page.index("Sent to the patient")
+    assert sent > tell and "We have your request" in page[sent:]
+
+
+def test_a_routine_request_from_the_start_form_shows_what_went_to_the_patient_apart(hub, server):
+    """No red flag: nothing to read out; the message the patient was sent is shown as theirs, not as a script."""
+    status, page = call(server, "POST", "/start", token(hub, "jo"), form={
+        "_workflow": "appointment-request", "_record": _ellen(hub), "reason": "a form for my employer",
+        "kind": "forms", "urgency": "routine"})
+    assert status == 200, page[:400]
+    assert "Tell the caller now" not in page
+    sent = page.split("Sent to the patient", 1)[1]
+    # the message read the reason (clinical), so the desk sees that it went, not what it says
+    assert "We have your request" in sent and "not shown to you" in sent and "within one working day" not in sent
+    assert "within one working day" in call(server, "POST", "/start", token(hub, "noor"), form={
+        "_workflow": "appointment-request", "_record": _ellen(hub), "reason": "a form for my employer",
+        "kind": "forms", "urgency": "routine"})[1].split("Sent to the patient", 1)[1]
+
+
+def test_a_slot_proposed_later_is_told_to_whoever_took_the_request(hub):
+    """The scheduler's slot is booked after the desk has hung up: the desk is told on the board, when and with whom,
+    with the visit to open, and nothing clinical."""
+    run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    iid = item_for(hub, run, "propose")
+    free = hub.engine.context(M(hub, "scheduling-agent"), iid)["context"]["provider:free-slots"]
+    slot = free[0]["value"] if isinstance(free[0], dict) else free[0]
+    hub.engine.complete(M(hub, "scheduling-agent"), iid, {"slot": slot, "why": "the first free slot"})
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["tell-booked"]["state"] == "done"
+    (n,) = hub.db.items.find({"run_id": run["id"], "kind": "notice", "step_id": "tell-booked"})
+    book = run["ctx"]["book"]
+    assert n["assignee"] == "jo" and n["title"] == f"Booked for {book['when']} with {book['member_name']}"
+    assert n["output"]["visit"] == book["reference"] and "form" not in n["title"]
 
 
 

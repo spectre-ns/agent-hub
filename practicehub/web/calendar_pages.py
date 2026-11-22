@@ -493,23 +493,65 @@ class CalendarPages:
             raise Rendered(422, self.page_booking_new({**req, "query": {}}, kept=f, error=exc)) from None
         raise self._redirect(f"/schedule?date={start.date().isoformat()}#cal")
 
-    def tell_the_caller(self, run_id: str, waiting: list[dict] | None = None) -> str:
-        """The member may still be talking to the caller: what a run's checks say to tell them now (a step output's
-        ``advice``, e.g. to call 911) comes first, in the open, above what was sent on, never only by message.
-        Whatever way the request was taken (a calendar slot, a start form), the member who took it is told."""
+    def tell_the_caller(self, run_id: str, waiting: list[dict] | None = None, me: dict | None = None) -> str:
+        """The member may still be talking to the caller: what a run's checks say to read out to them now (a step
+        output's ``say_now``, e.g. to call 911), in one voice, in the open; what the member needs to know apart from
+        it; and, apart again, what was sent to the run's record (a message the caller will also find). Whatever way
+        the request was taken (a calendar slot, a start form), the member who took it is told."""
         if waiting is None:
             waiting = self.hub.db.items.find({"run_id": run_id, "status": {"$in": ["open", "claimed"]}})
-        ctx = (self.hub.db.runs.get(run_id) or {}).get("ctx") or {}
-        outs = [o for o in ctx.values() if isinstance(o, dict)]
-        advice = list(dict.fromkeys(str(o["advice"]) for o in outs if isinstance(o.get("advice"), str) and o["advice"]))
-        if not advice:
+        run = self.hub.db.runs.get(run_id) or {}
+        outs = [o for o in (run.get("ctx") or {}).values() if isinstance(o, dict)]
+        say = list(dict.fromkeys(str(o["say_now"]) for o in outs if isinstance(o.get("say_now"), str) and o["say_now"]))
+        out = ""
+        if say:
+            urgent = any(it.get("priority") == "urgent" for it in waiting)
+            flagged = [str(x) for o in outs if o.get("red_flag") for x in (o.get("flags") or [])]
+            out = (f'<div class="flash {"error" if urgent else "warning"}" role="alert"><p><b>Tell the caller now:</b> '
+                   f'&ldquo;{e(" ".join(say))}&rdquo;</p>'
+                   + (f'<p class="muted">For you, not to read out: they mentioned '
+                      f'{e(", ".join(dict.fromkeys(flagged)))}. Stay on the line until they know what to do; the '
+                      f'request is marked urgent.</p>' if flagged else "") + "</div>")
+        return out + self._sent_to_the_record(run, me)
+
+    def _sent_to_the_record(self, run: dict, me: dict | None) -> str:
+        """The messages a run sent to its record (not pages to the team), apart from what staff say on the phone."""
+        record = run.get("record") or ""
+        if not record or not me:
             return ""
-        urgent = any(it.get("priority") == "urgent" for it in waiting)
-        flagged = [str(x) for o in outs if o.get("red_flag") for x in (o.get("flags") or [])]
-        return (f'<div class="flash {"error" if urgent else "warning"}" role="alert"><p><b>Tell the caller now:</b> '
-                + " ".join(e(a) for a in advice) + "</p>"
-                + (f'<p>They mentioned {e(", ".join(dict.fromkeys(flagged)))}. Stay on the line until they know '
-                   "what to do; the request is marked urgent.</p>" if flagged else "") + "</div>")
+        rows = [r for r in self.hub.db.outbox.find({"run_id": run.get("id")}) if r.get("recipient") == record]
+        if not rows:
+            return ""
+        rt = self.hub.record_type(record.split("/", 1)[0])
+        whom = f"the {self._lower(rt.label)}" if rt else "them"
+        items = "".join(
+            f'<li><b>{e(r["subject"])}</b>: {e(r["body"])}</li>' if self.hub.may_read_message(me, r) else
+            f'<li><b>{e(r["subject"])}</b> <span class="muted">(what it says is not shown to you)</span></li>'
+            for r in rows)
+        return (f'<div class="card"><p><b>Sent to {e(whom)}</b> <span class="muted">(a message they will find; '
+                f'you do not need to read it out)</span></p><ul>{items}</ul></div>')
+
+    def booked_confirmation(self, run_id: str) -> str:
+        """What a run booked, said back to the member who asked: when, with whom, for whom, and a link to it."""
+        out = []
+        for ref in self._run_bookings(run_id):
+            t, _, rid = ref.partition("/")
+            rt, rec = self.hub.record_type(t), self.hub.records.read(t, rid)
+            if not rt or not rec:
+                continue
+            seen = schema.project(rt, rec, self.hub.member_types())
+            try:
+                start = datetime.fromisoformat(str(seen.get("start")))
+                when = f"{start:%A %B} {start.day} at {start:%H:%M}"
+            except (TypeError, ValueError):
+                when = str(seen.get("start") or "")
+            names = ", ".join(self.member_name(str(w)) for w in (seen.get("with") or []) if w)  # member ids
+            subj = schema.ref_of(seen.get("subject"))
+            out.append(f'<div class="flash success" role="status"><p><b>Booked for {e(when)}</b>'
+                       + (f" with {e(names)}" if names else "")
+                       + (f": {self.record_link(subj)}" if subj else "")
+                       + f'. <a href="{e(self.record_href(ref))}">Open the {e(self._lower(rt.label))}</a></p></div>')
+        return "".join(out)
 
     def _book_by_request(self, req, me, rt, wf, rec: dict, subject: str, start: datetime, who: str, f: dict):
         """Book through the type's request workflow: the time must be free now; the workflow is given the slot and
@@ -521,12 +563,16 @@ class CalendarPages:
         inputs = {i["name"]: f[f"req_{i['name']}"] for i in wf.inputs if f.get(f"req_{i['name']}") not in (None, "")}
         inputs["slot"] = f"{start.isoformat(timespec='minutes')}|{who}"
         run = self.hub.engine.start(me, wf.id, record=subject, inputs=inputs)
-        if self._run_bookings(run["id"]):
-            raise self._redirect(f"/schedule?date={start.date().isoformat()}#cal")
         waiting = [it for it in self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})]
+        tell = self.tell_the_caller(run["id"], waiting, me)
+        booked = self.booked_confirmation(run["id"])
+        if booked:  # said back, with the booking to open, not a silent return to the calendar
+            body = (f'<div data-modal-body data-modal-stay>{booked}{tell}<div class="filters">'
+                    f'<a class="btn primary" href="/schedule?date={start.date().isoformat()}#cal">Back to the '
+                    f'calendar</a><a class="btn secondary" href="/runs/{e(run["id"])}">See the request</a></div></div>')
+            return self.layout(req, "Booked", body, crumbs=[("/schedule", "Schedule"), (None, "Booked")])
         roles = sorted({it.get("role") or "" for it in waiting} - {""})
         names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r)) or "someone"
-        tell = self.tell_the_caller(run["id"], waiting)
         body = (f'<div data-modal-body data-modal-stay>{tell}<div class="flash warning" role="status"><p><b>Not booked yet.</b> '
                 f'{e(self.member_name(who))}, {start:%A %B} {start.day} at {start:%H:%M} is still free: the reason '
                 f'went to {e(names)} first.</p></div><div class="card stack"><ul>'

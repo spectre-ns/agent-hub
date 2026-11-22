@@ -208,6 +208,19 @@ to = "{{run.record}}"
 subject = "Your appointment"
 body = "You are booked on {{book.when}} with {{book.member_name}} at Harbourview Family Medicine. Reply to change or cancel."
 
+# A slot proposed later (not the one picked on the calendar, which is said back at once): whoever took the request is
+# told on the board, with the visit to open. No reason, nothing clinical: the time and the physician.
+[[steps]]
+id = "tell-booked"
+title = "Tell whoever took the request that it is booked"
+kind = "automation"
+after = ["book"]
+action = "notice.send"
+[steps.params]
+to = "{{run.started_by}}"
+text = "Booked for {{book.when}} with {{book.member_name}}"
+link = "{{book.reference}}"
+
 [[steps]]
 id = "confirm-chosen"
 title = "Confirm the booking with the patient"

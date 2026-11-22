@@ -4447,3 +4447,24 @@ def test_an_agent_is_given_no_role_its_sponsor_does_not_reach_and_nothing_is_wri
     with pytest.raises(Invalid):
         hub.approve_roles(M(hub, "dr-amara"), "portal")
     assert set(hub.authz.read(relation="assignee")) == before and "physician" not in M(hub, "portal")["roles"]
+
+
+def test_a_field_with_roles_names_only_a_member_holding_one(hub):
+    """A reference to a member may be limited to the holders of some roles (``roles``): only on a reference field;
+    a write that adds anyone else is refused; one kept from before (someone who has since left the role) still saves."""
+    from practicehub import schema
+    for bad in ('roles = "lead"\ntype = "reference"\ntarget = ["Practitioner"]', 'roles = ["lead"]\ntype = "string"'):
+        with pytest.raises(schema.DefinitionError):
+            schema.parse(f'id = "Thing"\ndata_class = "clinical"\n[[field]]\nname = "x"\n{bad}\n')
+    jo = hub.member("jo")
+    body = {"name": [{"given": ["Ada"], "family": "Lane"}], "birthDate": "1990-02-03"}
+    with pytest.raises(Invalid):
+        hub.create_record(jo, "Patient", {**body, "generalPractitioner": [{"reference": "Practitioner/noor"}]})
+    pat = hub.create_record(jo, "Patient", {**body, "generalPractitioner": [{"reference": "Practitioner/dr-amara"}]})
+    ref = f"Patient/{pat['id']}"
+    with pytest.raises(Invalid):
+        hub.update_record(jo, ref, {"generalPractitioner": [{"reference": "Practitioner/noor"}]})
+    kept = {k: v for k, v in hub.records.read("Patient", pat["id"]).items() if k not in ("meta",)}
+    hub.records.update("Patient", pat["id"], {**kept, "generalPractitioner": [{"reference": "Practitioner/noor"}]})
+    hub.update_record(jo, ref, {"birthDate": "1990-02-04"})  # what was there is not checked again
+    assert hub.records.read("Patient", pat["id"])["birthDate"] == "1990-02-04"

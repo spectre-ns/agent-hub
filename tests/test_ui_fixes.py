@@ -47,7 +47,8 @@ def test_only_the_forward_move_is_primary(hub):
 
     assert ahead("planned") == "arrived"  # not the no-show, not cancelled, not entered in error
     assert ahead("arrived") == "triaged"
-    assert ahead("in-progress") == "finished"  # not the pause that comes back
+    # finishing a visit in progress is the note workflow's move, never a button; the pause is all a person may do
+    assert ahead("in-progress") == "onleave"
 
 
 @pytest.fixture

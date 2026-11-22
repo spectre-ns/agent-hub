@@ -2877,8 +2877,27 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def _member_ids(self) -> set[str]:
         return set(self.db.members.distinct("_id"))
 
-    def _check_record(self, rt: schema.RecordType, rec: dict) -> None:
+    def _role_problems(self, rt: schema.RecordType, rec: dict, before: dict | None) -> list[str]:
+        """A field with ``roles`` names only members holding one of them. Checked for the members a write adds: a
+        record kept from before (someone who has since left the role) still saves."""
+        out, members = [], self.member_types()
+        for f in rt.fields:
+            if f["type"] != "reference" or not f.get("roles"):
+                continue
+            had = {schema.ref_of(v) for v in schema.get(before, f["path"])} if before else set()
+            for v in schema.get(rec, f["path"]):
+                ref = schema.ref_of(v)
+                t, _, mid = (ref or "").partition("/")
+                if not ref or ref in had or t not in members:
+                    continue
+                if not set(f["roles"]) & set(self.roles_of(mid)):
+                    names = [self.role(r)["name"] for r in f["roles"] if self._role_known(r)] or f["roles"]
+                    out.append(f"{f['label']}: only someone who is a {' or '.join(names).lower()} may be chosen")
+        return out
+
+    def _check_record(self, rt: schema.RecordType, rec: dict, before: dict | None = None) -> None:
         problems = schema.validate(rt, rec, members=self._member_ids(), is_a=self.is_a)
+        problems += self._role_problems(rt, rec, before) if not problems else []
         for a in _files_in(rec):  # a file is added first (``add_file``); a record names only one the hub has
             if self.db.file_meta(a["blob"]) is None:
                 problems.append(f"{rt.label}: no file {a['blob'][:12]}… was added to this hub")
@@ -3178,7 +3197,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 if over and self.may_overbook(member, rt):
                     after = self._overbooked(rt, after, over)
                     now_held = self._held_time(rt, after)
-            self._check_record(rt, after)
+            self._check_record(rt, after, before)
             if rt.is_a("Booking") and held != now_held:  # only a change of time, members or state can make a clash
                 clashes = self._check_clashes(rt, after, member, over)
             if authors:

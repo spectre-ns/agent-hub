@@ -200,7 +200,8 @@ KEYS = {
          "part_of",
          "navigator", "layout", "standard", "consent", "booking"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
-              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class"},
+              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
+              "roles"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use", "labels"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
@@ -292,6 +293,10 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
         problems.append(f"{where}: with is a table of sibling keys and values, e.g. {{ system = \"phone\" }}")
     if raw.get("live") is True and typ != "markdown":
         problems.append(f"{where}: live is for a markdown field (several people write it at once)")
+    if "roles" in raw and not (_strings(raw["roles"]) and raw["roles"]):
+        problems.append(f"{where}: roles is a list of role ids, e.g. [\"lead\"]: only members holding one of them")
+    elif "roles" in raw and typ != "reference":
+        problems.append(f"{where}: roles is for a reference field that points at members (this one is {typ})")
     by = raw.get("by", "anyone")
     if by not in BY:
         problems.append(f"{where}: by is 'anyone' or 'workflow' (only a workflow step changes it, like stock on hand)")
@@ -311,7 +316,8 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
          "list": raw.get("list", False), "show": raw.get("show", True),
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
-         "live": raw.get("live", False), "data_class": raw.get("data_class") or None}
+         "live": raw.get("live", False), "data_class": raw.get("data_class") or None,
+         "roles": list(raw.get("roles") or [])}
     if typ == "reference" and not f["rel"]:
         f["rel"] = name
     return f, []

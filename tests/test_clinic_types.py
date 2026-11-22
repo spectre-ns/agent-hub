@@ -167,9 +167,28 @@ def test_a_nurse_checks_a_patient_in(clinic):
     noor = hub.member("noor")
     visit = hub.create_record(noor, "Encounter", {"subject": {"reference": patient}, "plannedStartDate": WHEN})
     ref = f"Encounter/{visit['id']}"
-    for st in ("arrived", "triaged", "in-progress", "finished"):
+    for st in ("arrived", "triaged", "in-progress"):
         hub.update_record(noor, ref, {"status": st})
-    assert hub.records.read("Encounter", visit["id"])["status"] == "finished"
+    assert hub.records.read("Encounter", visit["id"])["status"] == "in-progress"
+
+
+def test_no_one_finishes_a_visit_in_progress_by_hand(clinic):
+    """A visit in progress ends when its note is signed (visit documentation), not by a person setting the status:
+    the lifecycle move is the workflow's, for every person, a physician as much as a nurse."""
+    hub, base, patient, visit = clinic
+    from practicehub.hub import Denied
+    noor = hub.member("noor")
+    visit = hub.create_record(noor, "Encounter", {"subject": {"reference": patient}, "plannedStartDate": WHEN})
+    ref = f"Encounter/{visit['id']}"
+    for st in ("arrived", "in-progress"):
+        hub.update_record(noor, ref, {"status": st})
+    for who in ("noor", "dr-amara"):
+        with pytest.raises(Denied, match="only a workflow"):
+            hub.update_record(hub.member(who), ref, {"status": "finished"})
+    hub.update_record(noor, ref, {"status": "onleave"})
+    with pytest.raises(Denied, match="only a workflow"):
+        hub.update_record(noor, ref, {"status": "finished"})
+    assert hub.records.read("Encounter", visit["id"])["status"] == "onleave"
 
 
 def test_a_reference_inside_a_list_is_edited_in_place_and_read_as_a_link(clinic):

@@ -69,6 +69,21 @@ to = "role:physician"
 subject = "CRITICAL result"
 body = "Critical {{input.test}} {{input.value}} {{input.unit}} for {{run.record}} ({{check.reason}}). Review now."
 
+# The page waits for the connector; each physician on duty is also told on the board at once. The notice names no
+# test, value or patient (a notice's title shows where the record is withheld); it shows the page and its status.
+[[steps]]
+id = "tell-physicians"
+title = "Tell every physician on the board (critical result)"
+kind = "automation"
+after = ["page"]
+when = "input.flag == 'critical' or check.band == 'critical'"
+action = "notice.send"
+[steps.params]
+role = "physician"
+priority = "urgent"
+text = "A critical lab result needs a physician's review now"
+outbox = "{{page.message_id}}"
+
 [[steps]]
 id = "sort"
 title = "Sort the result"
