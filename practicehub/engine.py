@@ -696,7 +696,7 @@ class Engine:
             rt = hub.record_type(ref.split("/", 1)[0])
             rec = hub.records.read(*ref.split("/", 1))
             if rt is None or rec is None or self._walked_again(run, rt, rec) != "re-enter" \
-                    or self.runs(record=ref, status="running"):
+                    or hub.db.runs.find_one({"workflow_id": run["workflow_id"], "record": ref, "status": "running"}):
                 return  # an older version hands on (``_hand_on``); work still open walks it
             with hub.db:
                 self.start({"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"},
@@ -749,7 +749,8 @@ class Engine:
             if rt is None or rec is None or schema.starts_workflow(rt, rec) != run["workflow_id"]:
                 return
             wf, row = hub.workflow(run["workflow_id"])
-            if row["version"] == run["version"] or self.runs(record=ref, status="running"):
+            if row["version"] == run["version"] or \
+                    hub.db.runs.find_one({"workflow_id": wf.id, "record": ref, "status": "running"}, fields=["id"]):
                 return
             if hub.record_workflow(rt) != wf.id:
                 return
