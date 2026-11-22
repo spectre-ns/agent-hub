@@ -193,9 +193,10 @@ def _contact(c: dict) -> str:
     return f"{who}{f' ({rel})' if rel else ''}{f', {phone}' if phone else ''}"
 
 
-def facts(rec: dict) -> dict:
+def facts(rec: dict, today: date | None = None) -> dict:
+    """``today`` is the practice's date (the hub passes it), so an age turns over at the practice's midnight."""
     gp = ((rec.get("generalPractitioner") or [{}])[0].get("reference") or "").split("/")[-1]
-    years = age(rec.get("birthDate"))
+    years = age(rec.get("birthDate"), today)
     return {"born": rec.get("birthDate"), "age": years, "gender": rec.get("gender"),
             "contact": ", ".join(t.get("value", "") for t in rec.get("telecom", []) or []),
             "address": "; ".join(_address(a) for a in rec.get("address", []) or []),
@@ -463,7 +464,8 @@ def standin_renewal_prep(ctx):
     if len(meds) > 1:
         concerns.append(f"{len(meds)} active prescriptions match \"{asked}\"; renewing the newest")
     last_rx = (m.get("authoredOn") or "")[:10] or None
-    due = not last_visit or (date.today() - date.fromisoformat(last_visit)).days > 365
+    today = date.fromisoformat(ctx["run"]["today"]) if (ctx.get("run") or {}).get("today") else date.today()
+    due = not last_visit or (today - date.fromisoformat(last_visit)).days > 365
     if asked.lower() != _med_text(m).lower():
         concerns.append(f"Requested \"{asked}\", chart has \"{_med_text(m)}\"")
     disp = m.get("dispenseRequest") or {}
@@ -590,8 +592,8 @@ def _order(subj, text, dosage, qty, unit, repeats, days, authored, gp="dr-amara"
 def demo(hub):
     """Fictional patients and some work in progress, so every inbox has something in it."""
     jo, amara, portal, lab = (hub.member(m) for m in ("jo", "dr-amara", "portal", "lab-feed"))
-    today = date.today()
-    now = datetime.now().replace(second=0, microsecond=0)
+    now = hub.engine.now().replace(second=0, microsecond=0)  # the practice's wall time, as its calendar keeps it
+    today = now.date()
 
     def ago(days):
         return (today - timedelta(days=days)).isoformat()

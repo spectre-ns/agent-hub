@@ -194,7 +194,7 @@ class CatalogMixin:
         if rt is not None and rt.classed_fields:
             from .visibility import strip
             rec = strip(rec, rt.classed_fields)
-        got = self.pack.facts(rec) if self.pack else None
+        got = self.pack.facts(rec, today=self.engine.now().date()) if self.pack else None
         if got is not None:
             return got
         if rt is None:

@@ -169,6 +169,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.models = models or ModelGateway(self)
         from .engine import Engine
         self.engine = Engine(self)
+        self.engine.zone()  # an unknown time zone, or no tz data on this machine, fails here: never wrong dates later
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
         if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:
             # an upgrade whose definitions were approved before this pack.py was running, or one a restart stopped
@@ -1141,10 +1142,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if k == "code" and v and not re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", v):
                 raise Invalid("code: 2 to 6 capital letters or digits, starting with a letter (it begins every work "
                               "item's key, like HFM-12)")
-            if k == "timezone" and v:
-                import zoneinfo
-                if v not in zoneinfo.available_timezones():
-                    raise Invalid(f"timezone: {v!r} is not a time zone name like America/Halifax")
+            if k == "timezone":  # it decides the practice's "now" and "today" (``clock``): never left empty
+                if not v:
+                    raise Invalid("timezone: the practice needs a time zone (a name like America/Halifax)")
+                from .clock import ZoneError, zone
+                try:
+                    zone(v)
+                except ZoneError as exc:
+                    raise Invalid(f"timezone: {exc}") from None
             if k == "email" and v and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", v):
                 raise Invalid("email: that is not an email address")
             if k == "website" and v and not re.fullmatch(r"https://\S+", v):
@@ -1157,6 +1162,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             local = {**(self.db.get_setting("practice_local", {}) or {}), **clean}
             with self.db:
                 self.db.set_setting("practice_local", local)
+                self.engine._zone = None  # its time zone may have changed: read it afresh
                 self.track.append(actor, "practice.changed", f"practice:{now.get('id', 'main')}",
                                   data={"changed": {k: {"from": now.get(k), "to": v} for k, v in clean.items()}})
         return self.practice
