@@ -78,9 +78,12 @@ def test_the_scheduling_agent_never_reads_clinical_records(worked):
     with pytest.raises(Denied):
         hub.read_record(agent, f"MedicationRequest/{note['id']}")
     chart = hub.chart(agent, note["subject"]["reference"])
-    # a visit is the booking, so the scheduler writes visits; it never sees the clinical chart
-    assert set(chart["classes"]) <= {"demographics", "visits"} and "clinical" not in chart["classes"]
-    assert chart["hidden"] > 0
+    # a visit is the booking, so the scheduler reads visits (their time and people), never what is clinical in them
+    assert set(chart["classes"]) <= {"demographics", "visits"} and chart["hidden"] > 0
+    visits = chart["classes"].get("visits") or []
+    assert visits and all("reasonCode" not in v and "diagnosis" not in v for v in visits)
+    for v in visits:
+        assert "reasonCode" not in hub.read_record(agent, f"Encounter/{v['id']}")
 
 
 def test_scheduler_context_has_no_clinical_data(hub):
@@ -3135,3 +3138,91 @@ def test_an_agents_proposed_decision_waits_for_its_sponsor_whatever_the_risk(hub
     assert hub.engine.item(iid)["status"] == "held"
     hold = hub.db.items.find_one({"run_id": run["id"], "kind": "hold"})
     assert hold["assignee"] == agent["sponsor"] and "(high risk)" not in hold["title"]
+
+
+# ------------------------------------------------------------------------------------- field-level data classes
+def _visit_with_a_reason(hub, word="Zebrafinch"):
+    """A visit booked by the physician, with a reason (clinical) only a clinical reader may see."""
+    pat = hub.records.search("Patient")[0]
+    return hub.create_record(M(hub, "dr-amara"), "Encounter", {
+        "status": "planned", "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB",
+                                       "display": "ambulatory"},
+        "subject": {"reference": f"Patient/{pat['id']}"}, "plannedStartDate": "2031-03-03T09:00",
+        "plannedEndDate": "2031-03-03T09:15", "participant": [{"individual": {"reference": "Practitioner/dr-amara"}}],
+        "reasonCode": [{"text": f"{word} cough"}]})
+
+
+def test_a_field_of_a_class_a_member_may_not_read_is_never_shown_nor_written(hub):
+    """The front desk reads visits but not what is clinical in them: the reason is left out everywhere (the record,
+    lists and searches, exports, MCP, history, titles), and they may not write it."""
+    from practicehub import export, mcp
+    jo, amara = M(hub, "jo"), M(hub, "dr-amara")
+    v = _visit_with_a_reason(hub)
+    ref = f"Encounter/{v['id']}"
+    assert hub.read_record(amara, ref)["reasonCode"][0]["text"] == "Zebrafinch cough"
+    assert hub.may_read(jo, "Encounter") and "reasonCode" not in hub.read_record(jo, ref)
+    assert "Zebrafinch" not in hub.title(hub.records.read("Encounter", v["id"]))  # a title is for every reader
+    # search: no text match on what they may not see, no filter on it
+    assert [r["id"] for r in hub.search_records(amara, "Encounter", text="zebrafinch")] == [v["id"]]
+    assert hub.search_records(jo, "Encounter", text="zebrafinch") == []
+    assert all("reasonCode" not in r for r in hub.search_records(jo, "Encounter"))
+    with pytest.raises(Denied):
+        hub.search_records(jo, "Encounter", field="reasonCode.0.text", since="A")
+    # history
+    hub.update_record(jo, ref, {"plannedStartDate": "2031-03-03T09:30", "plannedEndDate": "2031-03-03T09:45"})
+    assert all("Zebrafinch" not in json.dumps(row) for row in hub.record_history(jo, ref))
+    assert any("Zebrafinch" in json.dumps(row) for row in hub.record_history(amara, ref))
+    # exports: one record, a list, a subject's file
+    for fmt in ("json", "print"):  # (an .odt is zipped: its words are not in its bytes)
+        assert b"Zebrafinch" not in export.record(hub, jo, ref, fmt).body
+    assert b"Zebrafinch" in export.record(hub, amara, ref, "json").body
+    for fmt in ("csv", "print"):
+        assert b"Zebrafinch" not in export.records_list(hub, jo, "Encounter", fmt).body
+    assert b"Zebrafinch" not in export.records_list(hub, jo, "Encounter", "csv", text="zebrafinch").body
+    for fmt in ("fhir", "print"):  # a subject's whole file (the visit is in it, not as FHIR)
+        assert b"Zebrafinch" not in export.subject_file(hub, jo, v["subject"]["reference"], fmt).body
+    assert b"Zebrafinch" in export.subject_file(hub, amara, v["subject"]["reference"], "print").body
+    # MCP: read, search, and the tools it is given
+    out = mcp.call_tool(hub, "practice", jo, "read_encounter", {"id": v["id"]})
+    assert not out["isError"] and "Zebrafinch" not in json.dumps(out)
+    found = mcp.call_tool(hub, "practice", jo, "search_encounter", {"text": "zebrafinch"})
+    assert v["id"] not in json.dumps(found)
+    update = next(t for t in mcp.tools(hub, "practice", jo) if t["name"] == "update_encounter")
+    assert "reasonCode" not in json.dumps(update["inputSchema"])
+    # the engine's view of a visit for them, as an agent's context reads it
+    assert "Zebrafinch" not in json.dumps(hub.redact_all(M(hub, "scheduling-agent"),
+                                                         hub.records.search("Encounter", limit=None)))
+    # writing it: refused, naming the field
+    with pytest.raises(Denied) as e:
+        hub.update_record(jo, ref, {"reasonCode": [{"text": "something else"}]})
+    assert "Reason" in str(e.value)
+    with pytest.raises(Denied):
+        hub.create_record(jo, "Encounter", {**{k: x for k, x in v.items() if k not in ("id", "meta")},
+                                             "plannedStartDate": "2031-03-04T09:00",
+                                             "plannedEndDate": "2031-03-04T09:15"})
+
+
+def test_a_front_desk_move_keeps_the_reason(hub):
+    jo = M(hub, "jo")
+    v = _visit_with_a_reason(hub)
+    ref = f"Encounter/{v['id']}"
+    seen = hub.read_record(jo, ref)
+    assert "reasonCode" not in seen
+    # what they saw, moved and saved back whole: the reason they never saw is still there
+    hub.update_record(jo, ref, {**{k: x for k, x in seen.items() if k not in ("id", "meta", "resourceType")},
+                                "plannedStartDate": "2031-03-05T10:00", "plannedEndDate": "2031-03-05T10:15"},
+                      expected_version=seen["meta"]["versionId"])
+    hub.update_record(jo, ref, {"reasonCode": None, "status": "cancelled"})  # a view without it clears nothing
+    stored = hub.records.read("Encounter", v["id"])
+    assert stored["plannedStartDate"] == "2031-03-05T10:00" and stored["status"] == "cancelled"
+    assert stored["reasonCode"] == [{"text": "Zebrafinch cough"}]
+
+
+def test_a_field_names_a_declared_data_class(hub):
+    src = hub.record_type("Encounter")
+    path = Path(__file__).parent.parent / "packs" / "general-practice" / "types" / "Encounter.toml"
+    bad = path.read_text().replace('data_class = "clinical"', 'data_class = "no-such-class"', 1)
+    assert bad != path.read_text() and src is not None
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), bad)
+    assert any("no-such-class" in p for p in e.value.problems)

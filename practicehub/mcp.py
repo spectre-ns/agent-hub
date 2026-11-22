@@ -34,7 +34,7 @@ import threading
 from collections import OrderedDict
 
 from . import fields as fieldmod
-from . import schema
+from . import schema, visibility
 from . import views as viewmod
 from .hub import Denied, HubError, Invalid, NotFound
 
@@ -305,7 +305,8 @@ def tools(hub, sid: str, member: dict) -> list[dict]:
              "_call": ("read", rt.id)})
         if not hub.may_write(member, rt.id):
             continue
-        fs = editable(rt)
+        unset = visibility.hidden_fields(hub, member, rt, write=True)  # a field of a class they may not write
+        fs = [f for f in editable(rt) if f not in unset]
         props, req = _fields_props(hub, fs)
         start = f" It starts as {rt.lifecycle['initial']!r}." if rt.lifecycle and rt.lifecycle.get("initial") else ""
         add({"name": f"create_{n}", "title": f"New {lab.lower()}",
@@ -530,7 +531,8 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
         rt = hub.record_type(target)
         hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {target} records")
         limit = min(int(a.get("limit") or 25), MAX_LIMIT)
-        recs = hub.records.search(target, limit=None if a.get("state") else limit, text=(a.get("text") or None))
+        recs = hub.search_records(member, target, limit=None if a.get("state") else limit,
+                                  text=(a.get("text") or None))
         if a.get("state"):
             recs = [r for r in recs if schema.first(r, rt.lifecycle["path"]) == a["state"]][:limit]
         found = [_summary(hub, rt, r) for r in recs]
@@ -539,7 +541,7 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
         ref = f"{target}/{a['id']}"
         rt = hub.record_type(target)
         hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {target} records")
-        rec = hub.records.read(target, a["id"])
+        rec = hub.redact(member, hub.records.read(target, a["id"]))
         if not rec:
             raise NotFound(f"there is no {ref}")
         hub.note_view(member, ref, how=how)
@@ -638,7 +640,7 @@ def read_resource(hub, sid: str, member: dict, uri: str) -> dict:
         return {"contents": [{"uri": uri, "mimeType": "application/schema+json",
                               "text": json.dumps(record_schema(hub, rt), indent=1)}]}
     lc = rt.lifecycle or {}
-    rec = hub.records.read(tid, rid)
+    rec = hub.redact(member, hub.records.read(tid, rid))
     if not rec or not lc.get("in_use"):
         raise RpcError(-32002, "Resource not found", {"uri": uri})
     hub.note_view(member, f"{tid}/{rid}", how=f"mcp {sid}/resource")

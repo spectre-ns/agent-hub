@@ -2041,7 +2041,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         if not self.hub.may_read(me, st):
             raise Denied(f"{me['name']} may not read {label} records")
         q = req["query"].get("q", "").lower()
-        subs = self.hub.records.search(st, limit=SHOWN + 1, text=q or None)  # searched in the store: none is missed
+        subs = self.hub.search_records(me, st, limit=SHOWN + 1, text=q or None)  # in the store: none is missed
         more = len(subs) > SHOWN
         subs = subs[:SHOWN]
         heads = list(self.hub.facts(subs[0]).keys()) if subs else []

@@ -18,6 +18,7 @@ from pathlib import Path
 from . import blocks as blockmod
 from . import markup
 from . import schema
+from . import visibility
 from . import pack as packmod
 from . import workflows as wfmod
 from .authz import Authorizer, LocalAuthorizer
@@ -1532,14 +1533,44 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def may_write(self, member: dict, rtype: str) -> bool:
         return self.can(member, "writer", f"data_class:{self.class_of(rtype)}")
 
-    def read_record(self, member: dict, ref: str) -> dict:
+    def read_record(self, member: dict, ref: str, *, raw: bool = False) -> dict:
+        """The record as the member may see it: without the fields of a data class they may not read (``raw``: the
+        whole record, for what is computed over it and never shown, like a signature's hash)."""
         rtype, rid = ref.split("/", 1)
         self.require(member, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
         rec = self.records.read(rtype, rid)
         if not rec:
             raise NotFound(f"there is no {ref}")
         self.note_view(member, ref)
-        return rec
+        return rec if raw else self.redact(member, rec)
+
+    def redact(self, member: dict | None, rec: dict | None) -> dict | None:
+        """What the member may see of a record (visibility.redact): every record handed to a member goes through
+        it, on every page, list, export, API and agent context."""
+        return visibility.redact(self, member, rec)
+
+    def redact_all(self, member: dict | None, recs) -> list[dict]:
+        return [visibility.redact(self, member, r) for r in recs]
+
+    def search_records(self, member: dict, rtype: str | None = None, *, text: str | None = None,
+                       limit: int | None = 200, subject: str | None = None, field: str | None = None,
+                       since: str | None = None, until: str | None = None) -> list[dict]:
+        """Records as the member may see them (the store's search, then ``redact``). A search by words matches only
+        what the member sees of each record; a range over a field they may not read is refused."""
+        if field and rtype and visibility.hides_path(self, member, rtype, field):
+            raise Denied(f"{member.get('name', '')} may not search {rtype} records by {field}")
+        types = [rtype] if rtype else None
+        guarded = bool(text) and (
+            any(visibility.hidden_fields(self, member, self.record_type_for_reading(t)) for t in types)
+            if types else any(visibility.hidden_fields(self, member, rt) for rt in self.record_types().values()))
+        recs = self.records.search(rtype, subject=subject, limit=None if guarded else limit, text=text or None,
+                                   field=field, since=since, until=until)
+        recs = self.redact_all(member, recs)
+        if guarded:
+            from .records import search_text, words_of
+            words = words_of(text)
+            recs = [r for r in recs if all(w in search_text(r) for w in words)][:limit]
+        return recs
 
     VIEW_WINDOW = timedelta(minutes=15)
 
@@ -1635,7 +1666,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.require(member, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
         self.note_view(member, ref, how="history")
         rows = self.db.record_versions.find({"type": rtype, "id": rid}, sort=[("version", DESC)])
-        return [{k: v for k, v in r.items() if k not in ("_id", "refs")} for r in rows]
+        return [{**{k: v for k, v in r.items() if k not in ("_id", "refs")}, "data": self.redact(member, r["data"])}
+                for r in rows]
 
     def revision_authors(self, ref: str) -> set[str]:
         """Who wrote what the record says now: whoever created it or changed a field other than its lifecycle state,
@@ -1764,7 +1796,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             seen.add(up)
             rec = self.records.read(*up.split("/", 1))
             if rec and self.may_read(member, rec["resourceType"]):
-                out.append(rec)
+                out.append(self.redact(member, rec))
             elif rec is None or not self.may_read(member, up.split("/", 1)[0]):
                 break
         return list(reversed(out)) if self.may_read(member, t) else []
@@ -1784,7 +1816,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             rel = krt.field(krt.parent)["rel"] or krt.parent
             kids += [self.records.read(*r["from_ref"].split("/", 1)) for r in self.db.links.find(
                 {"to_ref": ref, "rel": rel, "from_ref": {"$regex": f"^{re.escape(kt)}/"}})]
-        return sorted((k for k in kids if k), key=lambda r: self.title(r).casefold())
+        return sorted((self.redact(member, k) for k in kids if k), key=lambda r: self.title(r).casefold())
 
     # ------------------------------------------------------------------ parts and links
     def part_types(self, rtype: str) -> list[schema.RecordType]:
@@ -1815,7 +1847,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     if r and schema.ref_of(schema.first(r, rt.part_of["path"])) == ref]
             for r in recs:
                 self.note_view(member, f"{rt.id}/{r['id']}", how=f"part of {ref}")
-            out[rt.id] = sorted(recs, key=lambda r: schema.record_date(rt, r), reverse=True)
+            out[rt.id] = sorted(self.redact_all(member, recs), key=lambda r: schema.record_date(rt, r), reverse=True)
         return out, hidden
 
     def tree(self, member: dict, rtype: str, where=None) -> list[tuple[int, dict]]:
@@ -1826,7 +1858,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if not rt or not self.may_read(member, rtype):
             return []
         recs = [r for t in self.tree_types(rtype) if self.may_read(member, t)
-                for r in self.records.search(t, limit=None) if where is None or where(r)]
+                for r in self.redact_all(member, self.records.search(t, limit=None)) if where is None or where(r)]
         ids = {f"{r['resourceType']}/{r['id']}" for r in recs}
         under: dict = {}
         for r in recs:
@@ -2049,6 +2081,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 if t["by"] == "workflow" and not self._by_workflow(member, run_id):
                     raise Denied(f"only a workflow makes a {rt.label.lower()} {st!r}")
         self._workflow_fields(rt, member, run_id, {}, data)
+        data = visibility.guard_write(self, member, rt, None, data)  # a field of a class they may not write
         self._check_record(rt, {"resourceType": rtype, **data})
         with self.db:
             rec = self.records.create(rtype, data)
@@ -2057,7 +2090,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                    data={"subject": self.subject_of(rec),
                                          "summary": self.title(rec)})
             self.engine.on_record("created", rt, rec, None, member, ev)
-        return rec
+        return self.redact(member, rec)  # what they wrote, as they may read it
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
@@ -2088,6 +2121,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             after = {**before, **{k: v for k, v in data.items() if k not in ("resourceType", "id", "meta")}}
             after = {k: v for k, v in after.items() if v is not None}  # None clears a field
             self._workflow_fields(rt, member, run_id, before, after)
+            after = visibility.guard_write(self, member, rt, before, after)  # untouched: kept; changed: refused
             if rt.part_of and schema.first(before, rt.part_of["path"]) != schema.first(after, rt.part_of["path"]):
                 raise Invalid(f"a {rt.label.lower()} stays part of the record it was made in: "
                               f"make a new one there instead")
@@ -2128,7 +2162,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                        data={"from": moved[0], "to": moved[1],
                                              **({"comment": comment.strip()} if comment and comment.strip() else {})})
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
-            return rec
+            return self.redact(member, rec)
 
     # ------------------------------------------------------------------ signatures on any record
     def _record_digest(self, rec: dict) -> str:
@@ -2147,7 +2181,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def record_digest(self, member: dict, ref: str) -> str:
         """The hash a signature on this record would cover, as this member reads it: a signing page or API client
         shows the record, then signs with ``seen`` set to this, so a change in between refuses the signature."""
-        return self._record_digest(self.read_record(member, ref))
+        return self._record_digest(self.read_record(member, ref, raw=True))
 
     def sign_record(self, member: dict, ref: str, meaning: str, comment: str = "", *, seen: str | None = None) -> dict:
         """A person's electronic signature on a record: bound to its current version and the hash of its contents,
@@ -2187,7 +2221,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid(f"you have already signed this version as {meaning!r}")
         moves = bool(kind and kind.get("moves_to") and rt.lifecycle)
         with self.db:  # read, check and write as one step, so a change in between cannot slip under the signature
-            rec = self.read_record(member, ref)
+            rec = self.read_record(member, ref, raw=True)
             if seen is not None and seen != self._record_digest(rec):
                 raise Invalid("the record changed since you read it: read it again, then sign what it says now")
             if moves:
@@ -2226,7 +2260,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def signatures(self, member: dict, ref: str) -> list[dict]:
         """Every signature on a record, newest first, each marked current if it covers what the record says now."""
         rtype, rid = ref.split("/", 1)
-        rec = self.read_record(member, ref)
+        rec = self.read_record(member, ref, raw=True)
         now = self._record_digest(rec)
         out = []
         rows = self.db.events.find({"$or": [{"action": "record.signed", "subject": ref},
@@ -2284,7 +2318,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 continue
             dc = rt.data_class
             if self.can(member, "reader", f"data_class:{dc}"):
-                out.setdefault(dc, []).append(rec)
+                out.setdefault(dc, []).append(self.redact(member, rec))
                 self.note_view(member, f"{rec['resourceType']}/{rec['id']}", how=f"chart of {subject}")
             else:
                 hidden += 1

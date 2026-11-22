@@ -1,5 +1,7 @@
 # A visit, from booking to the end: when it is booked for and with whom (the practice calendar), then what billing
-# needs (who, when, how long, the diagnosis codes), never the note itself. FHIR R5 Encounter: a booked visit is
+# needs (who, when, how long), never the note itself. Why the patient comes and the diagnosis codes (reasonCode) are
+# clinical: the front desk and the scheduling agent book and move a visit without ever seeing them; billing is given
+# the codes by the visit-documentation workflow, on the claim. FHIR R5 Encounter: a booked visit is
 # ``planned`` with plannedStartDate/plannedEndDate; it is the calendar's Booking. There is no separate appointment.
 id = "Encounter"
 label = "Visit"
@@ -117,6 +119,7 @@ name = "reasonCode"
 label = "Reason codes (as JSON)"
 type = "list"
 advanced = true
+data_class = "clinical"
 help = "CodeableConcept list: [{coding: [{system: icd-9-cm, code}], text}]"
 
 [[field]]
@@ -124,6 +127,7 @@ name = "reason_text"
 label = "Reason"
 path = "reasonCode.0.text"
 type = "string"
+data_class = "clinical"
 
 [[field]]
 name = "participant"

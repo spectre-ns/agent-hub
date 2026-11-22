@@ -14,7 +14,7 @@ import re
 import urllib.parse
 from datetime import date, datetime, timedelta
 
-from .. import schema
+from .. import schema, visibility
 from ..hub import Denied, Invalid, NotFound
 
 e = html.escape
@@ -73,7 +73,7 @@ class CalendarPages:
                "end": span[1] if span else None, "with": b["with"], "cancelled": b["cancelled"], "sees": sees,
                "name": "Busy", "reason": "", "state": ""}
         if sees:
-            rec = self.hub.records.read(*subj.split("/", 1)) if subj else None
+            rec = self.hub.redact(me, self.hub.records.read(*subj.split("/", 1))) if subj else None
             full = self.hub.title(rec) if rec else (subj or self.hub.record_type(b["type"]).label)
             out["name"] = re.split(r" \(| · ", full, maxsplit=1)[0].strip() or full  # its name part: the grid is narrow
             out["full"] = full
@@ -130,7 +130,7 @@ class CalendarPages:
             open_days = days
         from ..engine import bookings
         held = bookings(self.hub, active_only=False, since=days[0].isoformat(),
-                        until=(days[-1] + timedelta(days=1)).isoformat())
+                        until=(days[-1] + timedelta(days=1)).isoformat(), member=me)
         shown = [self._shown(me, b) for b in held]
         shown = [x for x in shown if x["start"]]
         if view == "week":
@@ -276,6 +276,12 @@ class CalendarPages:
             return want
         return kinds[0]
 
+    def _may_give_reason(self, me, rt) -> bool:
+        """Whether the booking form asks this member why: not when the reason is of a class they may not write."""
+        held = (rt.base_map.get("reason") or {}).get("fields") or []
+        fs = [rt.field(n) for n in held if rt.field(n)]
+        return bool(fs) and all(visibility.may_field(self.hub, me, f, write=True) for f in fs)
+
     def _subject_field(self, rt) -> dict | None:
         held = (rt.base_map.get("subject") or {}).get("fields") or []
         return rt.field(held[0]) if len(held) == 1 else None
@@ -312,8 +318,9 @@ class CalendarPages:
             ctl = self._input({**sf, "required": True, "name": "subject"}, seed, me).replace(
                 f'name="{e(sf["path"].removesuffix(".*"))}"', 'name="subject"', 1)
             rows.append(ctl)
-        rows.append(f'<label>Reason <input name="reason" value="{e(str(q.get("reason") or ""))}" maxlength="200" '
-                    f'autocomplete="off"></label>')
+        if self._may_give_reason(me, rt):
+            rows.append(f'<label>Reason <input name="reason" value="{e(str(q.get("reason") or ""))}" maxlength="200" '
+                        f'autocomplete="off"></label>')
         if len(self.booking_kinds(me, write=True)) > 1:
             rows.append(f'<input type="hidden" name="type" value="{e(rtype)}">')
         lc = rt.lifecycle
@@ -353,12 +360,13 @@ class CalendarPages:
                 subject = self._resolve_ref(sf, typed)
                 self.hub.read_record(me, subject)  # one the member may read: never booked blind
             minutes = self._slot()
+            why = str(f.get("reason") or "").strip()
             rec = schema.compose(rt, {"start": start.isoformat(timespec="minutes"),
                                       "end": (start + timedelta(minutes=minutes)).isoformat(timespec="minutes"),
-                                      "reason": str(f.get("reason") or "").strip(), "subject": subject,
+                                      **({"reason": why} if why else {}), "subject": subject,
                                       "with": [who]}, self.hub.member_ref_type())
             self.hub.create_record(me, rtype, rec)
-        except (Invalid, NotFound) as exc:
+        except (Invalid, NotFound, Denied) as exc:
             if isinstance(exc, NotFound):
                 exc = Invalid(str(exc))
             raise Rendered(422, self.page_booking_new({**req, "query": {}}, kept=f, error=exc)) from None
@@ -461,7 +469,7 @@ class CalendarPages:
             return ""
         from ..engine import bookings
         now = self._now()
-        mine = [b for b in bookings(self.hub, since=now.date().isoformat()) if b.get("subject") == ref
+        mine = [b for b in bookings(self.hub, since=now.date().isoformat(), member=me) if b.get("subject") == ref
                 and self._may_read(me, b["type"]) and not b["cancelled"]]
         mine = [b for b in mine if (self.hub.booking_span(b, self._slot()) or (now,))[-1] >= now]
         mine.sort(key=lambda b: b["start"])

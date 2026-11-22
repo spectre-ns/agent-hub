@@ -134,7 +134,7 @@ def summarize(rec: dict) -> str:
         when = _day((rec.get("period") or {}).get("start")) or booked[:10]
         if rec.get("status") in ("planned", "arrived", "triaged", "in-progress", "onleave") and booked:
             when = booked[:16].replace("T", " ")  # a booking is known by its time
-        reason = _text(rec.get("reasonCode")) or "reason not recorded"
+        reason = _text(rec.get("reasonCode"))  # clinical: a title (read by every reader) is made without it
         cls = _text(rec.get("class"))
         kind = _text(rec.get("type"))
         status = rec.get("status") if rec.get("status") not in ("finished", None) else ""
@@ -709,12 +709,13 @@ def demo(hub):
 
 
 def _book(hub, member, patient, who, start, reason, minutes=15):
-    return hub.create_record(member, "Encounter", {
+    """The front desk books the time; the reason is clinical, so the physician writes it on the visit."""
+    visit = hub.create_record(member, "Encounter", {
         "status": "planned", "class": AMBULATORY, "subject": {"reference": f"Patient/{patient['id']}"},
         "plannedStartDate": start.isoformat(timespec="minutes"),
         "plannedEndDate": (start + timedelta(minutes=minutes)).isoformat(timespec="minutes"),
-        "participant": [{"individual": {"reference": f"Practitioner/{who}"}}],
-        "reasonCode": [{"text": reason}]})
+        "participant": [{"individual": {"reference": f"Practitioner/{who}"}}]})
+    return hub.update_record(hub.member(who), f"Encounter/{visit['id']}", {"reasonCode": [{"text": reason}]})
 
 
 # ------------------------------------------------------------------------------------------------------ upgrades

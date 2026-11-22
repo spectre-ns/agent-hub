@@ -29,7 +29,7 @@ import zipfile
 from dataclasses import dataclass
 from xml.sax.saxutils import escape as _xml_escape
 
-from . import schema
+from . import schema, visibility
 from .db import utcnow
 from .hub import Invalid, NotFound
 
@@ -254,6 +254,7 @@ def record_rows(hub, member, rt, rec) -> list[tuple[str, str]]:
         fields = [f for f in rt.fields if f.get("show", True) is not False and not f.get("advanced")
                   and not (lc and f["path"] == lc["path"])
                   and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields))]
+    fields = visibility.shown(hub, member, rt, fields)
     rows = []
     if lc:
         rows.append(("Status", str(schema.first(rec, lc["path"]) or "")))
@@ -270,7 +271,7 @@ def record_rows(hub, member, rt, rec) -> list[tuple[str, str]]:
 def list_table(hub, member, rt, recs) -> tuple[list[str], list[list]]:
     """The list's columns (its title, status and the fields the list shows), then id and dates: header and rows."""
     lc = rt.lifecycle
-    cols = schema.list_columns(rt)
+    cols = visibility.shown(hub, member, rt, schema.list_columns(rt))
     header = [rt.label] + (["Status"] if lc else []) + [f["label"] for f in cols] + ["id", "Date", "Last updated",
                                                                                   "Version"]
     rows = []
@@ -484,7 +485,7 @@ def record(hub, member, ref: str, fmt: str) -> Export:
         raise NotFound(f"there is no {ref}")
     _check_format(fmt, offered(hub, rtype, "record"), f"{a_label(rt)}")
     hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
-    rec = hub.records.read(rtype, rid)
+    rec = hub.redact(member, hub.records.read(rtype, rid))  # without the fields they may not read
     if not rec:
         raise NotFound(f"there is no {ref}")
     base = f"{rtype}-{rid}"
@@ -515,7 +516,7 @@ def records_list(hub, member, rtype: str, fmt: str, *, text: str | None = None, 
     if every:
         hub.require(member, "policy_owner", "practice:main", f"export every {rt.label.lower()} record (a bulk export)")
     hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
-    recs = hub.records.search(rtype, limit=None if every else limit, text=None if every else (text or None))
+    recs = hub.search_records(member, rtype, limit=None if every else limit, text=None if every else (text or None))
     refs = [f"{rtype}/{r['id']}" for r in recs]
     stamp = utcnow()[:10]
     if fmt == "ndjson":
@@ -544,7 +545,7 @@ def gather(hub, member, ref: str) -> tuple[list[dict], int]:
     if rtype not in hub.subject_types():
         raise Invalid(f"{rtype} is not what the practice's work is about; export one record instead")
     hub.require(member, "reader", f"data_class:{hub.class_of(rtype)}", f"read {rtype} records")
-    subject = hub.records.read(rtype, rid)
+    subject = hub.redact(member, hub.records.read(rtype, rid))
     if not subject:
         raise NotFound(f"there is no {ref}")
     members = hub.member_types()
@@ -567,7 +568,7 @@ def gather(hub, member, ref: str) -> tuple[list[dict], int]:
             return False
         rec = rec or hub.records.read(*r.split("/", 1))
         if rec:
-            got[r] = rec
+            got[r] = hub.redact(member, rec)
             return True
         return False
     for rec in hub.records.search(subject=ref, limit=None):
@@ -653,7 +654,7 @@ def everything(hub, member, fmt: str = "ndjson") -> tuple[dict[str, bytes], dict
             if n:
                 left_out.append({"type": t, "count": n})
             continue
-        recs = hub.records.search(t, limit=None)
+        recs = hub.redact_all(member, hub.records.search(t, limit=None))
         if not recs:
             continue
         if fmt == "csv":

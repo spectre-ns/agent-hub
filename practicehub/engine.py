@@ -171,10 +171,12 @@ CORE_ACTIONS = {
 
 
 # ---------------------------------------------------------------------------------------------- core providers
-def bookings(hub, *, active_only: bool = True, since: str | None = None, until: str | None = None) -> list[dict]:
+def bookings(hub, *, active_only: bool = True, since: str | None = None, until: str | None = None,
+             member: dict | None = None) -> list[dict]:
     """The practice calendar: every record of a type that extends the core's ``Booking``, read through it (``start``,
     ``end``, ``reason``, ``subject``, ``with`` members, ``cancelled``), as ``{record, type, ...those}``. Nothing here
-    knows how a pack keeps them. ``active_only`` leaves out cancelled ones."""
+    knows how a pack keeps them. ``active_only`` leaves out cancelled ones. ``member``: each as that member may read it
+    (a reason of a class they may not read is not there)."""
     out = []
     for rtype in hub.of_base("Booking"):
         rt = hub.record_type(rtype)
@@ -183,6 +185,8 @@ def bookings(hub, *, active_only: bool = True, since: str | None = None, until: 
         ranged = bool((since or until) and start_path and "*" not in start_path and schema.FIELD_PATH.fullmatch(start_path))
         for rec in hub.records.search(rtype, limit=None, field=start_path if ranged else None,
                                       since=since if ranged else None, until=until if ranged else None):
+            if member is not None:
+                rec = hub.redact(member, rec)
             seen = schema.project(rt, rec, hub.member_types())
             start = str(seen.get("start") or "")
             if not ranged and ((since and start < since) or (until and start >= until)):
@@ -1220,7 +1224,7 @@ class Engine:
                     recs += [r for r in hub.records.search(subject=run["record"], limit=None)
                              if hub.class_or_none(r["resourceType"]) == dc and r is not main
                              and f"{r['resourceType']}/{r['id']}" != run["record"]]
-                data[c] = recs
+                data[c] = hub.redact_all(member, recs)  # without the fields of a class the member may not read
             elif c.startswith("provider:"):
                 name = c[9:]
                 fn = CORE_PROVIDERS.get(name) or hub.pack.providers.get(name)

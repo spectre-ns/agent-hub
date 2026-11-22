@@ -1386,9 +1386,11 @@ def _ellen(hub):
     return f"Patient/{p['id']}"
 
 
-def _book(server, hub, who="jo", at=f"{DAY}T09:00", member="dr-amara", subject=None, reason="Sore throat"):
+def _book(server, hub, who="dr-amara", at=f"{DAY}T09:00", member="dr-amara", subject=None, reason="Sore throat"):
+    """A booking made by a physician, who may write its reason (it is clinical); the front desk books without one."""
     return call(server, "POST", "/schedule/new", token(hub, who),
-                form={"with": member, "at": at, "subject": subject or _ellen(hub), "reason": reason})
+                form={"with": member, "at": at, "subject": subject or _ellen(hub),
+                      **({"reason": reason} if reason else {})})
 
 
 def test_every_member_opens_the_calendar(hub, server):
@@ -1414,8 +1416,11 @@ def test_a_free_slot_opens_the_booking_form_with_the_member_and_time(hub, server
     status, form = call(server, "GET", html.unescape(href), token(hub, "jo"))
     assert status == 200 and "data-modal-body" in form
     assert 'name="with" value="dr-amara"' in form and f'name="at" value="{DAY}T09:00"' in form
-    assert "Monday January 7 at 09:00" in form and 'name="subject"' in form and 'name="reason"' in form
+    assert "Monday January 7 at 09:00" in form and 'name="subject"' in form
     assert 'name="plannedStartDate"' not in form and "It starts as <b>planned</b>" in form
+    # the reason is clinical: the front desk is not asked it, a physician is
+    assert 'name="reason"' not in form
+    assert 'name="reason"' in call(server, "GET", html.unescape(href), token(hub, "dr-amara"))[1]
 
 
 def test_booking_a_slot_makes_a_visit_in_its_first_state(hub, server):
@@ -1428,7 +1433,13 @@ def test_booking_a_slot_makes_a_visit_in_its_first_state(hub, server):
     assert v["reasonCode"][0]["text"] == "Sore throat"
     page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
     assert "Ellen MacLeod" in page and f'href="/records/Encounter/{v["id"]}"' in page
+    assert "Sore throat" not in page  # the front desk sees the booking, not why
+    assert "Sore throat" in call(server, "GET", f"/schedule?date={DAY}", token(hub, "dr-amara"))[1]
     assert f'with=dr-amara&amp;at={DAY}T09%3A00' not in page  # the slot is taken
+    # the front desk books without a reason; one they send anyway is refused, in the dialog
+    assert _book(server, hub, who="jo", at=f"{DAY}T10:00", reason="")[0] == 303
+    status, page = _book(server, hub, who="jo", at=f"{DAY}T10:30")
+    assert status == 422 and "Reason" in page and "clinical" in page
     assert call(server, "GET", f"/schedule/new?with=dr-amara&at={DAY}T09:00", token(hub, "sam"))[0] == 403
 
 
@@ -1484,8 +1495,11 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
     pid = _ellen(hub).split("/")[1]
     page = call(server, "GET", f"/{App(hub).subj['path']}/{pid}", token(hub, "jo"))[1]
     up = page.split('id="upcoming"', 1)[1].split("</section>", 1)[0]
-    assert "Mon Jan 07, 09:00" in up and "Dr. Amara Okafor" in up and "Sore throat" in up
+    assert "Mon Jan 07, 09:00" in up and "Dr. Amara Okafor" in up and "Sore throat" not in up  # clinical
     assert f'/schedule/new?subject=Patient%2F{pid}' in up
+    up = call(server, "GET", f"/{App(hub).subj['path']}/{pid}", token(hub, "dr-amara"))[1].split(
+        'id="upcoming"', 1)[1].split("</section>", 1)[0]
+    assert "Sore throat" in up
 
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
