@@ -41,3 +41,21 @@ name = "cancelled"
 label = "Cancelled"
 type = "boolean"
 help = "true when it no longer holds the time"
+
+[[field]]
+name = "kind"
+label = "What for"
+type = "string"
+help = "what the booking is for, in words everyone who sees the booking may read (the reason may be private)"
+
+[[field]]
+name = "priority"
+label = "Priority"
+type = "string"
+help = "how soon it must happen, in the practice's words; the calendar marks the ones its [booking] marked lists"
+
+[[field]]
+name = "overbooked"
+label = "Booked over another booking because"
+type = "string"
+help = "why it was booked over another booking, by a member its [booking] overbook lets do so"

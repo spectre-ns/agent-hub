@@ -15,6 +15,7 @@ event = "visit.ended"
 name = "appointment"
 type = "reference"
 target = ["Booking"]
+active = true
 help = "The booked visit this note is for (it is finished with the note); none files a visit that was never booked"
 
 [[input]]
@@ -135,7 +136,7 @@ participant = [{ individual = { reference = "Practitioner/{{sign.by}}" } }]
 type = [{ text = "{{input.visit_type}}" }]
 period = { start = "{{timing.start}}", end = "{{timing.end}}" }
 length = { value = "{{input.minutes}}", unit = "min" }
-reasonCode = [{ text = "ICD-9 {{edit.diagnosis_codes}}" }]
+diagnosis = [{ condition = [{ concept = { text = "ICD-9 {{edit.diagnosis_codes}}" } }] }]
 
 [[steps]]
 id = "file-visit"
@@ -156,7 +157,7 @@ plannedStartDate = "{{timing.start}}"
 plannedEndDate = "{{timing.end}}"
 period = { start = "{{timing.start}}", end = "{{timing.end}}" }
 length = { value = "{{input.minutes}}", unit = "min" }
-reasonCode = [{ text = "ICD-9 {{edit.diagnosis_codes}}" }]
+diagnosis = [{ condition = [{ concept = { text = "ICD-9 {{edit.diagnosis_codes}}" } }] }]
 
 [[steps]]
 id = "file-note"

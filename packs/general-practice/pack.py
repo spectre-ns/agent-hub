@@ -135,6 +135,9 @@ def summarize(rec: dict) -> str:
         if rec.get("status") in ("planned", "arrived", "triaged", "in-progress", "onleave") and booked:
             when = booked[:16].replace("T", " ")  # a booking is known by its time
         reason = _text(rec.get("reasonCode"))  # clinical: a title (read by every reader) is made without it
+        if not reason:  # what it is booked for (not clinical), when the reason is not there to read
+            reason = str(((((rec.get("serviceType") or [{}])[0] or {}).get("concept") or {}).get("text")) or "")
+            reason = reason.replace("-", " ").capitalize()
         cls = _text(rec.get("class"))
         kind = _text(rec.get("type"))
         status = rec.get("status") if rec.get("status") not in ("finished", None) else ""
@@ -694,24 +697,34 @@ def demo(hub):
     if days:
         def at(d, hm):
             return datetime.combine(d, datetime.strptime(hm, "%H:%M").time())
-        for d, hm, who, patient, reason in (
-                (0, "09:00", "dr-amara", ellen, "Blood pressure review"),
-                (0, "09:30", "dr-liam", omar, "New patient visit"),
-                (0, "10:30", "dr-amara", priya, "Follow-up: sore throat"),
-                (0, "11:00", "dr-liam", ellen, "Flu shot"),
-                (1, "09:15", "dr-amara", omar, "Back pain"),
-                (1, "14:00", "dr-liam", priya, "Travel vaccines"),
-                (2, "10:00", "dr-amara", ellen, "Medication review")):
-            _book(hub, jo, patient, who, at(days[min(d, len(days) - 1)], hm), reason)
-        off = _book(hub, jo, omar, "dr-amara", at(days[0], "11:30"), "Annual physical")
+        for d, hm, who, patient, reason, kind in (
+                (0, "09:00", "dr-amara", ellen, "Blood pressure review", "follow-up"),
+                (0, "09:30", "dr-liam", omar, "New patient visit", "check-up"),
+                (0, "10:30", "dr-amara", priya, "Follow-up: sore throat", "follow-up"),
+                (0, "11:00", "dr-liam", ellen, "Flu shot", "immunization"),
+                (1, "09:15", "dr-amara", omar, "Back pain", "new-concern"),
+                (1, "14:00", "dr-liam", priya, "Travel vaccines", "immunization"),
+                (2, "10:00", "dr-amara", ellen, "Medication review", "prescription-renewal")):
+            _book(hub, jo, patient, who, at(days[min(d, len(days) - 1)], hm), reason, kind=kind)
+        # Dr. Okafor squeezes Priya in over Ellen's visit: she called with a worsening cough and fever
+        hub.create_record(amara, "Encounter", {
+            "status": "planned", "class": AMBULATORY, "subject": {"reference": f"Patient/{priya['id']}"},
+            "plannedStartDate": at(days[0], "09:00").isoformat(timespec="minutes"),
+            "plannedEndDate": at(days[0], "09:15").isoformat(timespec="minutes"),
+            "participant": [{"individual": {"reference": "Practitioner/dr-amara"}}],
+            "serviceType": [{"concept": {"text": "new-concern"}}], "reasonCode": [{"text": "Cough and fever"}]},
+            overbook="worse since the throat visit, fever 39 overnight: seen before the weekend")
+        off = _book(hub, jo, omar, "dr-amara", at(days[0], "11:30"), "Annual physical", kind="check-up")
         hub.update_record(jo, f"Encounter/{off['id']}", {"status": "cancelled", "extension": [
             {"url": CANCEL_REASON, "valueString": "the patient called to cancel"}]})
 
 
-def _book(hub, member, patient, who, start, reason, minutes=15):
-    """The front desk books the time; the reason is clinical, so the physician writes it on the visit."""
+def _book(hub, member, patient, who, start, reason, minutes=15, kind=None):
+    """The front desk books the time and what it is for; the reason is clinical, so the physician writes it on the
+    visit."""
     visit = hub.create_record(member, "Encounter", {
         "status": "planned", "class": AMBULATORY, "subject": {"reference": f"Patient/{patient['id']}"},
+        **({"serviceType": [{"concept": {"text": kind}}]} if kind else {}),
         "plannedStartDate": start.isoformat(timespec="minutes"),
         "plannedEndDate": (start + timedelta(minutes=minutes)).isoformat(timespec="minutes"),
         "participant": [{"individual": {"reference": f"Practitioner/{who}"}}]})
@@ -812,4 +825,35 @@ def upgrade_appointments_to_visits(hub, actor):
             "appointments_now_visits": made, "appointment_type_retired": retired}
 
 
-UPGRADES = {"2-appointments-are-visits": upgrade_appointments_to_visits}
+def upgrade_diagnosis_apart_from_reason(hub, actor):
+    """Version 3 keeps what was billed (diagnosis) apart from why the visit was booked (reasonCode): before, finishing a
+    visit wrote the diagnosis codes over the booked reason. Once the Visit with a diagnosis is in force, each visit
+    whose reason is the codes ("ICD-9 ...") gets them as its diagnosis, and its reason back from the version before
+    the codes were written (none, if it never had another). None until the new Visit is approved."""
+    rt = hub.record_type("Encounter")
+    if rt is None or rt.field("diagnosis_text") is None:
+        return None
+    moved, restored = [], []
+    for v in hub.records.search("Encounter", limit=None):
+        reasons = [r for r in v.get("reasonCode") or [] if isinstance(r, dict)]
+        codes = [r for r in reasons if str(r.get("text") or "").startswith("ICD-9 ")]
+        if not codes or v.get("diagnosis"):
+            continue
+        earlier = None
+        for row in hub.db.record_versions.find({"type": "Encounter", "id": v["id"]}, sort=[("version", -1)],
+                                               fields=["data"]):
+            had = [r for r in (row["data"] or {}).get("reasonCode") or [] if isinstance(r, dict)]
+            if had and not any(str(r.get("text") or "").startswith("ICD-9 ") for r in had):
+                earlier = had
+                break
+        hub.update_record(actor, f"Encounter/{v['id']}", {
+            "diagnosis": [{"condition": [{"concept": {"text": r["text"]}}]} for r in codes],
+            "reasonCode": earlier or [r for r in reasons if r not in codes] or None})
+        moved.append(f"Encounter/{v['id']}")
+        if earlier:
+            restored.append(f"Encounter/{v['id']}")
+    return {"visits_with_diagnosis_apart": moved, "booked_reason_restored": restored}
+
+
+UPGRADES = {"2-appointments-are-visits": upgrade_appointments_to_visits,
+            "3-diagnosis-apart-from-reason": upgrade_diagnosis_apart_from_reason}

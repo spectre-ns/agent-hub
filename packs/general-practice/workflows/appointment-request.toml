@@ -9,6 +9,11 @@ tells the patient at once to call 911 in an emergency (every patient is told the
 clock). Only a request about paperwork or a check-up (screened as routine) goes straight to the scheduler; any other
 reason is read by a nurse first, who sends it on for a slot or calls and books it. The nurse books the urgent ones. A patient the nurse could not reach goes to a physician. The scheduler sees the calendar and contact details,
 never the chart.
+
+The front desk books from the calendar through this workflow too: they pick the slot and what the visit is for, and
+ask the patient why they are coming. The same screen runs first. A red flag, an unclear reason or a request marked
+urgent is not booked: it goes to a nurse to call back, with the slot the desk had picked. Anything else is booked in
+the slot they picked, at once.
 """
 
 [trigger]
@@ -17,9 +22,23 @@ event = "appointment.requested"
 
 [[input]]
 name = "reason"
+label = "Why the patient is coming"
 type = "string"
 required = true
-help = "in the patient's words, as much as they want to say"
+help = "in the patient's words, as much as they want to say; a nurse reads it if it may be urgent"
+
+[[input]]
+name = "kind"
+label = "Visit for"
+type = "choice"
+choices = ["check-up", "follow-up", "new-concern", "prescription-renewal", "test-results", "forms", "immunization",
+           "prenatal", "well-baby", "counselling", "procedure"]
+help = "what the visit is for, as everyone who books may see it (the reason stays with the clinical team)"
+
+[[input]]
+name = "slot"
+type = "string"
+help = "the slot the front desk picked on the calendar (YYYY-MM-DDTHH:MM|member): booked at once unless the screen flags it"
 
 [[input]]
 name = "urgency"
@@ -51,6 +70,7 @@ channel = "patient-portal"
 to = "{{run.record}}"
 subject = "We have your request"
 body = "{{screen.advice}}"
+when = "input.slot == null or screen.red_flag == true or screen.unsure == true"
 
 [[steps]]
 id = "nurse-call"
@@ -63,10 +83,11 @@ escalate_to = "physician"
 after = ["screen"]
 when = "input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true"
 persons_only = true
-context = ["input.reason", "screen", "record:demographics", "record:clinical"]
+context = ["input.reason", "input.kind", "input.slot", "screen", "record:demographics", "record:clinical"]
 instructions = """The patient's request was marked urgent, or their words may describe an emergency (see the screen).
 Call them now. Advise 911 or the emergency department if needed, or book them in today yourself: no slot is
-proposed automatically for a request that comes to you. If you cannot reach them,
+proposed automatically for a request that comes to you, and a slot the front desk picked (input.slot) was not
+booked. If you cannot reach them,
 leave reached unticked: a physician decides what to do next."""
 [[steps.fields]]
 name = "reached"
@@ -108,7 +129,7 @@ role = "nurse"
 due = "4h"
 escalate_to = "physician"
 after = ["screen"]
-when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine != true"
+when = "input.slot == null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine != true"
 persons_only = true
 context = ["input.reason", "input.urgency", "screen", "record:demographics", "record:clinical"]
 instructions = """The patient's reason mentions something that sounds like a symptom, so no slot is booked until a
@@ -133,7 +154,7 @@ due = "1d"
 escalate_to = "front-desk"
 skill = "slot-proposal"
 after = ["screen", "triage"]
-when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and (screen.routine == true or triage.decision == 'book-a-slot' or triage.decision == 'book-it-soon')"
+when = "input.slot == null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and (screen.routine == true or triage.decision == 'book-a-slot' or triage.decision == 'book-it-soon')"
 context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "screen.admin_reason",
            "triage.decision", "triage.note_for_scheduler"]
 
@@ -147,16 +168,46 @@ action = "booking.book"          # the core's: written through the Booking field
 slot = "{{propose.slot}}"
 subject = "{{run.record}}"
 reason = "{{input.reason}}"
+kind = "{{input.kind}}"
+priority = "{{input.urgency}}"
 defaults = { status = "planned", class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" } }   # a booked visit
+
+[[steps]]
+id = "book-chosen"
+title = "Book the slot the front desk picked"
+kind = "automation"
+after = ["screen"]
+when = "input.slot != null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false"
+action = "booking.book"
+[steps.params]
+slot = "{{input.slot}}"
+subject = "{{run.record}}"
+reason = "{{input.reason}}"
+kind = "{{input.kind}}"
+priority = "{{input.urgency}}"
+defaults = { status = "planned", class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" } }
 
 [[steps]]
 id = "confirm"
 title = "Confirm with the patient"
 kind = "automation"
 after = ["book"]
+when = "input.slot == null"
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
 to = "{{run.record}}"
 subject = "Your appointment"
 body = "You are booked on {{book.when}} with {{book.member_name}} at Harbourview Family Medicine. Reply to change or cancel."
+
+[[steps]]
+id = "confirm-chosen"
+title = "Confirm the booking with the patient"
+kind = "automation"
+after = ["book-chosen"]
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your appointment"
+body = "You are booked on {{book-chosen.when}} with {{book-chosen.member_name}} at Harbourview Family Medicine. Reply to change or cancel."

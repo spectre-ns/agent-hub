@@ -138,6 +138,7 @@ class RecordType:
     layout: str = "record"   # "page": its formatted text is the page, with its fields and controls in a bar above
     standard: str | None = None  # "fhir-r4": its records are FHIR R4 resources (exported as FHIR); None: its own shape
     consent: dict | None = None  # {"kind", "date", "source", "withdrawn": paths, "lasts": {kind: "2y" or ""}}
+    booking: dict = field(default_factory=dict)  # a Booking type's [booking]: see _check_booking
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -185,7 +186,7 @@ KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "screen", "parent",
          "part_of",
-         "navigator", "layout", "standard", "consent"},
+         "navigator", "layout", "standard", "consent", "booking"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
@@ -195,6 +196,8 @@ KEYS = {
     "tab": {"label", "fields"},
     "navigator": {"tops", "hide"},
     "consent": {"kind", "date", "source", "withdrawn", "lasts"},
+    "booking": {"marked", "overbook", "overbook_label", "overbook_reason", "overbook_priority", "request",
+                "request_inputs"},
 }
 FIELD_BOOLS = ("required", "list", "show", "advanced", "fact", "match", "live")
 
@@ -582,6 +585,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         rt.layout = layout
     if doc.get("consent") is not None:
         problems += _check_consent(rt, doc["consent"])
+    if doc.get("booking") is not None:
+        problems += _check_booking(rt, doc["booking"])
     std = doc.get("standard")
     if std is not None:
         problems += _check_standard(rt, std)
@@ -595,6 +600,53 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
     if problems:
         raise DefinitionError(problems)
     return rt
+
+
+def _check_booking(rt: RecordType, b) -> list[str]:
+    """``[booking]``: how the calendar books a record of a type that extends ``Booking``. Its words and roles are the
+    practice's; the core only applies them. Sets ``rt.booking`` when sound.
+
+        marked = ["urgent"]                 # the priorities (base field priority) the calendar marks on a booking
+        overbook = ["physician"]            # the roles that may book over another booking, saying why
+        overbook_label = "Squeeze in as urgent"   # the booking form's words for doing so
+        overbook_reason = "Why it cannot wait"    # ...and for the reason they give (kept in base field overbooked)
+        overbook_priority = "urgent"        # the priority a booking made over another one gets
+        request = "appointment-request"     # a member who may not give the reason books through this workflow
+        request_inputs = ["kind", "reason"] # the workflow's inputs the booking form asks for (it is given the slot)
+    """
+    if not isinstance(b, dict):
+        return ["booking: a table (marked, overbook, overbook_label, overbook_reason, overbook_priority, request)"]
+    out = _unknown("booking", b, "booking")
+    if rt.extends != "Booking":
+        out.append("booking: only a type that extends Booking says how it is booked")
+    for k in ("marked", "overbook", "request_inputs"):
+        if k in b and not _strings(b[k]):
+            out.append(f"booking.{k}: a list of words")
+    for k in ("overbook_label", "overbook_reason", "overbook_priority", "request"):
+        if k in b and (not isinstance(b[k], str) or not b[k].strip()):
+            out.append(f"booking.{k}: text")
+    if b.get("overbook") and not (b.get("overbook_label") and b.get("overbook_reason")):
+        out.append("booking: a type that lets members book over another booking says how the form asks "
+                   "(overbook_label, overbook_reason)")
+    for k in ("overbook_priority",):
+        if b.get(k) and "priority" not in rt.base_map:
+            out.append(f"booking.{k}: the type keeps no priority (base field priority)")
+    if b.get("overbook") and "overbooked" not in rt.base_map:
+        out.append("booking.overbook: the type keeps no reason for booking over another (base field overbooked)")
+    if b.get("request_inputs") and not b.get("request"):
+        out.append("booking.request_inputs: name the workflow (request) they are inputs of")
+    pf = rt.field(((rt.base_map.get("priority") or {}).get("fields") or [""])[0])
+    if pf and pf.get("choices"):
+        for v in [*(b.get("marked") or []), *([b["overbook_priority"]] if b.get("overbook_priority") else [])]:
+            if v not in pf["choices"]:
+                out.append(f"booking: {v!r} is not one of {pf['name']}'s choices ({', '.join(pf['choices'])})")
+    if not out:
+        rt.booking = {"marked": list(b.get("marked") or []), "overbook": list(b.get("overbook") or []),
+                      "overbook_label": str(b.get("overbook_label") or ""),
+                      "overbook_reason": str(b.get("overbook_reason") or ""),
+                      "overbook_priority": str(b.get("overbook_priority") or ""),
+                      "request": str(b.get("request") or ""), "request_inputs": list(b.get("request_inputs") or [])}
+    return out
 
 
 LASTS = re.compile(r"(\d{1,4})([dwmy])")

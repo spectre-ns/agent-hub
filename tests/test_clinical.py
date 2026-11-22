@@ -99,7 +99,8 @@ def test_signed_note_keeps_follow_up(worked):
     booked = worked.engine.run(run["id"])["ctx"]["input"]["appointment"]  # the visit was booked: documenting finishes it
     visit = worked.records.read(*booked.split("/", 1))
     assert visit["status"] == "finished" and visit["plannedStartDate"]
-    assert visit["period"]["start"] and isinstance(visit["reasonCode"], list)
+    assert visit["period"]["start"] and visit["diagnosis"][0]["condition"][0]["concept"]["text"] == "ICD-9 034"
+    assert visit["reasonCode"] == [{"text": "Sore throat"}]  # the booked reason is kept apart from what was billed
     assert note["encounter"]["reference"] == booked
 
 

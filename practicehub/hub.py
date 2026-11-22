@@ -1936,12 +1936,59 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             up, hops = (self.parent_of(rt, above) if above else None), hops + 1
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
-        clashes = self.booking_clashes(rt, rec)
-        if clashes:
-            raise Invalid(f"the {rt.label.lower()} clashes with another booking",
-                          [self._clash_text(c, who) for c, who in clashes])
 
     # ------------------------------------------------------------------ the calendar: no member booked twice
+    def may_overbook(self, member: dict, rt: schema.RecordType) -> bool:
+        """Whether this member may book over another booking (an urgent squeeze-in): a person holding a role the
+        booking type's ``[booking] overbook`` names. Nobody, when it names none."""
+        roles = set((rt.booking or {}).get("overbook") or [])
+        return bool(roles) and member.get("kind") == "person" and member.get("status", "active") == "active" \
+            and bool(roles & set(self.roles_of(member["id"])))
+
+    def _check_clashes(self, rt: schema.RecordType, rec: dict, member: dict, overbook: str | None) -> list:
+        """The clashes this write may make: none, unless the member may book over another booking and says why
+        (``overbook``). Called inside the write's transaction, so two people booking the same time are not both told
+        it is free."""
+        clashes = self.booking_clashes(rt, rec)
+        if not clashes:
+            return []
+        texts = [self._clash_text(c, who) for c, who in clashes]
+        if overbook and overbook.strip():
+            if not self.may_overbook(member, rt):
+                roles = [self.role(r)["name"] for r in (rt.booking or {}).get("overbook") or [] if self._role_known(r)]
+                raise Denied(f"{member.get('name') or member.get('id')} may not book over another booking"
+                             + (f" (only: {', '.join(roles)})" if roles else "") + ": " + "; ".join(texts))
+            return clashes
+        hint = (rt.booking or {}).get("overbook_label") if self.may_overbook(member, rt) else ""
+        raise Invalid(f"the {rt.label.lower()} clashes with another booking"
+                      + (f": to book it anyway, choose {hint!r} and say why" if hint else ""), texts)
+
+    def _role_known(self, rid: str) -> bool:
+        return self.db.roles.exists({"_id": rid})
+
+    def _overbooked(self, rt: schema.RecordType, rec: dict, reason: str) -> dict:
+        """The booking with why it was booked over another, and the priority the type gives such a booking."""
+        b = rt.booking or {}
+        values = {"overbooked": reason.strip()[:500]}
+        if b.get("overbook_priority") and "priority" in rt.base_map:
+            values["priority"] = b["overbook_priority"]
+        return schema.compose(rt, values, self.member_ref_type(), rec)
+
+    def _note_overbook(self, member: dict, rt: schema.RecordType, ref: str, clashes: list, reason: str, *,
+                       cause: int | None, run_id: str | None) -> int:
+        """On the track: who booked whom over which bookings, and why (shown to those who may read the reason)."""
+        f = rt.field(((rt.base_map.get("overbooked") or {}).get("fields") or [""])[0])
+        return self.track.append(member, "booking.overbooked", ref, cause=cause, run_id=run_id, data={
+            "over": [f"{b['type']}/{b['record']['id']}" for b, _ in clashes],
+            "with": sorted({who for _, who in clashes}), "reason": reason.strip()[:500],
+            "classes": [rt.field_class(f)] if f else [rt.data_class]})
+
+    def _held_time(self, rt: schema.RecordType, rec: dict) -> tuple:
+        """What of a booking decides whom it holds and when: its time, its members, whether it still holds them."""
+        seen = schema.project(rt, rec, self.member_types())
+        return (seen.get("start"), seen.get("end"), sorted(seen.get("with") or []), bool(seen.get("cancelled")),
+                schema.is_active(rt, rec))
+
     @staticmethod
     def booking_span(seen: dict, slot_minutes: int = 15) -> tuple[datetime, datetime] | None:
         """When a booking (as ``schema.project`` reads it through ``Booking``) holds its members: start to end, or one
@@ -2062,7 +2109,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.db.mention_names.insert({"_id": f"{ref}|{key}", "from_ref": ref, "type": rt.id, "key": key})
 
     def create_record(self, member: dict, rtype: str, data: dict, *, cause: int | None = None,
-                      run_id: str | None = None) -> dict:
+                      run_id: str | None = None, overbook: str | None = None) -> dict:
+        """``overbook``: for a booking, why it is booked over another one (a member the type lets do so); it is kept
+        on the booking and on the track."""
         rt = self._type(rtype)
         if member.get("kind") != "automation":
             self.require(member, "writer", f"data_class:{rt.data_class}", f"write {rtype} records")
@@ -2082,26 +2131,33 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     raise Denied(f"only a workflow makes a {rt.label.lower()} {st!r}")
         self._workflow_fields(rt, member, run_id, {}, data)
         data = visibility.guard_write(self, member, rt, None, data)  # a field of a class they may not write
+        over = overbook.strip() if overbook and overbook.strip() and rt.is_a("Booking") else None
+        if over and self.may_overbook(member, rt):
+            data = self._overbooked(rt, data, over)
         self._check_record(rt, {"resourceType": rtype, **data})
-        with self.db:
+        with self.db:  # the clash check and the write are one step: two people booking one time are never both told yes
+            clashes = self._check_clashes(rt, {"resourceType": rtype, **data}, member, over)
             rec = self.records.create(rtype, data)
             self._write_version(rt, rec, member, run_id)
             ev = self.track.append(member, "record.created", f"{rtype}/{rec['id']}", cause=cause, run_id=run_id,
                                    data={"subject": self.subject_of(rec),
                                          "summary": self.title(rec)})
+            if clashes:
+                ev = self._note_overbook(member, rt, f"{rtype}/{rec['id']}", clashes, over, cause=ev, run_id=run_id)
             self.engine.on_record("created", rt, rec, None, member, ev)
         return self.redact(member, rec)  # what they wrote, as they may read it
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
                       expected_version: str | None = None, comment: str | None = None,
-                      authors: list[str] | None = None) -> dict:
+                      authors: list[str] | None = None, overbook: str | None = None) -> dict:
         """``comment``: why, kept on the version (and on the move, if the record moves). ``authors``: who wrote the
         change, when several people did (each must be a member who may write the record).
 
         ``_signature``: the move is made by a signature the record type allows (``moves_to``), which the signer's
         role was checked for; it may make moves reserved to workflows. ``expected_version``: the version the editor
-        saw; when someone changed the record since, nothing is saved (their change is never silently overwritten)."""
+        saw; when someone changed the record since, nothing is saved (their change is never silently overwritten).
+        ``overbook``: a booking moved over another one, and why (as for ``create_record``)."""
         rtype, rid = ref.split("/", 1)
         rt = self._type(rtype)
         if member.get("kind") != "automation" and _signature is None:
@@ -2146,7 +2202,20 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
                     moved = (old, new)
+            clashes, over = [], None
+            if rt.is_a("Booking"):
+                held, now_held = self._held_time(rt, before), self._held_time(rt, after)
+                if held != now_held and not (held[4] and not held[3]) and now_held[:3] != held[:3] \
+                        and not getattr(self, "_upgrading", False):
+                    raise Invalid(f"a {rt.label.lower()} that no longer holds its time (cancelled or over) is not "
+                                  f"moved: book a new one")
+                over = overbook.strip() if overbook and overbook.strip() else None
+                if over and self.may_overbook(member, rt):
+                    after = self._overbooked(rt, after, over)
+                    now_held = self._held_time(rt, after)
             self._check_record(rt, after)
+            if rt.is_a("Booking") and held != now_held:  # only a change of time, members or state can make a clash
+                clashes = self._check_clashes(rt, after, member, over)
             if authors:
                 for a in authors:
                     if a != member.get("id") and not self.may_write(self.member(a), rtype):
@@ -2161,6 +2230,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 ev = self.track.append(member, "record.transitioned", ref, cause=ev, run_id=run_id,
                                        data={"from": moved[0], "to": moved[1],
                                              **({"comment": comment.strip()} if comment and comment.strip() else {})})
+            if clashes:
+                ev = self._note_overbook(member, rt, ref, clashes, over, cause=ev, run_id=run_id)
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
             return self.redact(member, rec)
 
