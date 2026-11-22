@@ -69,13 +69,13 @@ id = "safety-net"
 title = "Tell the patient what to do in an emergency"
 kind = "automation"
 after = ["screen"]
+when = "input.slot == null or screen.red_flag == true or screen.unsure == true"
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
 to = "{{run.record}}"
 subject = "We have your request"
 body = "{{screen.advice}}"
-when = "input.slot == null or screen.red_flag == true or screen.unsure == true"
 
 [[steps]]
 id = "nurse-call"

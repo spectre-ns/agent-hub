@@ -444,3 +444,14 @@ def test_the_request_form_does_not_ask_for_the_machine_slot(hub):
     urgency = next(i for i in wf.inputs if i["name"] == "urgency")
     page = App(hub, dev=False)._field(urgency, [{"value": c, "label": c} for c in urgency["choices"]], None)
     assert "<span>None</span>" not in page and 'value="routine" required checked' in page
+
+
+def test_a_clean_routine_booking_from_a_slot_sends_no_emergency_message(hub):
+    """The safety-net message goes only when the desk picked no slot or the screen flags or is unsure: its condition
+    is a step setting, not a message parameter (it once sat under params and so went to every patient)."""
+    run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-liam"})["id"])
+    assert run["steps"]["safety-net"]["state"] == "skipped"
+    run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub),
+                                          inputs={"reason": "a form for work"})["id"])
+    assert run["steps"]["safety-net"]["state"] == "done"
