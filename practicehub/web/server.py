@@ -30,6 +30,7 @@ from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
+from .dashboard_pages import DashboardPages
 from .definitions_pages import DefinitionPages
 from .calendar_pages import CalendarPages
 from .mcp_pages import McpPages
@@ -69,7 +70,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, McpPages):
+class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -172,6 +173,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         self.calendar_routes(R)
         self.live_routes(R)
         self.record_routes(R)
+        self.dashboard_routes(R)
         self.definition_routes(R)
         self.office_routes(R)
         self.mcp_routes(R)
