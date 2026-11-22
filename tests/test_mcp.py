@@ -212,8 +212,18 @@ def test_connections_and_calls_are_on_the_track_with_the_client(hub, server):
     assert conn["data"]["client"] == {"name": "test client", "runs_in": mcp.residency(hub)}
     called = next(e for e in evs if e["action"] == "mcp.called" and e["data"]["tool"] == "search_patient")
     assert called["data"]["client_info"]["name"] == "Desk app" and called["data"]["credential"]
-    viewed = {e["subject"] for e in evs if e["action"] == "record.viewed" and e["actor"] == "jo"}
-    assert {r["ref"] for r in found} <= viewed  # each patient record read through MCP is a view
+    # the search is on each listed patient's access report, as a list page's is
+    listed = next(e for e in evs if e["action"] == "records.listed" and e["actor"] == "jo")
+    assert listed["data"]["how"] == "mcp" and listed["subject"] == "records:Patient"
+    assert {r["ref"] for r in found} <= set(listed["data"]["refs"])
+    pid = found[0]["ref"]
+    rows = [r for r in hub.access_report(M(hub, "rana"), pid) if r["who"] == "jo"]
+    assert any("mcp" in r["how"] for r in rows)
+    # opening one is a view of its own
+    rpc(server, "practice", tok, "tools/call", {"name": "read_patient", "arguments": {"id": pid.split("/")[1]}},
+        headers=sess)
+    assert any(e["action"] == "record.viewed" and e["subject"] == pid and e["actor"] == "jo"
+               for e in hub.track.list(limit=5000))
 
 
 def test_the_tool_list_is_made_once_per_message(hub, server, monkeypatch):
@@ -314,12 +324,10 @@ def test_create_search_and_move_go_through_the_hub_and_are_logged(hub, server):
     assert all(e["data"]["how"] == "mcp" and e["data"]["server"] == "dms" for e in called)
     created = next(e for e in evs if e["action"] == "record.created" and e["subject"] == ref)
     assert any(c["seq"] == created["cause"] for c in called)
-    # the search read it first (one view per member and record in the window, as on the pages)
-    assert any(e["action"] == "record.viewed" and e["subject"] == ref and "mcp dms/" in json.dumps(e["data"])
-               for e in evs)
+    assert any(e["action"] == "record.viewed" and "mcp dms/read_document" in json.dumps(e["data"]) for e in evs)
     assert "SOP-001" not in json.dumps([e["data"] for e in called])  # arguments are not logged
     # over HTTP the same
-    tok = token(hub, "jo")
+    tok = token(hub, "jo", ["dms"])
     _, _, body = rpc(server, "dms", tok, "tools/call", {"name": "search_document", "arguments": {}})
     res = json.loads(body)["result"]
     assert res["isError"] is False and res["structuredContent"]["records"] and res["content"][0]["type"] == "text"

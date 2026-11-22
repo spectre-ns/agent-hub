@@ -743,7 +743,8 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
         if a.get("state"):
             recs = [r for r in recs if schema.first(r, rt.lifecycle["path"]) == a["state"]][:limit]
         found = [_summary(hub, rt, r) for r in recs]
-        hub.note_views(member, [x["ref"] for x in found], how=f"{how} (search)")  # each one listed was seen
+        # each patient record listed is on its access report (opening one is a record.viewed of its own)
+        hub.note_list(member, recs, how="mcp", what=f"records:{target}", text=a.get("text") or None)
         return {"records": found, "_text": f"{len(found)} {rt.plural.lower()}"}
     if what == "read":
         ref = f"{target}/{a['id']}"
@@ -799,7 +800,8 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
             rows = w.get("rows") or [r for g in (w.get("groups") or {}).values() for r in g]
             d["rows"] = [_row(hub, w, r) for r in rows]
             if w["source"] == "records":
-                hub.note_views(member, [x["ref"] for x in d["rows"]], how=f"{how} (view)")
+                hub.note_list(member, [{"resourceType": w["type"], **r} for r in rows], how="mcp",
+                              what=f"view:{target}")
             if "counts" in w:
                 d["counts"] = w["counts"]
             out.append(d)
