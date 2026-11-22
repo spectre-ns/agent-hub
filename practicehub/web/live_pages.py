@@ -35,6 +35,7 @@ class LivePages:
         R("POST", base + r"/caret", self.api_live_caret)
         R("POST", base + r"/leave", self.api_live_leave)
         R("POST", base + r"/done", self.api_live_done)
+        R("POST", rf"/api/records/{T}/{I}/title", self.api_record_title)
         R("POST", rf"/records/{T}/{I}/comments", self.post_comment)
         R("POST", rf"/records/{T}/{I}/comments/(?P<cid>c-[0-9a-f]+)/(?P<verb>reply|resolve|reopen)",
           self.post_comment_verb)
@@ -88,6 +89,37 @@ class LivePages:
 
     def api_live_done(self, req, rtype, rid, field):
         return self.live.done(req["me"], f"{rtype}/{rid}", field)
+
+    def api_record_title(self, req, rtype, rid):
+        """The editor's title box: the record's ``title`` field, saved as it is typed (a version of its own; the live
+        session takes it in when it next saves). The hub checks the write, as for any edit."""
+        rt = self.hub.record_type(rtype)
+        if not rt or not self._title_field(rt):
+            raise NotFound(f"a {rtype} has no title to change here")
+        v = " ".join(str(self.body_json(req).get("title", "")).split())
+        if not v or len(v) > 200:
+            raise Invalid("a title is 1 to 200 characters")
+        ref = f"{rtype}/{rid}"
+        rec = self.hub.records.read(rtype, rid)
+        if rec and rec.get("title") != v:
+            self.hub.update_record(req["me"], ref, {"title": v})
+        return {"ok": True, "title": v}
+
+    @staticmethod
+    def _title_field(rt):
+        return next((f for f in rt.fields if f["path"] == "title" and f["type"] in ("string", "text")), None)
+
+    def _publish_move(self, rt, st):
+        """The move the editor's main button makes, Confluence-style "Publish": the first move a person makes from
+        the state a new record starts in, when the record is still in it and the move needs nothing more."""
+        lc = rt.lifecycle
+        if not lc or st != lc.get("initial"):
+            return None
+        for t in lc.get("transition", []):
+            if (st in t["from"] or "*" in t["from"]) and t["to"] != st and t["by"] != "workflow" \
+                    and not t["fields"] and not t["comment"] and not self._undoing(t):
+                return {"to": t["to"], "label": t["label"]}
+        return None
 
     # ------------------------------------------------------------------ on the record's page
     def live_parts(self, req, rt, rec, ref, st, tab, may_write, locked) -> dict:
@@ -146,6 +178,7 @@ class LivePages:
             why = f"It is {st}: it is not edited."
         url = f"/records/{e(rt.id)}/{e(rec['id'])}"
         out["article"] = (f' data-live="{e(json.dumps({"ref": ref, "field": f["path"], "may": why is None, "active": bool(everyone), "me": me["id"], "url": f"/records/{rt.id}/{rec["id"]}",
+                                                         **self._editor_extras(rt, rec, st),
                                                          "colors": [self.AV_COLORS[i % len(self.AV_COLORS)] for i in range(8)]}))}"')
         if why is None:
             out["edit"] = (f'<a class="btn primary" href="{url}?edit=1#edit" data-live-edit accesskey="e" '
@@ -155,6 +188,15 @@ class LivePages:
                             + "</datalist>")
         out["side"], bottom = self._comments_panel(me, rt, rec, ref)
         out["after"] = bottom + out["after"]
+        return out
+
+    def _editor_extras(self, rt, rec, st) -> dict:
+        out = {}
+        if self._title_field(rt):
+            out["title"] = str(rec.get("title") or "")
+        mv = self._publish_move(rt, st)
+        if mv:
+            out["publish"] = mv
         return out
 
     def _live_faces(self, people) -> str:
