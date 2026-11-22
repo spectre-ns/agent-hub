@@ -137,16 +137,18 @@ def report(hub, member, *, days: int = DEFAULT_DAYS, now: datetime | None = None
     for ids in _batches(list(by_run)):
         for ev in db.events.find({"run_id": {"$in": ids},
                                   "action": {"$in": ["run.completed", "item.claimed", "item.escalated"]}},
-                                 fields=["action", "run_id", "subject", "at"]):
+                                 fields=["action", "run_id", "subject", "at", "data"]):
             if ev["action"] == "run.completed":
                 finished_at.setdefault(ev["run_id"], ev["at"])
             elif ev["action"] == "item.claimed":
                 claimed_at.setdefault(ev["subject"], ev["at"])  # the first time it was taken
-            else:
-                handed_up[ev["subject"]] = handed_up.get(ev["subject"], 0) + 1
-        items += db.items.find({"run_id": {"$in": ids}, "kind": {"$nin": list(NOT_WORK)}},
+            else:  # by item and step: one item walks a run's steps
+                key = (ev["subject"], (ev.get("data") or {}).get("step"))
+                handed_up[key] = handed_up.get(key, 0) + 1
+        items += db.items.find({"run_id": {"$in": ids}, "kind": {"$nin": list(NOT_WORK)},
+                                "status": {"$ne": "folded"}},
                                fields=["run_id", "step_id", "status", "created_at", "updated_at", "due_at",
-                                       "escalated"])
+                                       "escalated", "history"])
     defs: dict = {}
     flows: dict = {}
 
@@ -180,31 +182,56 @@ def report(hub, member, *, days: int = DEFAULT_DAYS, now: datetime | None = None
         if r.get("deadline_missed_at"):
             f["deadline_missed"] += 1
 
+    known_items = {it["_id"] for it in items}
+    visits = []  # (item, step, began, first taken, done, due, escalations, open, handed up)
     for it in items:
+        subj = f"item:{it['_id']}"
+        if it.get("history"):
+            # a step's time from the item's step history: each step a person did on this item (a child's step is
+            # counted once, on the child; an entry of an item folded in from before counts here)
+            for h in it["history"]:
+                if h.get("kind") not in ("task", "gate"):
+                    continue
+                if h.get("item") != it["_id"] and h.get("item") in known_items:
+                    continue
+                hsub = f"item:{h.get('item') or it['_id']}"
+                ended = h.get("done_at") if h.get("outcome") not in (None, "cancelled") else None
+                visits.append((it, h["step"], h.get("started_at"), h.get("taken_at") or claimed_at.get(hsub)
+                               if hsub != subj else h.get("taken_at"), ended, h.get("due_at"),
+                               int(h.get("escalated") or 0), not h.get("done_at") and it["status"] in OPEN_STATES,
+                               handed_up.get((subj, h["step"]), 0) + (handed_up.get((hsub, None), 0)
+                                                                       if hsub != subj else 0)))
+            continue
+        visits.append((it, it["step_id"], it["created_at"], claimed_at.get(subj),
+                       it["updated_at"] if it["status"] == "done" else None, it.get("due_at"),
+                       int(it.get("escalated") or 0), it["status"] in OPEN_STATES,
+                       sum(v for (sj, _), v in handed_up.items() if sj == subj)))
+    for it, sid, began, taken, ended, due_at, escalated, still_open, handed in visits:
         run = by_run.get(it["run_id"])
         if not run:
             continue
         f = flow(run["workflow_id"], run.get("version"))
-        s = f["steps"].setdefault(it["step_id"], {"count": 0, "wait": [], "work": [], "total": [], "overdue": 0,
-                                                  "escalations": 0})
+        s = f["steps"].setdefault(sid, {"count": 0, "wait": [], "work": [], "total": [], "overdue": 0,
+                                        "escalations": 0})
         s["count"] += 1
-        created, claim = _t(it["created_at"]), _t(claimed_at.get(f"item:{it['_id']}"))
-        done = _t(it["updated_at"]) if it["status"] == "done" else None
+        created, claim = _t(began), _t(taken)
+        done = _t(ended)
         if claim or done:
             s["wait"].append(_secs(created, claim or done))
         if claim and done:
             s["work"].append(_secs(claim, done))
         if done:
             s["total"].append(_secs(created, done))
-        due = _t(it.get("due_at"))
-        late = bool(due) and ((done and done > due) or (it["status"] in OPEN_STATES and now > due))
-        if late or int(it.get("escalated") or 0):
+        due = _t(due_at)
+        late = bool(due) and ((done and done > due) or (still_open and now > due))
+        if late or escalated:
             s["overdue"] += 1
-        s["escalations"] += int(it.get("escalated") or 0) + handed_up.get(f"item:{it['_id']}", 0)
+        s["escalations"] += escalated + handed
 
     # the work open now, by how long it has been waiting (whenever its run started)
     open_items = db.items.find({"status": {"$in": ["open", "claimed"]}, "kind": {"$nin": list(NOT_WORK)}},
-                               sort=[("n", -1)], limit=max_open + 1, fields=["run_id", "created_at"])
+                               sort=[("n", -1)], limit=max_open + 1,
+                               fields=["run_id", "created_at", "step_started_at"])
     open_capped = len(open_items) > max_open
     open_items = open_items[:max_open]
     run_flow: dict = {k: (v["workflow_id"], v.get("version")) for k, v in by_run.items()}
@@ -218,7 +245,7 @@ def report(hub, member, *, days: int = DEFAULT_DAYS, now: datetime | None = None
         if not got:
             continue
         f = flow(*got)
-        age = _secs(_t(it["created_at"]), now) or 0
+        age = _secs(_t(it.get("step_started_at") or it["created_at"]), now) or 0
         f["open_now"] += 1
         f["ages"][next(i for i, (lim, _) in enumerate(AGES) if lim is None or age < lim)] += 1
 

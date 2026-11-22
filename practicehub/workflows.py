@@ -35,6 +35,10 @@ nothing; ``{{each}}`` is the item (a reference stays a reference) and ``each_rec
 that ran) and ``passed_over`` (the items ``where`` left out). This is how a workflow acts on linked records,
 including records another module owns, without code.
 
+A ``task`` with ``for_each = "{{input.reviewers}}"`` is done once per person of that list (member ids or references to
+them): each gets a child item of the run's item, assigned to them when they hold the step's role, and the step is
+done when every one of them has done theirs. Its output is ``each``: one answer per person (with ``person``).
+
 A ``wait`` step does nothing until ``until`` holds, checked again whenever a record changes. With ``for_each`` it
 waits until ``until`` holds for every item (over ``each`` and ``each_record``), e.g. until every document a CAPA
 revised is approved again. Its ``role``, if given, gets a notice saying what the work waits for. Its output is
@@ -123,6 +127,7 @@ class Step:
     signer: str = "any"
     meaning: str = ""
     meanings: dict = field(default_factory=dict)   # outcome -> what signing that outcome says
+    meanings_if_did: dict = field(default_factory=dict)  # earlier step -> what signing says when its doer signs
     agent_criteria: str | None = None
     action: str | None = None
     params: dict = field(default_factory=dict)
@@ -257,6 +262,8 @@ def parse(source: str, catalog=None) -> Workflow:
             not_by=list(raw.get("not_by", []) or []), outcomes=list(raw.get("outcomes", []) or []),
             signer=raw.get("signer", "any"), meaning=str(raw.get("meaning", "")).strip(),
             meanings={str(k): str(v).strip() for k, v in (raw.get("meanings") or {}).items()} if isinstance(raw.get("meanings"), dict) else {},
+            meanings_if_did={str(k): str(v).strip() for k, v in (raw.get("meanings_if_did") or {}).items()}
+            if isinstance(raw.get("meanings_if_did"), dict) else {},
             agent_criteria=raw.get("agent_criteria"), action=raw.get("action"), params=dict(raw.get("params", {}) or {}),
             persons_only=bool(raw.get("persons_only", False)), block=raw.get("block") or None,
             due=raw.get("due"), escalate_to=raw.get("escalate_to"), priority=raw.get("priority", "normal"), assign_to=raw.get("assign_to"),
@@ -267,8 +274,8 @@ def parse(source: str, catalog=None) -> Workflow:
         if hidden:  # written after [steps.params] in TOML, a step setting silently becomes a parameter
             problems.append(f"{where}: {', '.join(hidden)} is a step setting, not a parameter: put it above "
                             f"[steps.params], with the step's other settings")
-        if step.for_each and kind not in ("automation", "wait"):
-            problems.append(f"{where}: for_each is for automations and waits")
+        if step.for_each and kind not in ("automation", "wait", "task"):
+            problems.append(f"{where}: for_each is for automations, waits and tasks (a task once per person)")
         if step.where and kind != "automation":
             problems.append(f"{where}: where is for automations")
         timed = [k for k, v in (("until", step.until), ("for", step.wait_for), ("at", step.at)) if v]
@@ -346,6 +353,12 @@ def parse(source: str, catalog=None) -> Workflow:
                     problems.append(f"{where}: meanings names {o!r}, which is not one of its outcomes")
                 elif not text:
                     problems.append(f"{where}: the meaning for {o!r} is empty")
+            if raw.get("meanings_if_did") is not None and not isinstance(raw.get("meanings_if_did"), dict):
+                problems.append(f"{where}: meanings_if_did is a table of earlier step = \"what signing says when "
+                                f"whoever did that step signs\"")
+            for o, text in step.meanings_if_did.items():
+                if not text:
+                    problems.append(f"{where}: the meaning for whoever did {o!r} is empty")
             if step.agent_criteria and step.signer == "person":
                 problems.append(f"{where}: agent_criteria has no effect when only a person may sign")
         if step.block:
@@ -383,10 +396,29 @@ def parse(source: str, catalog=None) -> Workflow:
                     pass
     if not steps:
         problems.append("steps: a workflow needs at least one step")
+    by_id = {s.id: s for s in steps}
+
+    def before(sid: str) -> set:
+        """Every step a step waits on, directly or through others."""
+        out, todo = set(), list(by_id[sid].after) if sid in by_id else []
+        while todo:
+            a = todo.pop()
+            if a not in out and a in by_id:
+                out.add(a)
+                todo += by_id[a].after
+        return out
+
+    for s in steps:
+        if s.meanings_if_did and s.kind != "gate":
+            problems.append(f"step {s.id}: meanings_if_did is for a gate's signature")
+        for o in s.meanings_if_did:
+            if o not in ids:
+                problems.append(f"step {s.id}: meanings_if_did names a step {o!r} that does not exist")
+            elif o not in before(s.id):
+                problems.append(f"step {s.id}: meanings_if_did names {o!r}, which does not come before it")
     if not problems:
         # cycles
         state: dict[str, int] = {}
-        by_id = {s.id: s for s in steps}
 
         def visit(sid, trail):
             if state.get(sid) == 1:

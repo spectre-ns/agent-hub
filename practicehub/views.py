@@ -549,7 +549,7 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
                 ok = it.get("assignee") == member.get("id") or it.get("role") in (member.get("roles") or [])
             else:
                 wf = viewer.workflow_of_run(run["id"])
-                ok = bool(wf) and viewer.step_visible(wf, it["step_id"])[0]
+                ok = bool(wf) and (viewer.step_visible(wf, it["step_id"])[0] if it.get("step_id") else True)
             if ok and not (it["kind"] == "notice" and it.get("assignee") == member.get("id")) \
                     and hub.restrictions.withholds_from(member, run.get("record")):
                 ok = False

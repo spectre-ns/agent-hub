@@ -901,9 +901,14 @@ def test_overdue_work_is_escalated_once_per_time_allowed(quality):
 
 def test_a_released_item_must_have_been_claimed(worked):
     hub = worked
-    done = hub.db.items.find_one({"status": "done", "claimed_by": {"$ne": None}}, sort="n")
-    with pytest.raises(Invalid):
-        hub.engine.release(M(hub, done["claimed_by"]), done["id"])
+    run = run_of(hub, "visit-documentation")
+    amara = M(hub, "dr-amara")
+    iid = item_for(hub, run, "edit")
+    d = hub.engine.context(amara, iid)["draft"]
+    hub.engine.complete(amara, iid, {"subjective": d["subjective"], "objective": d["objective"],
+                                     "assessment": d["assessment"], "plan": d["plan"], "diagnosis_codes": "034"})
+    with pytest.raises(Invalid):  # the step they did is done; the item has moved on, and they never took it there
+        hub.engine.release(amara, iid)
 
 
 def test_a_module_install_that_fails_leaves_the_practice_as_it_was(hub, monkeypatch):
@@ -4447,3 +4452,52 @@ def test_an_agent_is_given_no_role_its_sponsor_does_not_reach_and_nothing_is_wri
     with pytest.raises(Invalid):
         hub.approve_roles(M(hub, "dr-amara"), "portal")
     assert set(hub.authz.read(relation="assignee")) == before and "physician" not in M(hub, "portal")["roles"]
+
+
+
+# ------------------------------------------------------------------------------------------- what a signature says
+SIGNED = ('id = "{wid}"\ntitle = "Note check"\n[trigger]\nstarters = ["front-desk"]\n'
+          '[[steps]]\nid = "write"\ntitle = "Write it"\nkind = "task"\nrole = "physician"\n'
+          '[[steps.fields]]\nname = "done"\ntype = "boolean"\n'
+          '[[steps]]\nid = "sign"\ntitle = "Sign it"\nkind = "gate"\nrole = "physician"\nsigner = "person"\n'
+          'after = ["write"]\noutcomes = ["sign", "return"]\nmeaning = "I reviewed this note"\n{extra}')
+AUTHOR = 'meanings_if_did = { write = "I wrote this note and it is accurate" }\n'
+
+
+def test_a_signature_says_authorship_when_the_signer_wrote_it():
+    """``meanings_if_did``: the meaning when the signer did an earlier step; it must name one that comes before."""
+    from practicehub import workflows as wfmod
+    wf = wfmod.parse(SIGNED.format(wid="w", extra=AUTHOR))
+    assert wf.step("sign").meanings_if_did == {"write": "I wrote this note and it is accurate"}
+    for bad, why in (('meanings_if_did = { nope = "x" }\n', "does not exist"),
+                     ('meanings_if_did = { sign = "x" }\n', "does not come before"),
+                     ('meanings_if_did = { write = "" }\n', "is empty")):
+        with pytest.raises(wfmod.DefinitionError) as exc:
+            wfmod.parse(SIGNED.format(wid="w", extra=bad))
+        assert any(why in p for p in exc.value.problems), exc.value.problems
+
+
+@pytest.mark.parametrize("writer,signer,meaning", [
+    ("dr-amara", "dr-amara", "I wrote this note and it is accurate"),
+    ("dr-amara", "dr-liam", "I reviewed this note"),
+    ("taken-over", "dr-liam", "I wrote this note and it is accurate"),   # who did it, after a take-over
+])
+def test_the_signed_meaning_is_the_one_for_whoever_did_the_step(hub, writer, signer, meaning):
+    wid = "note-check"
+    p = hub.propose_workflow(M(hub, "jo"), SIGNED.format(wid=wid, extra=AUTHOR), "authorship")
+    hub.approve_workflow(M(hub, "rana"), wid, p["version"])
+    run = hub.engine.start(M(hub, "jo"), wid)
+    iid = item_for(hub, run, "write")
+    if writer == "taken-over":  # dr-amara took it, then it moved to dr-liam, who wrote it
+        hub.engine.claim(M(hub, "dr-amara"), iid)
+        hub.engine.take_over(M(hub, "rana"), iid, "away", to="dr-liam")
+        writer = "dr-liam"
+    hub.engine.complete(M(hub, writer), iid, {"done": True})
+    sign = item_for(hub, run, "sign")
+    assert sign == iid                                       # the same item, now at the signature
+    me = M(hub, signer)
+    shown = hub.engine.context(me, sign)["step"]
+    assert shown["meaning"] == meaning and shown["meanings"]["sign"] == meaning   # what they see before signing
+    hub.engine.decide(me, sign, "sign", "", seen=hub.engine.shown_digest(me, sign))
+    signed = [e for e in hub.track.list(run_id=run["id"]) if e["action"] == "gate.decided"]
+    assert signed[0]["data"]["signed"]["meaning"] == meaning and hub.track.verify_signature(signed[0])

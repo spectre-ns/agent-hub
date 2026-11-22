@@ -42,14 +42,24 @@ def _seed(hub, now):
                             "started_by": "jo", "refs": [ref], "root_event": None, "created_at": _z(created),
                             "updated_at": _z(created), **extra})
 
-    def item(iid, rid, step, created, *, claimed=None, done=None, due=None, escalated=0):
-        hub.db.items.insert(_item_doc(hub, id=iid, run_id=rid, step_id=step, kind="task",
-                                      title=f"About {patient['id']}", status="done" if done else
-                                      ("claimed" if claimed else "open"), created_at=_z(created),
-                                      updated_at=_z(done or claimed or created), due_at=_z(due) if due else None,
-                                      escalated=escalated))
+    def step(iid, rid, step, created, *, claimed=None, done=None, due=None, escalated=0):
+        """One step in the run's item's history (one item walks each run's steps)."""
         if claimed:
             _event(hub, next(ev), "item.claimed", claimed, rid, f"item:{iid}")
+        return {"step": step, "title": step, "kind": "task", "role": None, "assignee": None,
+                "started_at": _z(created), "taken_at": _z(claimed) if claimed else None,
+                "done_at": _z(done) if done else None, "by": "jo" if done else None,
+                "outcome": "done" if done else None, "due_at": _z(due) if due else None, "escalated": escalated,
+                "item": iid}
+
+    def item(iid, rid, *history):
+        last = history[-1]
+        hub.db.items.insert(_item_doc(hub, id=iid, run_id=rid, step_id=last["step"], kind="task",
+                                      title=f"About {patient['id']}", status="done" if last["done_at"] else
+                                      ("claimed" if last["taken_at"] else "open"), created_at=history[0]["started_at"],
+                                      updated_at=last["done_at"] or last["taken_at"] or last["started_at"],
+                                      step_started_at=last["started_at"], due_at=last["due_at"],
+                                      escalated=last["escalated"], history=list(history)))
 
     for i, (hours, wait) in enumerate(((10, 4), (20, 6), (30, 8))):
         rid = f"run-seed{i}"
@@ -57,16 +67,18 @@ def _seed(hub, now):
             if i == 0 else {}
         run(rid, "completed", base, **extra)
         late = i == 2
-        item(f"item-seed{i}r", rid, "review", base, claimed=base + timedelta(hours=wait),
-             done=base + timedelta(hours=wait + 1), due=base + timedelta(hours=2) if late else None,
-             escalated=1 if late else 0)
+        iid = f"item-seed{i}"
         start = base + timedelta(hours=9)
-        item(f"item-seed{i}a", rid, "accept", start, claimed=start + timedelta(minutes=10),
-             done=start + timedelta(minutes=40))
+        item(iid, rid,
+             step(iid, rid, "review", base, claimed=base + timedelta(hours=wait),
+                  done=base + timedelta(hours=wait + 1), due=base + timedelta(hours=2) if late else None,
+                  escalated=1 if late else 0),
+             step(iid, rid, "accept", start, claimed=start + timedelta(minutes=10),
+                  done=start + timedelta(minutes=40)))
         _event(hub, next(ev), "run.completed", base + timedelta(hours=hours), rid)
     run("run-seedc", "cancelled", base)
     run("run-seedo", "running", base)
-    item("item-seedo", "run-seedo", "review", base, due=base + timedelta(days=3))
+    item("item-seedo", "run-seedo", step("item-seedo", "run-seedo", "review", base, due=base + timedelta(days=3)))
     run("run-seedold", "completed", now - timedelta(days=40))
     hub.db.items.insert(_item_doc(hub, id="item-seedn", run_id="run-seedo", step_id="review", kind="notice",
                                   title=f"Overdue: {hub.title(patient)}", created_at=_z(base)))

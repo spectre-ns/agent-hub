@@ -334,7 +334,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         else:
             viewer = Viewer(self.hub, me)
             wf = viewer.workflow_of_run(run["id"])
-            ok = item.get("assignee") == me.get("id") or (bool(wf) and viewer.step_visible(wf, item["step_id"])[0])
+            ok = item.get("assignee") == me.get("id") or (bool(wf) and (
+                viewer.step_visible(wf, item["step_id"])[0] if item.get("step_id") else True))  # between steps: the run
         if item["kind"] == "notice" and item.get("assignee") == me.get("id"):
             return True  # told by name (a break-glass review goes to whom it is for)
         if item.get("assignee") == me.get("id") or (ok and item.get("role") and item["role"] in (me.get("roles") or [])):
@@ -870,7 +871,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         return f'{self._code()}-{row["n"] if row else "?"}'
 
     ITEM_STATUS = {"open": ("To do", ""), "claimed": ("In progress", "prog"), "held": ("Waiting for sponsor", "wait"),
-                   "done": ("Done", "done"), "cancelled": ("Cancelled", "")}
+                   "done": ("Done", "done"), "cancelled": ("Cancelled", ""), "waiting": ("Waiting", "wait"),
+                   "folded": ("Moved", "")}
     STEP_STATE = {"pending": ("Waiting", ""), "active": ("In progress", "prog"), "done": ("Done", "done"),
                   "skipped": ("Skipped", ""), "failed": ("Failed", "bad"), "waiting": ("Waiting", "wait"),
                   "if-needed": ("If needed", "")}
@@ -888,8 +890,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
 
     @staticmethod
     def _ki(kind: str) -> str:
-        letter = {"task": "T", "gate": "D", "notice": "!", "hold": "H", "automation": "A"}.get(kind, "?")
-        label = {"gate": "decision", "hold": "approval"}.get(kind, kind)
+        letter = {"task": "T", "gate": "D", "notice": "!", "hold": "H", "automation": "A", "wait": "W"}.get(kind, "?")
+        label = {"gate": "decision", "hold": "approval", "wait": "waiting"}.get(kind, kind)
         return f'<span class="ki {e(kind)}" title="{e(label)}">{letter}</span>'
 
     def member_name(self, mid):
@@ -1058,8 +1060,17 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         me, eng, q = req["me"], self.hub.engine, req["query"]
         who, group = q.get("who", ""), q.get("group", "")
         items = [i for i in eng.queue(req["me"]) if i["kind"] != "notice"]
-        done_rows = self.hub.db.items.find({"status": "done", "kind": {"$in": ["task", "gate"]}},
+        wid = q.get("workflow", "") if group == "step" else ""
+        flt = {"run_id": {"$in": [r["_id"] for r in self.hub.db.runs.find({"workflow_id": wid}, fields=["_id"],
+                                                                           sort=[("created_at", -1)], limit=500)]}} \
+            if wid else {}
+        if wid:
+            items = [i for i in items if i["run_id"] in flt["run_id"]["$in"]]
+        done_rows = self.hub.db.items.find({**flt, "status": "done", "kind": {"$in": ["task", "gate"]}},
                                            sort=[("updated_at", -1)], limit=12, fields=["id"])
+        # a run's item between people's steps (an automation running, a wait waiting): seen, in no one's to-do
+        done_rows += self.hub.db.items.find({**flt, "status": "waiting"}, sort=[("updated_at", -1)], limit=24,
+                                            fields=["id"])
         runs: dict = {}
 
         def run_of(rid):
@@ -1096,11 +1107,25 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             items = [i for i in items if not agent_work(i)]
 
         def column(it):
-            if it["kind"] == "hold":
+            if it["kind"] == "hold" or it["status"] == "waiting":
                 return "wait"
             return {"open": "todo", "claimed": "prog", "done": "done"}.get(it["status"], "todo")
 
         cols = self.BOARD_COLS
+        swf = None
+        if wid:  # one workflow, a column per step: where each run's item is now
+            try:
+                swf = self.hub.workflow(wid)[0]
+            except (NotFound, KeyError):
+                swf = None
+        if swf is not None:
+            sids = [st.id for st in swf.steps if st.kind in ("task", "gate", "wait")]
+            cols = [(f"step-{sid}", swf.step(sid).title, "") for sid in sids] + [("done", "Done recently", "done")]
+
+            def column(it):  # noqa: F811 - the step board's columns
+                if it["status"] == "done":
+                    return "done"
+                return f"step-{it['step_id']}" if it.get("step_id") in sids else f"step-{sids[0]}" if sids else ""
         back = self.here(req)
 
         def lane_of(it):
@@ -1136,18 +1161,27 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                    + '<span class="gap"></span><span class="lbl">Group by</span>'
                    + self._chip(q, "group", "", "None") + self._chip(q, "group", "workflow", "Workflow")
                    + self._chip(q, "group", "role", "Role") + "</div>")
+        flows = [w["workflow"] for w in self.hub.workflows()]
+        if flows:  # one workflow on a column per step
+            opts = "".join(f'<option value="{e(w.id)}"{" selected" if w.id == wid else ""}>{e(w.title)}</option>'
+                           for w in flows)
+            filters += (f'<form method="get" action="/board" class="filters"><input type="hidden" name="group" '
+                        f'value="step"><label>One workflow, by step <select name="workflow">{opts}</select></label>'
+                        f'<button class="secondary">Show</button></form>')
         return self.layout(req, "Board", filters + "".join(out), crumbs=[("/", "Practice"), ("", "Board")],
                            actions='<a class="btn secondary" href="/runs">All work</a>')
 
-    BOARD_COLS = [("todo", "To do", ""), ("prog", "In progress", "prog"), ("wait", "Awaiting approval", "wait"),
+    BOARD_COLS = [("todo", "To do", ""), ("prog", "In progress", "prog"), ("wait", "Waiting", "wait"),
                   ("done", "Done recently", "done")]
 
     def _tile(self, it, moves: dict | None = None, back: str = "/board") -> str:
         flag = '<span class="badge person">people only</span>' if it["persons_only"] else ""
         note = f'<div class="why">{e(it["note"])}</div>' if it.get("note") and it["status"] != "done" else ""
         urgent = " urgent" if it.get("priority") == "urgent" else ""
+        now = it.get("waiting") if it["status"] == "waiting" else it.get("step_title")
+        about = it.get("run_title", "") if it.get("run_title", "") != it["title"] else ""
         inner = (f'<div class="t">{e(it["title"])}{self._urgency(it)}</div>'
-                 f'<div class="about">{e(it.get("run_title", ""))}</div>{note}<div class="foot">{self._ki(it["kind"])}'
+                 f'<div class="about">{e(" · ".join(x for x in (now, about) if x))}</div>{note}<div class="foot">{self._ki(it["kind"])}'
                  f'<span class="key">{self._key(it["id"])}</span>{flag}{self._av(it["claimed_by"])}</div>')
         return self.board_card(inner, f'/items/{it["id"]}', urgent, it["id"], it["title"], moves or {},
                                "/board/move", {"item": it["id"], "_back": back})
@@ -1432,6 +1466,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
     def page_item(self, req, iid, kept: dict | None = None, error: Exception | None = None):
         me, eng = req["me"], self.hub.engine
         item, run = self._item_for(me, iid)
+        if item["status"] == "folded" and item.get("folded_into"):
+            raise Redirect(f"/items/{item['folded_into']}")  # a step's own item from before: now the run's one item
         wf, _ = self.hub.workflow(run["workflow_id"], run["version"])
         try:
             step = wf.step(item["step_id"])
@@ -1495,6 +1531,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             if item["kind"] == "notice" and item["status"] not in ("done", "cancelled"):
                 actions = (f'<form method="post" action="/items/{iid}/ack" class="inline"><button>Acknowledge'
                            f'</button></form>')
+        elif item["status"] == "waiting":
+            main.append(f'<div class="card"><p><b>{e(item.get("waiting") or "Waiting for the workflow to go on")}'
+                        f'</b></p><p class="muted">Nobody needs to do anything here yet; it comes back to someone '
+                        f'when the next step is theirs.</p></div>')
         elif item["status"] in ("done", "cancelled"):
             out = item["output"] or {}
             ok, missing = (True, [])
@@ -1532,10 +1572,50 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                            f'<option value="queue">Anyone who can</option></select></label>'
                            f'<input name="note" placeholder="why (they will see it)" required>'
                            f'<button>{"Take over" if item["escalated"] else "Reassign"}</button></form>')
+        main.append(self._item_family(me, item))
+        main.append(self._step_history(me, wf, item))
         events = [ev for ev in self.hub.track.list(run_id=run["id"], limit=500) if ev["subject"] == f"item:{iid}"]
         main.append(f'<div class="section"><h2>Activity</h2>{self._activity(list(reversed(events)), me)}</div>')
         body = f'<div class="issue"><div data-modal-body>{"".join(main)}</div>{details}</div>'
         return self.layout(req, item["title"], body, crumbs=crumbs, actions=actions)
+
+    def _item_family(self, me, item) -> str:
+        """The item a child closes back into, and the children an item waits on (each with its key and holder)."""
+        out = []
+        if item.get("parent_id"):
+            out.append(f'<p>Part of <a href="/items/{e(item["parent_id"])}">{e(self._key(item["parent_id"]))}</a>'
+                       f'</p>')
+        kids = self.hub.db.items.find({"_id": {"$in": list(item.get("children") or [])}}, sort="n") \
+            if item.get("children") else []
+        if kids:
+            rows = "".join(f'<li><a href="/items/{e(k["_id"])}">{e(self._key(k["_id"]))}</a> '
+                           f'{e(k.get("step_title") or k["title"])} {self._loz(self.ITEM_STATUS, k["status"])} '
+                           f'{e(self.member_name(k.get("claimed_by") or k.get("assignee")) or "")}</li>'
+                           for k in kids)
+            out.append(f'<div class="section"><h2>Parts</h2><ul class="plain">{rows}</ul></div>')
+        return "".join(out)
+
+    def _step_history(self, me, wf, item) -> str:
+        """The steps this item has been through, in order: who held each, when it began and ended, and how."""
+        hist = item.get("history") or []
+        if not hist:
+            return ""
+        viewer = Viewer(self.hub, me)
+        rows = []
+        for h in hist:
+            if h.get("step") and not viewer.step_visible(wf, h["step"])[0]:
+                rows.append('<tr><td colspan="4" class="muted">A step you may not see</td></tr>')
+                continue
+            who = self.member_name(h.get("by")) or self.member_name(h.get("assignee")) or \
+                self._role_words(h.get("role")) or ""
+            how = (h.get("outcome") or ("in progress" if not h.get("done_at") else "done")).replace("_", " ")
+            extra = (" (ran out of time)" if h.get("timed_out") else "") + \
+                (f" (escalated {h['escalated']}x)" if h.get("escalated") else "")
+            rows.append(f'<tr><td>{e(h.get("title") or "")}</td><td>{e(who)}</td>'
+                        f'<td>{self._at(h["started_at"]) if h.get("started_at") else ""}</td>'
+                        f'<td>{e(how + extra)}</td></tr>')
+        return (f'<div class="section"><h2>Steps so far</h2><table><thead><tr><th>Step</th><th>Who</th>'
+                f'<th>Began</th><th>How it went</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
 
     def _work_form(self, me, item, iid, step, kept: dict | None = None) -> str:
         eng = self.hub.engine

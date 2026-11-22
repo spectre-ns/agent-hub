@@ -253,6 +253,12 @@ acts on it:
   `weekdays 07:00`, `weekly mon 08:00` / `weekly mon,wed,fri 08:00`, `monthly 1 09:00` (day 1 to 28) or
   `monthly last 17:00`. Each fires once per slot.
 
+Each run is **one work item** that walks the workflow: one key and one step history from start to finish. It is
+reassigned to each step's role as the run goes on, says what it waits on while an automation runs or a wait waits
+(and is then in nobody's to-do), and gets child items for steps side by side or a task done once per person, each
+closing back into it. The board can show one workflow with a column per step (**Group by: one workflow, by
+step**). Runs open from before are folded into one item when the hub opens (`docs/workflows.md`).
+
 The diagram editor's step panel sets a wait's condition, duration, moment and timeout; the workflow panel its
 schedule and deadline. The workflow's page says them in words.
 

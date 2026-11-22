@@ -122,7 +122,7 @@ class WorkPanel:
                 bits.append('<span class="loz removed">Stopped</span>')
             elif sst.get("state") == "waiting":
                 bits.append('<span class="muted">waiting</span>')
-            if item and item.get("status") in ("open", "claimed", "held"):
+            if item and item.get("status") in ("open", "claimed", "held") and item.get("step_id") == s.id:
                 bits.append(self._holder(item) + self._urgency(item))
                 if item.get("claimed_by") == me["id"] or item.get("assignee") == me["id"] or (
                         item["status"] == "open" and not item.get("claimed_by") and eng.eligibility(me, item)[0]):
@@ -156,10 +156,18 @@ class WorkPanel:
         summary = " · ".join(p for p in [f"{n['done']} done" if n["done"] else "",
                                          f"{n['todo']} still to come" if n["todo"] else "",
                                          f"{n['maybe']} if needed" if n["maybe"] else ""] if p)
+        # the run's one item: its key, and how many of its parts (child items) are still open
+        key = ""
+        if run.get("item"):
+            kids = list((self.hub.db.items.get(run["item"]) or {}).get("children") or [])
+            left = self.hub.db.items.count({"_id": {"$in": kids}, "status": {"$in": ["open", "claimed", "held"]}}) \
+                if kids else 0
+            key = (f' <a class="key" href="/items/{e(run["item"])}">{e(self._key(run["item"]))}</a>'
+                   + (f' <span class="muted">{left} of {len(kids)} parts open</span>' if left else ""))
         act = "".join(f'<a class="btn primary wp-mine" href="/items/{e(item["id"])}">Your turn: {e(s.title)}</a>'
                       for s, item in mine)
         return (f'<article class="wcard">'
-                f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a></div>'
+                f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a>{key}</div>'
                 f'<div class="wnow"><span class="k">Now</span><ul class="plain">{"".join(now_html)}</ul></div>'
                 f'<ol class="wstrip" aria-hidden="true">{"".join(segs)}</ol>'
                 f'<details class="wsteps"><summary>{e(summary or "Steps")}</summary><ol class="plain">{"".join(rows)}'

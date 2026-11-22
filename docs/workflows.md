@@ -34,6 +34,28 @@ skill = "renewal-prep"               # what an agent uses to do it; its output f
 context = ["record:clinical", "record:visits", "input"]
 ```
 
+### One item walks the run
+
+A run has **one work item**, with one key (like `HFM-12`) and one history, from start to finish. When a step for a
+person starts, the item moves to it: it is reassigned to that step's role (or `assign_to`, or the person a directive
+names), shows the step's title, fields and outcomes, and its title stays the run's subject. Each step the item goes
+through is kept in its **step history**, in order: the step, who it was for, when it began, was taken and was done,
+by whom, how it ended, and whether it timed out or was escalated. `due`, `escalate_to` and timers count from when the
+item reached the current step.
+
+While an automation runs or a wait waits, the item says so ("waiting: Send the reminder", "waiting until 9 Mar
+09:00") and is in nobody's to-do list. Steps that run side by side, and a task done once per person
+(`for_each = "{{input.reviewers}}"`), are **child items**: each has its own key, is listed on the run's item, and
+closes back into it (its step joins the history). The run's item says "waiting on 1 of 2" until they are done.
+Notices are separate items, as before.
+
+Separation of duties (`not_by`) and `meanings_if_did` read the step history: who did a step stays who did it after
+a reassignment or a take-over.
+
+Runs that were open before this (an item per step) are folded when the hub opens: the earliest item keeps its key
+and gains every item's history; the one open step moves onto it, and steps open side by side become its children.
+The other items are marked as moved, and their links lead to the run's item. It runs once per run.
+
 ### task
 
 Someone holding the role fills in the step's `fields`, or the skill's output fields. A person sees a form and an agent
@@ -55,7 +77,13 @@ meaning = "I have reviewed this renewal and I am responsible for the decision"
 signer = "person"                    # person: never an agent | any: agents too, within agent_criteria
 agent_criteria = "code.amount <= 80" # only with signer = "any": an agent may decide while this holds
 not_by = ["code"]                    # whoever did these steps may not decide this one
+meanings_if_did = { edit = "I am the author of this note and it is accurate" }
 ```
+
+`meanings_if_did` names earlier steps (each must come before the gate): when the signer is the member who did that
+step, by the item's step history, the signature says that meaning; anyone else signs the step's `meaning` (or the
+outcome's, from `meanings`). The signer sees the meaning that applies to them before they sign, and the track keeps
+the one they signed.
 
 ### automation
 

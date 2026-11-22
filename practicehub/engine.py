@@ -390,12 +390,19 @@ _WAITING = {"$expr": {"$in": ["waiting", {"$map": {"input": {"$objectToArray": {
                                                     "as": "s", "in": "$$s.v.state"}}]}}
 
 
+OPEN_WORK = ("open", "claimed", "held")
+
+
 def _item_doc(hub, **fields) -> dict:
     """A new work item with every field it has: what is not given takes its default."""
     doc = {"id": None, "n": hub.db.next_seq("items"), "run_id": None, "step_id": "", "kind": None, "title": "",
            "role": None, "assignee": None, "persons_only": 0, "status": "open", "claimed_by": None, "output": None,
            "note": "", "cause": None, "created_at": utcnow(), "updated_at": utcnow(), "due_at": None, "escalated": 0,
-           "priority": "normal", "escalate_next": None}
+           "priority": "normal", "escalate_next": None,
+           # one item per run walks its workflow: the step it is at now, what it did so far, and the child items of
+           # people working in parallel (or once per person of a step's for_each)
+           "step_title": "", "history": [], "parent_id": None, "children": [], "wave": [], "step_started_at": None,
+           "waiting": ""}
     doc.update(fields)
     doc["_id"] = doc["id"]
     return doc
@@ -564,7 +571,7 @@ class Engine:
             seq = hub.track.append(actor, "run.started", record or "", run_id=run_id, cause=cause,
                                    data={"workflow": wid, "version": row["version"], "title": title, "input": values,
                                          "parent": parent})
-            hub.db.runs.set(run_id, {"root_event": seq})
+            hub.db.runs.set(run_id, {"root_event": seq, "item": self._run_item(run_id, wf, title, seq)})
             if getattr(wf, "deadline", None):  # [deadline] within: when the run is to be done by
                 hub.db.runs.set(run_id, {"deadline_at": self._deadline_at(wf), "deadline_missed_at": None})
             self.advance(run_id, seq)
@@ -648,6 +655,7 @@ class Engine:
                 if step.kind == "wait":
                     st.update(state="waiting")
                     self._save(run)
+                    self._hist_note(run, step, done=False)
                     hub.track.append(self.automation_actor(run), "step.waiting", f"step:{step.id}", run_id=run_id,
                                      cause=cause, data={"step": step.id, "until": step.until,
                                                         **({"for_each": step.for_each} if step.for_each else {}),
@@ -679,6 +687,7 @@ class Engine:
                             exc = ValueError(f"{exc}: {'; '.join(problems)}")
                         st.update(state="failed", error=str(exc))
                         self._save(run)
+                        self._hist_note(run, step, outcome="failed", by=actor["id"])
                         seq = hub.track.append(actor, "step.failed", f"step:{step.id}", run_id=run_id, cause=cause,
                                                data={"step": step.id, "action": step.action, "error": str(exc),
                                                      **({"block": step.block} if step.block else {})})
@@ -689,6 +698,7 @@ class Engine:
                     run["ctx"][step.id] = output
                     run["steps"][step.id] = {"state": "done", "by": actor["id"]}
                     self._save(run)
+                    self._hist_note(run, step, outcome="done", by=actor["id"])
                     cause = hub.track.append(actor, "action.ran", f"step:{step.id}", run_id=run_id, cause=cause,
                                              data={"step": step.id, "action": step.action, "params": params,
                                                    "output": output, **extra})
@@ -696,8 +706,20 @@ class Engine:
                     seq = hub.track.append(self.automation_actor(run), "step.activated", f"step:{step.id}",
                                            run_id=run_id, cause=cause,
                                            data={"step": step.id, "kind": step.kind, "role": step.role})
-                    item_id = self._new_item(run, step, seq)
-                    st.update(state="active", item=item_id)
+                    if not run.get("item"):  # a run with no item of its own (none before it): an item per step
+                        st.update(state="active", item=self._new_item(run, step, seq))
+                    elif step.for_each:  # once per person: a child item each
+                        people = self._people_of(run, step)
+                        if not people:
+                            run["ctx"][step.id] = {"each": [], "by": None}
+                            st.update(state="done", by=self.automation_actor(run)["id"])
+                            self._save(run)
+                            hub.track.append(self.automation_actor(run), "step.done", f"step:{step.id}",
+                                             run_id=run_id, cause=seq, data={"step": step.id, "each": []})
+                            break
+                        st.update(state="active", people=people, cause=seq)
+                    else:  # placed on the run's item, or a child of it, once every step ready now is known
+                        st.update(state="active", cause=seq)
                     self._save(run)
                 break
         run = self.run(run_id)
@@ -706,6 +728,19 @@ class Engine:
             self._save(run)
             hub.track.append(self.automation_actor(run), "run.completed", run["record"] or "", run_id=run_id, cause=cause)
             self._late_finish(run, cause)
+        if run["status"] == "running":
+            self._place(run_id, cause)
+        elif run["status"] == "completed" and run.get("item"):
+            # done: the item shows the last step a person did (or the run's last wait), and who did it
+            row = self.hub.db.items.get(run["item"]) or {}
+            hist = [h for h in row.get("history") or [] if h.get("item") == run["item"]]
+            last = next((h for h in reversed(hist) if h.get("kind") in ("task", "gate")), None) or \
+                next((h for h in reversed(hist) if h.get("kind") == "wait"), None)
+            fields = {"status": "done", "waiting": "", "updated_at": utcnow()}
+            if last:
+                fields.update(step_id=last["step"], step_title=last["title"], kind=last["kind"],
+                              claimed_by=last.get("by") if last["kind"] != "wait" else None)
+            self.hub.db.items.update({"_id": run["item"], "status": {"$in": ["waiting", "open"]}}, {"$set": fields})
 
     def _wait_over(self, run, step, cause) -> bool:
         """Finish a waiting step if what it waits for now holds (for every item of its for_each). A wait that cannot
@@ -718,6 +753,7 @@ class Engine:
             run = self.run(run["id"])
             run["steps"][step.id] = {"state": "failed", "error": str(exc)}
             self._save(run)
+            self._hist_close(run, step.id, outcome="failed")
             seq = self.hub.track.append(self.automation_actor(run), "step.failed", f"step:{step.id}",
                                         run_id=run["id"], cause=cause, data={"step": step.id, "until": step.until,
                                                                              "error": str(exc)})
@@ -757,6 +793,9 @@ class Engine:
         run["ctx"][step.id] = output
         run["steps"][step.id] = {"state": "done", "by": self.automation_actor(run)["id"]}
         self._save(run)
+        self._hist_close(run, step.id, outcome="timed out" if output.get("timed_out") else "done",
+                         by=self.automation_actor(run)["id"],
+                         **({"timed_out": bool(output["timed_out"])} if "timed_out" in output else {}))
         self.hub.db.items.update({"run_id": run["id"], "step_id": step.id, "kind": "notice", "status": "open"},
                                  {"$set": {"status": "done", "updated_at": utcnow()}}, many=True)  # no longer waiting
         self.hub.track.append(self.automation_actor(run), action, f"step:{step.id}", run_id=run["id"],
@@ -900,7 +939,7 @@ class Engine:
                 raise Invalid(f"only running work can be cancelled; this is {run['status']}")
             run["status"] = "cancelled"
             self._save(run)
-            self.hub.db.items.update({"run_id": run_id, "status": {"$in": ["open", "claimed", "held"]}},
+            self.hub.db.items.update({"run_id": run_id, "status": {"$in": ["open", "claimed", "held", "waiting"]}},
                                      {"$set": {"status": "cancelled", "updated_at": utcnow()}}, many=True)
             seq = self.hub.track.append(actor, "run.cancelled", run["record"] or "", run_id=run_id,
                                         data={"reason": reason})
@@ -1001,20 +1040,37 @@ class Engine:
         return self.hub.skill(name, version)
 
     # ------------------------------------------------------------------ items
-    def _new_item(self, run: dict, step, cause: int) -> str:
+    # One item per run walks its workflow. It is made when the run starts (when the workflow has any step a person
+    # does or waits on) and moves from step to step: offered to the step's role or person, then, while automations
+    # run or a wait waits, shown as waiting and in nobody's to-do list. Steps people work at the same time, and a
+    # step done once per person (``for_each``), get child items under it, each with its own key, which close back
+    # into it. The item's ``history`` says who did which step, and when.
+    STEP_KINDS = ("task", "gate", "wait")
+
+    def _run_item(self, run_id: str, wf, title: str, cause: int) -> str | None:
+        if not any(s.kind in self.STEP_KINDS for s in wf.steps):
+            return None  # automations only: nothing for anyone to see waiting
         item_id = _new_id("item")
+        self.hub.db.items.insert(_item_doc(self.hub, id=item_id, run_id=run_id, kind="wait", title=title,
+                                           status="waiting", cause=cause, persons_only=0))
+        return item_id
+
+    def _route(self, run: dict, step, person: str | None = None) -> dict:
+        """Who a step's work goes to, and by when: role, assignee, persons_only, due_at, priority."""
         due_at = None
         if step.due:
             secs = wfmod.duration_seconds(step.due)
             tz = self.zone()  # counted in real time, from the instant: a due time across a clock change is not off
             due_at = clock.stamp(clock.utc(self.now(), tz) + timedelta(seconds=secs), tz)
         assignee = None
-        if step.assign_to:  # offered to that member only if they hold the step's role and are active
+        who = person
+        if who is None and step.assign_to:  # offered to that member only if they hold the step's role and are active
             who = wfmod.render(step.assign_to, self._live_ctx(run))
             who = (who.get("reference") if isinstance(who, dict) else who) or ""
             who = str(who).split("/")[-1]
+        if who:
             try:
-                m = self.hub.member(who) if who else None
+                m = self.hub.member(who)
             except Exception:  # noqa: BLE001
                 m = None
             if m and m["status"] == "active" and step.role in m["roles"]:
@@ -1023,14 +1079,159 @@ class Engine:
         if run.get("record") and step.role and self.hub.restrictions.of_subject(
                 self.hub.restrictions.subject_of_ref(run["record"]) or ""):
             role, persons_only, assignee = self._directive_route(run, step, assignee)
+        return {"role": role, "assignee": assignee, "persons_only": int(persons_only), "due_at": due_at,
+                "priority": step.priority}
+
+    @staticmethod
+    def _entry(step, route: dict, item_id: str, **more) -> dict:
+        """One step in an item's history."""
+        return {"step": step.id, "title": step.title, "kind": step.kind, "role": route.get("role"),
+                "assignee": route.get("assignee"), "started_at": utcnow(), "taken_at": None, "done_at": None,
+                "by": None, "outcome": None, "due_at": route.get("due_at"), "escalated": 0, "item": item_id, **more}
+
+    def _new_item(self, run: dict, step, cause: int, *, parent: dict | None = None, person: str | None = None) -> str:
+        """A child item of the run's item (``parent``), or, for a run without one, an item for this step alone."""
+        item_id = _new_id("item")
+        route = self._route(run, step, person)
         self.hub.db.items.insert(_item_doc(
-            self.hub, id=item_id, run_id=run["id"], step_id=step.id, kind=step.kind, title=step.title, role=role,
-            assignee=assignee, persons_only=int(persons_only), status="open", cause=cause, due_at=due_at,
-            priority=step.priority))
-        if not assignee and role and not self.hub.active_holders(role, persons_only=persons_only):
+            self.hub, id=item_id, run_id=run["id"], step_id=step.id, kind=step.kind,
+            title=run["title"] if parent else step.title, step_title=step.title, status="open", cause=cause,
+            parent_id=parent["id"] if parent else None, step_started_at=utcnow(),
+            history=[self._entry(step, route, item_id)], **route))
+        if parent:
+            self.hub.db.items.update({"_id": parent["id"]}, {"$push": {"children": item_id, "wave": item_id},
+                                                             "$set": {"updated_at": utcnow()}})
+        if not route["assignee"] and route["role"] and not self.hub.active_holders(
+                route["role"], persons_only=bool(route["persons_only"])):
             self._nobody_holds(run, step, item_id, cause)
         self.hub.wake_agents()
         return item_id
+
+    def _move(self, run: dict, parent: dict, step, cause) -> None:
+        """The run's item moves on to ``step``."""
+        hub = self.hub
+        route = self._route(run, step)
+        parent = self.item(parent["id"])
+        kids = [c["_id"] for c in hub.db.items.find({"_id": {"$in": parent.get("wave") or []},
+                                                     "status": {"$in": list(OPEN_WORK)}}, fields=["_id"])]
+        hub.db.items.set(parent["id"], {
+            "step_id": step.id, "kind": step.kind, "step_title": step.title, "status": "open", "claimed_by": None,
+            "note": "", "cause": cause, "escalated": 0, "escalate_next": None, "step_started_at": utcnow(),
+            "waiting": "", "wave": kids, "history": (parent.get("history") or []) + [self._entry(step, route, parent["id"])],
+            "updated_at": utcnow(), **route})
+        if not route["assignee"] and route["role"] and not hub.active_holders(
+                route["role"], persons_only=bool(route["persons_only"])):
+            self._nobody_holds(run, step, parent["id"], cause)
+
+    def _people_of(self, run: dict, step) -> list[str]:
+        """The members a step done once per person is for: its ``for_each``, as member ids."""
+        got = wfmod.render(step.for_each, self._live_ctx(run))
+        if got is None or got == "":
+            got = []
+        if not isinstance(got, list):
+            got = [got]
+        out = []
+        for g in got:
+            g = self._ref_of(g)
+            g = str(g or "").split("/")[-1]
+            if g and g not in out:
+                out.append(g)
+        return out
+
+    def _place(self, run_id: str, cause) -> None:
+        """Put the steps that became active on the run's item: one alone moves the item on; steps at the same time
+        (or once per person) become child items; with nothing for a person, the item shows what it waits on."""
+        hub = self.hub
+        run = self.run(run_id)
+        if not run.get("item"):
+            return
+        parent = self.item(run["item"])
+        wf, _ = hub.workflow(run["workflow_id"], run["version"])
+        free = parent["status"] == "waiting"
+        ready = [s for s in wf.steps if run["steps"][s.id]["state"] == "active" and not run["steps"][s.id].get("item")]
+        single = [s for s in ready if not s.for_each]
+        for s in ready:
+            st = run["steps"][s.id]
+            at = st.pop("cause", None) or cause
+            if s.for_each:
+                st.update(item=parent["id"], each=[self._new_item(run, s, at, parent=parent, person=p)
+                                                   for p in st.pop("people", [])])
+            elif free and len(single) == 1:
+                self._move(run, parent, s, at)
+                st["item"] = parent["id"]
+                free = False
+            else:
+                st["item"] = self._new_item(run, s, at, parent=parent)
+        if ready:
+            self._save(run)
+            hub.wake_agents()
+        if free:
+            self._show_waiting(run, wf, parent["id"])
+
+    def _show_waiting(self, run: dict, wf, item_id: str) -> None:
+        """The run's item between people's steps: what it waits on, in words (its child items, a wait's time, a
+        step that stopped)."""
+        hub = self.hub
+        parent = self.item(item_id)
+        if parent["status"] != "waiting":
+            return
+        wave = parent.get("wave") or []
+        still = hub.db.items.count({"_id": {"$in": wave}, "status": {"$in": list(OPEN_WORK)}}) if wave else 0
+        words = [f"waiting on {still} of {len(wave)}"] if still else []
+        waits = [s for s in wf.steps if run["steps"][s.id]["state"] == "waiting"]
+        tz = self.zone()
+        for s in waits:
+            wake = run["steps"][s.id].get("wake_at")
+            words.append(f"waiting until {clock.shown(wake, tz)}" if wake else f"waiting: {s.title}")
+        words += [f"stopped: {s.title} failed" for s in wf.steps if run["steps"][s.id]["state"] == "failed"]
+        step = waits[0] if waits else None
+        hub.db.items.set(item_id, {"waiting": "; ".join(words), "kind": "wait", "step_id": step.id if step else "",
+                                   "step_title": step.title if step else "", "role": None, "assignee": None,
+                                   "claimed_by": None, "due_at": None, "escalated": 0, "escalate_next": None,
+                                   "persons_only": 0, "updated_at": utcnow()})
+
+    def _hist_note(self, run: dict, step, *, done: bool = True, outcome: str | None = None,
+                   by: str | None = None) -> None:
+        """An automation or a wait in the run's item's history."""
+        if not run.get("item"):
+            return
+        now = utcnow()
+        entry = self._entry(step, {"role": step.role}, run["item"], done_at=now if done else None, by=by,
+                            outcome=outcome)
+        self.hub.db.items.update({"_id": run["item"]}, {"$push": {"history": entry}})
+
+    def _hist_update(self, item_id: str, step_id: str, **fields) -> dict | None:
+        """Update the last open entry of a step in an item's history; the entry as it is now."""
+        row = self.hub.db.items.get(item_id)
+        if not row:
+            return None
+        hist = list(row.get("history") or [])
+        for e in reversed(hist):
+            if e.get("step") == step_id and not e.get("done_at"):
+                e.update(fields)
+                self.hub.db.items.set(item_id, {"history": hist})
+                return e
+        return None
+
+    def _hist_close(self, run: dict, step_id: str, **fields) -> None:
+        if run.get("item"):
+            self._hist_update(run["item"], step_id, done_at=utcnow(), **fields)
+
+    def _did(self, run: dict, step_id: str, mid: str) -> bool:
+        """Whether this member did that step of the run: by its items' step history (any child too), or the run's
+        own record of the step's answer."""
+        if (run["ctx"].get(step_id) or {}).get("by") == mid:
+            return True
+        for row in self.hub.db.items.find({"run_id": run["id"], "kind": {"$nin": ["notice", "hold"]}},
+                                          fields=["history"]):
+            if any(e.get("step") == step_id and e.get("by") == mid for e in row.get("history") or []):
+                return True
+        return False
+
+    @staticmethod
+    def what(item: dict) -> str:
+        """What an item is about, in words: the step it is at, else its title."""
+        return item.get("step_title") or item.get("title") or ""
 
     def _nobody_holds(self, run: dict, step, item_id: str, cause: int) -> None:
         """Work for a role nobody switched on holds is never left to wait unseen: it is raised with the step's
@@ -1111,6 +1312,8 @@ class Engine:
         hub = self.hub
         if member.get("status") != "active":
             return False, f"{member['name']} is not active"
+        if item["status"] == "waiting":
+            return False, item.get("waiting") or "it is waiting for the workflow to go on"
         if item["status"] not in ("open", "claimed"):
             return False, "this item is finished"
         if item["status"] == "claimed" and item["claimed_by"] != member["id"]:
@@ -1140,7 +1343,7 @@ class Engine:
             elif prior == "record.editors":
                 if run["record"] and member["id"] in hub.revision_authors(run["record"]):
                     return False, "whoever wrote or changed this record does not also approve it"
-            elif (run["ctx"].get(prior) or {}).get("by") == member["id"]:
+            elif self._did(run, prior, member["id"]):  # who did which step: the run's step history
                 return False, f"whoever did '{wf.step(prior).title}' does not also do this"
         for c in step.context:
             if c.startswith("record:") and not hub.can(member, "reader", f"data_class:{c[7:]}"):
@@ -1222,7 +1425,7 @@ class Engine:
         if not ok:
             self.hub.track.append(member, "item.refused", f"item:{item['id']}", run_id=item["run_id"],
                                   cause=item["cause"], data={"reason": why})
-            raise Denied(f"{member['name']} may not take '{item['title']}': {why}")
+            raise Denied(f"{member['name']} may not take '{self.what(item)}': {why}")
 
     def claim(self, member: dict, item_id: str) -> dict:
         from .hub import Invalid
@@ -1234,6 +1437,10 @@ class Engine:
             if item["kind"] == "notice":
                 raise Invalid("a notice is acknowledged, not claimed")
             self.hub.db.items.set(item_id, {"status": "claimed", "claimed_by": member["id"], "updated_at": utcnow()})
+            entry = next((e for e in reversed(item.get("history") or []) if e.get("step") == item["step_id"]
+                          and not e.get("done_at")), None)
+            if entry is not None and not entry.get("taken_at"):
+                self._hist_update(item_id, item["step_id"], taken_at=utcnow())
             self.hub.track.append(member, "item.claimed", f"item:{item_id}", run_id=item["run_id"], cause=item["cause"],
                                   data={"step": item["step_id"]})
         return self.item(item_id)
@@ -1254,7 +1461,7 @@ class Engine:
         self.hub.db.items.set(item_id, {"status": "open", "claimed_by": None, "persons_only": persons_only, "note": note,
                                         "role": role, "assignee": assignee, "updated_at": utcnow()})
         self.hub.track.append(member, "item.escalated" if escalate else "item.released", f"item:{item_id}",
-                              run_id=item["run_id"], cause=item["cause"], data={"note": note})
+                              run_id=item["run_id"], cause=item["cause"], data={"note": note, "step": item["step_id"]})
         return self.item(item_id)
 
     def holder(self, item: dict) -> str | None:
@@ -1332,7 +1539,7 @@ class Engine:
                 who = self.hub.member(before)
                 if who and who["kind"] == "person":
                     run, _, step = self.step_of(item)
-                    self.alert(run, step, f"{member['name']} moved \"{item['title']}\" off you: {note}",
+                    self.alert(run, step, f"{member['name']} moved \"{self.what(item)}\" off you: {note}",
                                assignee=before, cause=None)
         return self.item(item_id)
 
@@ -1397,7 +1604,7 @@ class Engine:
             run = self.run(row["run_id"])
             wf, _ = hub.workflow(run["workflow_id"], run["version"])
             step = wf.step(row["step_id"])
-            self.alert(run, step, f"Back in the queue: \u201c{row['title']}\u201d ({name}: {reason})",
+            self.alert(run, step, f"Back in the queue: \u201c{self.what(row)}\u201d ({name}: {reason})",
                        role=row["role"] if self._staffed(row["role"]) else (step.escalate_to if step else None),
                        cause=seq, priority=row["priority"])
             released.append(row["id"])
@@ -1461,7 +1668,7 @@ class Engine:
             hub.track.append(member, "access.denied", f"item:{item_id}", run_id=run["id"],
                              data={"relation": "reader", "what": "read the work's inputs, withheld at the subject's "
                                                                 "request"})
-            raise Denied(f"what '{item['title']}' is about is withheld from {member.get('name') or member['id']} "
+            raise Denied(f"what '{self.what(item)}' is about is withheld from {member.get('name') or member['id']} "
                          f"at the subject's request")
         data: dict = {}
         for c in step.context:
@@ -1520,14 +1727,24 @@ class Engine:
                                   "workflow": wf.id, "version": run["version"],
                                   "today": self.now().date().isoformat(), "time_zone": self.zone().key},
             "step": {"id": step.id, "title": step.title, "kind": step.kind, "risk": step.risk, "role": step.role,
-                     "instructions": instructions, "outcomes": step.outcomes, "meaning": step.meaning,
-                     "meanings": {o: step.meanings.get(o, step.meaning) for o in step.outcomes},
+                     "instructions": instructions, "outcomes": step.outcomes,
+                     "meaning": self.meaning_for(member, run, step),
+                     "meanings": {o: self.meaning_for(member, run, step, o) for o in step.outcomes},
                      "signer": step.signer, "skill": skill.id if skill else step.skill, "block": step.block},
             "skill": {"id": skill.id, "title": skill.title, "instructions": skill.instructions} if skill else None,
             "context": data, "draft": draft, "fields": fields,
             "schema": json_schema(fields, self._choice_ctx(fields, data, run)),
             "choices": {f["name"]: self._choices(f, data, run) for f in fields if f["type"] == "choice" or f.get("choices_from")},
         }
+
+    def meaning_for(self, member: dict, run: dict, step, outcome: str | None = None) -> str:
+        """What signing this gate says for this member: a ``meanings_if_did`` meaning when they did that earlier
+        step (by the run's step history, so a reassignment or take-over does not change it), else the outcome's
+        own meaning, else the step's."""
+        for sid, text in (getattr(step, "meanings_if_did", None) or {}).items():
+            if self._did(run, sid, member["id"]):
+                return text
+        return step.meanings.get(outcome, step.meaning) if outcome else step.meaning
 
     def _choice_ctx(self, fields, data, run):
         ctx = dict(run["ctx"])
@@ -1623,7 +1840,8 @@ class Engine:
             if outcome not in step.outcomes:
                 raise Invalid(f"the decision is one of: {', '.join(step.outcomes)}")
             values = {"outcome": outcome, "comment": comment or ""}
-            what = {"run": run["id"], "step": step.id, "outcome": outcome, "meaning": step.meanings.get(outcome, step.meaning),
+            what = {"run": run["id"], "step": step.id, "outcome": outcome,
+                    "meaning": self.meaning_for(member, run, step, outcome),
                     "record": run["record"], "workflow": f"{wf.id}@v{run['version']}",
                     "shown_sha256": self._check_shown(member, item_id, seen), "comment": comment or ""}
             if run["record"] and "/" in run["record"]:  # the decision is also a signature on the record it is about
@@ -1706,16 +1924,33 @@ class Engine:
         hub = self.hub
         if signed is not None and member.get("kind") != "person":
             raise Denied("only a person signs: agents never sign")
-        hub.db.items.set(item["id"], {"status": "done", "claimed_by": member["id"], "output": values,
-                                      "updated_at": utcnow()})
+        # the run's own item waits for its next step; a child (or an item of a run without one) is done
+        walks = bool(run.get("item")) and item["id"] == run.get("item")
+        hub.db.items.set(item["id"], {"status": "waiting" if walks else "done", "claimed_by": member["id"],
+                                      "output": values, "updated_at": utcnow()})
+        entry = self._hist_update(item["id"], step.id, done_at=utcnow(), by=member["id"],
+                                  outcome=values.get("outcome") or "done")
+        if entry and item.get("parent_id"):  # a child closes back into the run's item: its history has the step
+            hub.db.items.update({"_id": item["parent_id"]}, {"$push": {"history": entry}})
         data = {"step": step.id, "output": values, **({"approved_by": approved_by} if approved_by else {}),
                 **({"attested": attested} if attested else {})}
         seq = hub.track.append(member, action, f"item:{item['id']}", run_id=run["id"], cause=cause or item["cause"],
                                data=data, signed=signed)
         run = self.run(run["id"])
-        run["ctx"][step.id] = {**values, "by": member["id"], "by_kind": member["kind"], "event": seq,
-                               **({"signature": seq} if signed else {"signature": signature} if signature else {})}
-        run["steps"][step.id] = {"state": "done", "item": item["id"], "by": member["id"]}
+        answer = {**values, "by": member["id"], "by_kind": member["kind"], "event": seq,
+                  **({"signature": seq} if signed else {"signature": signature} if signature else {})}
+        st = run["steps"][step.id]
+        if step.for_each and st.get("each"):  # once per person: done when each of them is
+            got = run["ctx"].get(step.id) if isinstance(run["ctx"].get(step.id), dict) else {}
+            got = {"each": [*(got.get("each") or []), {**answer, "person": item.get("assignee") or member["id"]}],
+                   "by": member["id"]}
+            run["ctx"][step.id] = got
+            left = hub.db.items.count({"_id": {"$in": st["each"]}, "status": {"$ne": "done"}})
+            if not left:
+                run["steps"][step.id] = {**st, "state": "done", "by": member["id"]}
+        else:
+            run["ctx"][step.id] = answer
+            run["steps"][step.id] = {"state": "done", "item": item["id"], "by": member["id"]}
         self._save(run)
         if member["kind"] == "agent" and RISK_ORDER[step.risk] == 1:
             self.alert(run, step, f"{member['name']} did '{step.title}' ({step.risk} risk): take a look",
@@ -1734,6 +1969,116 @@ class Engine:
         self.hub.db.items.set(item_id, {"status": "done", "claimed_by": member["id"], "updated_at": utcnow()})
         self.hub.track.append(member, "notice.acknowledged", f"item:{item_id}", run_id=item["run_id"], cause=item["cause"])
         return self.item(item_id)
+
+    # ------------------------------------------------------------------ upgrade: one item per run
+    def fold_run_items(self) -> list[str]:
+        """Runs still open from before one item walked its workflow (an item per step) get their one item: the
+        earliest item keeps its key and gets every item's step history; the one step open on its own moves onto
+        it, and steps open side by side become its child items (keeping their keys). Items folded in are marked
+        ``folded`` (``folded_into`` the kept one), so a link to one still finds the work. Safe to run again: a run
+        that has been looked at carries ``item`` (None when its workflow has no step for a person or a wait)."""
+        hub = self.hub
+        done = []
+        for r in hub.db.runs.find({"status": "running", "item": {"$exists": False}}, sort=[("created_at", 1)]):
+            run = _plain(r)
+            try:
+                with hub.db:
+                    self._fold(run)
+                done.append(run["id"])
+            except Exception as exc:  # noqa: BLE001 - one run that cannot be folded never stops the hub opening
+                hub.db.runs.set(run["id"], {"item": None})
+                hub.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "run.fold_failed",
+                                 run["id"], run_id=run["id"], data={"error": str(exc)})
+        return done
+
+    def _fold(self, run: dict) -> None:
+        hub = self.hub
+        rows = hub.db.items.find({"run_id": run["id"], "kind": {"$nin": ["notice", "hold"]},
+                                  "status": {"$ne": "folded"}}, sort="n")
+        try:
+            wf, _ = hub.workflow(run["workflow_id"], run["version"])
+        except Exception:  # noqa: BLE001
+            wf = None
+        if not rows:
+            pid = self._run_item(run["id"], wf, run["title"], run.get("root_event")) if wf else None
+            hub.db.runs.set(run["id"], {"item": pid})
+            if pid:
+                self._place(run["id"], run.get("root_event"))
+            return
+        keep = rows[0]
+        live = [x for x in rows if x["status"] in OPEN_WORK]
+
+        def entry(x) -> dict:
+            closed = x["status"] in ("done", "cancelled")
+            title = x.get("step_title") or x["title"]
+            kind = x["kind"]
+            try:
+                st = wf.step(x["step_id"]) if wf else None
+                title, kind = st.title, st.kind
+            except KeyError:
+                pass
+            return {"step": x["step_id"], "title": title, "kind": kind, "role": x.get("role"),
+                    "assignee": x.get("assignee"), "started_at": x["created_at"], "taken_at": None,
+                    "done_at": x["updated_at"] if closed else None, "by": x.get("claimed_by") if closed else None,
+                    "outcome": ((x.get("output") or {}).get("outcome") or "done") if x["status"] == "done"
+                    else ("cancelled" if closed else None), "due_at": x.get("due_at"),
+                    "escalated": int(x.get("escalated") or 0), "item": x["_id"]}
+
+        for x in rows:  # when each was first taken, from the track
+            ev = hub.db.events.find_one({"subject": f"item:{x['_id']}", "action": "item.claimed"}, sort="seq",
+                                        fields=["at"])
+            x["_taken"] = ev["at"] if ev else None
+        history = []
+        for x in rows:
+            if x["status"] in OPEN_WORK and x is not keep and len(live) > 1:
+                continue  # stays a child item, with its own history
+            history.append({**entry(x), "taken_at": x["_taken"]})
+        carried = keep if keep["status"] in OPEN_WORK else (live[0] if len(live) == 1 else None)
+        children = [x for x in live if x is not carried]
+        fields = {"title": run["title"], "parent_id": None, "history": history,
+                  "children": [x["_id"] for x in children], "wave": [x["_id"] for x in children],
+                  "updated_at": utcnow()}
+        if carried is not None:
+            st = None
+            try:
+                st = wf.step(carried["step_id"]) if wf else None
+            except KeyError:
+                pass
+            for h in history:
+                if h["item"] == carried["_id"]:
+                    h["item"] = keep["_id"]
+            fields.update({k: carried.get(k) for k in ("step_id", "kind", "role", "assignee", "persons_only", "status",
+                                                       "claimed_by", "output", "note", "cause", "due_at", "escalated",
+                                                       "escalate_next", "priority")},
+                          step_title=st.title if st else carried["title"], step_started_at=carried["created_at"],
+                          waiting="")
+        else:
+            fields.update(status="waiting", kind="wait", step_id="", step_title="", claimed_by=None, role=None,
+                          assignee=None, due_at=None)
+        hub.db.items.set(keep["_id"], fields)
+        steps = run["steps"]
+        for x in rows:
+            if x is keep:
+                continue
+            if x in children:
+                hub.db.items.set(x["_id"], {"parent_id": keep["_id"], "step_title": x.get("step_title") or x["title"],
+                                            "title": run["title"], "step_started_at": x["created_at"],
+                                            "history": [{**entry(x), "taken_at": x["_taken"]}]})
+                continue
+            hub.db.items.set(x["_id"], {"status": "folded", "folded_into": keep["_id"], "updated_at": utcnow()})
+            hub.db.items.update({"kind": "hold", "output.holds": x["_id"]}, {"$set": {"output.holds": keep["_id"]}},
+                                many=True)
+            for sid, st in steps.items():
+                if st.get("item") == x["_id"]:
+                    st["item"] = keep["_id"]
+        hub.db.runs.set(run["id"], {"item": keep["_id"], "steps": steps})
+        hub.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "run.items_folded",
+                         f"item:{keep['_id']}", run_id=run["id"],
+                         data={"kept": keep["_id"], "folded": [x["_id"] for x in rows if x is not keep
+                                                               and x not in children],
+                               "children": [x["_id"] for x in children]})
+        if carried is None and wf is not None:
+            self._show_waiting(self.run(run["id"]), wf, keep["_id"])
 
     # ------------------------------------------------------------------ inbound events
     def _starts_on(self, wf, event_type: str, ctx: dict) -> bool:
@@ -1866,7 +2211,8 @@ class Engine:
             if item.get("escalate_next") and now_utc < _parse(item["escalate_next"]):
                 continue
             due = _parse(item["due_at"])
-            allowed = min(max(timedelta(minutes=15), due - _parse(item["created_at"])), timedelta(days=1))
+            began = _parse(item.get("step_started_at") or item["created_at"])
+            allowed = min(max(timedelta(minutes=15), due - began), timedelta(days=1))
             run = self.run(item["run_id"])
             wf, _ = hub.workflow(run["workflow_id"], run["version"])
             step = wf.step(item["step_id"])
@@ -1875,10 +2221,12 @@ class Engine:
                 hub.db.items.set(item["id"], {"escalated": level + 1,
                                               "escalate_next": clock.stamp(now_utc + allowed, tz),
                                               "updated_at": utcnow()})
+                self._hist_update(item["id"], item["step_id"], escalated=level + 1)
                 seq = hub.track.append(self.automation_actor(run), "item.overdue", f"item:{item['id']}",
                                        run_id=run["id"], cause=item["cause"],
                                        data={"due_at": item["due_at"], "level": level + 1})
-                text = (f"Overdue: {item['title']}" if level == 0 else f"Still not done ({level + 1}): {item['title']}")
+                what = self.what(item)
+                text = (f"Overdue: {what}" if level == 0 else f"Still not done ({level + 1}): {what}")
                 text += ". You may take it over."
                 # never only to the one who is late: to whoever else holds the escalation role, else the practice's
                 self.alert(run, step, text, role=step.escalate_to, cause=seq, priority=item.get("priority"),

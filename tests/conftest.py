@@ -130,10 +130,24 @@ def _database(monkeypatch):
     monkeypatch.setattr(st.Store, "__init__", given)
     try:
         yield
+        for name in dict.fromkeys(_TEST["used"]):  # every workflow any test walked: one item from start to finish
+            one_item_per_run(_db(name))
     finally:
         used, _ = _TEST.pop("used"), _TEST.clear()
         for name in dict.fromkeys(used):
             _put_back(name)
+
+
+def one_item_per_run(db) -> None:
+    """Each run that has its item has that one item at the top (one key, one history), and every other piece of
+    work on it (parallel steps, a step once per person) is a child of it. Notices and sponsor holds are apart."""
+    for run in db.runs.find({"item": {"$type": "string"}}, {"item": 1}):
+        top = [r["_id"] for r in db.items.find({"run_id": run["_id"], "parent_id": None,
+                                                 "kind": {"$nin": ["notice", "hold"]},
+                                                 "status": {"$ne": "folded"}}, {"_id": 1})]
+        assert top == [run["item"]], f"run {run['_id']}: top items {top}, not its one item {run['item']}"
+        stray = db.items.count_documents({"run_id": run["_id"], "parent_id": {"$nin": [None, run["item"]]}})
+        assert not stray, f"run {run['_id']}: {stray} child item(s) of another item"
 
 
 @pytest.fixture
