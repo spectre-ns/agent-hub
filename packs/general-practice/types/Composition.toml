@@ -3,6 +3,7 @@ id = "Composition"
 label = "Note"
 plural = "Notes"
 data_class = "clinical"
+standard = "fhir-r4"
 strict = true
 date = "date"
 active = "record.status != 'entered-in-error'"

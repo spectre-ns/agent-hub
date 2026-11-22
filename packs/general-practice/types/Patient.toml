@@ -3,6 +3,7 @@ id = "Patient"
 label = "Patient"
 plural = "Patients"
 data_class = "demographics"
+standard = "fhir-r4"
 extends = "Subject"           # the core's subject: work, calendars and modules (a CAPA, a document) point at it
 title = "{name}[ (born {birthDate})][ · card {health_card}]"
 strict = true

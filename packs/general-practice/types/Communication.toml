@@ -3,6 +3,7 @@ id = "Communication"
 label = "Message"
 plural = "Messages"
 data_class = "correspondence"
+standard = "fhir-r4"
 strict = true
 date = "sent"
 active = "not record.status in ['completed', 'entered-in-error', 'not-done', 'stopped']"

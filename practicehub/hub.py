@@ -108,6 +108,12 @@ def _refs_in(value) -> list[str]:
     return sorted(out)
 
 
+def _how(data: dict) -> str:
+    """How a record was seen, for an access report: 'export (csv)' when it went out in a file."""
+    how = data.get("how", "")
+    return f"{how} ({data['format']})" if how == "export" and data.get("format") else how
+
+
 class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def __init__(self, state_dir: Path | str | None, *, pack: str | packmod.Pack | None = None,
                  authorizer: Authorizer | None = None, records: RecordStore | None = None, models=None):
@@ -1512,7 +1518,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 for r in self.db.events.find({"subject": ref, "action": "record.viewed"}, sort=[("seq", DESC)],
                                              limit=limit)]
 
-    ACCESS_ACTIONS = ("record.viewed", "record.created", "record.updated", "record.transitioned", "record.signed")
+    ACCESS_ACTIONS = ("record.viewed", "records.exported", "record.created", "record.updated", "record.transitioned", "record.signed")
 
     def access_report(self, member: dict, subject: str) -> list[dict]:
         """Everyone (people, agents, services) who saw or changed anything in a subject's file, oldest first: what
@@ -1531,7 +1537,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.track.append(member, "access.reported", subject, data={"events": len(rows)})
         return [{"seq": r["seq"], "at": r["at"], "who": r["actor"], "name": names.get(r["actor"], r["actor"]),
                  "kind": r["actor_kind"], "action": r["action"].split(".", 1)[1], "record": r["subject"],
-                 "how": (r.get("data") or {}).get("how", "")} for r in rows]
+                 "how": _how(r.get("data") or {})} for r in rows]
 
     def record_history(self, member: dict, ref: str) -> list[dict]:
         rtype, rid = ref.split("/", 1)

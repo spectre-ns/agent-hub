@@ -3,6 +3,7 @@ id = "QuestionnaireResponse"
 label = "Intake form"
 plural = "Intake forms"
 data_class = "intake"
+standard = "fhir-r4"
 strict = true
 date = "authored"
 active = "record.status != 'entered-in-error'"

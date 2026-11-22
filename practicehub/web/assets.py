@@ -559,6 +559,7 @@ dialog.modal .modal-actions{display:flex;justify-content:flex-end;flex-wrap:wrap
 .filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 16px}
 .starts{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 16px}
 .starts::before{content:"Start work";flex-basis:100%;font-size:12px;font-weight:600;color:var(--subtle)}
+.file-tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 16px}
 form p.about{margin:0;color:var(--subtle)}
 .filters input{width:auto;flex:0 1 240px;margin:0}
 .chip{display:inline-flex;align-items:center;gap:4px;height:32px;padding:0 12px;border-radius:3px;font-weight:500;

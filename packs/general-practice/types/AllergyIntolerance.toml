@@ -3,6 +3,7 @@ id = "AllergyIntolerance"
 label = "Allergy"
 plural = "Allergies"
 data_class = "clinical"
+standard = "fhir-r4"
 strict = true
 date = "recordedDate"
 flag = "criticality"

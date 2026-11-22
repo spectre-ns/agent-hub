@@ -3,6 +3,7 @@ id = "MedicationStatement"
 label = "Medication taken"
 plural = "Medications taken"
 data_class = "clinical"
+standard = "fhir-r4"
 strict = true
 date = "effectiveDateTime"
 active = "record.status in ['active', 'intended', 'on-hold']"

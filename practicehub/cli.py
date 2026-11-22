@@ -9,6 +9,8 @@
     practicehub verify                                  check the hash chain and signatures of the track
     practicehub backup /backups/2026-11-21              a consistent copy of the database, its files and the anchors (not the secret)
     practicehub restore /backups/2026-11-21 --force     put a backup back; then `track restored` records what was lost
+    practicehub export --as rana --type Patient --format csv --out patients.csv   every record of a type (a policy owner)
+    practicehub export --as rana --all --out /exports/2026-11-21    the whole hub: one .ndjson per type and a manifest
     practicehub owners recover --grant dr-amara         the server holder grants policy_owner when too few are left
     practicehub openfga init --url http://localhost:8081
     practicehub keycloak realm > realm.json
@@ -491,6 +493,35 @@ def _person(hub, mid):
         raise SystemExit(f"there is no member {mid}") from None
 
 
+def cmd_export(args):
+    """A bulk export, for a policy owner: every record of one type (``--type``), or of every type (``--all``), into
+    files. Each record is a read on the track (how=export) and the export is an event (records.exported)."""
+    from . import export
+    hub = build_hub(args)
+    me = _person(hub, args.as_member)
+    out = Path(args.out)
+    if args.all:
+        files, manifest = export.everything(hub, me, args.format or "ndjson")
+        out.mkdir(parents=True, exist_ok=False)
+        for name, body in files.items():
+            (out / name).write_bytes(body)
+        n = sum(x["count"] for x in manifest["output"])
+        left = sum(x["count"] for x in manifest["left_out"])
+        print(f"exported {n} records of {len(manifest['output'])} types into {out}/ (manifest.json lists them)"
+              + (f"; {left} records you may not read were left out" if left else ""))
+        return
+    rt = hub.record_type(args.type)
+    ext = out.suffix.lstrip(".").lower()  # the format the file's name says, else FHIR's for a FHIR type
+    fmt = args.format or (ext if ext in ("ndjson", "csv", "ods") else "ndjson" if export.is_fhir(rt) else "csv")
+    x = export.records_list(hub, me, args.type, fmt, every=True)
+    if out.is_dir():
+        out = out / x.filename
+    if out.exists():
+        raise SystemExit(f"{out} exists; name a new file")
+    out.write_bytes(x.body)
+    print(f"exported {x.count} {args.type} records as {fmt} into {out}")
+
+
 def cmd_module_review(args):
     hub = build_hub(args)
     out = hub.approve_module_code(_person(hub, args.as_member), args.name)
@@ -681,6 +712,15 @@ def main(argv=None):
     for p in mb.choices.values():
         p.add_argument("--as", dest="as_member", required=True)
         p.set_defaults(fn=cmd_member)
+    p = sub.add_parser("export", help="export every record of a type, or the whole hub, to files (a policy owner)")
+    p.add_argument("--as", dest="as_member", required=True, help="the policy owner making the export")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--type", help="every record of this type")
+    g.add_argument("--all", action="store_true", help="every record of every type, one file per type")
+    p.add_argument("--format", choices=["ndjson", "csv", "ods"], help="ndjson (FHIR Bulk Data; the default "
+                   "for a FHIR type), csv (the default otherwise), ods; --all takes ndjson or csv")
+    p.add_argument("--out", required=True, help="the file to write (a directory with --all)")
+    p.set_defaults(fn=cmd_export)
     p = sub.add_parser("verify", help="verify the track")
     p.set_defaults(fn=cmd_verify)
     tr = sub.add_parser("track", help="the track itself").add_subparsers(dest="sub", required=True)

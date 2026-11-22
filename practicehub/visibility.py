@@ -105,7 +105,7 @@ class Viewer:
                                      "channel", "how", "status") if k in data}
         return {**ev, "data": {**keep, "hidden": f"content needs access to: {', '.join(hidden)}"}}
 
-    ACCESS_EVENTS = frozenset({"record.viewed", "access.reported"})
+    ACCESS_EVENTS = frozenset({"record.viewed", "records.exported", "access.reported"})
 
     def events(self, evs: list[dict]) -> list[dict]:
         """What the member may see of these events. Who opened which file is itself personal health information:

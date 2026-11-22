@@ -2720,3 +2720,140 @@ def test_a_record_type_stored_before_a_stricter_check_is_set_aside_not_a_failure
     assert "Patient" in hub.record_types() and "initial" in hub.broken_types["Condition"]
     listed = {d["id"]: d for d in hub.definitions("type")}
     assert listed["Condition"]["definition"] is None and "initial" in listed["Condition"]["problem"]
+
+
+# ------------------------------------------------------------------------------------------- exports
+def _file_of_ellen(hub):
+    """A subject with a full file in the demo: allergies, problems, prescriptions, results, a visit."""
+    return max((f"{s}/{p['id']}" for s in hub.subject_types() for p in hub.records.search(s)),
+               key=lambda ref: len(hub.records.search(subject=ref, limit=None)))
+
+
+def _export_reads(hub, fmt=None):
+    return [x for x in hub.db.events.find({"action": "record.viewed"})
+            if (x.get("data") or {}).get("how") == "export" and (fmt is None or x["data"].get("format") == fmt)]
+
+
+def test_a_type_says_it_is_a_fhir_resource_and_the_hub_checks_it_can_be():
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    head = 'id = "Thing"\nlabel = "Thing"\ndata_class = "clinical"\nstrict = true\n'
+    field = '[[field]]\nname = "status"\nlabel = "Status"\ntype = "string"\n'
+    assert schema.parse(head + 'standard = "fhir-r4"\n' + field).standard == "fhir-r4"
+    assert schema.parse(head + field).standard is None
+    for bad in (head + 'standard = "hl7v2"\n' + field,                                      # not a standard we export
+                head.replace("Thing", "my-thing", 1) + 'standard = "fhir-r4"\n' + field,    # not a resource name
+                head.replace("strict = true", "strict = false") + 'standard = "fhir-r4"\n' + field):  # any key
+        with pytest.raises(DefinitionError, match="standard"):
+            schema.parse(bad)
+    # a field of the practice's own is allowed: it goes out as an extension
+    assert schema.parse(head + 'standard = "fhir-r4"\n' + field.replace('"status"', '"plan_code"')).standard
+
+
+def test_the_clinic_packs_types_are_fhir_resources(hub):
+    from practicehub import export
+    fhir = {t for t, rt in hub.record_types().items() if export.is_fhir(rt)}
+    assert hub.subject_types() and set(hub.subject_types()) <= fhir
+    assert {"MedicationRequest", "Observation", "AllergyIntolerance", "Condition", "Immunization"} <= fhir
+
+
+def test_a_record_exports_as_fhir_json_that_round_trips(hub):
+    from practicehub import export
+    amara = M(hub, "dr-amara")
+    rec = hub.records.search("MedicationRequest")[0]
+    x = export.record(hub, amara, f"MedicationRequest/{rec['id']}", "fhir")
+    assert x.content_type == "application/fhir+json" and x.filename == f"MedicationRequest-{rec['id']}.json"
+    res = json.loads(x.body)
+    assert res["resourceType"] == "MedicationRequest" and res["id"] == rec["id"]
+    assert set(res["meta"]) == {"versionId", "lastUpdated"} and res["meta"]["versionId"] == rec["meta"]["versionId"]
+    assert res["subject"] == {"reference": rec["subject"]} if isinstance(rec["subject"], str) else rec["subject"]
+    assert "/" in res["subject"]["reference"]
+    assert not any(k.startswith("_") for k in res)
+    assert len(_export_reads(hub, "fhir")) == 1
+
+
+def test_a_subjects_file_is_a_bundle_of_its_parts_and_links_and_counts_what_is_left_out(hub):
+    from practicehub import export
+    ref = _file_of_ellen(hub)
+    about = {f"{r['resourceType']}/{r['id']}" for r in hub.records.search(subject=ref, limit=None)}
+    x = export.subject_file(hub, M(hub, "dr-amara"), ref, "fhir")
+    b = json.loads(x.body)
+    assert b["resourceType"] == "Bundle" and b["type"] == "collection"
+    got = [e["resource"] for e in b["entry"]]
+    assert f"{got[0]['resourceType']}/{got[0]['id']}" == ref, "the subject comes first"
+    fhir = {r for r in about if export.is_fhir(hub.record_type(r.split("/")[0]))}
+    assert {f"{r['resourceType']}/{r['id']}" for r in got} == fhir
+    assert x.other == len(about - fhir) and x.left_out == 0
+    linked = {e["from_ref"] for e in hub.db.links.find({"to_ref": ref})}
+    assert linked & fhir, "records that link to the subject are in the file"
+    # parts of the subject (a part_of type) are in it
+    assert any(hub.record_type(r.split("/")[0]).part_of for r in fhir)
+    # the front desk may not read clinical records: they are left out, and counted, never named
+    jo = M(hub, "jo")
+    y = export.subject_file(hub, jo, ref, "fhir")
+    kept = [e["resource"]["resourceType"] for e in json.loads(y.body)["entry"]]
+    assert all(hub.may_read(jo, t) for t in kept)
+    hidden = sum(1 for r in about if r != ref and not hub.may_read(jo, r.split("/")[0]))
+    assert hidden and y.left_out == hidden
+    assert export.left_out_words(2) == "2 records you may not read were left out."
+    assert b"MedicationRequest" not in y.body
+
+
+def test_every_export_logs_each_record_as_a_read_and_the_export_itself(hub):
+    from practicehub import export
+    amara = M(hub, "dr-amara")
+    ref = _file_of_ellen(hub)
+    before = len(_export_reads(hub))
+    hub.read_record(amara, ref)  # a view a minute ago does not swallow the export's read
+    x = export.subject_file(hub, amara, ref, "odt")
+    assert len(_export_reads(hub, "odt")) == x.count and len(_export_reads(hub)) == before + x.count
+    ev = hub.db.events.find({"action": "records.exported", "subject": ref})
+    assert ev and ev[-1]["actor"] == "dr-amara" and ev[-1]["data"]["format"] == "odt"
+    assert ev[-1]["data"]["count"] == x.count
+    y = export.records_list(hub, amara, "Observation", "csv")
+    assert len(_export_reads(hub, "csv")) == y.count
+    lst = hub.db.events.find({"action": "records.exported", "subject": "records:Observation"})
+    assert lst[-1]["data"]["format"] == "csv" and lst[-1]["data"]["count"] == y.count
+    # the privacy officer sees the export in the access report; others never see who exported what
+    report = hub.access_report(M(hub, "rana"), ref)
+    assert any(r["action"] == "exported" for r in report)
+    assert any(r["how"] == "export (odt)" for r in report)
+    from practicehub.visibility import Viewer
+    assert "records.exported" in Viewer.ACCESS_EVENTS
+
+
+def test_only_a_policy_owner_makes_a_bulk_export(hub):
+    from practicehub import export
+    jo = M(hub, "jo")
+    with pytest.raises(Denied):
+        export.records_list(hub, jo, "Patient", "csv", every=True)
+    with pytest.raises(Denied):
+        export.everything(hub, jo)
+    assert not hub.db.events.find({"action": "records.exported"})
+    x = export.records_list(hub, M(hub, "rana"), "Patient", "ndjson", every=True)
+    lines = x.body.decode().splitlines()
+    assert len(lines) == len(hub.records.search("Patient", limit=None)) == x.count
+    assert all(json.loads(line)["resourceType"] == "Patient" for line in lines)
+    files, manifest = export.everything(hub, M(hub, "rana"))
+    assert "manifest.json" in files and manifest["output"]
+    # the owner reads no clinical records: those are counted, not exported
+    assert manifest["left_out"] and not any(o["type"] == "MedicationRequest" for o in manifest["output"])
+
+
+def test_a_type_that_is_not_a_fhir_resource_offers_no_fhir_format(quality):
+    from practicehub import export
+    hub = quality
+    rt = hub.record_type("Document")
+    assert not export.is_fhir(rt)
+    assert "fhir" not in export.offered(hub, "Document", "record") and "json" in export.offered(hub, "Document", "record")
+    assert "ndjson" not in export.offered(hub, "Document", "list")
+    reader = next(m for m in hub.members("person") if hub.may_read(m, "Document"))
+    rec = hub.records.search("Document")[0]
+    with pytest.raises(Invalid):
+        export.record(hub, reader, f"Document/{rec['id']}", "fhir")
+    with pytest.raises(Invalid):
+        export.records_list(hub, reader, "Document", "ndjson")
+    plain = json.loads(export.record(hub, reader, f"Document/{rec['id']}", "json").body)
+    assert plain["resourceType"] == "Document" and plain["id"] == rec["id"]
+    odt = export.record(hub, reader, f"Document/{rec['id']}", "odt")  # a document works for any type
+    assert odt.body[:2] == b"PK"
