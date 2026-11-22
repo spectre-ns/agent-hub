@@ -3216,8 +3216,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             run = self.db.runs.get(run_id)
             if run and run["workflow_id"] == owner and run.get("record") == ref:
                 return None
-            if run:
+            if run and not self.state_move_waited_on(rt, ref, after, t["to"]):
+                # another workflow (a CAPA revising the documents it names) moves it only through a move the owner's
+                # open step waits on, as a person would
                 return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
+            if run:
+                return None
         if self.state_move_waited_on(rt, ref, after, t["to"]):
             return None
         if not self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
@@ -3225,8 +3229,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         return (f"a {label} is moved by its workflow; it is not waiting for "
                 f"{rt.state_label(t['to']).lower()} now")
 
-    def state_move_waited_on(self, rt, ref: str, after: dict, new: str) -> bool:
-        """Whether the open run of the type's workflow about ``ref`` is waiting on the record moving to ``new``."""
+    def state_move_waited_on(self, rt, ref: str, after: dict, new: str) -> str | None:
+        """Whether the open run of the type's workflow about ``ref`` is waiting on the record moving to ``new``: how
+        ("until", a wait that then goes on; "moves", a state the open step lets people move it to), or None."""
         from . import expr
         owner = (rt.workflow or {}).get("id")
         field = (rt.lifecycle or {}).get("field")
@@ -3239,16 +3244,73 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 st = (run["steps"].get(s.id) or {}).get("state")
                 if st not in ("active", "waiting"):
                     continue
-                if new in s.moves:
-                    return True
-                if s.kind == "wait" and s.until and field:
+                if s.kind == "wait" and s.until and field and not s.for_each:
                     moved = {**after, field: new}
                     try:
                         if expr.holds(s.until, {**run["ctx"], "record": moved}):
-                            return True
+                            return "until"
                     except Exception:  # noqa: BLE001 - a wait that cannot be read waits on nothing
-                        continue
-        return False
+                        pass
+                if new in s.moves:
+                    return "moves"
+        return None
+
+    def record_workflow(self, rt) -> str | None:
+        """The workflow walking records of ``rt`` now: the one its type names, once that workflow's active version is
+        about ``rt`` and does not start itself on ``rt``'s record events. Until then (a module upgrade whose new
+        type is approved before its new workflow) the older version goes on starting itself, and nothing else
+        starts it."""
+        wid = (rt.workflow or {}).get("id")
+        if not wid:
+            return None
+        try:
+            wf = self.workflow(wid)[0]
+        except NotFound:
+            return None
+        event = wf.event or ""
+        if wf.record != rt.id or (event.startswith("record.") and event.endswith(f":{rt.id}")):
+            return None
+        return wid
+
+    def _owner_follows_move(self, rt, ref: str, rec: dict, member: dict, run_id: str | None, t: dict,
+                            cause: int) -> None:
+        """The record moved: its own workflow's open run follows, in this same transaction, so the record's state and
+        the run's step change together or not at all (never the savepoint that lets a run that cannot go on fail
+        alone). A move its run made itself needs nothing more. Otherwise (a person, another workflow's run):
+
+        - a correction open from every state (entered in error), or a move to a state that only a correction leaves
+          (cancelled), that no wait of the run was waiting for, stops the open run (``run.stopped``): nothing is
+          left to do (a run that waits for it, a visit's no-show, goes on to its own ending);
+        - else the run takes the step the move finished (a wait's ``until``);
+        - and when no run of its workflow is walking it now but the type's ``when`` holds of where it is (a record
+          sent back and revised, or one filed before its type named a workflow), its workflow starts about it again:
+          every pass of a lifecycle that loops is walked."""
+        owner = rt.workflow["id"]
+        if run_id:
+            run = self.db.runs.get(run_id)
+            if run and run["workflow_id"] == owner and run.get("record") == ref:
+                return
+        how = self.state_move_waited_on(rt, ref, rec, t["to"])
+        closing = not any(t["to"] in x["from"] for x in rt.lifecycle["transition"] if "*" not in x["from"])
+        runs = [r["id"] for r in self.db.runs.find({"workflow_id": owner, "record": ref, "status": "running"},
+                                                   fields=["id"])]
+        if runs and how != "until" and ("*" in t["from"] or closing):
+            why = f"moved to {rt.state_label(t['to']).lower()}" + (" (a correction)" if "*" in t["from"] else "")
+            for r in runs:
+                self.engine.stop(member, r, why, cause)
+            return
+        for r in runs:
+            self.engine.advance(r, cause)
+        if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner \
+                or schema.starts_workflow(rt, rec) != owner \
+                or self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
+            return
+        starter = member if member.get("kind") in ("person", "agent", "service") else \
+            {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
+        last = self.db.runs.find_one({"workflow_id": owner, "record": ref}, sort=[("created_at", DESC)],
+                                     fields=["id"])
+        self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
+                          previous=last["id"] if last else None)
 
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
@@ -3360,6 +3422,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return
         try:
             self.workflow(wid)
+            if self.record_workflow(rt) != wid:
+                return  # its active version still starts itself (a module upgrade half approved)
         except NotFound:
             self.track.append(member, "trigger.failed", f"{rt.id}/{rec['id']}", cause=cause,
                               data={"workflow": wid, "error": f"there is no workflow {wid!r}"})
@@ -3457,13 +3521,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                              **({"comment": comment.strip()} if comment and comment.strip() else {})})
             if clashes:
                 ev = self._note_overbook(member, rt, ref, clashes, over, cause=ev, run_id=run_id)
-            if moved and (rt.workflow or {}).get("id") and not run_id:
-                # the move its own workflow waited on: that run takes its step in this same transaction, so the
-                # record's state and the run's step change together or not at all (never the savepoint that lets a
-                # run that cannot go on fail alone)
-                for r in self.db.runs.find({"workflow_id": rt.workflow["id"], "record": ref, "status": "running"},
-                                           fields=["id"]):
-                    self.engine.advance(r["id"], ev)
+            if moved and (rt.workflow or {}).get("id"):
+                self._owner_follows_move(rt, ref, rec, member, run_id, rt.transition(*moved), ev)
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
         if rt.is_a("Restriction"):
             self.restrictions.reset()
