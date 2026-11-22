@@ -20,10 +20,24 @@ def install_dms(hub):
     hub.install_module(M(hub, "rana"), "dms")
 
 
-def token(hub, mid):
+def enable(hub, sid, *, roles=None, members=(), clients=()):
+    """Rana asks, Dr Amara (a second policy owner) approves: the server is on for these roles (every role if none)."""
+    roles = [r["id"] for r in hub.roles()] if roles is None else roles
+    mcp.ask_access(hub, M(hub, "rana"), sid, roles=roles, members=members, clients=clients, reason="test",
+                   acknowledged=True)
+    if mcp.request_of(hub, sid):
+        mcp.approve_access(hub, M(hub, "dr-amara"), sid)
+
+
+def token(hub, mid, servers=("core", "practice"), *, client="test client", runs_in=None, on=True):
     m = hub.member(mid)
     by = mid if m["kind"] == "person" else m["sponsor"]
-    return hub.issue_token(M(hub, by), mid, "test")
+    if on:
+        for sid in servers:
+            if not mcp.server(hub, sid):
+                enable(hub, sid)
+    return mcp.issue_token(hub, M(hub, by), mid, servers_=list(servers), client=client,
+                           runs_in=runs_in or mcp.residency(hub), label="test")
 
 
 @pytest.fixture
@@ -101,16 +115,129 @@ def test_a_bad_token_is_401_and_a_bad_origin_403(hub, server):
 
 def test_a_disabled_or_missing_module_server_is_404(hub, server):
     install_dms(hub)
-    tok = token(hub, "rana")
+    tok = token(hub, "rana", ["dms"])
     assert rpc(server, "dms", tok, "ping")[0] == 200
     assert rpc(server, "nosuch", tok, "ping")[0] == 404
     with pytest.raises(Exception):
-        mcp.set_enabled(hub, M(hub, "jo"), "dms", False)  # not a policy owner
-    mcp.set_enabled(hub, M(hub, "rana"), "dms", False, "testing")
+        mcp.switch_off(hub, M(hub, "jo"), "dms", "no")  # not a policy owner
+    mcp.switch_off(hub, M(hub, "rana"), "dms", "testing")
     assert rpc(server, "dms", tok, "ping")[0] == 404
     assert any(e["action"] == "mcp.disabled" and e["subject"] == "mcp:dms" for e in hub.track.list(limit=500))
-    mcp.set_enabled(hub, M(hub, "rana"), "dms", True)
+    enable(hub, "dms")
     assert rpc(server, "dms", tok, "ping")[0] == 200
+
+
+# ------------------------------------------------------------------ off by default, who may connect, residency
+def test_every_server_is_off_until_two_policy_owners_switch_it_on(hub, server):
+    assert not [s for s in mcp.servers(hub) if s["enabled"]]
+    rana, amara, jo = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "jo")
+    with pytest.raises(Exception):  # nobody may connect: no token for it either
+        token(hub, "jo", ["practice"], on=False)
+    plain = hub.issue_token(jo, "jo", "api")
+    assert rpc(server, "practice", plain, "ping")[0] == 404  # off: as if it were not there
+    with pytest.raises(Exception):
+        mcp.ask_access(hub, jo, "practice", roles=["front-desk"], reason="x", acknowledged=True)  # not a policy owner
+    with pytest.raises(Exception):  # the residency acknowledgement is required
+        mcp.ask_access(hub, rana, "practice", roles=["front-desk"], reason="x")
+    out = mcp.ask_access(hub, rana, "practice", roles=["front-desk", "nurse"], reason="scheduling", acknowledged=True)
+    assert out["waiting"] and not mcp.server(hub, "practice")
+    with pytest.raises(Exception):
+        mcp.approve_access(hub, rana, "practice")  # not the one who asked
+    mcp.approve_access(hub, amara, "practice")
+    s = mcp.server(hub, "practice")
+    assert s["policy"]["roles"] == ["front-desk", "nurse"] and s["policy"]["approved_by"] == "dr-amara"
+    ev = next(e for e in hub.track.list(limit=500) if e["action"] == "mcp.enabled")
+    assert ev["actor"] == "dr-amara" and ev["data"]["residency"] == mcp.residency(hub)
+    assert hub.track.trusted(ev)
+    # narrowing applies at once; widening waits again
+    mcp.ask_access(hub, rana, "practice", roles=["front-desk"], reason="front desk only", acknowledged=True)
+    assert mcp.server(hub, "practice")["policy"]["roles"] == ["front-desk"] and not mcp.request_of(hub, "practice")
+    mcp.ask_access(hub, rana, "practice", roles=["front-desk"], members=["noor"], reason="noor too", acknowledged=True)
+    assert mcp.server(hub, "practice")["policy"]["members"] == [] and mcp.request_of(hub, "practice")
+
+
+def test_an_mcp_token_opens_only_its_servers_for_allowed_members(hub, server):
+    enable(hub, "practice", roles=["front-desk", "physician"])
+    enable(hub, "core", roles=["front-desk"])
+    tok = token(hub, "jo", ["practice"], on=False)
+    assert rpc(server, "practice", tok, "ping")[0] == 200
+    assert rpc(server, "core", tok, "ping")[0] == 403  # on, but not this token's server
+    api = hub.issue_token(M(hub, "jo"), "jo", "api")
+    assert rpc(server, "practice", api, "ping")[0] == 403  # an API token is not for MCP
+    assert hub.authenticate(api)["id"] == "jo" and hub.authenticate(tok) is None  # nor an MCP token for the API
+    with pytest.raises(Exception):
+        token(hub, "noor", ["practice"], on=False)  # a nurse is not let in
+    # a member let in and later left out is refused on the next message, and the refusal is on the track
+    mcp.ask_access(hub, M(hub, "rana"), "practice", roles=["physician"], reason="doctors only", acknowledged=True)
+    assert rpc(server, "practice", tok, "ping")[0] == 403
+    ref = [e for e in hub.track.list(limit=500) if e["action"] == "mcp.refused"]
+    assert ref and ref[0]["data"]["stage"] == "connect" and ref[0]["data"]["client"]["name"] == "test client"
+
+
+def test_a_client_outside_the_residency_is_refused_unless_attested(hub, server):
+    home = mcp.residency(hub)
+    assert home  # the pack names it; the core names no place
+    enable(hub, "practice")
+    with pytest.raises(Exception):
+        token(hub, "jo", ["practice"], client="Cloud chat", runs_in="Elsewhere")
+    with pytest.raises(Exception):  # where it runs is declared
+        mcp.issue_token(hub, M(hub, "jo"), "jo", servers_=["practice"], client="Cloud chat", runs_in="")
+    mcp.ask_access(hub, M(hub, "rana"), "practice", roles=[r["id"] for r in hub.roles()],
+                   clients=[{"name": "Cloud chat", "runs_in": "Elsewhere"}], reason="vendor agreement",
+                   acknowledged=True)
+    assert mcp.request_of(hub, "practice")  # attesting a client widens: a second policy owner approves
+    mcp.approve_access(hub, M(hub, "dr-amara"), "practice")
+    tok = token(hub, "jo", ["practice"], client="Cloud chat", runs_in="Elsewhere")
+    assert rpc(server, "practice", tok, "ping")[0] == 200
+    issued = next(e for e in hub.track.list(limit=500) if e["action"] == "credential.issued"
+                  and e["data"].get("scope") == "mcp")
+    assert issued["data"]["client"] == {"name": "Cloud chat", "runs_in": "Elsewhere"}
+    # the attestation is taken away: the same token stops at once
+    mcp.ask_access(hub, M(hub, "rana"), "practice", roles=[r["id"] for r in hub.roles()], reason="ended",
+                   acknowledged=True)
+    assert rpc(server, "practice", tok, "ping")[0] == 403
+
+
+def test_connections_and_calls_are_on_the_track_with_the_client(hub, server):
+    tok = token(hub, "jo", ["practice"])
+    _, h, _ = rpc(server, "practice", tok, "initialize",
+                  {"protocolVersion": "2025-06-18", "clientInfo": {"name": "Desk app", "version": "2.1"}})
+    sess = {"Mcp-Session-Id": h["Mcp-Session-Id"]}
+    _, _, body = rpc(server, "practice", tok, "tools/call", {"name": "search_patient", "arguments": {}}, headers=sess)
+    found = json.loads(body)["result"]["structuredContent"]["records"]
+    assert found
+    evs = hub.track.list(limit=5000)
+    conn = next(e for e in evs if e["action"] == "mcp.connected")
+    assert conn["actor"] == "jo" and conn["data"]["client_info"] == {"name": "Desk app", "version": "2.1"}
+    assert conn["data"]["client"] == {"name": "test client", "runs_in": mcp.residency(hub)}
+    called = next(e for e in evs if e["action"] == "mcp.called" and e["data"]["tool"] == "search_patient")
+    assert called["data"]["client_info"]["name"] == "Desk app" and called["data"]["credential"]
+    # the search is on each listed patient's access report, as a list page's is
+    listed = next(e for e in evs if e["action"] == "records.listed" and e["actor"] == "jo")
+    assert listed["data"]["how"] == "mcp" and listed["subject"] == "records:Patient"
+    assert {r["ref"] for r in found} <= set(listed["data"]["refs"])
+    pid = found[0]["ref"]
+    rows = [r for r in hub.access_report(M(hub, "rana"), pid) if r["who"] == "jo"]
+    assert any("mcp" in r["how"] for r in rows)
+    # opening one is a view of its own
+    rpc(server, "practice", tok, "tools/call", {"name": "read_patient", "arguments": {"id": pid.split("/")[1]}},
+        headers=sess)
+    assert any(e["action"] == "record.viewed" and e["subject"] == pid and e["actor"] == "jo"
+               for e in hub.track.list(limit=5000))
+
+
+def test_the_tool_list_is_made_once_per_message(hub, server, monkeypatch):
+    tok = token(hub, "jo", ["practice"])
+    _, h, _ = rpc(server, "practice", tok, "initialize", {"protocolVersion": "2025-06-18"})
+    sess = {"Mcp-Session-Id": h["Mcp-Session-Id"]}
+    made = []
+    real = mcp.tools
+    monkeypatch.setattr(mcp, "tools", lambda *a, **k: made.append(1) or real(*a, **k))
+    rpc(server, "practice", tok, "tools/call", {"name": "search_patient", "arguments": {}}, headers=sess)
+    assert len(made) == 1
+    made.clear()
+    rpc(server, "practice", tok, "tools/list", headers=sess)
+    assert len(made) == 1
 
 
 # ------------------------------------------------------------------ tools from definitions
@@ -200,7 +327,7 @@ def test_create_search_and_move_go_through_the_hub_and_are_logged(hub, server):
     assert any(e["action"] == "record.viewed" and "mcp dms/read_document" in json.dumps(e["data"]) for e in evs)
     assert "SOP-001" not in json.dumps([e["data"] for e in called])  # arguments are not logged
     # over HTTP the same
-    tok = token(hub, "jo")
+    tok = token(hub, "jo", ["dms"])
     _, _, body = rpc(server, "dms", tok, "tools/call", {"name": "search_document", "arguments": {}})
     res = json.loads(body)["result"]
     assert res["isError"] is False and res["structuredContent"]["records"] and res["content"][0]["type"] == "text"

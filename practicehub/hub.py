@@ -150,6 +150,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.pack = pack_name
         self.module_problems: dict[str, str] = {}
         self.pack_problem: str | None = None
+        # modules another process (the command line) installs, upgrades or removes are picked up by sync_modules
+        self._modules_live = not isinstance(pack_name, packmod.Pack)
+        self._modules_lock = threading.RLock()
+        self._module_seq: dict[str, int | None] = {}  # the sealed install/upgrade event each loaded module came from
+        self._modules_seen: tuple | None = None
         if pack_name and not isinstance(pack_name, packmod.Pack):
             self.pack = self._load_practice_pack(pack_name) if pack is None else packmod.load(pack_name)
         if self.pack and pack is None:  # modules added to the running practice, in the order they were installed
@@ -159,6 +164,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     self.pack.modules.remove(m)
                     self.module_problems[m.id] = "the practice pack names it, but it was never installed"
             self._load_installed_modules()
+        if self.pack:
+            self._modules_noted()
         self._defs_reset()
         self._sealed_ok: set = set()
         self._subjects()
@@ -509,31 +516,131 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         or changed is left out (its definitions stay; its actions do not run) and named in ``module_problems``, for
         the modules page; the practice still starts."""
         for mid in self.installed_modules():
-            listed = next((i for i, x in enumerate(self.pack.modules) if x.id == mid), None)
-            if listed is not None and self.pack.modules[listed].module is None and \
-                    not self.pack.modules[listed].module_sha256:
-                continue  # listed by the pack, read, and it has no code to run
-            old = self.pack.modules[listed] if listed is not None else None
+            self._load_one_module(mid)
+
+    def _load_one_module(self, mid: str) -> None:
+        listed = next((i for i, x in enumerate(self.pack.modules) if x.id == mid), None)
+        if listed is not None and self.pack.modules[listed].module is None and \
+                not self.pack.modules[listed].module_sha256:
+            return  # listed by the pack, read, and it has no code to run
+        old = self.pack.modules[listed] if listed is not None else None
+        try:
+            sha = self._module_code_sha(mid)
+            if sha is None:
+                raise ValueError(f"the module {mid} has no signed install on the track: it is not run")
+            m = packmod.load_module(mid, expect_sha256=sha)
+            if listed is not None:  # a module the pack lists was read without its code: run it now it is checked
+                self.pack.modules[listed] = m
             try:
-                sha = self._module_code_sha(mid)
-                if sha is None:
-                    raise ValueError(f"the module {mid} has no signed install on the track: it is not run")
-                m = packmod.load_module(mid, expect_sha256=sha)
-                if listed is not None:  # a module the pack lists was read without its code: run it now it is checked
-                    self.pack.modules[listed] = m
-                try:
-                    packmod.add_module(self.pack, m)
-                except Exception:
-                    if listed is not None:
-                        self.pack.modules[listed] = old
-                    raise
-            except Exception as exc:  # noqa: BLE001 - one broken module never stops the practice starting
-                self.module_problems[mid] = str(exc)
-                last = self.db.events.find_one({"action": "module.refused", "subject": f"module:{mid}"},
-                                               sort=[("seq", DESC)])
-                if not last or last["data"].get("problem") != str(exc):
-                    self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "module.refused",
-                                      f"module:{mid}", data={"module": mid, "problem": str(exc)})
+                packmod.add_module(self.pack, m)
+            except Exception:
+                if listed is not None:
+                    self.pack.modules[listed] = old
+                raise
+        except Exception as exc:  # noqa: BLE001 - one broken module never stops the practice starting
+            self.module_problems[mid] = str(exc)
+            last = self.db.events.find_one({"action": "module.refused", "subject": f"module:{mid}"},
+                                           sort=[("seq", DESC)])
+            if not last or last["data"].get("problem") != str(exc):
+                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "module.refused",
+                                  f"module:{mid}", data={"module": mid, "problem": str(exc)})
+
+    MODULE_EVENTS = ("module.installed", "module.upgraded", "module.removed")
+
+    def _module_event_seq(self, mid: str) -> int | None:
+        """The newest sealed install, upgrade or removal of a module: what the loaded code must have come from."""
+        rows = self.track.trusted({"action": {"$in": list(self.MODULE_EVENTS)}, "subject": f"module:{mid}"},
+                                  sort=[("seq", DESC)], limit=1)
+        return rows[0]["seq"] if rows else None
+
+    def _modules_mark(self) -> tuple:
+        """Two settings rows, read on every request: the installed modules and a mark every install, upgrade and
+        removal changes (in whichever process it happens)."""
+        return tuple(self.installed_modules()), self.db.get_setting("modules_rev")
+
+    def _modules_changed(self) -> None:
+        """Inside an install, upgrade or removal's transaction: other hubs on this database load the change."""
+        self.db.set_setting("modules_rev", secrets.token_hex(8))
+
+    def _modules_noted(self, *mids: str) -> None:
+        """This process loaded (or took out) these modules as the track now says; with none, every installed one."""
+        for mid in (mids or self.installed_modules()):
+            if mid in self.installed_modules():
+                self._module_seq[mid] = self._module_event_seq(mid)
+            else:
+                self._module_seq.pop(mid, None)
+        if not mids:
+            self._modules_seen = self._modules_mark()
+
+    def sync_modules(self) -> bool:
+        """Bring the running hub's modules in line with the database, when another process (``practicehub module
+        install``, ``upgrade``, ``remove``) changed them: a removed module's code stops running, a new or upgraded
+        one is loaded, and only if its pack.py is the code sealed into the track by its install or upgrade (whose
+        review a second policy owner signed). Cheap when nothing changed: two settings rows. True if anything
+        changed."""
+        if not self.pack or not self._modules_live:
+            return False
+        mark = self._modules_mark()
+        if mark == self._modules_seen:
+            return False
+        with self._modules_lock:
+            mark = self._modules_mark()
+            if mark == self._modules_seen:
+                return False
+            want = list(mark[0])
+            changed = False
+            for m in list(self.pack.modules):
+                if m.id not in want:
+                    packmod.remove_module(self.pack, m)
+                    changed = True
+            for mid in [x for x in self.module_problems if x not in want and x in self._module_seq]:
+                self.module_problems.pop(mid, None)
+            for mid in [x for x in self._module_seq if x not in want]:
+                self._module_seq.pop(mid, None)
+            for mid in want:
+                seq = self._module_event_seq(mid)
+                if mid in self._module_seq and self._module_seq[mid] == seq:
+                    continue  # running the code its newest install or upgrade sealed (or refused that, already said)
+                old = next((x for x in self.pack.modules if x.id == mid), None)
+                if old is not None:
+                    packmod.remove_module(self.pack, old)
+                self.module_problems.pop(mid, None)
+                self._load_one_module(mid)
+                self._module_seq[mid] = seq
+                changed = True
+            self._modules_seen = mark
+            if changed:
+                self._defs_reset()
+                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "modules.reloaded",
+                                  "practice:main", data={"modules": [m.id for m in self.pack.modules],
+                                                         "not_running": sorted(self.module_problems)})
+            return changed
+
+    def module_status(self, mid: str, *, sync: bool = True) -> dict:
+        """One module's state as every page shows it: installed or not, running or not, and what to do."""
+        if sync:
+            self.sync_modules()
+        installed = mid in self.installed_modules()
+        running = any(m.id == mid for m in self.pack.modules) if self.pack else False
+        problem = self.module_problems.get(mid)
+        if installed and running and not problem:
+            return {"state": "running", "installed": True, "running": True, "why": "", "next": ""}
+        if installed:
+            return {"state": "not_running", "installed": True, "running": False,
+                    "why": problem or "its code is not loaded in this hub",
+                    "next": ("review and upgrade it on its modules page, or restart the hub after fixing the files"
+                             if problem else "restart the hub to load it")}
+        return {"state": "available", "installed": False, "running": False, "why": "", "next": ""}
+
+    def module_requires(self, mid: str) -> list[str]:
+        """What a module builds on, from its module.toml: the loaded one, else as it is on disk."""
+        m = next((x for x in (self.pack.modules if self.pack else []) if x.id == mid), None)
+        if m is None:
+            try:
+                m = packmod.load_module(mid, run_code=False)
+            except (FileNotFoundError, ValueError):
+                return []
+        return list(m.requires)
 
     def _module_by_id(self, mid: str) -> packmod.Pack:
         m = next((x for x in self.pack.modules if x.id == mid), None)
@@ -624,6 +731,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self._install_definitions(installer, p, "", root)
             for m in p.modules:
                 self._install_definitions(installer, m, m.id, root)
+            self._modules_changed()
+        self._modules_noted()
         if demo and p.module is not None and hasattr(p.module, "demo"):
             p.module.demo(self)
         for m in p.modules:
@@ -689,6 +798,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.require(actor, "policy_owner", "practice:main", "install modules")
         if not wfmod.ID.fullmatch(name or ""):
             raise Invalid("name a module in the modules directory (letters, digits and dashes), not a path")
+        self.sync_modules()
         if name in self.installed_modules():
             raise Invalid(f"the module {name} is already installed: upgrade it instead")
         try:  # read it, check the review, and only then run the code that was reviewed
@@ -697,6 +807,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid(str(exc)) from None
         if any(x.id == m.id for x in self.pack.modules):
             raise Invalid(f"the module {m.id} is already installed")
+        have = self.installed_modules()
+        absent = [r for r in m.requires if r not in have]
+        if absent:
+            raise Invalid(f"the {m.id} module builds on {', '.join(absent)}: install "
+                          f"{'it' if len(absent) == 1 else 'them'} first")
+        stopped = [r for r in m.requires if self.module_status(r)["state"] != "running"]
+        if stopped:
+            raise Invalid(f"the {m.id} module builds on {', '.join(stopped)}, which "
+                          f"{'is' if len(stopped) == 1 else 'are'} installed but not running here ("
+                          + "; ".join(self.module_status(r)["why"] for r in stopped) + "): fix that first")
         self._require_code_review(actor, m, None)
         m = self._load_reviewed(name, m)
         try:
@@ -717,10 +837,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self._defs_reset()
                 self._install_definitions(actor, m, m.id, root)
                 self._install_extensions(actor, m, root)
+                self._modules_changed()
         except Exception:
             packmod.remove_module(self.pack, m)
             self._defs_reset()
             raise
+        self._modules_noted(m.id)
         return {"module": m.id, "version": m.version}
 
     EXT_BEGIN, EXT_END = "# >>> added by the {} module", "# <<< {}"
@@ -907,6 +1029,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if actor.get("kind") != "person":
             raise Denied("a module is upgraded by a person")
         self.require(actor, "policy_owner", "practice:main", "upgrade modules")
+        self.sync_modules()
         if name not in self.installed_modules():
             raise Invalid(f"the module {name} is not installed")
         try:  # read it, check the review, and only then run the code that was reviewed
@@ -969,12 +1092,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                          **self._propose(kind, actor, did, src, note,
                                                          module=None if (kind, did) in new.extensions else new.id)})
                 self.module_problems.pop(new.id, None)
+                self._modules_changed()
         except Exception:
             packmod.remove_module(self.pack, new)
             if old is not None:
                 packmod.add_module(self.pack, old)
             self._defs_reset()
             raise
+        self._modules_noted(new.id)
         return {"module": new.id, "version": new.version, "proposed": proposed, "plan": plan}
 
     def uninstall_module(self, actor: dict, name: str, reason: str = "") -> dict:
@@ -985,10 +1110,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if actor.get("kind") != "person":
             raise Denied("a module is removed by a person")
         self.require(actor, "policy_owner", "practice:main", "remove modules")
+        self.sync_modules()
         if name not in self.installed_modules():
             raise Invalid(f"the module {name} is not installed")
         m = next((x for x in self.pack.modules if x.id == name), None)
-        users = [x.id for x in self.pack.modules if name in x.requires]
+        # every installed module, running here or not: one that builds on this one keeps it
+        users = [x for x in self.installed_modules() if x != name and name in self.module_requires(x)]
         if users:
             raise Invalid(f"{', '.join(users)} build{'s' if len(users) == 1 else ''} on {name}: remove "
                           f"{'it' if len(users) == 1 else 'them'} first")
@@ -1019,10 +1146,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     self._put_version(actor, kind, r[col], src, f"The {name} module's additions taken out", name,
                                       root, f"{kind}.unextended")
             self.db.set_setting("modules", [x for x in self.installed_modules() if x != name])
+            self._modules_changed()
             self._defs_reset()
         if m is not None:
             packmod.remove_module(self.pack, m)
         self.module_problems.pop(name, None)
+        self._modules_noted(name)
         self._defs_reset()
         return {"module": name, "retired": owned}
 
@@ -1858,10 +1987,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def issue_token(self, actor: dict, mid: str, label: str = "") -> str:
+    def issue_token(self, actor: dict, mid: str, label: str = "", *, scope: str = "api", servers: list | None = None,
+                    client: dict | None = None) -> str:
         """An API token for a member. A person's comes only to that person (whoever holds it can act and sign as
         them); an agent's or service's only from its sponsor, who answers for what is done with it (a member admin
-        who could mint one could act through the agent as a puppet)."""
+        who could mint one could act through the agent as a puppet). ``scope="mcp"`` makes one that opens only the
+        MCP servers named, for one named client (``practicehub.mcp.issue_token`` checks those first); an MCP token
+        is refused everywhere else, and any other token by the MCP servers."""
+        if scope not in ("api", "mcp"):
+            raise Invalid("a token is for the API or for MCP")
         target = self.member(mid)
         if target["kind"] == "person":
             allowed = actor["id"] == mid or actor.get("kind") == "installer"
@@ -1875,9 +2009,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid(f"{target['name']} is switched off")
         token = "ph_" + secrets.token_urlsafe(32)
         th = self._hash_token(token)
-        self.db.tokens.insert({"_id": th, "token_hash": th, "member": mid, "label": label, "created_at": utcnow(),
-                               "revoked": 0, "issued_by": actor["id"]})
-        self.track.append(actor, "credential.issued", member_ref(mid), data={"label": label})
+        row = {"_id": th, "token_hash": th, "member": mid, "label": label, "created_at": utcnow(), "revoked": 0,
+               "issued_by": actor["id"], "scope": scope}
+        if scope == "mcp":
+            row.update({"servers": list(servers or []), "client": dict(client or {})})
+        with self.db:
+            self.db.tokens.insert(row)
+            self.track.append(actor, "credential.issued", member_ref(mid),
+                              data={"label": label, "scope": scope, "credential": th[:12],
+                                    **({"servers": row["servers"], "client": row["client"]} if scope == "mcp" else {})})
         return token
 
     def tokens(self, actor: dict, mid: str) -> list[dict]:
@@ -1887,7 +2027,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 or self.can(actor, "member_admin", "practice:main")):
             raise Denied(f"{actor['name']} may not see {target['name']}'s credentials")
         return [{"id": r["token_hash"][:12], "label": r["label"], "created_at": r["created_at"],
-                 "issued_by": r["issued_by"], "revoked": bool(r["revoked"])}
+                 "issued_by": r["issued_by"], "revoked": bool(r["revoked"]), "scope": r.get("scope", "api"),
+                 "servers": r.get("servers", []), "client": r.get("client") or {}}
                 for r in self.db.tokens.find({"member": mid}, sort=[("created_at", DESC)])]
 
     def revoke_token(self, actor: dict, mid: str, tid: str) -> None:
@@ -1912,12 +2053,18 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if n:
             self.track.append(actor, "credential.revoked", member_ref(mid), data={"count": n, "reason": why})
 
-    def authenticate(self, token: str) -> dict | None:
-        row = self.db.tokens.find_one({"_id": self._hash_token(token), "revoked": 0})
+    def authenticate(self, token: str, scope: str = "api") -> dict | None:
+        """The active member a token is for, if it is live and for this use (an MCP token opens only MCP)."""
+        got = self.credential(token)
+        return got[0] if got and got[1].get("scope", "api") == scope else None
+
+    def credential(self, token: str) -> tuple[dict, dict] | None:
+        """(member, the credential's row) for a live token of an active member."""
+        row = self.db.tokens.find_one({"_id": self._hash_token(token or ""), "revoked": 0})
         if not row:
             return None
         m = self.member(row["member"])
-        return m if m["status"] == "active" else None
+        return (m, {**row, "scope": row.get("scope", "api")}) if m["status"] == "active" else None
 
     # ------------------------------------------------------------------ records (permission-checked)
     def _type(self, rtype: str) -> schema.RecordType:

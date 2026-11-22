@@ -1846,7 +1846,6 @@ class RecordPages:
     # ------------------------------------------------------------------------------------------ modules
     def page_modules(self, req):
         me, hub = req["me"], self.hub
-        have = {m.id: m for m in hub.pack.modules}
         installed = hub.installed_modules()
         may = me["kind"] == "person" and hub.is_policy_owner(me)
         rows = []
@@ -1856,20 +1855,22 @@ class RecordPages:
             except Exception as exc:  # noqa: BLE001 - a broken module on disk is shown, not fatal
                 rows.append(f"<tr><td>{e(d.parent.name)}</td><td colspan=4 class='error'>{e(str(exc))}</td></tr>")
                 continue
-            missing = [r for r in m.requires if r not in have]
-            if m.id in hub.module_problems:
-                act = (f'<span class="loz removed">not running</span> <a href="/modules/{e(m.id)}">Review</a>')
-            elif m.id in have:
+            st = hub.module_status(m.id)
+            missing = [r for r in m.requires if hub.module_status(r)["state"] != "running"]
+            if st["state"] == "not_running":
+                act = (f'<span class="loz removed">installed, not running</span><br><span class="muted">'
+                       f'{e(st["why"])}: {e(st["next"])}.</span>'
+                       + (f' <a href="/modules/{e(m.id)}">Review</a>' if may else ""))
+            elif st["state"] == "running":
                 changed = m.digest != hub._module_digest(m.id)
-                act = ('<span class="loz success">installed</span>'
+                act = ('<span class="loz success">installed, running</span>'
                        + (f' <a href="/modules/{e(m.id)}">{"Upgrade to version " + e(m.version) if changed else "Manage"}'
                           f'</a>' if may else ""))
-            elif m.id in installed:
-                act = '<span class="loz moved">installed, not loaded</span>'
             elif not may:
                 act = '<span class="muted">a policy owner installs it</span>'
             elif missing:
-                why = [f"{r} is not running" if r in hub.module_problems else f"install {r} first" for r in missing]
+                why = [f"{r} is installed but not running" if r in installed else f"install {r} first"
+                       for r in missing]
                 act = f'<span class="muted">{e("; ".join(why))}</span>'
             else:
                 act = f'<a class="btn" href="/modules/{e(m.id)}">Review and install</a>'
@@ -1892,7 +1893,8 @@ class RecordPages:
         me, hub = req["me"], self.hub
         if not (me["kind"] == "person" and hub.is_policy_owner(me)):
             raise Denied("a policy owner manages modules")
-        installed = mid in hub.installed_modules()
+        st = hub.module_status(mid)
+        installed = st["installed"]
         try:
             plan = hub.module_plan(mid)
         except FileNotFoundError:
@@ -1901,8 +1903,9 @@ class RecordPages:
             plan = None
             hub.module_problems.setdefault(mid, str(exc))
         out = []
-        if mid in hub.module_problems:
-            out.append(f'<div class="flash error" role="alert"><p>{e(hub.module_problems[mid])}</p></div>')
+        if st["state"] == "not_running":
+            out.append(f'<div class="flash error" role="alert"><p><b>Installed, not running.</b> {e(st["why"])}: '
+                       f'{e(st["next"])}.</p></div>')
         if plan is None:
             return self.layout(req, f"Module {mid}", "".join(out), crumbs=[("/modules", "Modules")])
         rows = [("clashes", "Refused: these belong to someone else, so the module cannot change them"),
@@ -1919,11 +1922,13 @@ class RecordPages:
         what = "Install" if not installed else "Upgrade"
         heading = (f"Install version {e(plan['version'])}" if not installed else
                    f"Upgrade to version {e(plan['version'])}" if plan["needs_review"] else
-                   f"Version {e(plan['version'])} is running")
+                   f"Version {e(plan['version'])} is running" if st["running"] else
+                   f"Version {e(plan['version'])} is installed, not running")
         out.append(f"<div class='section'><h2>{heading}</h2>")
         if installed and not plan["needs_review"]:
-            out.append("<p class='muted'>The practice runs this module as it is on disk: there is nothing to "
-                       "upgrade.</p>")
+            out.append("<p class='muted'>" + ("The practice runs this module as it is on disk: there is nothing to "
+                       "upgrade." if st["running"] else "Its files are the ones put into force, but this hub is not "
+                       "running its code.") + "</p>")
         else:
             out.append(f"<p>Its code (pack.py) is <b>{'changed' if plan['code_changed'] else 'unchanged'}</b>. "
                        f"{review}</p>")

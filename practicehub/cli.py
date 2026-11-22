@@ -142,6 +142,7 @@ def start_clock(hub, interval: float = 60.0):
         while True:
             time.sleep(interval)
             try:
+                hub.sync_modules()  # modules the command line installed, upgraded or removed meanwhile
                 hub.engine.tick()
                 hub.outbox_tick()
                 hub.track.anchor()
@@ -166,6 +167,7 @@ def start_agent_loop(hub, interval: float = 30.0):
             hub.agents_wanted.clear()
             time.sleep(0.2)  # let the request that made the work finish its transaction
             try:
+                hub.sync_modules()
                 n = run_all_local(hub, rounds=10, log=lambda m: print(f"[agents] {m}", flush=True))
                 if n:
                     print(f"[agents] handled {n} item(s)", flush=True)
@@ -222,6 +224,13 @@ def cmd_agents_run(args):
 def cmd_token(args):
     hub = build_hub(args)
     actor = hub.member(args.as_member)
+    if args.mcp:
+        from . import mcp
+        if not args.client or not args.runs_in:
+            raise SystemExit("an MCP token names its client (--client) and where it runs (--runs-in)")
+        print(mcp.issue_token(hub, actor, args.member, servers_=[x for x in args.mcp.split(",") if x],
+                              client=args.client, runs_in=args.runs_in, label=args.label or ""))
+        return
     print(hub.issue_token(actor, args.member, args.label or "cli"))
 
 
@@ -528,14 +537,18 @@ def cmd_owners_recover(args):
 def cmd_module_list(args):
     from . import pack as packmod
     hub = build_hub(args)
-    have = {m.id: m for m in hub.pack.modules}
     for mid, why in hub.module_problems.items():
         print(f"{mid:12} {'refused':10} {why}")
     for d in sorted(packmod.MODULES_DIR.glob("*/module.toml")):
         m = packmod.load_module(d.parent.name, run_code=False)
-        mark = "installed" if m.id in have else "available"
+        st = hub.module_status(m.id)["state"]
+        mark = {"running": "installed", "not_running": "not run"}.get(st, "available")
         needs = f" (needs {', '.join(m.requires)})" if m.requires else ""
         print(f"{m.id:12} {mark:10} {m.practice.get('name', m.id)}: {m.practice.get('summary', '')}{needs}")
+
+
+LIVE_HINT = ("a running hub on this database picks the change up on its next request (no restart needed); its modules "
+             "page says if it could not")
 
 
 def cmd_module_install(args):
@@ -550,6 +563,7 @@ def cmd_module_install(args):
         if fn:
             fn(hub)
     print(f"installed {out['module']} version {out['version']}" + (" with its demo data" if args.demo else ""))
+    print(LIVE_HINT)
 
 
 def _person(hub, mid):
@@ -644,6 +658,7 @@ def cmd_module_upgrade(args):
     hub = build_hub(args)
     out = hub.upgrade_module(_person(hub, args.as_member), args.name)
     print(f"upgraded {out['module']} to {out['version']}")
+    print(LIVE_HINT)
     for p in out["proposed"]:
         print(f"  proposed {p['kind']} {p['id']} v{p['version']}: another policy owner approves it")
 
@@ -652,6 +667,7 @@ def cmd_module_remove(args):
     hub = build_hub(args)
     out = hub.uninstall_module(_person(hub, args.as_member), args.name, args.reason or "")
     print(f"removed {out['module']}; its records stay, readable")
+    print(LIVE_HINT)
 
 
 def cmd_tick(args):
@@ -754,10 +770,14 @@ def main(argv=None):
     p.add_argument("--interval", type=float, default=5.0)
     p.set_defaults(fn=cmd_agents_run)
 
-    p = sub.add_parser("token", help="issue an API token for a member")
+    p = sub.add_parser("token", help="issue an API token (or, with --mcp, an MCP token) for a member")
     p.add_argument("member")
     p.add_argument("--as", dest="as_member", required=True, help="who is issuing it (the member, or an agent's or service's sponsor)")
     p.add_argument("--label")
+    p.add_argument("--mcp", metavar="SERVERS", help="an MCP token for these servers (comma separated), not an API token")
+    p.add_argument("--client", help="with --mcp: the client (AI app or program) that will use it")
+    p.add_argument("--runs-in", dest="runs_in", help="with --mcp: where that client runs (refused outside the "
+                   "practice's data residency unless a policy owner attested the client)")
     p.set_defaults(fn=cmd_token)
 
     mb = sub.add_parser("member", help="members: add, roles, sponsors, credentials").add_subparsers(dest="sub",

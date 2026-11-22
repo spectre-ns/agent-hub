@@ -531,6 +531,12 @@ form .actions,.form-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:cent
 form.inline{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0}
 form.inline input:not([type=checkbox]):not([type=radio]),form.inline select{width:auto;flex:1;min-width:140px;margin:0}
 form.inline label{margin:0}
+/* connections (MCP): buttons in a row; the server table stacks into labelled rows on a phone */
+.mcp-btns{display:flex;flex-wrap:wrap;gap:8px}
+@media (max-width:640px){table.connections thead{display:none}table.connections tr{display:block;padding:8px 0;
+border-bottom:1px solid var(--border)}table.connections td{display:block;border:0;padding:4px 8px;text-align:left;white-space:normal;overflow-wrap:anywhere}
+table.connections td[data-label]:not(:first-child)::before{content:attr(data-label) ": ";font-weight:600;color:var(--subtle)}
+table.connections code.url{word-break:break-all}}
 
 /* ---- buttons: default (neutral), .primary, .subtle, .danger; .secondary is the default */
 button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:32px;padding:0 12px;margin:0;
