@@ -263,6 +263,10 @@ def parse(source: str, catalog=None) -> Workflow:
             people_role=raw.get("people_role") or None, for_each=raw.get("for_each") or None, where=raw.get("where") or None,
             until=raw.get("until") or None, wait_for=raw.get("for") or None, at=raw.get("at") or None,
             timeout=raw.get("timeout") or None)
+        hidden = sorted(set(step.params) & {"when", "after", "until", "due", "escalate_to", "timeout", "for_each"})
+        if hidden:  # written after [steps.params] in TOML, a step setting silently becomes a parameter
+            problems.append(f"{where}: {', '.join(hidden)} is a step setting, not a parameter: put it above "
+                            f"[steps.params], with the step's other settings")
         if step.for_each and kind not in ("automation", "wait"):
             problems.append(f"{where}: for_each is for automations and waits")
         if step.where and kind != "automation":

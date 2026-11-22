@@ -1275,6 +1275,16 @@ def test_a_wait_step_is_checked(hub):
         parse(head + 'kind = "wait"\nuntil = "record.done"\nfor = "3d"\n')
 
 
+def test_a_step_setting_cannot_hide_among_its_parameters(hub):
+    """Written after [steps.params] in TOML, when (or after, due...) becomes a parameter and the step runs every time;
+    the check refuses it and says where it goes."""
+    from practicehub.workflows import DefinitionError, parse
+    src = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["nurse"]\n[[steps]]\nid = "x"\ntitle = "X"\n'
+           'kind = "automation"\naction = "message.send"\n[steps.params]\nto = "a"\nwhen = "input.x == 1"\n')
+    with pytest.raises(DefinitionError, match="when is a step setting, not a parameter"):
+        parse(src)
+
+
 def test_only_the_authors_of_this_revision_may_not_approve_it(quality):
     """Who wrote an earlier, approved revision may approve the next one; otherwise two controllers lock each other out."""
     hub = quality
