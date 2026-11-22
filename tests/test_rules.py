@@ -2984,6 +2984,31 @@ def test_an_agent_is_mentioned_only_where_it_may_read_and_never_changes_the_text
         lv.decide_suggestion(M(hub, "scribe-agent"), ref, c["id"], s["id"], True)
 
 
+def test_a_suggestion_on_a_file_is_never_applied_by_the_hub(quality):
+    """Rule: on a file a record holds, an agent's suggestion is words; the hub never edits the file. Accepting it is a
+    person with write access saying they made the change themselves (tests/test_office_mentions.py has the rest)."""
+    hub = quality
+    from practicehub.hub import member_ref
+    from practicehub.integrations import collabora as cool
+    from practicehub.live import Live
+    lv = hub._live = Live(hub)
+    rana, agent = M(hub, "rana"), M(hub, "scribe-agent")
+    hub.authz.write([("data_class:documents", "reader", member_ref("scribe-agent"))])
+    att = hub.add_file(rana, "Document", b"Visitors sign in at the desk.", "Visitors.txt", "text/plain")
+    rec = hub.create_record(rana, "Document", {"title": "Visitors", "status": "draft", "file": att})
+    ref = f"Document/{rec['id']}"
+    c = lv.comment(M(hub, "jo"), ref, "@scribe-agent clearer?", field="file", file="Visitors.txt")
+    s = lv.suggest(agent, ref, c["id"], "", "at the desk", "at the front desk")["replies"][-1]
+    with pytest.raises(Denied):
+        lv.decide_suggestion(agent, ref, c["id"], s["id"], True)
+    before = hub.records.read(*ref.split("/", 1))
+    lv.decide_suggestion(rana, ref, c["id"], s["id"], True)
+    after = hub.records.read(*ref.split("/", 1))
+    assert after["file"] == before["file"] and after["meta"] == before["meta"]
+    assert hub.db.events.find_one({"action": "suggestion.accepted", "data.made_by": "rana"})
+    assert cool.extension("Visitors.txt")
+
+
 # ------------------------------------------------------------------------------------------- exports
 def _file_of_ellen(hub):
     """A subject with a full file in the demo: allergies, problems, prescriptions, results, a visit."""

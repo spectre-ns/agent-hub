@@ -4,6 +4,10 @@ A mention names a member by id (``@noor``, ``@scribe-agent``): it is stored as t
 record, where in it (a quote and the comment thread, the *anchor*), the words around it, and who wrote it. Nothing
 here knows what kind of record it is on: a page, a document, anything with text.
 
+An anchor is one of two kinds. *Text*: a passage of a field of the record (``field``, with the ``quote``). *File*: a
+file the record holds in an attachment field (``field`` and the file's name, ``file``), with an optional quote of its
+words; the mentioned member is given the file's text (:func:`practicehub.filetext.text_of`), read as they may read it.
+
 Mentioning someone gives them a notice in their inbox, on a run of its own (the built-in ``mention`` workflow), so a
 person sees it where they see the rest of their work and an agent finds it through ``/api/inbox``. What the notice
 carries is only where to look; the record, the passage and the thread come from :meth:`Mentions.context`, which asks
@@ -12,14 +16,15 @@ person typing is told so (:class:`~practicehub.hub.Invalid`), and nothing is sen
 
 An agent answers in the thread with its own token, and its answer is marked as an agent's. It may propose a change to
 the text as a *suggestion*; a person who may change the record accepts it (it is then saved as that person's change,
-naming the agent) or rejects it. An agent never changes the text itself here, and nothing here signs or approves.
+naming the agent) or rejects it. On a file, nobody's suggestion is applied by the hub: the person makes the change in
+the file themselves, and accepting it says they did. An agent never changes the text itself here, and nothing here signs or approves.
 Every step is on the track: ``mention.created``, ``mention.refused``, ``mention.answered``,
 ``suggestion.proposed``, ``suggestion.accepted``, ``suggestion.rejected``.
 """
 
 from __future__ import annotations
 
-from . import visibility
+from . import filetext, visibility
 
 import re
 import secrets
@@ -107,9 +112,10 @@ class Mentions:
 
     # ------------------------------------------------------------------ mentioning
     def mention(self, author: dict, ref: str, text: str, *, anchor: str = "", quote: str = "", field: str = "",
-                cause: int | None = None, skip_refused: bool = False) -> list[dict]:
+                file: str = "", cause: int | None = None, skip_refused: bool = False) -> list[dict]:
         """Record and send each mention in ``text`` (written by ``author`` on ``ref``). ``anchor`` is where it was
-        written (a comment thread's id, or a field of the record); ``quote`` the passage it is about. With
+        written (a comment thread's id, or a field of the record); ``quote`` the passage it is about; ``file`` the name of
+the file in ``field`` it is about, when it is about a file rather than the field's text. With
         ``skip_refused`` (text saved by several people at once), a member who may not read ``ref`` is left out and
         the refusal is tracked, instead of stopping the save."""
         if skip_refused:
@@ -123,10 +129,11 @@ class Mentions:
         for m in members:
             if m["id"] == author["id"]:
                 continue
-            out.append(self._send(author, ref, m, text=text, anchor=anchor, quote=quote, field=field, cause=cause))
+            out.append(self._send(author, ref, m, text=text, anchor=anchor, quote=quote, field=field, file=file,
+                                  cause=cause))
         return out
 
-    def _send(self, author, ref, m, *, text, anchor, quote, field, cause) -> dict:
+    def _send(self, author, ref, m, *, text, anchor, quote, field, file="", cause) -> dict:
         hub = self.hub
         from .engine import _item_doc, _new_id
         mid = "mn-" + secrets.token_hex(6)
@@ -136,7 +143,7 @@ class Mentions:
         with self.db:
             seq = hub.track.append(author, "mention.created", ref, cause=cause,
                                    data={"mention": mid, "who": m["id"], "kind": m["kind"], "anchor": anchor,
-                                         "field": field})
+                                         "field": field, **({"file": file} if file else {})})
             run_id = _new_id("run")
             self.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": MENTION_WORKFLOW, "version": 0,
                                  "title": f"You were mentioned: {title}", "record": ref, "status": "completed",
@@ -151,7 +158,8 @@ class Mentions:
                 title=f"{author['name']} {what} on “{title}”",
                 output={"about": ref, "mention": mid}))
             doc = {"_id": mid, "id": mid, "ref": ref, "who": member_ref(m["id"]), "member": m["id"],
-                   "kind": m["kind"], "by": author["id"], "anchor": anchor, "field": field, "quote": quote[:500],
+                   "kind": m["kind"], "by": author["id"], "anchor": anchor, "field": field, "file": file or "",
+                   "quote": quote[:500],
                    "around": _around(text, m["id"]), "at": utcnow(), "item": item_id, "run": run_id,
                    "answered": False}
             self.db.mentions.insert(doc)
@@ -170,7 +178,37 @@ class Mentions:
         c = self.db.live_comments.get(anchor) if anchor else None
         if not c or c["ref"] != ref:
             return None
-        return {k: c.get(k) for k in ("id", "quote", "body", "by", "at", "resolved", "replies", "field")}
+        return {k: c.get(k) for k in ("id", "quote", "body", "by", "at", "resolved", "replies", "field", "file")}
+
+    # ------------------------------------------------------------------ a file as an anchor
+    @staticmethod
+    def attachment_named(rec: dict, path: str, name: str) -> dict | None:
+        """The file called ``name`` that ``rec`` holds at ``path`` (an attachment field, one file or a list)."""
+        now = rec.get(path.removesuffix(".*")) if rec else None
+        for a in (now if isinstance(now, list) else [now]):
+            if isinstance(a, dict) and isinstance(a.get("blob"), str) and (a.get("name") or "") == name:
+                return a
+        return None
+
+    def file_text(self, member: dict, ref: str, field: str, name: str, rec: dict | None = None) -> dict:
+        """The words of the file ``name`` in ``field`` of ``ref``, as ``member`` may read them: the record read as
+        theirs (a field of a class they may not read is not there, so neither is its file), then the stored file."""
+        rt = self.hub.record_type_for_reading(ref.split("/", 1)[0])
+        f = rt.field(field) if rt else None
+        out = {"field": field, "name": name, "available": False, "text": "", "why": "text not available"}
+        if not f or f["type"] != "attachment":
+            return out
+        rec = rec if rec is not None else self.hub.read_record(member, ref)
+        a = self.attachment_named(rec, f["path"], name)
+        if not a:
+            out["why"] = "the record does not hold this file now"
+            return out
+        data, meta = self.hub.read_file(member, ref, a["blob"])
+        text = filetext.text_of(data, name, a.get("contentType") or meta.get("contentType") or "")
+        out["blob"] = a["blob"]
+        if text is None:
+            return out
+        return {**out, "available": True, "text": text, "why": ""}
 
     def context(self, member: dict, mid: str) -> dict:
         """What the mentioned member is given: the record (only if they may still read it), the passage, the words
@@ -182,13 +220,22 @@ class Mentions:
         rec = self.hub.read_record(member, ref)  # asks again: a grant taken away since is respected (and redacted)
         thread = self.thread(ref, row["anchor"])
         mention = {k: row[k] for k in ("id", "ref", "by", "anchor", "field", "quote", "around", "at")}
+        mention["file"] = row.get("file") or ""
         rt = self.hub.record_type_for_reading(ref.split("/", 1)[0])
-        if row.get("field") and any(f["name"] == row["field"] or f["path"] == row["field"]
-                                    for f in visibility.hidden_fields(self.hub, member, rt)):
+        hidden = bool(row.get("field")) and any(f["name"] == row["field"] or f["path"] == row["field"]
+                                                for f in visibility.hidden_fields(self.hub, member, rt))
+        if hidden:
             mention["quote"], thread = "", None  # a passage of a field they may not read is not theirs to see
-        return {"mention": mention,
-                "record": {k: v for k, v in rec.items() if k != "meta"}, "thread": thread,
-                "reply": f"/api/mentions/{mid}/reply", "suggest": f"/api/mentions/{mid}/suggest"}
+        out = {"mention": mention,
+               "record": {k: v for k, v in rec.items() if k != "meta"}, "thread": thread,
+               "reply": f"/api/mentions/{mid}/reply", "suggest": f"/api/mentions/{mid}/suggest"}
+        if mention["file"]:
+            out["document"] = ({"field": row["field"], "name": mention["file"], "available": False, "text": "",
+                                "why": "text not available"} if hidden
+                               else self.file_text(member, ref, row["field"], mention["file"], rec=rec))
+            out["suggest_how"] = ("A suggestion on a file is words to replace (find, quoted from its text) and what "
+                                  "to put instead (text). The hub never changes the file: a person makes the change.")
+        return out
 
     def answered(self, member: dict, ref: str, anchor: str, cause: int | None = None) -> None:
         """``member`` answered in the thread at ``anchor``: its open mentions there are done."""

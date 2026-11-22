@@ -1,7 +1,11 @@
 """Office documents in Collabora Online: the record page's Open and Edit together buttons, the editor page, blank
 documents, and the WOPI endpoints Collabora calls (``integrations/wopi.py`` does the work).
 
-Nothing here shows unless ``PRACTICEHUB_COLLABORA_URL`` is set and Collabora's discovery answers.
+Nothing here shows unless ``PRACTICEHUB_COLLABORA_URL`` is set and Collabora's discovery answers, except the
+comments on a document (:meth:`OfficePages.office_comments_html`): threads on the file as a whole, with an optional
+quote of its words, beside the editor and on the record page whether or not Collabora is set up. They are the hub's
+comments (``practicehub.live``) with an ``@`` to mention a person or an agent (``practicehub.mentions``); an agent
+answers in the thread and may suggest a change as words, which a person makes in the document themselves.
 """
 
 from __future__ import annotations
@@ -31,6 +35,10 @@ EDITOR_JS = r"""(() => {
     const list = [...views.values()];
     users.textContent = list.length ? 'Open now: ' + list.map(v => v.UserName + ([true, 'true', '1', 1].includes(v.ReadOnly) ? ' (reading)' : '')).join(', ') : '';
   };
+  const side = document.getElementById('office-side'), toggle = document.getElementById('office-side-toggle');
+  if (side && toggle) toggle.addEventListener('click', () => {
+    side.hidden = !side.hidden; toggle.setAttribute('aria-expanded', String(!side.hidden));
+  });
   window.addEventListener('message', ev => {
     if (ev.origin !== origin || ev.source !== frame.contentWindow) return;
     let msg; try { msg = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; } catch (_) { return; }
@@ -53,7 +61,13 @@ background:var(--surface);min-height:44px;flex-wrap:wrap}
 .office-bar .title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 200px}
 .office-bar .muted{color:var(--subtle)}#office-users{color:var(--subtle);font-size:12px}
 .office-note{font-size:12px;padding:2px 8px;border-radius:3px;background:var(--warning-bg)}
-#office-frame{flex:1;border:0;width:100%;background:var(--bg)}
+#office-frame{flex:1;border:0;width:100%;min-width:0;background:var(--bg)}
+.office-main{flex:1;display:flex;min-height:0}
+.office-main .office-side{flex:0 0 340px;border-left:1px solid var(--border);background:var(--surface);overflow:auto;
+padding:12px}
+.office-side[hidden]{display:none}
+@media (max-width:760px){.office-main{flex-direction:column;overflow:auto}#office-frame{flex:0 0 70vh}
+.office-main .office-side{flex:none;border-left:0;border-top:1px solid var(--border)}}
 """
 
 
@@ -170,6 +184,61 @@ class OfficePages:
         hub.update_record(me, ref, {path: value}, comment=f"New {cool.BLANK_KINDS[kind].lower()}: {name}")
         raise self._redirect(f"/records/{rtype}/{rid}/office/{field}/{att['blob']}")
 
+    # ------------------------------------------------------------------------------------------ comments on a document
+    def office_documents(self, rt, rec: dict) -> list[tuple[dict, dict]]:
+        """The documents a record holds (field, attachment), as the member reads it: the kinds an office suite opens
+        and plain text. They are commented on whether or not Collabora is set up."""
+        out = []
+        for f in rt.fields:
+            if f["type"] != "attachment" or f.get("show", True) is False:
+                continue
+            now = rec.get(f["path"].removesuffix(".*"))
+            for a in (now if isinstance(now, list) else [now]):
+                if (isinstance(a, dict) and isinstance(a.get("blob"), str) and a.get("name")
+                        and cool.extension(str(a["name"]), str(a.get("contentType") or ""))):
+                    out.append((f, a))
+        return out
+
+    def office_comments_html(self, me, rt, rec: dict, only: tuple[dict, dict] | None = None, back: str = "") -> str:
+        """Threads on each document of the record (or ``only`` one), and a form to start one: on the document as a
+        whole, with words of it quoted if the writer wants. ``back``: the page the forms return to."""
+        if not me or not rec.get("id"):
+            return ""
+        ref = f"{rt.id}/{rec['id']}"
+        docs = [only] if only else self.office_documents(rt, rec)
+        if not docs:
+            return ""
+        live = self.live
+        url = f"/records/{e(rt.id)}/{e(rec['id'])}"
+        may_write = self.hub.may_write(me, rt.id)
+        nxt = f'<input type="hidden" name="next" value="{e(back)}">' if back else ""
+        out = []
+        for f, a in docs:
+            name = str(a["name"])
+            cs = live.comments(me, ref, field=f["name"], file=name)
+            opened = [c for c in cs if not c["resolved"]]
+            done = [c for c in cs if c["resolved"]]
+            th = lambda c: self._thread_html(me, c, ref=ref, url=url, may_write=may_write, back=back)  # noqa: E731
+            hid = "dc-" + __import__("hashlib").sha1(f"{f['name']}|{name}".encode()).hexdigest()[:8]
+            out.append(
+                f'<section class="doc-comments" aria-labelledby="{hid}"><h2 id="{hid}">Comments on {e(name)} '
+                f'<span class="muted">{len(opened)}</span></h2>'
+                f'<p class="muted doc-note">On the document as a whole. Write @ to ask a person or an agent: they are '
+                f'told in their inbox. An agent answers here and may suggest a change as words; it never edits, saves, '
+                f'signs or approves the document. A person makes any change in the document.</p>'
+                + (f'<ul class="plain threads">{"".join(th(c) for c in opened)}</ul>' if opened else "")
+                + (f'<details><summary>Resolved ({len(done)})</summary><ul class="plain threads">'
+                   f'{"".join(th(c) for c in done)}</ul></details>' if done else "")
+                + f'<form method="post" action="{url}/comments" class="stack c-new">{nxt}'
+                  f'<input type="hidden" name="field" value="{e(f["name"])}">'
+                  f'<input type="hidden" name="file" value="{e(name)}">'
+                  f'<details class="c-quote-in"><summary>Quote words from the document (optional)</summary>'
+                  f'<label>Words from the document<textarea name="quote" rows="2" maxlength="500" '
+                  f'placeholder="Paste or type the words the comment is about"></textarea></label></details>'
+                  f'<label>Comment<textarea name="body" rows="3" required data-at="{e(ref)}"></textarea></label>'
+                  f'<div class="filters"><button class="primary">Comment</button></div></form></section>')
+        return "".join(out)
+
     # ------------------------------------------------------------------------------------------ the editor page
     def _origin(self, req) -> str:
         h = req.get("headers") or {}
@@ -205,21 +274,34 @@ class OfficePages:
             notes.append("This version is signed. Saving a change makes a new version, which is not signed.")
         theme = f' data-theme="{e(prefs["theme"])}"' if prefs.get("theme") in ("light", "dark") else ""
         title = hub.title(rec)
+        rt = hub.record_type(rtype)
+        a = self.wopi.attachment(rec, field, blob) or {"blob": blob, "name": sess["name"]}
+        here = req.get("path") or f"{back}/office/{field}/{blob}"
+        here += "?view=1" if want_view else ""
+        panel = self.office_comments_html(me, rt, rec, only=(rt.field(field), {**a, "name": sess["name"]}),
+                                          back=here)
+        n = len([c for c in self.live.comments(me, ref, field=field, file=sess["name"]) if not c["resolved"]])
         page = (f'<!doctype html><html lang="en"{theme}><head><meta charset="utf-8">'
                 f'<meta name="viewport" content="width=device-width, initial-scale=1">'
                 f'<title>{e(sess["name"])} · {e(title)}</title><link rel="stylesheet" href="/static/app.css">'
-                f'<style>{EDITOR_CSS}</style><script src="/static/office.js" defer></script></head>'
+                f'<style>{EDITOR_CSS}</style><script src="/static/app.js" defer></script>'
+                f'<script src="/static/office.js" defer></script></head>'
                 f'<body class="office" data-origin="{e(self.collabora.origin)}" data-back="{e(back)}">'
                 f'<header class="office-bar"><a class="btn secondary" href="{e(back)}">&larr; Back to the record</a>'
                 f'<span class="title">{e(title)} <span class="muted">· {e(sess["name"])}</span></span>'
                 f'<span class="lozenge">{"Editing together" if write else "Reading"}</span>'
                 + "".join(f'<span class="office-note" role="status">{e(n)}</span>' for n in notes)
-                + '<span id="office-users" aria-live="polite"></span></header>'
+                + '<span id="office-users" aria-live="polite"></span>'
+                f'<button type="button" class="secondary" id="office-side-toggle" aria-controls="office-side" '
+                f'aria-expanded="true">Comments <span class="muted">{n}</span></button></header>'
+                f'<div class="office-main">'
                 f'<form id="office-form" method="post" target="office-frame" action="{e(action_url)}">'
                 f'<input type="hidden" name="access_token" value="{e(token)}">'
                 f'<input type="hidden" name="access_token_ttl" value="{ttl}"></form>'
                 f'<iframe id="office-frame" name="office-frame" title="{e(sess["name"])}" '
-                f'allow="clipboard-read *; clipboard-write *; fullscreen"></iframe></body></html>')
+                f'allow="clipboard-read *; clipboard-write *; fullscreen"></iframe>'
+                f'<aside class="office-side" id="office-side" aria-label="Comments">{panel}</aside></div>'
+                f'</body></html>')
         o = self.collabora.origin
         csp = (f"default-src 'self'; frame-src {o}; form-action 'self' {o}; script-src 'self'; "
                f"style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; "

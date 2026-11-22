@@ -200,57 +200,14 @@ class LivePages:
 
     # ------------------------------------------------------------------ comments
     def _comments_panel(self, me, rt, rec, ref) -> str:
-        cs = self.live.comments(me, ref)
+        cs = self.live.comments(me, ref, file="")  # threads on a file are shown beside that file
         plain = " ".join(markup.plain(v, 10 ** 7) for f in rt.fields if f["type"] == "markdown"
                          for v in schema.get(rec, f["path"]) if isinstance(v, str))
         url = f"/records/{e(rt.id)}/{e(rec['id'])}"
         may_write = self.hub.may_write(me, rt.id)
 
-        def agent_mark(x):
-            # who() marks an agent by name already; an agent's words that its member row no longer says are marked here
-            return "" if not x.get("agent") or self._kind(x["by"]) == "agent" else ' <span class="badge agent">agent</span>' 
-
-        def suggestion(c, r):
-            s = r.get("suggestion")
-            if not s:
-                return ""
-            change = (f'<p class="diff c-change"><del>{e(s["find"])}</del> <ins>{e(s["text"])}</ins></p>')
-            if s["status"] != "open":
-                return (f'<div class="c-sug">{change}<p class="muted">{e(s["status"].capitalize())} by '
-                        f'{e(self._member_name(s.get("by")))}</p></div>')
-            act = ""
-            if me["kind"] == "person" and may_write:
-                base = f'{url}/comments/{e(c["id"])}/suggestions/{e(r["id"])}'
-                act = (f'<div class="filters"><form method="post" action="{base}/accept" class="inline"><button '
-                       f'class="primary">Accept</button></form><form method="post" action="{base}/reject" '
-                       f'class="inline"><button class="secondary">Reject</button></form></div>')
-            return (f'<div class="c-sug" aria-label="Suggested change"><p class="muted">Suggested change to the '
-                    f'text, waiting for a person to accept it:</p>{change}{act}</div>')
-
         def thread(c):
-            gone = c["quote"] and not self.live.anchored(c, plain)
-            quote = ""
-            if c["quote"]:
-                quote = (f'<blockquote class="c-quote{" gone" if gone else ""}" data-quote="{e(c["quote"])}" '
-                         f'data-before="{e(c["before"])}" data-after="{e(c["after"])}">{e(c["quote"])}</blockquote>'
-                         + ('<p class="muted c-gone">On text that was removed.</p>' if gone else ""))
-            replies = "".join(f'<li{" class=by-agent" if r.get("agent") else ""}><p class="c-by">{self.who(r["by"])}'
-                              f'{agent_mark(r)} <span class="muted">{e(r["at"][:16].replace("T", " "))}'
-                              f'</span></p><p>{self._comment_text(r["body"])}</p>{suggestion(c, r)}</li>'
-                              for r in c["replies"])
-            may_resolve = c["by"] == me["id"] or may_write
-            verb = "reopen" if c["resolved"] else "resolve"
-            act = (f'<form method="post" action="{url}/comments/{e(c["id"])}/{verb}" class="inline">'
-                   f'<button class="subtle">{"Reopen" if c["resolved"] else "Resolve"}</button></form>'
-                   if may_resolve else "")
-            return (f'<li class="thread{" resolved" if c["resolved"] else ""}" id="{e(c["id"])}" data-comment="{e(c["id"])}">'
-                    f'{quote}<p class="c-by">{self.who(c["by"])}{agent_mark(c)} <span class="muted">{e(c["at"][:16].replace("T", " "))}'
-                    f'</span>{" <span class=loz>resolved</span>" if c["resolved"] else ""}</p>'
-                    f'<p>{self._comment_text(c["body"])}</p>'
-                    + (f'<ul class="plain replies">{replies}</ul>' if replies else "")
-                    + f'<details class="c-reply"><summary>Reply</summary><form method="post" '
-                      f'action="{url}/comments/{e(c["id"])}/reply" class="stack"><label>Reply<textarea name="body" '
-                      f'rows="2" required data-at="{e(ref)}"></textarea></label><button>Reply</button></form></details>{act}</li>')
+            return self._thread_html(me, c, ref=ref, url=url, may_write=may_write, plain=plain)
         opened = [c for c in cs if not c["resolved"]]
         done = [c for c in cs if c["resolved"]]
         on_text = [c for c in opened if c["quote"]]
@@ -277,24 +234,92 @@ class LivePages:
                                   else "") + new + '</section>')
         return side, bottom
 
+    def _agent_mark(self, x) -> str:
+        # who() marks an agent by name already; an agent's words that its member row no longer says are marked here
+        return "" if not x.get("agent") or self._kind(x["by"]) == "agent" else ' <span class="badge agent">agent</span>'
+
+    def _suggestion_html(self, me, c, r, *, url, may_write, back="") -> str:
+        s = r.get("suggestion")
+        if not s:
+            return ""
+        nxt = f'<input type="hidden" name="next" value="{e(back)}">' if back else ""
+        change = f'<p class="diff c-change"><del>{e(s["find"])}</del> <ins>{e(s["text"])}</ins></p>'
+        by_hand = bool(s.get("file"))
+        if s["status"] != "open":
+            said = ("Made in the file by" if by_hand and s["status"] == "accepted" else
+                    f'{s["status"].capitalize()} by')
+            return (f'<div class="c-sug">{change}<p class="muted">{e(said)} '
+                    f'{e(self._member_name(s.get("by")))}</p></div>')
+        act = ""
+        if me["kind"] == "person" and may_write:
+            base = f'{url}/comments/{e(c["id"])}/suggestions/{e(r["id"])}'
+            yes = "I made this change" if by_hand else "Accept"
+            act = (f'<div class="filters"><form method="post" action="{base}/accept" class="inline">{nxt}<button '
+                   f'class="primary">{yes}</button></form><form method="post" action="{base}/reject" '
+                   f'class="inline">{nxt}<button class="secondary">Reject</button></form></div>')
+        if by_hand:
+            head = (f'<p class="muted">Suggested change to {e(s["file"])}. The hub does not edit the file: a person '
+                    f'who may change it makes this change in the document, then marks it made.</p>')
+        else:
+            head = '<p class="muted">Suggested change to the text, waiting for a person to accept it:</p>'
+        return f'<div class="c-sug" aria-label="Suggested change">{head}{change}{act}</div>'
+
+    def _thread_html(self, me, c, *, ref, url, may_write, plain="", back="") -> str:
+        """One comment thread: its quote, the comment, replies (an agent's marked), suggestions and the forms.
+        ``back``: where its forms return to (the record page when empty)."""
+        nxt = f'<input type="hidden" name="next" value="{e(back)}">' if back else ""
+        gone = c["quote"] and not c.get("file") and not self.live.anchored(c, plain)
+        quote = ""
+        if c["quote"]:
+            quote = (f'<blockquote class="c-quote{" gone" if gone else ""}" data-quote="{e(c["quote"])}" '
+                     f'data-before="{e(c.get("before") or "")}" data-after="{e(c.get("after") or "")}">'
+                     f'{e(c["quote"])}</blockquote>'
+                     + ('<p class="muted c-gone">On text that was removed.</p>' if gone else ""))
+        replies = "".join(f'<li{" class=by-agent" if r.get("agent") else ""}><p class="c-by">{self.who(r["by"])}'
+                          f'{self._agent_mark(r)} <span class="muted">{e(r["at"][:16].replace("T", " "))}'
+                          f'</span></p><p>{self._comment_text(r["body"])}</p>'
+                          f'{self._suggestion_html(me, c, r, url=url, may_write=may_write, back=back)}</li>'
+                          for r in c["replies"])
+        may_resolve = c["by"] == me["id"] or may_write
+        verb = "reopen" if c["resolved"] else "resolve"
+        act = (f'<form method="post" action="{url}/comments/{e(c["id"])}/{verb}" class="inline">{nxt}'
+               f'<button class="subtle">{"Reopen" if c["resolved"] else "Resolve"}</button></form>'
+               if may_resolve else "")
+        return (f'<li class="thread{" resolved" if c["resolved"] else ""}{" by-agent" if c.get("agent") else ""}" '
+                f'id="{e(c["id"])}" data-comment="{e(c["id"])}">'
+                f'{quote}<p class="c-by">{self.who(c["by"])}{self._agent_mark(c)} <span class="muted">'
+                f'{e(c["at"][:16].replace("T", " "))}</span>'
+                f'{" <span class=loz>resolved</span>" if c["resolved"] else ""}</p>'
+                f'<p>{self._comment_text(c["body"])}</p>'
+                + (f'<ul class="plain replies">{replies}</ul>' if replies else "")
+                + f'<details class="c-reply"><summary>Reply</summary><form method="post" '
+                  f'action="{url}/comments/{e(c["id"])}/reply" class="stack">{nxt}<label>Reply<textarea name="body" '
+                  f'rows="2" required data-at="{e(ref)}"></textarea></label><button>Reply</button></form></details>'
+                  f'{act}</li>')
+
     def _comment_text(self, body: str) -> str:
         out = e(body).replace("\n", "<br>")
         return __import__("re").sub(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]*[a-z0-9])",
                                     lambda m: f'<span class="at">@{m.group(1)}</span>', out)
 
-    def _back(self, rtype, rid, anchor="") -> None:
-        raise self._redirect(f"/records/{rtype}/{rid}" + (f"#{anchor}" if anchor else ""))
+    def _back(self, rtype, rid, anchor="", req=None) -> None:
+        """Back to the record page, or to ``next`` when it is a page of the same record (the office editor)."""
+        base = f"/records/{rtype}/{rid}"
+        nxt = str(self.form(req).get("next") or "") if req is not None else ""
+        if not (nxt.startswith(base + "/") and __import__("re").fullmatch(r"/[\w./%=?&-]*", nxt)):
+            nxt = base
+        raise self._redirect(nxt + (f"#{anchor}" if anchor else ""))
 
     def post_comment(self, req, rtype, rid):
         f = self.form(req)
         c = self.live.comment(req["me"], f"{rtype}/{rid}", str(f.get("body", "")), quote=str(f.get("quote", "")),
                               before=str(f.get("before", "")), after=str(f.get("after", "")),
-                              field=str(f.get("field", "")))
-        self._back(rtype, rid, c["id"])
+                              field=str(f.get("field", "")), file=str(f.get("file", "")))
+        self._back(rtype, rid, c["id"], req)
 
     def post_suggestion(self, req, rtype, rid, cid, sid, verb):
         self.live.decide_suggestion(req["me"], f"{rtype}/{rid}", cid, sid, verb == "accept")
-        self._back(rtype, rid, cid)
+        self._back(rtype, rid, cid, req)
 
     # ------------------------------------------------------------------ mentions (people and agents)
     @property
@@ -341,7 +366,7 @@ class LivePages:
             self.live.reply(req["me"], ref, cid, str(self.form(req).get("body", "")))
         else:
             self.live.resolve(req["me"], ref, cid, resolved=verb == "resolve")
-        self._back(rtype, rid, cid)
+        self._back(rtype, rid, cid, req)
 
     # ------------------------------------------------------------------ versions
     def history_extra(self, v: dict) -> str:

@@ -1252,6 +1252,8 @@ class RecordPages:
                               f'<button>Attach</button></form>')
                 if hasattr(self, "office_new_html"):  # a blank office document, when Collabora is set up
                     main.append(self.office_new_html(rt, rec, files))
+            if hasattr(self, "office_comments_html") and not editing:  # threads on each document, Collabora or not
+                main.append(self.office_comments_html(me, rt, rec))
             if rt.parent and not editing:
                 kids = hub.children(me, ref)
                 add = (f' <a class="btn secondary" href="/records/{e(rtype)}/new?parent={e(urllib.parse.quote(ref))}" data-modal>'

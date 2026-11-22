@@ -3043,6 +3043,13 @@ border-radius:3px;box-shadow:var(--shadow-overlay)}
 .at-menu li.off{opacity:.65;cursor:not-allowed}.at-menu .badge{margin-left:6px}.at-menu .at-why{display:block}
 .c-sug{margin:6px 0;padding:8px;border:1px dashed var(--border-bold);border-radius:6px}
 .c-sug .c-change{margin:4px 0}
+/* comments on a document (a file the record holds), beside its editor or on the record page */
+.doc-comments{font-size:13px;max-width:780px}.doc-comments h2,.doc-comments h3{font-size:14px;margin:0 0 8px}
+.doc-comments .c-new textarea{width:100%}.doc-comments .doc-note{margin:0 0 8px;font-size:12px}
+ul.threads li.thread{padding:8px 10px}.doc-comments .replies li.by-agent{border-left:3px solid var(--discovery);padding-left:8px}
+.doc-comments .thread.by-agent{border-left:3px solid var(--discovery)}
+.doc-comments .c-quote-in summary{cursor:pointer;color:var(--link);font-size:12px}
+.doc-comments+.doc-comments{margin-top:16px}
 .live-menu li{padding:6px 12px;cursor:pointer}.live-menu li[aria-selected=true]{background:var(--selected-bg);color:var(--selected-fg)}
 .diff-text{white-space:pre-wrap;font-size:14px;line-height:22px;padding:12px;border:1px solid var(--border);border-radius:3px;background:var(--raised)}
 .diff ins,.diff-key ins{background:var(--success-bg);color:var(--success-fg);text-decoration:none;border-bottom:1px solid var(--success-icon)}

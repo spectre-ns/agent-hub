@@ -528,10 +528,16 @@ class Live:
         return t
 
     # ------------------------------------------------------------------ comments
-    def comments(self, member: dict, ref: str) -> list[dict]:
+    def comments(self, member: dict, ref: str, *, field: str | None = None, file: str | None = None) -> list[dict]:
+        """The record's threads. ``file``: only those on that file (in ``field``); "": only those on its text."""
         rtype = ref.split("/", 1)[0]
         self.hub.require(member, "reader", f"data_class:{self.hub.class_of(rtype)}", f"read {rtype} records")
-        return self.db.live_comments.find({"ref": ref}, sort=[("at", 1)])
+        cs = self.db.live_comments.find({"ref": ref}, sort=[("at", 1)])
+        if file is None:
+            return cs
+        if not file:
+            return [c for c in cs if not c.get("file")]
+        return [c for c in cs if c.get("file") == file and (field is None or c.get("field") == field)]
 
     @property
     def mentions(self):
@@ -539,12 +545,18 @@ class Live:
         return mentions_of(self.hub)
 
     def comment(self, member: dict, ref: str, body: str, *, quote: str = "", before: str = "", after: str = "",
-                field: str = "") -> dict:
+                field: str = "", file: str = "") -> dict:
         """A comment on the record: on a quoted piece of its text (with a little of the text either side, to find it
-        again after edits), or on the whole page. Anyone who may read the record may comment."""
+        again after edits), or on the whole page. Anyone who may read the record may comment.
+
+        With ``file``: on the file of that name the record holds in the attachment field ``field`` (a document as a
+        whole), with an optional ``quote`` of its words the commenter pastes or types."""
         rtype, rid = ref.split("/", 1)
         self.hub.require(member, "reader", f"data_class:{self.hub.class_of(rtype)}", f"read {rtype} records")
         self._record(ref)
+        file = (file or "").strip()
+        if file:
+            self._file_of(member, ref, field, file)
         if member.get("kind") not in ("person", "agent"):
             raise Denied("only people and agents comment")
         body = (body or "").strip()
@@ -555,16 +567,29 @@ class Live:
         quote = (quote or "").strip()[:500]
         who = self.mentions.check(member, ref, body)  # a member who may not read the record is not mentioned
         cid = "c-" + secrets.token_hex(6)
-        doc = {"_id": cid, "id": cid, "ref": ref, "field": field or "", "quote": quote,
+        doc = {"_id": cid, "id": cid, "ref": ref, "field": field or "", "file": file, "quote": quote,
                "before": (before or "")[-60:], "after": (after or "")[:60], "body": body, "by": member["id"],
                "agent": member["kind"] == "agent", "at": utcnow(), "replies": [], "resolved": False,
                "mentions": [m["id"] for m in who]}
         with self.db:
             self.db.live_comments.insert(doc)
-            seq = self.hub.track.append(member, "comment.added", ref, data={"comment": cid, "on": "text" if quote
-                                                                             else "page"})
-            self.mentions.mention(member, ref, body, anchor=cid, quote=quote, field=field or "", cause=seq)
+            seq = self.hub.track.append(member, "comment.added", ref, data={
+                "comment": cid, "on": "file" if file else "text" if quote else "page",
+                **({"field": field, "file": file} if file else {})})
+            self.mentions.mention(member, ref, body, anchor=cid, quote=quote, field=field or "", file=file, cause=seq)
         return doc
+
+    def _file_of(self, member: dict, ref: str, field: str, name: str) -> dict:
+        """The attachment called ``name`` in ``field``, as ``member`` reads the record (a field of a class they may
+        not read holds nothing for them)."""
+        rt = self.hub.record_type(ref.split("/", 1)[0])
+        f = rt.field(field) if rt and field else None
+        if not f or f["type"] != "attachment":
+            raise Invalid("say which file field the comment is on")
+        a = self.mentions.attachment_named(self.hub.read_record(member, ref), f["path"], name)
+        if not a:
+            raise NotFound(f"the record holds no file called {name!r} now")
+        return a
 
     def reply(self, member: dict, ref: str, cid: str, body: str) -> dict:
         c = self._comment(member, ref, cid)
@@ -590,9 +615,10 @@ class Live:
                                         data={"comment": cid, "reply": r["id"], "agent": r["agent"]})
             if suggestion:
                 self.hub.track.append(member, "suggestion.proposed", ref, cause=seq,
-                                      data={"comment": cid, "reply": r["id"], "field": suggestion["field"]})
+                                      data={"comment": cid, "reply": r["id"], "field": suggestion["field"],
+                                            **({"file": suggestion["file"]} if suggestion.get("file") else {})})
             self.mentions.mention(member, ref, body, anchor=cid, quote=c.get("quote") or "", field=c.get("field") or "",
-                                  cause=seq)
+                                  file=c.get("file") or "", cause=seq)
             self.mentions.answered(member, ref, cid, cause=seq)
         return self.db.live_comments.get(cid)
 
@@ -601,6 +627,8 @@ class Live:
         becomes ``text`` only when a person who may change the record accepts it. Whoever proposes it changes
         nothing; this is how an agent edits."""
         c = self._comment(member, ref, cid)
+        if c.get("file"):
+            return self._suggest_on_file(member, ref, c, find, text, note)
         rt, f = self._field(ref, field, member)
         cur = str(self._record(ref).get(f["path"]) or "")
         if not find or cur.count(find) != 1:
@@ -608,6 +636,21 @@ class Live:
         if len(text or "") > 20000:
             raise Invalid("a suggestion is at most 20000 characters")
         sug = {"field": f["name"], "find": find, "text": text or "", "status": "open"}
+        return self._reply(member, ref, c, (note or "").strip() or "Suggested a change.", suggestion=sug)
+
+    def _suggest_on_file(self, member, ref, c, find, text, note) -> dict:
+        """A change proposed to a file, as words: ``find`` (in the file's text as the proposer may read it) becomes
+        ``text``. The hub never edits the file for anyone: a person who may change it makes the change themselves."""
+        doc = self.mentions.file_text(member, ref, c["field"], c["file"])
+        if not doc["available"]:
+            raise Invalid(f"the file's {doc['why']}: there is nothing to suggest a change to")
+        squash = lambda t: re.sub(r"\s+", " ", t).strip()  # noqa: E731 - the file's line breaks are not the quote's
+        if not (find or "").strip() or squash(find) not in squash(doc["text"]):
+            raise Invalid("a suggestion replaces words that are in the file: quote them as written")
+        if len(text or "") > 20000:
+            raise Invalid("a suggestion is at most 20000 characters")
+        sug = {"field": c["field"], "file": c["file"], "blob": doc.get("blob"), "find": find.strip()[:5000],
+               "text": text or "", "status": "open", "by_hand": True}
         return self._reply(member, ref, c, (note or "").strip() or "Suggested a change.", suggestion=sug)
 
     def decide_suggestion(self, member: dict, ref: str, cid: str, rid: str, accept: bool) -> dict:
@@ -624,7 +667,9 @@ class Live:
         sug = r["suggestion"]
         if sug["status"] != "open":
             raise Invalid(f"this suggestion was {sug['status']} already")
-        if accept:
+        if accept and sug.get("file"):
+            pass  # a file is changed by the person, in its editor: accepting says they made the change, nothing more
+        elif accept:
             rt, f = self._field(ref, sug["field"], member)
             if self.editing(ref):
                 raise Invalid("people are editing it now: accept the suggestion once they are done")
@@ -642,7 +687,9 @@ class Live:
                 "replies.$.suggestion.status": status, "replies.$.suggestion.by": member["id"],
                 "replies.$.suggestion.at": utcnow()}})
             self.hub.track.append(member, f"suggestion.{status}", ref,
-                                  data={"comment": cid, "reply": rid, "proposed_by": r["by"]})
+                                  data={"comment": cid, "reply": rid, "proposed_by": r["by"],
+                                        **({"file": sug["file"], "made_by": member["id"] if accept else None}
+                                           if sug.get("file") else {})})
         return self.db.live_comments.get(cid)
 
     def resolve(self, member: dict, ref: str, cid: str, resolved: bool = True) -> dict:
