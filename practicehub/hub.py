@@ -3288,8 +3288,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         owner = rt.workflow["id"]
         if run_id:
             run = self.db.runs.get(run_id)
-            if run and run["workflow_id"] == owner and run.get("record") == ref:
-                return
+            if run and run["workflow_id"] == owner and run.get("record") == ref and run["status"] == "running":
+                return  # its own run moved it; a run cancelled part way (its abandoned move) is walked on below
         how = self.state_move_waited_on(rt, ref, rec, t["to"])
         closing = not any(t["to"] in x["from"] for x in rt.lifecycle["transition"] if "*" not in x["from"])
         runs = [r["id"] for r in self.db.runs.find({"workflow_id": owner, "record": ref, "status": "running"},
