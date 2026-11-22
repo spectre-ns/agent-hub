@@ -1331,9 +1331,12 @@ class Engine:
             raise Invalid("what you were shown has changed since you opened it; read it again before you decide")
         return now
 
-    def decide(self, member: dict, item_id: str, outcome: str, comment: str = "", *, seen: str | None = None) -> dict:
+    def decide(self, member: dict, item_id: str, outcome: str, comment: str = "", *, seen: str | None = None,
+               propose: bool = False) -> dict:
         """Decide a gate. The decision is an electronic signature with the step's meaning, by this signer, over the
-        hash of what they were shown (``seen``: the hash the page showed them; refused if it no longer matches)."""
+        hash of what they were shown (``seen``: the hash the page showed them; refused if it no longer matches).
+        ``propose``: an agent's decision is only proposed, whatever the step's risk: it waits, unapplied, for its
+        sponsor to approve it (how an agent decides over MCP, where it never signs on its own)."""
         from .hub import Invalid
         hub = self.hub
         with hub.db:
@@ -1356,7 +1359,7 @@ class Engine:
                 rec = hub.records.read(*run["record"].split("/", 1))
                 if rec is not None:
                     signed.update(version=hub.record_version(run["record"]), record_sha256=hub._record_digest(rec))
-            if member["kind"] == "agent" and step.risk == "high":
+            if member["kind"] == "agent" and (step.risk == "high" or propose):
                 return self._hold(member, item, run, step, values, action="gate.decided", signed=signed)
             return self._finish(member, item, run, step, values, action="gate.decided", signed=signed)
 
@@ -1371,7 +1374,7 @@ class Engine:
         hold_id = _new_id("item")
         hub.db.items.insert(_item_doc(
             hub, id=hold_id, run_id=run["id"], step_id=step.id, kind="hold",
-            title=f"Approve {agent['name']}'s '{step.title}' (high risk)", role=None, assignee=agent["sponsor"],
+            title=f"Approve {agent['name']}'s '{step.title}'" + (" (high risk)" if step.risk == "high" else ""), role=None, assignee=agent["sponsor"],
             persons_only=1, status="open", output={"holds": item["id"], "action": action, "signed": signed}, cause=seq))
         sp = hub.db.members.find_one({"_id": agent["sponsor"]}, fields=["status"])
         if not sp or sp["status"] != "active":

@@ -616,6 +616,18 @@ def cmd_contract_export(args):
     print(json.dumps(contract.export(types), indent=2))
 
 
+def cmd_mcp(args):
+    """A stdio bridge to one of the hub's MCP servers, for clients that start a command: JSON-RPC lines in on stdin,
+    POSTed to ``<url>/mcp/<server>`` with the member's token (from an environment variable, never an argument), and
+    the replies out on stdout. It keeps nothing but the session id the hub gave it."""
+    from . import mcp_bridge
+    token = os.environ.get(args.token_env, "")
+    if not token:
+        raise SystemExit(f"set {args.token_env} to a member's token (ph_...)")
+    raise SystemExit(mcp_bridge.run(f"{args.url.rstrip('/')}/mcp/{args.server}", token, sys.stdin, sys.stdout,
+                                    ping=args.ping))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="practicehub", description="A practice platform where agents are members.")
     ap.add_argument("--state", help="state directory (default $PRACTICEHUB_STATE or ./state)")
@@ -770,6 +782,13 @@ def main(argv=None):
     p = ct.add_parser("export", help="print the core's base types as Avro schemas (and a pack's extensions of them)")
     p.add_argument("--pack", help="a practice pack or module (name or directory)")
     p.set_defaults(fn=cmd_contract_export)
+
+    p = sub.add_parser("mcp", help="bridge one of the hub's MCP servers to stdio (for clients that start a command)")
+    p.add_argument("server", help="core, practice, or an installed module's id")
+    p.add_argument("--url", required=True, help="the hub, e.g. https://hub.example.ca")
+    p.add_argument("--token-env", default="PRACTICEHUB_TOKEN", help="the environment variable holding the token")
+    p.add_argument("--ping", type=float, default=30.0, help="seconds between pings, to hear of tool changes (0: off)")
+    p.set_defaults(fn=cmd_mcp)
 
     args = ap.parse_args(argv)
     try:
