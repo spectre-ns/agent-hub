@@ -3312,3 +3312,126 @@ def test_a_field_names_a_declared_data_class(hub):
     with pytest.raises(Invalid) as e:
         hub.propose("type", M(hub, "rana"), bad)
     assert any("no-such-class" in p for p in e.value.problems)
+
+
+# ------------------------------------------------------------------------------------------ the practice's clock
+def _utc(*a):
+    from datetime import datetime, timezone
+    return datetime(*a, tzinfo=timezone.utc)
+
+
+def test_today_is_the_practices_date_not_the_servers(hub, monkeypatch):
+    """A Halifax practice on a server in another zone: at 00:30 UTC it is still 20:30 the evening before in Halifax
+    (AST, -4), so a note signed then carries the practice's date and its visit period the practice's wall time."""
+    import time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from practicehub import expr
+    monkeypatch.setenv("TZ", "Asia/Tokyo")  # whatever the server's own zone is, it is never used
+    time.tzset()
+    try:
+        assert hub.practice["timezone"] == "America/Halifax"
+        hub.engine._now = _utc(2026, 11, 23, 0, 30)
+        assert hub.engine.now() == datetime(2026, 11, 22, 20, 30) and hub.engine.now().tzinfo is None
+        when = hub.pack.module._when(hub.engine, {"valid_days": 30, "minutes": 20})  # what clock.now gives a note
+        assert when["today"] == "2026-11-22" and when["now"] == "2026-11-22T20:30:00"
+        assert when["valid_until"] == "2026-12-22"
+        assert (when["start"], when["end"]) == ("2026-11-22T20:10", "2026-11-22T20:30")
+        assert hub.engine.utc(hub.engine.now()) == "2026-11-23T00:30:00Z"  # instants are still stored in UTC
+        # a run's run.today, and date shifts from it, are the practice's
+        run = hub.engine.start(M(hub, "jo"), "missed-appointment", record=_patient(hub),
+                               inputs={"notice_hours": 48})
+        today = hub.engine.run(run["id"])["ctx"]["run"]["today"]
+        assert today == "2026-11-22"
+        assert expr.holds("record.due <= run.today + 1d", {"record": {"due": "2026-11-23"}, "run": {"today": today}})
+        assert not expr.holds("record.due <= run.today", {"record": {"due": "2026-11-23"}, "run": {"today": today}})
+        # the clock's tick (schedules, overdue work) reads the practice's wall time from an instant
+        assert hub.engine.tick(_utc(2026, 11, 23, 0, 30))["at"] == "2026-11-22T20:30"
+        # in summer Halifax is on ADT (-3): 00:30 UTC on 1 July is 21:30 on 30 June
+        hub.engine._now = _utc(2026, 7, 1, 0, 30)
+        assert hub.engine.now() == datetime(2026, 6, 30, 21, 30)
+        # with no clock set, "now" is Halifax's, not Tokyo's
+        hub.engine._now = None
+        hfx = datetime.now(ZoneInfo("America/Halifax")).replace(tzinfo=None)
+        assert abs((hub.engine.now() - hfx).total_seconds()) < 60
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+
+
+def test_a_due_time_is_the_right_instant(hub):
+    """A step due in 4 hours, started at 20:30 in Halifax, is due at 04:30 UTC the next day, and is overdue by
+    the practice's clock exactly then (not four hours early or late)."""
+    from datetime import datetime
+    hub.engine._now = _utc(2026, 11, 23, 0, 30)
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")  # due in 4 hours: 00:30 on the 23rd in Halifax, 04:30 UTC
+    assert hub.engine.item(iid)["due_at"] == "2026-11-23T04:30:00Z"
+    assert iid not in hub.engine.tick(_utc(2026, 11, 23, 4, 29))["overdue"]
+    assert iid in hub.engine.tick(datetime(2026, 11, 23, 0, 31))["overdue"]  # 00:31 in Halifax is 04:31 UTC
+
+
+def test_the_practice_time_zone_setting_moves_the_clock(hub):
+    from datetime import datetime
+    hub.engine._now = _utc(2026, 11, 23, 0, 30)
+    assert hub.engine.now().date().isoformat() == "2026-11-22"
+    hub.set_practice(M(hub, "rana"), {"timezone": "Europe/London"})
+    assert hub.engine.now() == datetime(2026, 11, 23, 0, 30)
+    with pytest.raises(Invalid):
+        hub.set_practice(M(hub, "rana"), {"timezone": ""})  # a practice always has a time zone
+    with pytest.raises(Invalid):
+        hub.set_practice(M(hub, "rana"), {"timezone": "../../etc/passwd"})
+    assert hub.practice["timezone"] == "Europe/London"
+
+
+def test_a_hub_with_an_unknown_time_zone_refuses_to_open(tmp_path, monkeypatch):
+    from practicehub.clock import ZoneError
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    state = tmp_path / "state"
+    Hub(state, pack="general-practice").install("general-practice")
+    h = Hub(state)
+    assert h.engine.zone().key == "America/Halifax"
+    h.db.set_setting("practice_local", {"timezone": "Mars/Base"})  # not through the settings page, which refuses it
+    with pytest.raises(ZoneError, match="Mars/Base"):
+        Hub(state)
+
+
+def test_no_tz_data_on_the_machine_fails_loudly(monkeypatch):
+    """A slim container without tzdata knows no zone at all: the hub says so, not "not a time zone name"."""
+    import zoneinfo
+    from practicehub import clock
+
+    def nothing(key):
+        raise zoneinfo.ZoneInfoNotFoundError(f"No time zone found with key {key}")
+    monkeypatch.setattr(clock, "ZoneInfo", nothing)
+    with pytest.raises(clock.ZoneError, match="no time zone data"):
+        clock.zone("America/Halifax")
+
+
+def test_a_practice_pack_must_name_its_time_zone(tmp_path):
+    import re
+    import shutil
+    from practicehub import pack as packmod
+    from practicehub.clock import ZoneError
+    copy = tmp_path / "packs" / "general-practice"
+    shutil.copytree(packmod.find("general-practice"), copy, ignore=shutil.ignore_patterns("__pycache__"))
+    toml = copy / "pack.toml"
+    text = toml.read_text()
+    toml.write_text(re.sub(r'(?m)^timezone = .*\n', "", text, count=1))
+    with pytest.raises(ValueError, match="timezone"):
+        packmod.load(str(copy))
+    toml.write_text(text.replace('timezone = "America/Halifax"', 'timezone = "Atlantis/Capital"'))
+    with pytest.raises(ZoneError):
+        packmod.load(str(copy))
+
+
+def test_pages_show_track_times_in_the_practices_zone():
+    from zoneinfo import ZoneInfo
+    from practicehub import clock
+    hfx = ZoneInfo("America/Halifax")
+    assert clock.shown("2026-11-23T00:30:00Z", hfx) == "2026-11-22 20:30"  # an instant: converted
+    assert clock.shown("2026-11-23T09:30", hfx) == "2026-11-23 09:30"      # a wall time: already the practice's
+    assert clock.shown("2026-11-23", hfx) == "2026-11-23" and clock.shown("", hfx) == ""
+    assert clock.stamp(clock.local(_utc(2026, 3, 8, 7, 0), hfx), hfx) == "2026-03-08T07:00:00Z"

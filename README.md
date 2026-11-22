@@ -159,6 +159,13 @@ Everything else is Apache-2.0 or similarly permissive. Windmill and n8n are deli
 to `deploy/.env` first. Ports 8080, 9980 and 11434 are never bound. The track's anchors live on their own volume
 (`hub-anchors`), away from the database's, so that replacing the database shows.
 
+The hub's clock is the practice's, not the server's: "now" and "today" (a note's date, a visit's period, the calendar's
+today and free slots, `run.today`, due times) are in the practice's time zone (`[practice] timezone`, changeable on
+the practice settings page), whatever zone the container runs in. Clinical and calendar times are stored as the
+practice's wall time without an offset; the track and work items keep instants in UTC (`...Z`) and pages show them in
+the practice's zone (`practicehub/clock.py`). The image installs `tzdata`; a hub with an unknown zone, or on a machine
+without tz data, refuses to open.
+
 ### Kubernetes and Nebari
 
 `deploy/helm/practicehub` is a Helm chart: the hub (one replica: one hub process per database), MongoDB as a one-node

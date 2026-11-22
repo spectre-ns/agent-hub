@@ -1278,7 +1278,7 @@ class RecordPages:
             runs = hub.engine.runs(mentions=ref)
             main.append(("<div class='tablewrap'><table><tr><th>Work</th><th>Status</th><th>Started</th></tr>" + "".join(
                 f'<tr><td><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
-                f'<td class="muted">{e(r["created_at"][:16].replace("T", " "))}</td></tr>' for r in runs)
+                f'<td class="muted">{self._at(r["created_at"])}</td></tr>' for r in runs)
                 + "</table></div>") if runs else "<p class='muted'>No work about this record.</p>")
             starts = self.start_buttons(me, rtype, ref)
             if starts:
@@ -1335,7 +1335,7 @@ class RecordPages:
         side.append(f"<h2>Signatures</h2><p>{len(cur)} on this version"
                     + (f", {len(sigs) - len(cur)} on earlier ones" if len(sigs) > len(cur) else "") + "</p>")
         side.append(f'<h2>Record</h2><p class="muted">{e(rt.label)} · {e(rt.data_class)}<br>version '
-                    f'{e(str(rec.get("meta", {}).get("versionId", "")))} · {e(rec.get("meta", {}).get("lastUpdated", "")[:16].replace("T", " "))}</p>')
+                    f'{e(str(rec.get("meta", {}).get("versionId", "")))} · {self._at(rec.get("meta", {}).get("lastUpdated", ""))}</p>')
         from .. import markup
         heads = [h for f in prose for v in schema.get(rec, f["path"]) if isinstance(v, str)
                  for h in markup.headings(v)]
@@ -1373,7 +1373,7 @@ class RecordPages:
                             f'{self._value_html(f, rec)}</span>')
             m = rec.get("meta") or {}
             meta.append(f'<span class="meta-item">version {e(str(m.get("versionId", "")))} · '
-                        f'{e(str(m.get("lastUpdated", ""))[:16].replace("T", " "))}</span>')
+                        f'{self._at(m.get("lastUpdated", ""))}</span>')
             meta.append(f'<a class="meta-item" href="?tab=signatures">{len(cur)} signature{"s" if len(cur) != 1 else ""}'
                         + (f' ({len(sigs) - len(cur)} on earlier versions)' if len(sigs) > len(cur) else "") + "</a>")
             if auto:
@@ -1480,7 +1480,7 @@ class RecordPages:
                 covers += ' <span class="loz removed">does not verify</span>'
             return (f'<tr><td>{self.who(s["by"])}</td><td>“{e(s["meaning"] or "")}”{decided}</td>'
                     f'<td>v{e(str(s["version"]))}</td><td>{covers}</td>'
-                    f'<td class="muted">{e(s["at"][:16].replace("T", " "))}</td><td>{e(s["comment"])}</td>'
+                    f'<td class="muted">{self._at(s["at"])}</td><td>{e(s["comment"])}</td>'
                     f'<td><a href="/track/{s["seq"]}">#{s["seq"]}</a></td></tr>')
         rows = "".join(row(s) for s in sigs)
         out = [("<div class='tablewrap'><table><tr><th>Who</th><th>Meaning</th><th>Version</th><th>Covers</th><th>When</th>"
@@ -1548,14 +1548,14 @@ class RecordPages:
             cmp_ = (f' <a href="/records/{e(rt.id)}/{e(ref.split("/", 1)[1])}/compare?a={versions[i + 1]["version"]}'
                     f'&amp;b={v["version"]}">Compare</a>') if i + 1 < len(versions) else ""
             rows.append(f'<tr><td>v{v["version"]}</td><td>{self.who(v["actor"]) if v["actor"] else ""}{via}</td>'
-                        f'<td>{e(", ".join(changed) or "—")}{note}{cmp_}</td><td class="muted">{e(v["at"][:16].replace("T", " "))}</td>'
+                        f'<td>{e(", ".join(changed) or "—")}{note}{cmp_}</td><td class="muted">{self._at(v["at"])}</td>'
                         f'<td><details><summary>record</summary><pre>{e(json.dumps(v["data"], indent=1))}</pre></details></td></tr>')
         out = ("<div class='tablewrap'><table><tr><th>Version</th><th>By</th><th>Changed</th><th>When</th><th><span class='visually-hidden'>Record</span></th></tr>"
                + "".join(rows) + "</table></div>") if rows else "<p class='muted'>No history.</p>"
         if self.hub.is_policy_owner(me):  # the privacy officer answers "who looked at my chart?"
             seen = self.hub.views_of(me, ref)
             vrows = "".join(f'<tr><td>{self.who(v["actor"])}</td><td>{e((v.get("data") or {}).get("how", ""))}</td>'
-                            f'<td class="muted">{e(v["at"][:16].replace("T", " "))}</td></tr>' for v in seen)
+                            f'<td class="muted">{self._at(v["at"])}</td></tr>' for v in seen)
             out += ("<h3>Who viewed it</h3>" + (f"<div class='tablewrap'><table><tr><th scope='col'>Who</th>"
                     f"<th scope='col'>How</th><th scope='col'>When</th></tr>{vrows}</table></div>" if vrows
                     else "<p class='muted'>No one has viewed it.</p>"))

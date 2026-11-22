@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from . import blocks as blockmod
+from . import clock
 from . import expr
 from . import schema
 from . import workflows as wfmod
@@ -322,10 +323,31 @@ class Engine:
     def __init__(self, hub):
         self.hub = hub
         self._now = None
+        self._zone = None  # (until, the practice's ZoneInfo): ``zone`` reads the setting at most every 2 seconds
         self._advancing: set = set()  # runs advancing now (a record change inside one does not re-enter it)
 
+    def zone(self):
+        """The practice's time zone (``[practice] timezone``, as its policy owners last set it). Raises
+        ``clock.ZoneError`` for a name the tz database does not know, or when this machine has no tz data."""
+        import time
+        got = self._zone
+        if got and got[0] > time.monotonic():
+            return got[1]
+        hub = self.hub
+        name = hub.practice.get("timezone") or ((hub.pack.practice or {}).get("timezone") if hub.pack else None)
+        tz = clock.zone(name)
+        self._zone = (time.monotonic() + 2, tz)  # a page shows many times: read the setting once, not per time
+        return tz
+
     def now(self) -> datetime:
-        return self._now or datetime.now()
+        """The practice's wall time now, without an offset: what its calendar shows, the date its notes carry and
+        the ``today`` its rules compare with (``clock``). Never the server's clock, which is often UTC."""
+        tz = self.zone()
+        return clock.local(self._now, tz) if self._now else clock.now(tz)
+
+    def utc(self, t: datetime) -> str:
+        """A time as the track writes it (UTC, ISO, Z). A naive time is the practice's wall time."""
+        return clock.stamp(t, self.zone())
 
     # ------------------------------------------------------------------ runs
     def run(self, run_id: str) -> dict:
@@ -802,7 +824,8 @@ class Engine:
         due_at = None
         if step.due:
             secs = wfmod.duration_seconds(step.due)
-            due_at = _utc(self.now() + timedelta(seconds=secs))
+            tz = self.zone()  # counted in real time, from the instant: a due time across a clock change is not off
+            due_at = clock.stamp(clock.utc(self.now(), tz) + timedelta(seconds=secs), tz)
         assignee = None
         if step.assign_to:  # offered to that member only if they hold the step's role and are active
             who = wfmod.render(step.assign_to, self._live_ctx(run))
@@ -1265,7 +1288,8 @@ class Engine:
                       {"name": "comment", "label": "Comment", "type": "text", "required": False, "help": ""}]
         return {
             "item": item, "run": {"id": run["id"], "title": self.hub.run_title(member, run), "record": run["record"],
-                                  "workflow": wf.id, "version": run["version"]},
+                                  "workflow": wf.id, "version": run["version"],
+                                  "today": self.now().date().isoformat(), "time_zone": self.zone().key},
             "step": {"id": step.id, "title": step.title, "kind": step.kind, "risk": step.risk, "role": step.role,
                      "instructions": instructions, "outcomes": step.outcomes, "meaning": step.meaning,
                      "meanings": {o: step.meanings.get(o, step.meaning) for o in step.outcomes},
@@ -1530,7 +1554,11 @@ class Engine:
         """Run what time makes due: scheduled workflows (once per slot, remembered in settings) and overdue items
         (flagged, and escalated to the step's ``escalate_to`` role). Safe to call as often as you like."""
         hub = self.hub
-        now = now or self.now()
+        tz = self.zone()
+        # schedules fire by the practice's wall clock (a daily 08:00 is 08:00 in the practice, whatever the server's
+        # zone); an aware ``now`` (an instant) is turned into it, a naive one already is it
+        now = clock.local(now, tz) if now else self.now()
+        now_utc = clock.utc(now, tz)
         stamp = now.strftime("%Y-%m-%dT%H:%M")
         started, overdue = [], []
         last = hub.db.get_setting("schedule_last", {}) or {}
@@ -1559,12 +1587,12 @@ class Engine:
                 except Exception as exc:  # noqa: BLE001
                     hub.track.append(actor, "trigger.failed", f"workflow:{wf.id}", cause=seq,
                                      data={"error": str(exc)})
-        for item in hub.db.items.find({"status": {"$in": ["open", "claimed"]}, "due_at": {"$ne": None, "$lt": _utc(now)},
+        for item in hub.db.items.find({"status": {"$in": ["open", "claimed"]},
+                                       "due_at": {"$ne": None, "$lt": clock.stamp(now_utc, tz)},
                                        "kind": {"$ne": "notice"}}, sort="n"):
             # escalation repeats until the work is done: once per the step's own time allowed (at least 15 minutes),
             # first to the step's escalation role, then also to the practice's escalation role and its owners
             level = int(item["escalated"] or 0)
-            now_utc = now.astimezone(timezone.utc)
             if item.get("escalate_next") and now_utc < _parse(item["escalate_next"]):
                 continue
             due = _parse(item["due_at"])
@@ -1574,7 +1602,8 @@ class Engine:
             step = wf.step(item["step_id"])
             late = item["claimed_by"] or item["assignee"]
             with hub.db:
-                hub.db.items.set(item["id"], {"escalated": level + 1, "escalate_next": _utc(now_utc + allowed),
+                hub.db.items.set(item["id"], {"escalated": level + 1,
+                                              "escalate_next": clock.stamp(now_utc + allowed, tz),
                                               "updated_at": utcnow()})
                 seq = hub.track.append(self.automation_actor(run), "item.overdue", f"item:{item['id']}",
                                        run_id=run["id"], cause=item["cause"],
@@ -1589,9 +1618,9 @@ class Engine:
                                priority="urgent", besides=late, owners_too=True)
             overdue.append(item["id"])
         checked = hub.db.get_setting("waits_checked", "") or ""
-        if (_utc(now - timedelta(minutes=15)) >= checked
+        if (clock.stamp(now_utc - timedelta(minutes=15), tz) >= checked
                 and hub.db.runs.exists({"status": "running", **_WAITING})):
-            hub.db.set_setting("waits_checked", _utc(now))
+            hub.db.set_setting("waits_checked", clock.stamp(now_utc, tz))
             tick_seq = hub.track.append({"id": "clock", "kind": "automation"}, "clock.ticked", "", data={"at": stamp})
             self.recheck_waits(tick_seq)  # a wait on something time changes (or that changed outside the hub)
         return {"started": started, "overdue": overdue, "at": stamp}
@@ -1600,11 +1629,6 @@ class Engine:
 def _parse(stamp: str) -> datetime:
     """A track time (UTC, ISO, Z) as an aware datetime."""
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-
-
-def _utc(t: datetime) -> str:
-    """A time as the track writes it (UTC, ISO, Z). A naive time is the practice's local time."""
-    return t.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
