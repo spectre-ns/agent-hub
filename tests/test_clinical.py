@@ -20,7 +20,7 @@ def types():
 
 
 def test_every_type_parses_and_matches_its_file(types):
-    assert len(types) == 17  # Appointment became the Visit (pack version 2)
+    assert len(types) == 18  # Appointment became the Visit (pack version 2); a patient's Consent directive
     for name, rt in types.items():
         assert rt.id == name
     assert [rt.id for rt in types.values() if rt.subject] == ["Patient"]

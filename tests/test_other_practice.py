@@ -165,7 +165,9 @@ def test_every_record_the_core_reads_keeps_the_contract(firm, hub):
     assert out["extensions"] == [{"type": "Meeting", "extends": "ca.practicehub.core.Booking",
                                   "base": {"start": {"fields": ["start"]}, "end": {"fields": ["end"]},
                                            "reason": {"fields": ["reason"]}, "subject": {"fields": ["client"]},
-                                           "with": {"fields": ["staff"]}, "cancelled": {"fields": ["called_off"]}}}]
+                                           "with": {"fields": ["staff"]}, "cancelled": {"fields": ["called_off"]},
+                                           "kind": {"fields": ["kind"]}, "priority": {"fields": ["priority"]},
+                                           "overbooked": {"fields": ["overbooked"]}}}]
 
 
 def test_a_pack_for_another_contract_is_refused(tmp_path):
