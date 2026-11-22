@@ -131,7 +131,8 @@ def test_every_installed_module_has_a_server_with_tools_from_its_definitions(hub
     # what the practice's own types say, on the practice server, and nothing of the module's
     assert "search_patient" in names(hub, "practice", "jo") and "search_document" not in names(hub, "practice", "jo")
     # references are Type/id strings; choices are enums
-    appt = {t["name"]: t for t in mcp.tools(hub, "practice", M(hub, "jo"))}["create_appointment"]["inputSchema"]
+    appt = {t["name"]: t for t in mcp.tools(hub, "practice", M(hub, "jo"))}["create_encounter"]["inputSchema"]
+    assert "reasonCode" not in appt["properties"]  # a visit's reason is clinical: not the front desk's to write
     refs = [p for p in appt["properties"].values() if "pattern" in p and "Patient" in p["pattern"]]
     every = [p for t in mcp.tools(hub, "practice", M(hub, "jo")) if t["name"].startswith("create_")
              for p in t["inputSchema"]["properties"].values()]

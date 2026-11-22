@@ -18,10 +18,8 @@ FORMS = {
     "AllergyIntolerance": ("dr-amara", {"patient": "{patient}", "code.text": "Penicillin", "type": "allergy",
                                         "criticality": "high", "reaction.0.manifestation.0.text": "Hives",
                                         "clinicalStatus.text": "active", "verificationStatus.text": "confirmed"}),
-    "Appointment": ("jo", {"participant.0.actor": "{patient}", "participant.1.actor": "Practitioner/dr-liam",
-                           "start": WHEN, "minutesDuration": "15", "description": "Sore throat"}),
     "Encounter": ("noor", {"subject": "{patient}", "participant.0.individual": "Practitioner/dr-amara",
-                           "type.0.text": "minor", "class.code": "AMB", "period.start": WHEN, "length.value": "15",
+                           "type.0.text": "minor", "class.code": "AMB", "plannedStartDate": WHEN,
                            "reasonCode.0.text": "Sore throat"}),
     "Observation": ("dr-amara", {"subject": "{patient}", "code.text": "HbA1c", "effectiveDateTime": WHEN,
                                  "valueQuantity.value": "6.6", "valueQuantity.unit": "%",
@@ -43,8 +41,7 @@ FORMS = {
 # what each one's words land as in the record
 LANDS = {
     "AllergyIntolerance": [("code.text", "Penicillin"), ("reaction.0.manifestation.0.text", "Hives")],
-    "Appointment": [("participant.1.actor", "Practitioner/dr-liam"), ("minutesDuration", 15)],
-    "Encounter": [("type.0.text", "minor"), ("length.value", 15), ("length.unit", "min"),
+    "Encounter": [("type.0.text", "minor"), ("plannedStartDate", WHEN),
                   ("participant.0.individual", "Practitioner/dr-amara")],
     "Observation": [("code.text", "HbA1c"), ("valueQuantity.value", 6.6), ("valueQuantity.unit", "%")],
     "MedicationRequest": [("medicationCodeableConcept.text", "Ramipril 5 mg"), ("dispenseRequest.quantity.value", 90)],
@@ -55,7 +52,7 @@ LANDS = {
 }
 
 # where a new one starts (the types without a lifecycle say their status on the form, or keep none)
-STARTS = {"Appointment": "proposed", "Encounter": "planned", "Observation": "registered",
+STARTS = {"Encounter": "planned", "Observation": "registered",
           "MedicationRequest": "draft", "Composition": "preliminary", "ServiceRequest": "draft",
           "Immunization": "completed"}
 
@@ -138,7 +135,7 @@ def test_a_create_form_is_plain_inputs_and_starts_the_record(clinic, rtype):
         assert rec["status"] == STARTS[rtype]
 
 
-NESTED = [("Appointment", "patient"), ("Appointment", "practitioner"), ("Encounter", "practitioner"),
+NESTED = [("Encounter", "practitioner"),
           ("Immunization", "given_by"), ("MedicationRequest", "priorPrescription")]
 
 
@@ -165,7 +162,7 @@ def test_a_person_starts_a_record_where_its_lifecycle_starts(clinic):
 def test_a_nurse_checks_a_patient_in(clinic):
     hub, base, patient, visit = clinic
     noor = hub.member("noor")
-    visit = hub.create_record(noor, "Encounter", {"subject": {"reference": patient}})
+    visit = hub.create_record(noor, "Encounter", {"subject": {"reference": patient}, "plannedStartDate": WHEN})
     ref = f"Encounter/{visit['id']}"
     for st in ("arrived", "triaged", "in-progress", "finished"):
         hub.update_record(noor, ref, {"status": st})
@@ -176,7 +173,8 @@ def test_a_reference_inside_a_list_is_edited_in_place_and_read_as_a_link(clinic)
     """participant.0.individual: the form shows who it is now, a change keeps the entry's other keys and the
     {reference} shape, and the record reads it as a link."""
     hub, base, patient, visit = clinic
-    rec = hub.records.create("Encounter", {"status": "planned", "subject": {"reference": patient}, "participant": [
+    rec = hub.records.create("Encounter", {"status": "planned", "subject": {"reference": patient},
+                                           "plannedStartDate": "2030-01-07T09:00", "participant": [
         {"type": [{"text": "primary performer"}], "individual": {"reference": "Practitioner/dr-amara"}}]})
     url = f"/records/Encounter/{rec['id']}"
     noor = token(hub, "noor")

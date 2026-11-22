@@ -1,0 +1,175 @@
+# A visit: what billing needs (who, when, how long, the diagnosis codes), never the note itself.
+id = "Encounter"
+label = "Visit"
+plural = "Visits"
+data_class = "visits"
+strict = true
+date = "period"
+active = "record.status in ['planned', 'arrived', 'triaged', 'in-progress']"
+order = 70
+summary = "A visit: what billing needs (who, when, how long, the diagnosis codes), never the note itself."
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled", "entered-in-error",
+           "unknown"]
+required = true
+
+[[field]]
+name = "class"
+label = "Setting (coded)"
+type = "object"
+advanced = true
+help = "a Coding: {system: v3-ActCode, code: AMB, display: ambulatory} (VR virtual, HH home)"
+
+[[field]]
+name = "setting"
+label = "Setting"
+path = "class.code"
+type = "choice"
+choices = ["AMB", "VR", "HH"]
+with = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode" }
+help = "AMB in the clinic, VR virtual, HH at home"
+
+[[field]]
+name = "subject"
+label = "Patient"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "type"
+label = "Visit types (as JSON)"
+type = "list"
+advanced = true
+help = "[{text: minor | complete | counselling}]"
+
+[[field]]
+name = "visit_type"
+label = "Visit type"
+path = "type.0.text"
+type = "choice"
+choices = ["minor", "complete", "counselling"]
+
+[[field]]
+name = "period"
+label = "Period (as JSON)"
+type = "object"
+advanced = true
+help = "{start, end}"
+
+[[field]]
+name = "period_start"
+label = "Start"
+path = "period.start"
+type = "datetime"
+
+[[field]]
+name = "period_end"
+label = "End"
+path = "period.end"
+type = "datetime"
+
+[[field]]
+name = "length"
+label = "Length (as JSON)"
+type = "object"
+advanced = true
+help = "a Duration: {value, unit: min}"
+
+[[field]]
+name = "minutes"
+label = "Minutes"
+path = "length.value"
+type = "number"
+with = { unit = "min" }
+
+[[field]]
+name = "reasonCode"
+label = "Reason codes (as JSON)"
+type = "list"
+advanced = true
+help = "CodeableConcept list: [{coding: [{system: icd-9-cm, code}], text}]"
+
+[[field]]
+name = "reason_text"
+label = "Reason"
+path = "reasonCode.0.text"
+type = "string"
+
+[[field]]
+name = "participant"
+label = "Participants (as JSON)"
+type = "list"
+advanced = true
+help = "[{individual: {reference: Practitioner/<id>}}]"
+
+[[field]]
+name = "practitioner"
+label = "Physician"
+path = "participant.0.individual"
+type = "reference"
+target = ["Practitioner"]
+rel = "participant"
+
+[[field]]
+name = "practitioners"
+label = "Everyone who took part"
+path = "participant.*.individual"
+type = "reference"
+target = ["Practitioner"]
+rel = "participant"
+
+[[field]]
+name = "appointment"
+label = "Appointments (as JSON)"
+type = "list"
+advanced = true
+
+[[field]]
+name = "appointments"
+path = "appointment.*.reference"
+type = "reference"
+target = ["Appointment"]
+rel = "appointment"
+
+[[field]]
+name = "serviceProvider"
+label = "Service provider"
+type = "object"
+advanced = true
+
+[[screen]]
+id = "visit"
+on = ["create"]
+fields = ["subject", "practitioner", "visit_type", "setting", "period_start", "period_end", "minutes", "reason_text"]
+
+# A visit is planned, the patient arrives, is triaged and seen, and the visit ends. The visit-documentation workflow
+# files a visit that has already happened as finished.
+[lifecycle]
+field = "status"
+initial = "planned"
+[[lifecycle.transition]]
+from = ["planned"]
+to = "arrived"
+[[lifecycle.transition]]
+from = ["arrived"]
+to = "triaged"
+[[lifecycle.transition]]
+from = ["arrived", "triaged", "onleave"]
+to = "in-progress"
+[[lifecycle.transition]]
+from = ["in-progress"]
+to = "onleave"
+[[lifecycle.transition]]
+from = ["in-progress", "onleave"]
+to = "finished"
+[[lifecycle.transition]]
+from = ["planned", "arrived"]
+to = "cancelled"
+[[lifecycle.transition]]
+from = ["*"]
+to = "entered-in-error"

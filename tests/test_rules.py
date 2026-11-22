@@ -78,7 +78,12 @@ def test_the_scheduling_agent_never_reads_clinical_records(worked):
     with pytest.raises(Denied):
         hub.read_record(agent, f"MedicationRequest/{note['id']}")
     chart = hub.chart(agent, note["subject"]["reference"])
-    assert set(chart["classes"]) <= {"demographics"} and chart["hidden"] > 0
+    # a visit is the booking, so the scheduler reads visits (their time and people), never what is clinical in them
+    assert set(chart["classes"]) <= {"demographics", "visits"} and chart["hidden"] > 0
+    visits = chart["classes"].get("visits") or []
+    assert visits and all("reasonCode" not in v and "diagnosis" not in v for v in visits)
+    for v in visits:
+        assert "reasonCode" not in hub.read_record(agent, f"Encounter/{v['id']}")
 
 
 def test_scheduler_context_has_no_clinical_data(hub):
@@ -1344,7 +1349,7 @@ def test_the_core_knows_no_profession(hub):
     system, _ = models.build_prompt({"name": "A"}, ctx, "P", hub.pack.practice.get("agent_rules"))
     assert "You do not diagnose" in system
     from practicehub.engine import bookings
-    assert hub.of_base("Booking") == ["Appointment"] and all(b["start"] for b in bookings(hub))
+    assert hub.of_base("Booking") == ["Encounter"] and all(b["start"] for b in bookings(hub))
 
 
 def test_a_changed_practice_pack_waits_for_two_policy_owners(tmp_path, monkeypatch):
@@ -1541,8 +1546,8 @@ def test_an_approved_pack_change_to_access_takes_effect(tmp_path, monkeypatch):
     Hub(state, pack=str(copy)).install(str(copy), demo=True)
     assert Hub(state).may_read(M(Hub(state), "scheduling-agent"), "Patient")
     toml = copy / "pack.toml"
-    text = toml.read_text().replace('[grants.scheduler]\nwrite = ["scheduling"]\nread = ["demographics"]',
-                                    '[grants.scheduler]\nwrite = ["scheduling"]')
+    text = toml.read_text().replace('[grants.scheduler]\nwrite = ["visits"]\nread = ["demographics"]',
+                                    '[grants.scheduler]\nwrite = ["visits"]')
     text = text.replace('[grants.billing]', '[grants.pharmacist]\nread = ["clinical"]\n\n[grants.billing]')
     text += '\n[[roles]]\nid = "pharmacist"\nname = "Pharmacist"\n'
     toml.write_text(text)
@@ -1875,18 +1880,18 @@ def test_a_definition_changed_outside_change_control_does_not_run(hub):
 def test_no_search_is_cut_short_by_a_record_limit(hub):
     """A busy practice has thousands of records: a double booking, a patient, a slot are found past any list size."""
     import importlib.util
-    # the booking that matters is the oldest: 2,500 newer appointments come after it
-    hub.records.create("Appointment", {"status": "booked", "start": "2027-03-02T09:00", "end": "2027-03-02T09:15",
-                                       "participant": [{"actor": {"reference": "Practitioner/dr-liam"}}]})
+    # the booking that matters is the oldest: 2,500 newer visits come after it
+    doc = lambda at: {"status": "planned", "plannedStartDate": at,
+                      "participant": [{"individual": {"reference": "Practitioner/dr-liam"}}]}
+    hub.records.create("Encounter", {**doc("2027-03-02T09:00"), "plannedEndDate": "2027-03-02T09:15"})
     for i in range(2500):
-        hub.records.create("Appointment", {"status": "booked", "start": f"2026-01-{1 + i % 28:02d}T{8 + i % 9:02d}:00",
-                                           "participant": [{"actor": {"reference": "Practitioner/dr-liam"}}]})
+        hub.records.create("Encounter", doc(f"2026-01-{1 + i % 28:02d}T{8 + i % 9:02d}:00"))
     run = {"id": "r1", "record": None}
     from practicehub.engine import act_booking_book
     with pytest.raises(ValueError, match="taken in the meantime"):
         act_booking_book(hub.engine, run, None, {"slot": "2027-03-02T09:00|dr-liam"}, M(hub, "jo"))
     # a range search returns only that day; a text search finds the oldest patient among 600 newer ones
-    assert len(hub.records.search("Appointment", limit=None, field="start", since="2027-03-02",
+    assert len(hub.records.search("Encounter", limit=None, field="plannedStartDate", since="2027-03-02",
                                   until="2027-03-03")) == 1
     hub.records.create("Patient", {"name": [{"given": ["Zephyrine"], "family": "Oldfield"}], "birthDate": "1950-01-01"})
     for i in range(600):
@@ -1894,7 +1899,7 @@ def test_no_search_is_cut_short_by_a_record_limit(hub):
     assert [p["name"][0]["family"] for p in hub.records.search("Patient", text="zephyrine oldfield")] == ["Oldfield"]
     assert len(hub.records.search("Patient", limit=None)) > 600
     with pytest.raises(ValueError):
-        hub.records.search("Appointment", field="start') OR 1=1 --", since="x")
+        hub.records.search("Encounter", field="plannedStartDate') OR 1=1 --", since="x")
 
 
 # ------------------------------------------------------------------------------------------- screens
@@ -2783,6 +2788,98 @@ def test_a_record_type_stored_before_a_stricter_check_is_set_aside_not_a_failure
     assert listed["Condition"]["definition"] is None and "initial" in listed["Condition"]["problem"]
 
 
+# ------------------------------------------------------------------------------------------- the calendar
+def _visit(pat, who, start, end=None, status="planned"):
+    rec = {"status": status, "subject": {"reference": pat}, "plannedStartDate": start,
+           "participant": [{"individual": {"reference": f"Practitioner/{who}"}}]}
+    return {**rec, "plannedEndDate": end} if end else rec
+
+
+def test_a_member_is_never_booked_twice(hub):
+    """A booking that overlaps another of the same member is refused, saying whose time and when (never whom for);
+    back to back, with someone else, or over a cancelled or finished visit, it is booked."""
+    jo = M(hub, "jo")
+    pat = f"Patient/{hub.records.create('Patient', {'name': [{'given': ['Ellen'], 'family': 'MacLeod'}]})['id']}"
+    first = hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:00", "2027-03-02T09:30"))
+    with pytest.raises(Invalid, match="clashes") as err:
+        hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:15"))
+    (why,) = err.value.problems
+    assert "Dr. Liam Fraser is already booked on Tue Mar 02 from 09:00 to 09:30" in why and "Ellen" not in why
+    hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:30"))  # back to back
+    hub.create_record(jo, "Encounter", _visit(pat, "dr-amara", "2027-03-02T09:15"))  # another member
+    later = hub.create_record(jo, "Encounter", _visit(pat, "dr-amara", "2027-03-02T10:00"))
+    with pytest.raises(Invalid, match="clashes"):  # moving onto someone's booked time is refused too
+        hub.update_record(jo, f"Encounter/{later['id']}", {"plannedStartDate": "2027-03-02T09:10"})
+    hub.update_record(jo, f"Encounter/{first['id']}", {"status": "cancelled"})
+    hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:00"))  # the cancelled time is free
+
+
+def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, monkeypatch):
+    """A practice on version 1 (Appointment and Visit apart) upgrades: each appointment becomes a visit (the visit
+    filed for it, or a new one with its id), whatever pointed at it points at the visit, none is left behind, and the
+    Appointment type is retired."""
+    import shutil
+    from practicehub import pack as packmod
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    src = Path(packmod.find("general-practice", "practice"))
+    copy = tmp_path / "packs" / "general-practice"
+    shutil.copytree(src, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    v1 = Path(__file__).parent / "packs" / "clinic-v1-types"
+    for name in ("Appointment.toml", "Encounter.toml"):
+        shutil.copy(v1 / name, copy / "types" / name)
+    state = tmp_path / "state"
+    hub = Hub(state, pack=str(copy))
+    hub.install(str(copy))
+    hub.db.set_setting("pack_upgrades_done", [])  # installed before version 2
+    assert sorted(hub.of_base("Booking")) == ["Appointment"]
+    pat = f"Patient/{hub.records.create('Patient', {'name': [{'given': ['Omar'], 'family': 'Haddad'}]})['id']}"
+    appt = lambda status, start, why: hub.records.create("Appointment", {
+        "status": status, "start": start, "minutesDuration": 15, "description": why,
+        "participant": [{"actor": {"reference": pat}}, {"actor": {"reference": "Practitioner/dr-liam"}}]})
+    booked = appt("booked", "2027-03-02T09:00", "Flu shot")
+    gone = appt("cancelled", "2027-03-02T09:00", "Annual physical")
+    gone = hub.records.update("Appointment", gone["id"], {**gone, "cancelationReason": {"text": "Patient sick"}})
+    seen = appt("fulfilled", "2026-11-02T10:00", "Sore throat")
+    filed = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
+                                             "appointment": [{"reference": f"Appointment/{seen['id']}"}],
+                                             "period": {"start": "2026-11-02T10:05"}})
+    note = hub.records.create("Composition", {"status": "final", "subject": {"reference": pat}, "title": "Note",
+                                              "encounter": {"reference": f"Encounter/{filed['id']}"}})
+    walk_in = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
+                                               "period": {"start": "2026-11-03T11:00", "end": "2026-11-03T11:20"}})
+
+    for name in ("Appointment.toml", "Encounter.toml"):  # version 2 arrives
+        (copy / "types" / name).unlink()
+    shutil.copy(src / "types" / "Encounter.toml", copy / "types" / "Encounter.toml")
+    hub = Hub(state)
+    hub.review_pack(M(hub, "rana"))
+    hub.upgrade_pack(M(hub, "dr-amara"))
+    hub = Hub(state)
+    for row in hub.db.type_versions.find({"type_id": "Encounter", "status": "proposed"}):  # its second owner
+        hub.approve(M(hub, "rana"), "type", "Encounter", row["version"])
+    hub = Hub(state)
+
+    assert hub.records.search("Appointment", limit=None) == []
+    assert hub.record_type("Appointment") is None and hub.of_base("Booking") == ["Encounter"]
+    visits = {v["id"]: v for v in hub.records.search("Encounter", limit=None)}
+    assert visits[booked["id"]]["status"] == "planned"
+    assert visits[booked["id"]]["plannedStartDate"] == "2027-03-02T09:00"
+    assert visits[booked["id"]]["plannedEndDate"] == "2027-03-02T09:15"
+    assert visits[booked["id"]]["reasonCode"][0]["text"] == "Flu shot"
+    assert visits[gone["id"]]["status"] == "cancelled"  # a cancelled booking at the same time is no clash
+    assert "Patient sick" in json.dumps(visits[gone["id"]]["extension"])
+    assert seen["id"] not in visits  # the appointment a visit was filed for is that visit
+    assert visits[filed["id"]]["plannedStartDate"] == "2026-11-02T10:00"
+    assert visits[filed["id"]]["period"]["start"] == "2026-11-02T10:05" and "appointment" not in visits[filed["id"]]
+    assert visits[walk_in["id"]]["plannedStartDate"] == "2026-11-03T11:00"
+    assert hub.records.read("Composition", note["id"])["encounter"]["reference"] == f"Encounter/{filed['id']}"
+    assert all(v.get("plannedStartDate") for v in visits.values())
+    assert hub.track.verify()["ok"]
+    from practicehub.engine import bookings
+    assert {b["record"]["id"] for b in bookings(hub)} == {booked["id"], filed["id"], walk_in["id"]}  # not cancelled
+
+
 # ------------------------------------------------------------------------------------------- live co-editing and SOPs
 def test_two_people_editing_a_page_live_keep_both_changes_and_the_version_names_both(wiki):
     from practicehub.live import Live
@@ -3102,3 +3199,91 @@ def test_a_commercial_message_goes_only_with_consent_that_holds_checked_when_que
     row = h.db.outbox.get(sent["message_id"])
     assert row["status"] == "refused" and "withdrew" in row["note"]
     assert any(ev["action"] == "outbox.refused" for ev in h.track.list(limit=200))
+
+
+# ------------------------------------------------------------------------------------- field-level data classes
+def _visit_with_a_reason(hub, word="Zebrafinch"):
+    """A visit booked by the physician, with a reason (clinical) only a clinical reader may see."""
+    pat = hub.records.search("Patient")[0]
+    return hub.create_record(M(hub, "dr-amara"), "Encounter", {
+        "status": "planned", "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB",
+                                       "display": "ambulatory"},
+        "subject": {"reference": f"Patient/{pat['id']}"}, "plannedStartDate": "2031-03-03T09:00",
+        "plannedEndDate": "2031-03-03T09:15", "participant": [{"individual": {"reference": "Practitioner/dr-amara"}}],
+        "reasonCode": [{"text": f"{word} cough"}]})
+
+
+def test_a_field_of_a_class_a_member_may_not_read_is_never_shown_nor_written(hub):
+    """The front desk reads visits but not what is clinical in them: the reason is left out everywhere (the record,
+    lists and searches, exports, MCP, history, titles), and they may not write it."""
+    from practicehub import export, mcp
+    jo, amara = M(hub, "jo"), M(hub, "dr-amara")
+    v = _visit_with_a_reason(hub)
+    ref = f"Encounter/{v['id']}"
+    assert hub.read_record(amara, ref)["reasonCode"][0]["text"] == "Zebrafinch cough"
+    assert hub.may_read(jo, "Encounter") and "reasonCode" not in hub.read_record(jo, ref)
+    assert "Zebrafinch" not in hub.title(hub.records.read("Encounter", v["id"]))  # a title is for every reader
+    # search: no text match on what they may not see, no filter on it
+    assert [r["id"] for r in hub.search_records(amara, "Encounter", text="zebrafinch")] == [v["id"]]
+    assert hub.search_records(jo, "Encounter", text="zebrafinch") == []
+    assert all("reasonCode" not in r for r in hub.search_records(jo, "Encounter"))
+    with pytest.raises(Denied):
+        hub.search_records(jo, "Encounter", field="reasonCode.0.text", since="A")
+    # history
+    hub.update_record(jo, ref, {"plannedStartDate": "2031-03-03T09:30", "plannedEndDate": "2031-03-03T09:45"})
+    assert all("Zebrafinch" not in json.dumps(row) for row in hub.record_history(jo, ref))
+    assert any("Zebrafinch" in json.dumps(row) for row in hub.record_history(amara, ref))
+    # exports: one record, a list, a subject's file
+    for fmt in ("json", "print"):  # (an .odt is zipped: its words are not in its bytes)
+        assert b"Zebrafinch" not in export.record(hub, jo, ref, fmt).body
+    assert b"Zebrafinch" in export.record(hub, amara, ref, "json").body
+    for fmt in ("csv", "print"):
+        assert b"Zebrafinch" not in export.records_list(hub, jo, "Encounter", fmt).body
+    assert b"Zebrafinch" not in export.records_list(hub, jo, "Encounter", "csv", text="zebrafinch").body
+    for fmt in ("fhir", "print"):  # a subject's whole file (the visit is in it, not as FHIR)
+        assert b"Zebrafinch" not in export.subject_file(hub, jo, v["subject"]["reference"], fmt).body
+    assert b"Zebrafinch" in export.subject_file(hub, amara, v["subject"]["reference"], "print").body
+    # MCP: read, search, and the tools it is given
+    out = mcp.call_tool(hub, "practice", jo, "read_encounter", {"id": v["id"]})
+    assert not out["isError"] and "Zebrafinch" not in json.dumps(out)
+    found = mcp.call_tool(hub, "practice", jo, "search_encounter", {"text": "zebrafinch"})
+    assert v["id"] not in json.dumps(found)
+    update = next(t for t in mcp.tools(hub, "practice", jo) if t["name"] == "update_encounter")
+    assert "reasonCode" not in json.dumps(update["inputSchema"])
+    # the engine's view of a visit for them, as an agent's context reads it
+    assert "Zebrafinch" not in json.dumps(hub.redact_all(M(hub, "scheduling-agent"),
+                                                         hub.records.search("Encounter", limit=None)))
+    # writing it: refused, naming the field
+    with pytest.raises(Denied) as e:
+        hub.update_record(jo, ref, {"reasonCode": [{"text": "something else"}]})
+    assert "Reason" in str(e.value)
+    with pytest.raises(Denied):
+        hub.create_record(jo, "Encounter", {**{k: x for k, x in v.items() if k not in ("id", "meta")},
+                                             "plannedStartDate": "2031-03-04T09:00",
+                                             "plannedEndDate": "2031-03-04T09:15"})
+
+
+def test_a_front_desk_move_keeps_the_reason(hub):
+    jo = M(hub, "jo")
+    v = _visit_with_a_reason(hub)
+    ref = f"Encounter/{v['id']}"
+    seen = hub.read_record(jo, ref)
+    assert "reasonCode" not in seen
+    # what they saw, moved and saved back whole: the reason they never saw is still there
+    hub.update_record(jo, ref, {**{k: x for k, x in seen.items() if k not in ("id", "meta", "resourceType")},
+                                "plannedStartDate": "2031-03-05T10:00", "plannedEndDate": "2031-03-05T10:15"},
+                      expected_version=seen["meta"]["versionId"])
+    hub.update_record(jo, ref, {"reasonCode": None, "status": "cancelled"})  # a view without it clears nothing
+    stored = hub.records.read("Encounter", v["id"])
+    assert stored["plannedStartDate"] == "2031-03-05T10:00" and stored["status"] == "cancelled"
+    assert stored["reasonCode"] == [{"text": "Zebrafinch cough"}]
+
+
+def test_a_field_names_a_declared_data_class(hub):
+    src = hub.record_type("Encounter")
+    path = Path(__file__).parent.parent / "packs" / "general-practice" / "types" / "Encounter.toml"
+    bad = path.read_text().replace('data_class = "clinical"', 'data_class = "no-such-class"', 1)
+    assert bad != path.read_text() and src is not None
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), bad)
+    assert any("no-such-class" in p for p in e.value.problems)

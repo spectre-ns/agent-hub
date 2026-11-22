@@ -48,6 +48,9 @@ answer that becomes a record, an engine calling the API.
     rel = "subject"               # the link written for it; ``subject`` makes it what the record is about
     # fact = true                 # shown among a subject's headline facts
     # match = true                # with the name, how a second registration of the same subject is noticed
+    # data_class = "clinical"     # a field of its own data class: only who may read that class sees it (on every
+                                  #   page, list, export and history), only who may write it sets it. The type's class
+                                  #   still says who sees the record exists, lists it and creates it.
 
     [lifecycle]                   # optional: the states a record moves through
     field = "status"
@@ -151,6 +154,15 @@ class RecordType:
     def field(self, name: str) -> dict | None:
         return next((f for f in self.fields if f["name"] == name), None)
 
+    def field_class(self, f: dict) -> str:
+        """The data class that guards a field's value: its own, else the type's."""
+        return f.get("data_class") or self.data_class
+
+    @property
+    def classed_fields(self) -> list[dict]:
+        """The fields whose own data class differs from the type's: those some readers of the record do not see."""
+        return [f for f in self.fields if f.get("data_class") and f["data_class"] != self.data_class]
+
     @property
     def references(self) -> list[dict]:
         return [f for f in self.fields if f["type"] == "reference"]
@@ -175,7 +187,7 @@ KEYS = {
          "part_of",
          "navigator", "layout", "standard", "consent"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "max_length", "min",
-              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live"},
+              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
@@ -220,7 +232,7 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
     for k in FIELD_BOOLS:
         if k in raw and not isinstance(raw[k], bool):
             problems.append(f"{where}: {k} is true or false, not {raw[k]!r}")
-    for k in ("label", "help", "rel"):
+    for k in ("label", "help", "rel", "data_class"):
         if k in raw and not isinstance(raw[k], str):
             problems.append(f"{where}: {k} is text, not {raw[k]!r}")
     ml = raw.get("max_length")
@@ -275,7 +287,7 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
          "list": raw.get("list", False), "show": raw.get("show", True),
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
-         "live": raw.get("live", False)}
+         "live": raw.get("live", False), "data_class": raw.get("data_class") or None}
     if typ == "reference" and not f["rel"]:
         f["rel"] = name
     return f, []
@@ -545,6 +557,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             problems.append("part_of: a record is not part of its own kind; for a tree, say parent")
         else:
             rt.part_of = {"field": pf["name"], "path": pf["path"], "target": list(pf["target"])}
+    problems += _check_field_classes(rt)
     nav = doc.get("navigator")
     if nav is not None:
         hide = nav.get("hide", []) if isinstance(nav, dict) else None
@@ -615,6 +628,33 @@ def _check_consent(rt: RecordType, c) -> list[str]:
     if not out:
         rt.consent = {**paths, "lasts": dict(lasts)}
     return out
+
+
+def _inside(path: str, outer: str) -> bool:
+    """Whether ``path`` lies within ``outer`` (``reasonCode.0.text`` within ``reasonCode``; ``*`` matches a position)."""
+    a, b = path.split("."), outer.split(".")
+    return len(a) > len(b) and all(x == y or "*" in (x, y) or (x.isdigit() and y.isdigit() and x == y)
+                                   for x, y in zip(a, b))
+
+
+def _check_field_classes(rt: RecordType) -> list[str]:
+    """A field's own data class must make sense in the record: what says which record it is (its state, its owner,
+    its parent, its base fields' subject) stays with the type's class, and a field inside another holds no less
+    guarded data than the one around it (a reader would see it there)."""
+    problems = []
+    keep = {(rt.lifecycle or {}).get("path"), (rt.part_of or {}).get("path"), rt.parent}
+    subj = (rt.base_map.get("subject") or {}).get("fields") or []
+    for f in rt.classed_fields:
+        if f["path"] in keep or f["name"] in subj or (f["rel"] == "subject" and f["type"] == "reference"):
+            problems.append(f"field {f['name']}: it says which record this is (its state, owner, parent or "
+                            f"subject): it keeps the type's data class")
+    for f in rt.fields:
+        for g in rt.fields:
+            if f is not g and _inside(f["path"], g["path"]) and g.get("data_class") \
+                    and rt.field_class(f) != rt.field_class(g):
+                problems.append(f"field {f['name']}: it is inside {g['name']}, which is {rt.field_class(g)}: give it "
+                                f"the same data class")
+    return problems
 
 
 STANDARDS = {"fhir-r4": "FHIR R4"}   # what ``standard`` may say: the standard its records are resources of

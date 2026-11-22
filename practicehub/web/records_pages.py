@@ -14,7 +14,7 @@ import urllib.parse
 
 from .. import pack as packmod
 from .. import export as exportmod
-from .. import schema
+from .. import schema, visibility
 from ..hub import Conflict, HubError, Denied, Invalid
 
 e = html.escape
@@ -153,7 +153,7 @@ class RecordPages:
         if not rt or rtype in hub.member_types():
             raise NotFound(f"there is no {ref}")
         hub.require(me, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
-        rec = hub.records.read(rtype, rid)
+        rec = hub.redact(me, hub.records.read(rtype, rid))
         if not rec:
             raise NotFound(f"there is no {ref}")
         base = f"/records/{rtype}/{urllib.parse.quote(rid)}/export?format="
@@ -175,7 +175,7 @@ class RecordPages:
         if not rt or rt.abstract or rtype in hub.member_types():
             raise NotFound(f"there is no record type {rtype}")
         hub.require(me, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
-        n = len(hub.records.search(rtype, limit=SHOWN, text=text))
+        n = len(hub.search_records(me, rtype, limit=SHOWN, text=text))
         qs = f"q={urllib.parse.quote(text)}&" if text else ""
         fmts = exportmod.offered(hub, rtype, "list")
         hints = {"ndjson": "One FHIR resource a line, for another clinic's system (FHIR Bulk Data)"}
@@ -462,7 +462,7 @@ class RecordPages:
             if t == "*" or t in self.hub.member_types() or not self.hub.record_type(t):
                 continue
             words = lead(typed)  # a title as shown is searched by its name part
-            found = self.hub.records.search(t, limit=50, text=words)  # every word typed is in the record
+            found = self.hub.search_records(None, t, limit=50, text=words)  # words seen by every reader
             name = lambda r: self.hub.title(r).strip().lower()
             exact = [r for r in found if r["id"] == typed or typed.lower() in (name(r), lead(name(r)))]
             hits += [f"{t}/{r['id']}" for r in (exact or found)]
@@ -473,7 +473,9 @@ class RecordPages:
                                            f"birth or number), or open the one you mean and link it from there"))
 
     def _input(self, f, rec, me) -> str:
-        """A form control for a field, filled from the record."""
+        """A form control for a field, filled from the record (none for a field of a class they may not write)."""
+        if not visibility.may_field(self.hub, me, f, write=True):
+            return ""
         name = f["path"].removesuffix(".*")
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "")] \
             if rec else []
@@ -732,10 +734,10 @@ class RecordPages:
             raise Denied(f"{me['name']} may not read {rt.plural.lower()}")
         q = req["query"].get("q", "").lower()
         from .server import SHOWN
-        recs = hub.records.search(rtype, limit=SHOWN + 1, text=q or None)
+        recs = hub.search_records(me, rtype, limit=SHOWN + 1, text=q or None)  # without what they may not read
         more, recs = len(recs) > SHOWN, recs[:SHOWN]
         lc = rt.lifecycle
-        heads = schema.list_columns(rt)  # a part: which record it is part of, first; the export has the same
+        heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
         rows = "".join(
             f'<tr><td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
             + (f'<td>{self._state_loz(schema.first(r, lc["path"]))}</td>' if lc else "")
@@ -1025,7 +1027,7 @@ class RecordPages:
             g = groups.setdefault(t, {"rels": set(), "recs": {}})
             g["rels"].add(x["rel"])
             if rid not in g["recs"]:
-                r = hub.records.read(t, rid)
+                r = hub.redact(me, hub.records.read(t, rid))
                 if r:
                     g["recs"][rid] = r
                     hub.note_view(me, x["ref"], how=f"linked to {ref}")
@@ -1075,7 +1077,7 @@ class RecordPages:
                 continue
             f = self._owner_field(rt)
             for x in hub.db.links.find({"to_ref": ref, "rel": f["rel"], "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}}):
-                r = hub.records.read(*x["from_ref"].split("/", 1))
+                r = hub.redact(me, hub.records.read(*x["from_ref"].split("/", 1)))
                 if r and schema.is_active(rt, r):
                     found.append((rt, r))
         if not found:
@@ -1090,7 +1092,7 @@ class RecordPages:
     def subject_banner(self, me, ref: str, *, heading: bool = False) -> str:
         """The subject's banner: their name (a link to their page), headline facts, and alerts."""
         hub = self.hub
-        p = hub.records.read(*ref.split("/", 1))
+        p = hub.redact(me, hub.records.read(*ref.split("/", 1)))
         if not p:
             return ""
         facts = "".join(f'<div><dt>{e(self.human(k))}</dt><dd>{self._fact_html(v)}</dd></div>'
@@ -1133,7 +1135,7 @@ class RecordPages:
         owner = self.hub.owner_of(rec)
         if not owner or not self._may_read(me, owner.split("/", 1)[0]):
             return None
-        o = self.hub.records.read(*owner.split("/", 1))
+        o = self.hub.redact(me, self.hub.records.read(*owner.split("/", 1)))
         if not o:
             return None
         ort = self.hub.record_type(owner.split("/", 1)[0])
@@ -1146,7 +1148,7 @@ class RecordPages:
         t = owner.split("/", 1)[0]
         if t == self.subj["type"]:
             return self.subject_banner(me, owner)
-        o = self.hub.records.read(*owner.split("/", 1))
+        o = self.hub.redact(me, self.hub.records.read(*owner.split("/", 1)))
         return self.record_banner(me, o) if o and self._may_read(me, t) else ""
 
     # ------------------------------------------------------------------------------------------ one record
@@ -1166,8 +1168,10 @@ class RecordPages:
         tab = req["query"].get("tab", "details")
 
         # main column: the fields, then the tabs
-        prose = [f for f in rt.fields if f["type"] == "markdown" and f.get("show", True) is not False]
-        row = lambda f: ("" if f in prose else
+        unseen = visibility.hidden_fields(hub, me, rt)  # a field of a class they may not read: no row at all
+        prose = [f for f in rt.fields if f["type"] == "markdown" and f.get("show", True) is not False
+                 and f not in unseen]
+        row = lambda f: ("" if f in prose or f in unseen else
                          f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, rec)}</td></tr>")
         view = rt.screen("view")
         if view is not None:  # the type's view screen: its tabs as headed groups, its fields in its order
@@ -1179,7 +1183,8 @@ class RecordPages:
                              and not (lc and f["path"] == lc["path"])
                              and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields)))
         adv_rows = "".join(f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, rec)}</td></tr>"
-                           for f in rt.fields if f.get("advanced") and f.get("show", True) is not False)
+                           for f in rt.fields if f.get("advanced") and f.get("show", True) is not False
+                           and f not in unseen)
         if rtype == self.subj["type"] and hub.is_policy_owner(me):
             fields += (f"<tr><th>Privacy</th><td><a href='/access?subject={e(urllib.parse.quote(ref))}'>Who opened or "
                        f"changed this file</a></td></tr>")
@@ -1207,6 +1212,8 @@ class RecordPages:
         edit_btn = (f'<a class="btn secondary" href="{url}/export" data-modal>Export</a>' if not editing else "") + (
             f'<a class="btn primary" href="{url}?edit=1#edit" accesskey="e" aria-keyshortcuts="Alt+E">Edit</a>'
             if editable and not editing else "")
+        if editable and not editing and rt.is_a("Booking") and schema.is_active(rt, rec):  # another time, member
+            edit_btn = (f'<a class="btn secondary" href="{url}/reschedule" data-modal>Move</a>' + edit_btn)
         rail: list = []
         if tab == "details":
             used = hub.in_use_version(me, ref) if not is_page else None  # a page says so in its banner

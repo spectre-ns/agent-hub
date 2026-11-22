@@ -709,6 +709,51 @@ fieldset.fb-chips{margin:0}fieldset.fb-chips[aria-invalid=true]{outline:2px soli
   .issue-side,.issue>.details{order:-1;position:static}
   .details{position:static}
 }
+/* the practice calendar: a column per member per day, rows of slots; a list on a phone */
+.cal-bar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;margin:0 0 12px}
+.cal-nav,.cal-views,.cal-who{display:flex;gap:4px;align-items:center;margin:0}
+.cal-who select{width:auto;margin:0}.cal-who label{margin:0}
+.cal-title{font-size:16px;line-height:20px;margin:0 0 0 8px}
+.cal-views .btn.selected{background:var(--selected-bg);color:var(--selected-fg)}
+.cal-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+.cal{display:grid;grid-template-columns:52px repeat(var(--cols),minmax(132px,1fr));min-width:min-content}
+.cal-corner{border-bottom:1px solid var(--border);background:var(--surface)}
+.cal-day{text-align:center;font-weight:600;font-size:13px;padding:6px 4px;border-left:1px solid var(--border);
+  border-bottom:1px solid var(--border);background:var(--sunken)}
+.cal-day a{color:var(--fg);text-decoration:none}.cal-day.today a{color:var(--brand)}
+.cal-day.today{box-shadow:inset 0 -2px 0 var(--brand)}
+.cal-who-h{font-size:12px;color:var(--subtle);padding:4px 6px;text-align:center;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;border-left:1px solid var(--border);border-bottom:1px solid var(--border)}
+.cal-times,.cal-col{display:grid;grid-template-rows:repeat(var(--rows),26px);grid-template-columns:minmax(0,1fr)}
+.cal-time{grid-column:1;font-size:11px;color:var(--subtlest);text-align:right;padding:0 6px;transform:translateY(-6px)}
+.cal-col{border-left:1px solid var(--border);position:relative}
+.cal-col.today{background:color-mix(in srgb,var(--selected-bg) 35%,transparent)}
+.cal-col>*{grid-column:1}
+.cal-cell,.cal-slot,.cal-off{border-top:1px dotted var(--border)}
+.cal-off{background:var(--sunken)}
+.cal-slot{display:block;font-size:11px;padding:0 6px;color:transparent;text-decoration:none;line-height:25px}
+.cal-slot:hover,.cal-slot:focus-visible{background:var(--selected-bg);color:var(--selected-fg)}
+.cal-ev{z-index:1;margin:1px 3px;padding:2px 6px;border-radius:4px;font-size:12px;line-height:16px;overflow:hidden;
+  background:var(--info-bg);color:var(--fg);border-left:3px solid var(--brand);text-decoration:none;min-height:0;
+  white-space:nowrap;text-overflow:ellipsis}
+a.cal-ev:hover{background:var(--selected-bg);text-decoration:none}
+.cal-ev .t{color:var(--subtle);font-size:11px}.cal-ev .why{color:var(--subtle)}
+.cal-ev .st{color:var(--subtlest);font-size:11px}
+.cal-ev.busy{background:var(--neutral);border-left-color:var(--border-bold);color:var(--subtle)}
+.cal-ev.cancelled{background:transparent;border:1px dashed var(--border-bold);border-left-width:3px;color:var(--subtlest)}
+.cal-ev.cancelled b,.cal-ev.cancelled .why{text-decoration:line-through}
+.cal-now{z-index:2;height:2px;align-self:start;margin-top:calc(var(--f) * 26px);background:var(--danger);
+  pointer-events:none;position:relative}
+.cal-now::before{content:"";position:absolute;left:-4px;top:-3px;width:8px;height:8px;border-radius:50%;
+  background:var(--danger)}
+.cal-list{display:none}
+.cal-listday{margin:0 0 16px}.cal-listday h3{font-size:14px;margin:0 0 6px}
+.cal-listday li{display:flex;flex-direction:column;gap:2px;padding:4px 0}
+.cal-listday .cal-ev{margin:0;display:block;white-space:normal}.cal-listday .who{font-size:12px}
+.cal-free{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.cal-legend{font-size:12px;margin-top:8px}
+.booking-when{font-size:14px;margin:0}
+@media (max-width:600px){.cal-wrap{display:none}.cal-list{display:block}.cal-title{margin:0;flex-basis:100%}}
 @media (max-width:480px){
   main table:not(.kv){display:block;overflow-x:auto;white-space:nowrap}
   .top{gap:4px;padding:0 8px}

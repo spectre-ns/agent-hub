@@ -26,7 +26,7 @@ import secrets
 import threading
 import time
 
-from . import ot, schema
+from . import ot, schema, visibility
 from .hub import Conflict, Denied, Invalid, NotFound
 from .store import DuplicateKey, utcnow
 
@@ -98,7 +98,7 @@ class Live:
     def sid(ref: str, field: str) -> str:
         return f"{ref}#{field}"
 
-    def _field(self, ref: str, field: str):
+    def _field(self, ref: str, field: str, member: dict | None = None):
         rtype = ref.split("/", 1)[0]
         rt = self.hub.record_type(rtype)
         if not rt:
@@ -106,6 +106,9 @@ class Live:
         f = next((f for f in live_fields(rt) if f["name"] == field), None)
         if f is None:
             raise Invalid(f"{rt.label}: {field!r} is not edited live")
+        if member is not None and f in visibility.hidden_fields(self.hub, member, rt):
+            raise Denied(f"{member.get('name', 'they')} may not read {rt.label.lower()} {f['label']} "
+                         f"(it is {rt.field_class(f)})")
         return rt, f
 
     def _record(self, ref: str) -> dict:
@@ -179,7 +182,7 @@ class Live:
     def join(self, member: dict, ref: str, field: str) -> dict:
         """Open the field to edit together (or, for someone who may only read it, to watch). The state to start
         from: the text, its sequence number, and who else is in."""
-        rt, f = self._field(ref, field)
+        rt, f = self._field(ref, field, member)
         self.hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rt.id} records")
         sid = self.sid(ref, field)
         with self._lock(sid):
@@ -217,7 +220,7 @@ class Live:
 
     def watch(self, member: dict, ref: str, field: str) -> dict:
         """The session as it stands, for someone reading the page while others edit it (nothing joined)."""
-        rt, f = self._field(ref, field)
+        rt, f = self._field(ref, field, member)
         self.hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rt.id} records")
         s = self.session(ref, field)
         return self._state(s, mode="watch", rec=None if s else self._record(ref), f=f)
@@ -261,7 +264,7 @@ class Live:
     def submit(self, member: dict, ref: str, field: str, cid: str, base: int, op, caret=None) -> dict:
         """One change, made on the text at sequence number ``base``. Returns its sequence number. The same ``cid``
         sent twice (after a lost connection) is kept once."""
-        rt, f = self._field(ref, field)
+        rt, f = self._field(ref, field, member)
         sid = self.sid(ref, field)
         if not isinstance(cid, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{6,80}", cid):
             raise Invalid("an operation needs an id")
@@ -351,7 +354,7 @@ class Live:
     def poll(self, member: dict, ref: str, field: str, since: int, pv: int = -1, wait: float = POLL_WAIT) -> dict:
         """What happened after ``since``: the operations in order (each with the id its sender gave it, which is
         how a sender knows it was kept), and who is in the session. Waits up to ``wait`` seconds for news."""
-        rt, f = self._field(ref, field)
+        rt, f = self._field(ref, field, member)
         self.hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rt.id} records")
         sid = self.sid(ref, field)
         cond = self._cond(sid)
@@ -598,7 +601,7 @@ class Live:
         becomes ``text`` only when a person who may change the record accepts it. Whoever proposes it changes
         nothing; this is how an agent edits."""
         c = self._comment(member, ref, cid)
-        rt, f = self._field(ref, field)
+        rt, f = self._field(ref, field, member)
         cur = str(self._record(ref).get(f["path"]) or "")
         if not find or cur.count(find) != 1:
             raise Invalid("a suggestion replaces words that are in the text exactly once: quote them as written")
@@ -622,7 +625,7 @@ class Live:
         if sug["status"] != "open":
             raise Invalid(f"this suggestion was {sug['status']} already")
         if accept:
-            rt, f = self._field(ref, sug["field"])
+            rt, f = self._field(ref, sug["field"], member)
             if self.editing(ref):
                 raise Invalid("people are editing it now: accept the suggestion once they are done")
             cur = self._record(ref)
@@ -686,6 +689,7 @@ class Live:
         cur = self._record(ref)
         keep = {rt.lifecycle["path"].split(".")[0]} if rt.lifecycle else set()
         keep |= {f["path"].split(".")[0] for f in rt.fields if f.get("by") == "workflow"}
+        keep |= visibility.hidden_keys(self.hub, member, rtype, write=True)  # a field they may not write stays
         old = row["data"]
         data = {k: v for k, v in old.items() if k not in ("resourceType", "id", "meta") and k not in keep}
         for k in cur:  # a field the old version did not have is cleared

@@ -128,7 +128,7 @@ def test_the_core_names_no_pack_type():
     import ast
     from pathlib import Path
     names = {"Patient", "Appointment", "Practitioner", "Observation", "Encounter", "Client", "Meeting", "TaxSlip",
-             "patient", "patients", "appointment.book"}
+             "Visit", "patient", "patients", "appointment.book"}
     root = Path(__file__).parent.parent / "practicehub"
     found = []
     for p in root.rglob("*.py"):

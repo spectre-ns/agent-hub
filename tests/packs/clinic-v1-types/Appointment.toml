@@ -2,7 +2,7 @@
 id = "Appointment"
 label = "Appointment"
 plural = "Appointments"
-data_class = "scheduling"
+data_class = "visits"            # version 1 kept it in "scheduling", which version 2 folds into "visits"
 strict = true
 extends = "Booking"           # the core's calendar, free slots and booking.book handle it
 date = "start"

@@ -20,7 +20,7 @@ def types():
 
 
 def test_every_type_parses_and_matches_its_file(types):
-    assert len(types) == 18
+    assert len(types) == 17  # Appointment became the Visit (pack version 2)
     for name, rt in types.items():
         assert rt.id == name
     assert [rt.id for rt in types.values() if rt.subject] == ["Patient"]
@@ -96,8 +96,11 @@ def test_signed_note_keeps_follow_up(worked):
     (note,) = worked.records.search("Composition")
     sections = {s["title"]: s["text"] for s in note["section"]}
     assert sections["Follow-up"] == draft["follow_up"]
-    (visit,) = [e for e in worked.records.search("Encounter") if e.get("appointment")]
+    booked = worked.engine.run(run["id"])["ctx"]["input"]["appointment"]  # the visit was booked: documenting finishes it
+    visit = worked.records.read(*booked.split("/", 1))
+    assert visit["status"] == "finished" and visit["plannedStartDate"]
     assert visit["period"]["start"] and isinstance(visit["reasonCode"], list)
+    assert note["encounter"]["reference"] == booked
 
 
 def test_a_filed_note_carries_the_physicians_signature_and_is_locked(worked):

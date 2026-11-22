@@ -164,6 +164,9 @@ class CatalogMixin:
         rtype = rec.get("resourceType") or ""
         rt = self.record_type_for_reading(rtype) if rtype else None
         values = None
+        if rt is not None and rt.classed_fields:  # a title travels (notices, pickers, the track): never from those
+            from .visibility import strip
+            rec = strip(rec, rt.classed_fields)
 
         def vals():
             out = {f["name"]: schema.first(rec, f["path"]) for f in rt.fields if "*" not in f["path"]}
@@ -187,10 +190,13 @@ class CatalogMixin:
     def facts(self, rec: dict) -> dict:
         """A subject's headline facts: the pack's ``facts``, else its type's ``fact = true`` fields, else the
         identifier and contact its base type has."""
+        rt = self.record_type_for_reading(rec.get("resourceType") or "")
+        if rt is not None and rt.classed_fields:
+            from .visibility import strip
+            rec = strip(rec, rt.classed_fields)
         got = self.pack.facts(rec) if self.pack else None
         if got is not None:
             return got
-        rt = self.record_type_for_reading(rec.get("resourceType") or "")
         if rt is None:
             return {}
         marked = [f for f in rt.fields if f.get("fact")]
@@ -271,6 +277,10 @@ class CatalogMixin:
         if rt.data_class and rt.data_class not in classes:
             problems.append(f"data_class: there is no data class {rt.data_class!r} "
                             f"(data classes: {', '.join(sorted(classes))})")
+        for f in rt.fields:
+            if f.get("data_class") and f["data_class"] not in classes:
+                problems.append(f"field {f['name']}: there is no data class {f['data_class']!r} "
+                                f"(data classes: {', '.join(sorted(classes))})")
         roles = self.role_ids()
         for g in rt.signatures:
             for r in g["roles"]:
@@ -438,6 +448,8 @@ class CatalogMixin:
             broken = self._workflows_broken_by(kind, did)
             if broken:
                 raise Invalid(f"approving this {noun} would break workflows the practice runs", broken)
+        if kind == "type":  # a pack upgrade that waited for this type (records of a merged type become this one)
+            self.run_pack_upgrades(actor)
         return {f"{kind}_id": did, "version": version}
 
     def withdraw(self, actor: dict, kind: str, did: str, version: int, reason: str = "") -> None:

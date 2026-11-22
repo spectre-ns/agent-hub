@@ -170,7 +170,7 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
     if w["source"] == "records":
         if not hub.may_read(member, w["type"]):
             return [], f"needs access to {hub.class_of(w['type'])} records"
-        rows = hub.records.search(w["type"], limit=None)
+        rows = hub.search_records(member, w["type"], limit=None)  # a filter sees only what the member sees
         today = hub.engine.now().date().isoformat()
         rows = [r for r in rows if not w["where"] or expr.holds(w["where"], {"record": r, "row": r, "today": today})]
         rt = hub.record_type(w["type"])

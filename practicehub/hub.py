@@ -18,6 +18,7 @@ from pathlib import Path
 from . import blocks as blockmod
 from . import markup
 from . import schema
+from . import visibility
 from . import pack as packmod
 from . import workflows as wfmod
 from .authz import Authorizer, LocalAuthorizer
@@ -149,6 +150,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         from .engine import Engine
         self.engine = Engine(self)
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
+        if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:
+            try:  # an upgrade whose definitions were approved before this pack.py was running
+                self.run_pack_upgrades()
+            except Exception as exc:  # noqa: BLE001 - the hub still opens; the track says what did not happen
+                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
+                                  f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                                  data={"error": str(exc)[:500]})
 
     # ------------------------------------------------------------------ the practice pack, under change control
     PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants")
@@ -297,7 +305,89 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     proposed.append({"kind": kind, "id": did, **self._propose(
                         kind, actor, did, src, f"The practice pack {p.version} changes this", module=None)})
             self._defs_reset()
+            self.run_pack_upgrades(actor)  # what this process's pack.py can do now (the new one runs after the restart)
         return {"pack": p.id, "version": p.version, "restart": True, "added": added_defs, "proposed": proposed}
+
+    def run_pack_upgrades(self, actor: dict | None = None) -> list[dict]:
+        """Run what the practice pack's ``UPGRADES`` (pack.py) do to records an older version left: each once, when it
+        can (a function returns None while what it needs is not in force yet, such as a record type still proposed),
+        in one transaction, written to the track. Called when a pack is upgraded, when a definition is approved, and
+        when the hub opens, so the upgrade happens whichever of these comes last."""
+        ups = dict(self.pack.upgrades) if self.pack else {}
+        if not ups:
+            return []
+        # the hub writes what the upgrade changes (the approver may not write every record it touches); the track says
+        # whose approval or upgrade set it off
+        by = (actor or {}).get("id")
+        actor = {"id": "hub", "kind": "automation", "name": "Practice Hub"}
+        done, out = list(self.db.get_setting("pack_upgrades_done") or []), []
+        for uid, fn in ups.items():
+            if uid in done:
+                continue
+            self._upgrading = True
+            try:
+                with self.db:
+                    got = fn(self, actor)
+                    if got is None:
+                        continue
+                    done.append(uid)
+                    self.db.set_setting("pack_upgrades_done", done)
+                    self.track.append(actor, "practice.upgrade_applied",
+                                      f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by, **dict(got)})
+                    out.append({"upgrade": uid, **dict(got)})
+            finally:
+                self._upgrading = False
+                self._defs_reset()
+        return out
+
+    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None) -> dict:
+        """Turn a record into one of another type (a pack upgrade that merges two types): a new record with the same
+        id, or, with ``into``, the existing record of ``rtype`` it already stood for, rewritten as ``data``. The record
+        written is checked as any other, every record that pointed at the old one points at it instead, and the old one
+        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere."""
+        old_type, rid = ref.split("/", 1)
+        rt = self._type(rtype)
+        new_id = into.split("/", 1)[1] if into else rid
+        new_ref = f"{rtype}/{new_id}"
+        with self.db:
+            before = self.records.read(old_type, rid)
+            if not before:
+                raise NotFound(f"there is no {ref}")
+            there = self.records.read(rtype, new_id)
+            if bool(there) != bool(into):
+                raise Invalid(f"there is a {new_ref} already" if there else f"there is no {new_ref}")
+            body = {k: v for k, v in data.items() if k not in ("resourceType", "meta")}
+            body["id"] = new_id
+            self._check_record(rt, {"resourceType": rtype, **body})
+            rec = self.records.update(rtype, new_id, body) if into else self.records.create(rtype, body)
+            self._write_version(rt, rec, actor, None)
+
+            def swap(v):
+                if isinstance(v, str):
+                    return new_ref if v == ref else v
+                if isinstance(v, dict):
+                    return {k: swap(x) for k, x in v.items()}
+                if isinstance(v, list):
+                    return [swap(x) for x in v]
+                return v
+            for row in self.db.links.find({"to_ref": ref}):
+                ft, fid = row["from_ref"].split("/", 1)
+                other = self.records.read(ft, fid)
+                if not other or ft == old_type and fid == rid:
+                    continue
+                fixed = swap({k: v for k, v in other.items() if k != "meta"})
+                if fixed != {k: v for k, v in other.items() if k != "meta"}:
+                    ort = self.record_type_for_reading(ft)
+                    upd = self.records.update(ft, fid, fixed)
+                    if ort is not None:
+                        self._write_version(ort, upd, actor, None)
+            self.db.records.delete({"_id": ref})
+            self.db.links.delete({"from_ref": ref})
+            self.db.titles.delete({"_id": ref})
+            self.track.append(actor, "record.converted", new_ref,
+                              data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec)})
+        return rec
 
     # ------------------------------------------------------------------ modules
     def installed_modules(self) -> list[str]:
@@ -384,6 +474,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                            "modules": [m.id for m in p.modules]})
             self._install_part(installer, p, "", root)
             self.db.set_setting("modules", [m.id for m in p.modules])  # installed with the practice: they are its
+            # a practice that starts on this version has nothing an older one left: its upgrades are done
+            self.db.set_setting("pack_upgrades_done", list(p.upgrades))
             for m in p.modules:
                 mroot = self.track.append(installer, "module.installed", f"module:{m.id}", cause=root,
                                           data={"module": m.id, "version": m.version,
@@ -1441,14 +1533,44 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def may_write(self, member: dict, rtype: str) -> bool:
         return self.can(member, "writer", f"data_class:{self.class_of(rtype)}")
 
-    def read_record(self, member: dict, ref: str) -> dict:
+    def read_record(self, member: dict, ref: str, *, raw: bool = False) -> dict:
+        """The record as the member may see it: without the fields of a data class they may not read (``raw``: the
+        whole record, for what is computed over it and never shown, like a signature's hash)."""
         rtype, rid = ref.split("/", 1)
         self.require(member, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
         rec = self.records.read(rtype, rid)
         if not rec:
             raise NotFound(f"there is no {ref}")
         self.note_view(member, ref)
-        return rec
+        return rec if raw else self.redact(member, rec)
+
+    def redact(self, member: dict | None, rec: dict | None) -> dict | None:
+        """What the member may see of a record (visibility.redact): every record handed to a member goes through
+        it, on every page, list, export, API and agent context."""
+        return visibility.redact(self, member, rec)
+
+    def redact_all(self, member: dict | None, recs) -> list[dict]:
+        return [visibility.redact(self, member, r) for r in recs]
+
+    def search_records(self, member: dict, rtype: str | None = None, *, text: str | None = None,
+                       limit: int | None = 200, subject: str | None = None, field: str | None = None,
+                       since: str | None = None, until: str | None = None) -> list[dict]:
+        """Records as the member may see them (the store's search, then ``redact``). A search by words matches only
+        what the member sees of each record; a range over a field they may not read is refused."""
+        if field and rtype and visibility.hides_path(self, member, rtype, field):
+            raise Denied(f"{member.get('name', '')} may not search {rtype} records by {field}")
+        types = [rtype] if rtype else None
+        guarded = bool(text) and (
+            any(visibility.hidden_fields(self, member, self.record_type_for_reading(t)) for t in types)
+            if types else any(visibility.hidden_fields(self, member, rt) for rt in self.record_types().values()))
+        recs = self.records.search(rtype, subject=subject, limit=None if guarded else limit, text=text or None,
+                                   field=field, since=since, until=until)
+        recs = self.redact_all(member, recs)
+        if guarded:
+            from .records import search_text, words_of
+            words = words_of(text)
+            recs = [r for r in recs if all(w in search_text(r) for w in words)][:limit]
+        return recs
 
     VIEW_WINDOW = timedelta(minutes=15)
 
@@ -1544,7 +1666,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.require(member, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
         self.note_view(member, ref, how="history")
         rows = self.db.record_versions.find({"type": rtype, "id": rid}, sort=[("version", DESC)])
-        return [{k: v for k, v in r.items() if k not in ("_id", "refs")} for r in rows]
+        return [{**{k: v for k, v in r.items() if k not in ("_id", "refs")}, "data": self.redact(member, r["data"])}
+                for r in rows]
 
     def revision_authors(self, ref: str) -> set[str]:
         """Who wrote what the record says now: whoever created it or changed a field other than its lifecycle state,
@@ -1673,7 +1796,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             seen.add(up)
             rec = self.records.read(*up.split("/", 1))
             if rec and self.may_read(member, rec["resourceType"]):
-                out.append(rec)
+                out.append(self.redact(member, rec))
             elif rec is None or not self.may_read(member, up.split("/", 1)[0]):
                 break
         return list(reversed(out)) if self.may_read(member, t) else []
@@ -1693,7 +1816,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             rel = krt.field(krt.parent)["rel"] or krt.parent
             kids += [self.records.read(*r["from_ref"].split("/", 1)) for r in self.db.links.find(
                 {"to_ref": ref, "rel": rel, "from_ref": {"$regex": f"^{re.escape(kt)}/"}})]
-        return sorted((k for k in kids if k), key=lambda r: self.title(r).casefold())
+        return sorted((self.redact(member, k) for k in kids if k), key=lambda r: self.title(r).casefold())
 
     # ------------------------------------------------------------------ parts and links
     def part_types(self, rtype: str) -> list[schema.RecordType]:
@@ -1724,7 +1847,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     if r and schema.ref_of(schema.first(r, rt.part_of["path"])) == ref]
             for r in recs:
                 self.note_view(member, f"{rt.id}/{r['id']}", how=f"part of {ref}")
-            out[rt.id] = sorted(recs, key=lambda r: schema.record_date(rt, r), reverse=True)
+            out[rt.id] = sorted(self.redact_all(member, recs), key=lambda r: schema.record_date(rt, r), reverse=True)
         return out, hidden
 
     def tree(self, member: dict, rtype: str, where=None) -> list[tuple[int, dict]]:
@@ -1735,7 +1858,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if not rt or not self.may_read(member, rtype):
             return []
         recs = [r for t in self.tree_types(rtype) if self.may_read(member, t)
-                for r in self.records.search(t, limit=None) if where is None or where(r)]
+                for r in self.redact_all(member, self.records.search(t, limit=None)) if where is None or where(r)]
         ids = {f"{r['resourceType']}/{r['id']}" for r in recs}
         under: dict = {}
         for r in recs:
@@ -1813,6 +1936,69 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             up, hops = (self.parent_of(rt, above) if above else None), hops + 1
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
+        clashes = self.booking_clashes(rt, rec)
+        if clashes:
+            raise Invalid(f"the {rt.label.lower()} clashes with another booking",
+                          [self._clash_text(c, who) for c, who in clashes])
+
+    # ------------------------------------------------------------------ the calendar: no member booked twice
+    @staticmethod
+    def booking_span(seen: dict, slot_minutes: int = 15) -> tuple[datetime, datetime] | None:
+        """When a booking (as ``schema.project`` reads it through ``Booking``) holds its members: start to end, or one
+        slot when it has no end. None when its start is not a time."""
+        try:
+            start = datetime.fromisoformat(str(seen.get("start") or "")[:16])
+        except ValueError:
+            return None
+        try:
+            end = datetime.fromisoformat(str(seen.get("end") or "")[:16])
+        except ValueError:
+            end = None
+        if end is None or end <= start:
+            end = start + timedelta(minutes=slot_minutes)
+        return start, end
+
+    def slot_minutes(self) -> int:
+        return int(((self.pack.calendar if self.pack else None) or {}).get("slot_minutes", 15))
+
+    def booking_clashes(self, rt: schema.RecordType, rec: dict) -> list[tuple[dict, str]]:
+        """The other bookings that hold a member this one holds at an overlapping time, as ``(booking, member id)``.
+        Only bookings that still hold time count: not cancelled, and active by their type (a finished visit filed
+        afterwards clashes with nothing). Records carried over by a pack upgrade are taken as they were."""
+        if not rt.is_a("Booking") or getattr(self, "_upgrading", False):
+            return []
+        seen = schema.project(rt, rec, self.member_types())
+        if seen.get("cancelled") or not seen.get("with") or not schema.is_active(rt, rec):
+            return []
+        span = self.booking_span(seen, self.slot_minutes())
+        if span is None:
+            return []
+        from .engine import bookings
+        out = []
+        for b in bookings(self, since=(span[0] - timedelta(days=1)).isoformat(timespec="minutes"),
+                          until=span[1].isoformat(timespec="minutes")):
+            if b["type"] == rt.id and b["record"].get("id") == rec.get("id"):
+                continue
+            if not schema.is_active(self.record_type(b["type"]), b["record"]):
+                continue
+            other = self.booking_span(b, self.slot_minutes())
+            if other is None or not (other[0] < span[1] and span[0] < other[1]):
+                continue
+            for who in seen["with"]:
+                if who in b["with"]:
+                    out.append((b, who))
+                    break
+        return out
+
+    def _clash_text(self, b: dict, who: str) -> str:
+        """Which member is booked when: never whom for (the person booking may not read the other booking)."""
+        try:
+            name = self.member(who)["name"]
+        except Exception:  # noqa: BLE001 - a member since removed is still named by id
+            name = who
+        start, end = self.booking_span(b, self.slot_minutes())
+        return (f"{name} is already booked on {start.strftime('%a %b %d')} from {start.strftime('%H:%M')} to "
+                f"{end.strftime('%H:%M')}: choose another time or another member")
 
     def _workflow_fields(self, rt, member: dict, run_id: str | None, before: dict, after: dict) -> None:
         """A field marked ``by = "workflow"`` (stock on hand) changes only in a workflow step: a person who could set it
@@ -1895,6 +2081,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 if t["by"] == "workflow" and not self._by_workflow(member, run_id):
                     raise Denied(f"only a workflow makes a {rt.label.lower()} {st!r}")
         self._workflow_fields(rt, member, run_id, {}, data)
+        data = visibility.guard_write(self, member, rt, None, data)  # a field of a class they may not write
         self._check_record(rt, {"resourceType": rtype, **data})
         with self.db:
             rec = self.records.create(rtype, data)
@@ -1903,7 +2090,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                    data={"subject": self.subject_of(rec),
                                          "summary": self.title(rec)})
             self.engine.on_record("created", rt, rec, None, member, ev)
-        return rec
+        return self.redact(member, rec)  # what they wrote, as they may read it
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
@@ -1934,6 +2121,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             after = {**before, **{k: v for k, v in data.items() if k not in ("resourceType", "id", "meta")}}
             after = {k: v for k, v in after.items() if v is not None}  # None clears a field
             self._workflow_fields(rt, member, run_id, before, after)
+            after = visibility.guard_write(self, member, rt, before, after)  # untouched: kept; changed: refused
             if rt.part_of and schema.first(before, rt.part_of["path"]) != schema.first(after, rt.part_of["path"]):
                 raise Invalid(f"a {rt.label.lower()} stays part of the record it was made in: "
                               f"make a new one there instead")
@@ -1974,7 +2162,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                        data={"from": moved[0], "to": moved[1],
                                              **({"comment": comment.strip()} if comment and comment.strip() else {})})
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
-            return rec
+            return self.redact(member, rec)
 
     # ------------------------------------------------------------------ signatures on any record
     def _record_digest(self, rec: dict) -> str:
@@ -1993,7 +2181,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def record_digest(self, member: dict, ref: str) -> str:
         """The hash a signature on this record would cover, as this member reads it: a signing page or API client
         shows the record, then signs with ``seen`` set to this, so a change in between refuses the signature."""
-        return self._record_digest(self.read_record(member, ref))
+        return self._record_digest(self.read_record(member, ref, raw=True))
 
     def sign_record(self, member: dict, ref: str, meaning: str, comment: str = "", *, seen: str | None = None) -> dict:
         """A person's electronic signature on a record: bound to its current version and the hash of its contents,
@@ -2033,7 +2221,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid(f"you have already signed this version as {meaning!r}")
         moves = bool(kind and kind.get("moves_to") and rt.lifecycle)
         with self.db:  # read, check and write as one step, so a change in between cannot slip under the signature
-            rec = self.read_record(member, ref)
+            rec = self.read_record(member, ref, raw=True)
             if seen is not None and seen != self._record_digest(rec):
                 raise Invalid("the record changed since you read it: read it again, then sign what it says now")
             if moves:
@@ -2072,7 +2260,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def signatures(self, member: dict, ref: str) -> list[dict]:
         """Every signature on a record, newest first, each marked current if it covers what the record says now."""
         rtype, rid = ref.split("/", 1)
-        rec = self.read_record(member, ref)
+        rec = self.read_record(member, ref, raw=True)
         now = self._record_digest(rec)
         out = []
         rows = self.db.events.find({"$or": [{"action": "record.signed", "subject": ref},
@@ -2130,7 +2318,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 continue
             dc = rt.data_class
             if self.can(member, "reader", f"data_class:{dc}"):
-                out.setdefault(dc, []).append(rec)
+                out.setdefault(dc, []).append(self.redact(member, rec))
                 self.note_view(member, f"{rec['resourceType']}/{rec['id']}", how=f"chart of {subject}")
             else:
                 hidden += 1

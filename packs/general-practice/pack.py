@@ -1,11 +1,12 @@
 """General practice: the deterministic parts of the pack.
 
-* ``ACTIONS``: what automations can do here beyond the core (book an appointment).
+* ``ACTIONS``: what automations can do here beyond the core (the time, a patient's details).
 * ``GUARDS``: checks on an answer, keyed by skill, run on every answer (person or agent) before it is accepted.
 * ``STANDINS``: plain-code answers for each skill, so the whole practice runs with no model at all (tests, demos,
   and a baseline to compare a model against). They are deliberately simple; when they cannot answer, they escalate.
 * ``summarize``: a one-line label for a record.
-* ``demo``: a few fictional patients and some work in progress.
+* ``demo``: a few fictional patients, the week's bookings and some work in progress.
+* ``UPGRADES``: what version 2 does to a practice on version 1 (its appointments become visits).
 """
 
 from __future__ import annotations
@@ -14,6 +15,9 @@ import math
 import re
 from datetime import date, datetime, timedelta
 
+# how a visit's status reads in its one-line label (planned is FHIR's word for booked)
+STATUS_WORDS = {"planned": "booked", "in-progress": "in progress", "onleave": "on leave", "noshow": "no-show",
+                "entered-in-error": "entered in error"}
 FEES = {"minor-assessment": 35, "complete-assessment": 65, "counselling": 55, "renewal-no-visit": 15}
 SEVERITY = {"normal": 0, "abnormal": 1, "critical": 2}
 
@@ -74,7 +78,7 @@ def _join(*parts) -> str:
 
 def summarize(rec: dict) -> str:
     t = rec.get("resourceType")
-    # Patient and Appointment are named by their types' titles (and the core's Subject and Booking)
+    # a patient is named by its type's title (and the core's Subject)
     if t == "RelatedPerson":
         phone = next((x.get("value") for x in rec.get("telecom", []) or [] if x.get("value")), "")
         rel = _text(rec.get("relationship"))
@@ -126,11 +130,16 @@ def summarize(rec: dict) -> str:
         dose = _text((rec.get("dosage") or [{}])[0])
         return f"{med}{f', {dose}' if dose else ''} (taking: {rec.get('status', 'unknown')})"
     if t == "Encounter":
-        when = _day((rec.get("period") or {}).get("start"))
-        reason = _text(rec.get("reasonCode")) or "reason not recorded"
+        booked = str(rec.get("plannedStartDate") or "")
+        when = _day((rec.get("period") or {}).get("start")) or booked[:10]
+        if rec.get("status") in ("planned", "arrived", "triaged", "in-progress", "onleave") and booked:
+            when = booked[:16].replace("T", " ")  # a booking is known by its time
+        reason = _text(rec.get("reasonCode"))  # clinical: a title (read by every reader) is made without it
         cls = _text(rec.get("class"))
         kind = _text(rec.get("type"))
-        return _join(f"Visit {when}".strip(), reason, " ".join(x for x in (kind, cls) if x))
+        status = rec.get("status") if rec.get("status") not in ("finished", None) else ""
+        return _join(f"Visit {when}".strip(), reason, " ".join(x for x in (kind, cls) if x),
+                     status and STATUS_WORDS.get(status, status))
     if t == "Composition":
         when = _day(rec.get("date"))
         return f"{rec.get('title', 'Note')}{f' {when}' if when else ''} ({rec.get('status', '')})"
@@ -623,7 +632,8 @@ def demo(hub):
     hub.create_record(imported, "Encounter", {
         "status": "finished", "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB",
                                         "display": "ambulatory"},
-        "subject": subj, "period": {"start": ago(170) + "T10:00", "end": ago(170) + "T10:30"},
+        "subject": subj, "plannedStartDate": ago(170) + "T10:00", "plannedEndDate": ago(170) + "T10:30",
+        "period": {"start": ago(170) + "T10:00", "end": ago(170) + "T10:30"},
         "type": [{"text": "complete"}], "participant": [{"individual": {"reference": "Practitioner/dr-amara"}}],
         "reasonCode": [_cc("401", ICD9, "401")], "length": {"value": 30, "unit": "min"}})
 
@@ -658,8 +668,12 @@ def demo(hub):
         "Priya", "Nair", "1984-11-20", "female", card="5555 123 456", phone="902-555-0123",
         street="45 Spring Garden Road", postal="B3J 1E7", contact=("Arjun Nair", "Spouse", "902-555-0124"),
         gp="dr-amara"))
+    # she was booked, arrived and was seen; the note's workflow finishes her visit
+    visit = _book(hub, jo, priya, "dr-amara", now - timedelta(minutes=15), "Sore throat")
+    for st in ("arrived", "in-progress"):
+        hub.update_record(amara, f"Encounter/{visit['id']}", {"status": st})
     hub.engine.emit(amara, "visit.ended", record=f"Patient/{priya['id']}", data={
-        "visit_type": "minor", "minutes": 15,
+        "appointment": f"Encounter/{visit['id']}", "visit_type": "minor", "minutes": 15,
         "start": (now - timedelta(minutes=15)).isoformat(timespec="minutes"),
         "end": now.isoformat(timespec="minutes"),
         "transcript": "\n".join([
@@ -669,3 +683,133 @@ def demo(hub):
             "Assessment: Viral pharyngitis.",
             "Plan: Fluids, rest, lozenges, acetaminophen as needed. No antibiotics.",
             "Follow-up: if not better in a week or if fever develops."])})
+
+    # The calendar for the next working days: booked visits with both physicians, and one cancelled.
+    hours = (hub.pack.calendar or {}).get("hours", {}) if hub.pack else {}
+    days, day = [], today
+    while len(days) < 3 and hours:
+        day += timedelta(days=1)
+        if day.strftime("%a").lower()[:3] in hours:
+            days.append(day)
+    if days:
+        def at(d, hm):
+            return datetime.combine(d, datetime.strptime(hm, "%H:%M").time())
+        for d, hm, who, patient, reason in (
+                (0, "09:00", "dr-amara", ellen, "Blood pressure review"),
+                (0, "09:30", "dr-liam", omar, "New patient visit"),
+                (0, "10:30", "dr-amara", priya, "Follow-up: sore throat"),
+                (0, "11:00", "dr-liam", ellen, "Flu shot"),
+                (1, "09:15", "dr-amara", omar, "Back pain"),
+                (1, "14:00", "dr-liam", priya, "Travel vaccines"),
+                (2, "10:00", "dr-amara", ellen, "Medication review")):
+            _book(hub, jo, patient, who, at(days[min(d, len(days) - 1)], hm), reason)
+        off = _book(hub, jo, omar, "dr-amara", at(days[0], "11:30"), "Annual physical")
+        hub.update_record(jo, f"Encounter/{off['id']}", {"status": "cancelled", "extension": [
+            {"url": CANCEL_REASON, "valueString": "the patient called to cancel"}]})
+
+
+def _book(hub, member, patient, who, start, reason, minutes=15):
+    """The front desk books the time; the reason is clinical, so the physician writes it on the visit."""
+    visit = hub.create_record(member, "Encounter", {
+        "status": "planned", "class": AMBULATORY, "subject": {"reference": f"Patient/{patient['id']}"},
+        "plannedStartDate": start.isoformat(timespec="minutes"),
+        "plannedEndDate": (start + timedelta(minutes=minutes)).isoformat(timespec="minutes"),
+        "participant": [{"individual": {"reference": f"Practitioner/{who}"}}]})
+    return hub.update_record(hub.member(who), f"Encounter/{visit['id']}", {"reasonCode": [{"text": reason}]})
+
+
+# ------------------------------------------------------------------------------------------------------ upgrades
+AMBULATORY = {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB", "display": "ambulatory"}
+CANCEL_REASON = "https://harbourview.example/fhir/cancellation-reason"
+NOTE = "https://harbourview.example/fhir/booking-note"
+# a version-1 Appointment's status, as the Visit (FHIR R5 Encounter) it becomes
+APPOINTMENT_STATUS = {"proposed": "planned", "pending": "planned", "booked": "planned", "waitlist": "planned",
+                      "arrived": "arrived", "checked-in": "arrived", "fulfilled": "finished",
+                      "cancelled": "cancelled", "noshow": "noshow", "entered-in-error": "entered-in-error"}
+
+
+def visit_from_appointment(appt: dict, visit: dict | None = None) -> dict:
+    """A version-1 Appointment as a Visit: its booked time, patient, physicians, reason and status; on top of the
+    visit that was filed for it, when there was one (that visit keeps what it recorded of the visit itself)."""
+    people = [p.get("actor", {}).get("reference", "") for p in appt.get("participant", []) or []]
+    patient = next((r for r in people if r.startswith("Patient/")), "")
+    staff = [r for r in people if r and not r.startswith("Patient/")]
+    out = {k: v for k, v in (visit or {}).items() if k not in ("appointment", "meta", "id", "resourceType")}
+    out.setdefault("class", AMBULATORY)
+    start = appt.get("start") or ""
+    end = appt.get("end") or ""
+    if start and not end and appt.get("minutesDuration"):
+        end = (datetime.fromisoformat(start[:16]) + timedelta(minutes=int(appt["minutesDuration"]))).isoformat(
+            timespec="minutes")
+    out["plannedStartDate"] = start
+    if end:
+        out["plannedEndDate"] = end
+    if visit is None:
+        out["status"] = APPOINTMENT_STATUS.get(appt.get("status") or "", "planned")
+        out["subject"] = {"reference": patient}
+        out["participant"] = [{"individual": {"reference": r}} for r in staff]
+        reasons = list(appt.get("reasonCode") or [])
+        if appt.get("description"):
+            reasons = [{**(reasons[0] if reasons else {}), "text": appt["description"]}] + reasons[1:]
+        if reasons:
+            out["reasonCode"] = reasons
+        if appt.get("serviceType"):
+            out["type"] = appt["serviceType"]
+        if out["status"] == "finished" and appt.get("minutesDuration"):
+            out["length"] = {"value": appt["minutesDuration"], "unit": "min"}
+    ext = list(out.get("extension") or [])
+    why = appt.get("cancelationReason") or appt.get("cancellation_reason")
+    if isinstance(why, dict):
+        why = why.get("text") or ", ".join(c.get("display") or c.get("code", "") for c in why.get("coding", []) or [])
+    if why:
+        ext.append({"url": CANCEL_REASON, "valueString": str(why)})
+    if appt.get("comment"):
+        ext.append({"url": NOTE, "valueString": str(appt["comment"])})
+    if ext:
+        out["extension"] = ext
+    return out
+
+
+def upgrade_appointments_to_visits(hub, actor):
+    """Version 2 merges Appointment into Visit. Once the Visit that is a Booking is in force: every visit gets its
+    booked time; an appointment a visit was filed for becomes that visit (whatever pointed at the appointment points
+    at it); any other appointment becomes a visit with the same id; the Appointment type is retired. None until the
+    new Visit is approved."""
+    rt = hub.record_type("Encounter")
+    if rt is None or not rt.is_a("Booking") or rt.field("plannedStartDate") is None:
+        return None
+    filed, undated = {}, []  # Appointment/<id> -> the visit filed for it (its first); visits to date from their period
+    for v in hub.records.search("Encounter", limit=None):
+        ref = next((a.get("reference") for a in v.get("appointment", []) or [] if isinstance(a, dict)
+                    and str(a.get("reference") or "").startswith("Appointment/")
+                    and hub.records.read("Appointment", a["reference"].split("/", 1)[1])), None)
+        if ref and ref not in filed:
+            filed[ref] = v
+        elif not v.get("plannedStartDate") or "appointment" in v:
+            undated.append(v)
+    for v in undated:
+        period = v.get("period") or {}
+        hub.update_record(actor, f"Encounter/{v['id']}", {
+            "plannedStartDate": v.get("plannedStartDate") or period.get("start")
+            or (v.get("meta") or {}).get("lastUpdated", "")[:16],
+            "plannedEndDate": v.get("plannedEndDate") or period.get("end"), "appointment": None})
+    merged, made = [], []
+    for a in hub.records.search("Appointment", limit=None):
+        ref = f"Appointment/{a['id']}"
+        visit = filed.get(ref)
+        if visit is not None:
+            hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a, visit),
+                               into=f"Encounter/{visit['id']}")
+            merged.append(ref)
+        else:
+            hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a))
+            made.append(ref)
+    retired = False
+    if hub._active_row("type", "Appointment") is not None:
+        hub._retire_now(actor, "type", "Appointment", "merged into Visit (pack version 2)")
+        retired = True
+    return {"visits_dated": len(undated), "appointments_merged_into_their_visit": merged,
+            "appointments_now_visits": made, "appointment_type_retired": retired}
+
+
+UPGRADES = {"2-appointments-are-visits": upgrade_appointments_to_visits}

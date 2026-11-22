@@ -19,6 +19,8 @@ Every step is on the track: ``mention.created``, ``mention.refused``, ``mention.
 
 from __future__ import annotations
 
+from . import visibility
+
 import re
 import secrets
 
@@ -177,9 +179,14 @@ class Mentions:
         if row["member"] != member["id"]:
             raise Denied("this mention is for someone else")
         ref = row["ref"]
-        rec = self.hub.read_record(member, ref)  # asks again: a grant taken away since is respected
+        rec = self.hub.read_record(member, ref)  # asks again: a grant taken away since is respected (and redacted)
         thread = self.thread(ref, row["anchor"])
-        return {"mention": {k: row[k] for k in ("id", "ref", "by", "anchor", "field", "quote", "around", "at")},
+        mention = {k: row[k] for k in ("id", "ref", "by", "anchor", "field", "quote", "around", "at")}
+        rt = self.hub.record_type_for_reading(ref.split("/", 1)[0])
+        if row.get("field") and any(f["name"] == row["field"] or f["path"] == row["field"]
+                                    for f in visibility.hidden_fields(self.hub, member, rt)):
+            mention["quote"], thread = "", None  # a passage of a field they may not read is not theirs to see
+        return {"mention": mention,
                 "record": {k: v for k, v in rec.items() if k != "meta"}, "thread": thread,
                 "reply": f"/api/mentions/{mid}/reply", "suggest": f"/api/mentions/{mid}/suggest"}
 

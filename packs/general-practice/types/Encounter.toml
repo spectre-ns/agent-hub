@@ -1,20 +1,47 @@
-# A visit: what billing needs (who, when, how long, the diagnosis codes), never the note itself.
+# A visit, from booking to the end: when it is booked for and with whom (the practice calendar), then what billing
+# needs (who, when, how long), never the note itself. Why the patient comes and the diagnosis codes (reasonCode) are
+# clinical: the front desk and the scheduling agent book and move a visit without ever seeing them; billing is given
+# the codes by the visit-documentation workflow, on the claim. FHIR R5 Encounter: a booked visit is
+# ``planned`` with plannedStartDate/plannedEndDate; it is the calendar's Booking. There is no separate appointment.
 id = "Encounter"
 label = "Visit"
 plural = "Visits"
 data_class = "visits"
+extends = "Booking"
 strict = true
-date = "period"
-active = "record.status in ['planned', 'arrived', 'triaged', 'in-progress']"
+date = "plannedStartDate"
+active = "record.status in ['planned', 'arrived', 'triaged', 'in-progress', 'onleave']"
 order = 70
-summary = "A visit: what billing needs (who, when, how long, the diagnosis codes), never the note itself."
+summary = "A visit, from booking to the end: when and with whom, then what billing needs, never the note itself."
+
+# The calendar reads a visit through the core's Booking: booked start and end, the reason, the patient, the
+# physicians, and whether it no longer holds the time (cancelled, a no-show, entered in error).
+[base]
+start = "plannedStartDate"
+end = "plannedEndDate"
+reason = "reason_text"
+subject = "subject"
+with = "practitioners"
+cancelled = { when = "record.status in ['cancelled', 'noshow', 'entered-in-error']" }
 
 [[field]]
 name = "status"
 type = "choice"
-choices = ["planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled", "entered-in-error",
-           "unknown"]
+choices = ["planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled", "noshow",
+           "entered-in-error", "unknown"]
 required = true
+help = "planned is booked; noshow is the practice's own (FHIR R5 has no code for a patient who did not come)"
+
+[[field]]
+name = "plannedStartDate"
+label = "Booked for"
+type = "datetime"
+required = true
+
+[[field]]
+name = "plannedEndDate"
+label = "Booked until"
+type = "datetime"
 
 [[field]]
 name = "class"
@@ -92,6 +119,7 @@ name = "reasonCode"
 label = "Reason codes (as JSON)"
 type = "list"
 advanced = true
+data_class = "clinical"
 help = "CodeableConcept list: [{coding: [{system: icd-9-cm, code}], text}]"
 
 [[field]]
@@ -99,6 +127,7 @@ name = "reason_text"
 label = "Reason"
 path = "reasonCode.0.text"
 type = "string"
+data_class = "clinical"
 
 [[field]]
 name = "participant"
@@ -124,17 +153,11 @@ target = ["Practitioner"]
 rel = "participant"
 
 [[field]]
-name = "appointment"
-label = "Appointments (as JSON)"
+name = "extension"
+label = "Extensions (as JSON)"
 type = "list"
 advanced = true
-
-[[field]]
-name = "appointments"
-path = "appointment.*.reference"
-type = "reference"
-target = ["Appointment"]
-rel = "appointment"
+help = "what FHIR has no field for: why a booking was cancelled (url .../cancellation-reason, valueString), a note"
 
 [[field]]
 name = "serviceProvider"
@@ -145,10 +168,11 @@ advanced = true
 [[screen]]
 id = "visit"
 on = ["create"]
-fields = ["subject", "practitioner", "visit_type", "setting", "period_start", "period_end", "minutes", "reason_text"]
+fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "reason_text", "visit_type", "setting"]
 
-# A visit is planned, the patient arrives, is triaged and seen, and the visit ends. The visit-documentation workflow
-# files a visit that has already happened as finished.
+# A visit is booked (planned), the patient arrives, is triaged and seen, and the visit ends; or it is cancelled, or the
+# patient does not come. The visit-documentation workflow finishes the booked visit the note is for (or files one that
+# was never booked, as finished).
 [lifecycle]
 field = "status"
 initial = "planned"
@@ -168,8 +192,16 @@ to = "onleave"
 from = ["in-progress", "onleave"]
 to = "finished"
 [[lifecycle.transition]]
+from = ["planned", "arrived", "triaged"]
+to = "finished"
+by = "workflow"
+[[lifecycle.transition]]
 from = ["planned", "arrived"]
 to = "cancelled"
+[[lifecycle.transition]]
+from = ["planned"]
+to = "noshow"
+label = "No-show"
 [[lifecycle.transition]]
 from = ["*"]
 to = "entered-in-error"
