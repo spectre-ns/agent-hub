@@ -2177,3 +2177,158 @@ def test_the_track_page_shows_one_page_at_a_time_and_verifies_only_what_is_new(h
     again = hub.verify(full=False)
     assert again["ok"] and again["head"] == first["head"]
     assert hub.db.get_setting("track_verified") == before  # nothing new: the sealed result stands, not rewritten
+
+
+# ------------------------------------------------------------------------- the seventh panel: what the pages say
+def test_the_board_links_only_items_the_member_may_open(hub, server):
+    """Every card on someone's board opens; the rest are counted, not linked, so a click is never a 404 and never
+    an access.denied on their record. An item one may not open says so, without its id."""
+    for who in ("jo", "rana", "noor"):
+        tok = token(hub, who)
+        before = hub.db.events.count({"action": "access.denied", "actor": who})
+        page = call(server, "GET", "/board", tok)[1]
+        ids = set(re.findall(r'href="/items/(item-[\w-]+)"', page))
+        assert ids or "you may not open" in page, who
+        for iid in ids:
+            assert call(server, "GET", f"/items/{iid}", tok)[0] == 200, (who, iid)
+        assert hub.db.events.count({"action": "access.denied", "actor": who}) == before, who
+    run = run_of(hub, "lab-result-review")
+    hidden = [i for i in hub.db.items.find({"run_id": run["id"], "kind": {"$ne": "notice"}})
+              if not App(hub).may_see_item(M(hub, "jo"), i, run)]
+    assert hidden
+    code, page = call(server, "GET", f"/items/{hidden[0]['id']}", token(hub, "jo"))
+    assert code == 404 and "not yours to open" in page and hidden[0]["id"] not in page
+
+
+def test_the_item_open_rule_keeps_step_visibility_for_a_role_holder(hub):
+    """Holding an item's role does not open a step its holder may not see; the assignee still opens it."""
+    from practicehub.visibility import Viewer
+    run = run_of(hub, "lab-result-review")
+    wf, _ = hub.workflow(run["workflow_id"], run["version"])
+    jo = M(hub, "jo")
+    step = next(s for s in wf.steps if not Viewer(hub, jo).step_visible(wf, s.id)[0])
+    item = {"kind": "task", "step_id": step.id, "role": jo["roles"][0], "assignee": None}
+    app = App(hub)
+    assert not app.may_see_item(jo, item, run)
+    assert app.may_see_item(jo, {**item, "assignee": "jo"}, run)
+
+
+def test_role_editors_say_why_a_role_waits_and_lead_with_those_given_at_once(hub):
+    app = App(hub, dev=False)
+    rana = M(hub, "rana")
+    page = html.unescape(app.page_member({"me": rana, "query": {}, "path": "/team/jo"}, "jo"))
+    beyond = hub.beyond_roles(rana)
+    assert beyond, "the demo's practice manager does not reach every class"
+    roles = page.split("Roles Jo Tremblay holds", 1)[1].split("</fieldset>", 1)[0]
+    assert "which you do not" in roles and ("reads " in roles or "writes " in roles)
+    head = roles.index("These wait for a second policy owner")
+    for r in hub.roles():
+        if r["id"] not in beyond and r["id"] not in hub.privileged_roles():
+            assert roles.index(f'value="{r["id"]}"') < head, r["id"]
+    # an agent's page marks the roles its sponsor does not reach
+    admin = next(m for m in hub.members("person") if hub.can(m, "member_admin", "practice:main"))
+    for agent in hub.members():
+        if agent["kind"] == "person" or not agent["sponsor"]:
+            continue
+        sp = M(hub, agent["sponsor"])
+        page = html.unescape(app.page_member({"me": admin, "query": {}, "path": f"/team/{agent['id']}"}, agent["id"]))
+        if hub.beyond_roles(sp) and "/roles" in page:
+            assert f"which {sp['name']} does not" in page and "its sponsor does not reach this" in page
+
+
+def test_the_sponsor_picker_offers_only_people_who_reach_as_far(hub):
+    app = App(hub, dev=False)
+    admin = next(m for m in hub.members("person") if hub.can(m, "member_admin", "practice:main"))
+    left_out = 0
+    for m in hub.members():
+        if m["kind"] == "person" or m["status"] != "active":
+            continue
+        page = app.page_member({"me": admin, "query": {}, "path": f"/team/{m['id']}"}, m["id"])
+        form = page.split(f'action="/team/{m["id"]}/sponsor"', 1)[1].split("</form>", 1)[0]
+        offered = re.findall(r'<option value="([\w-]+)"', form)
+        for pid in offered:
+            assert not hub.reach_beyond(M(hub, pid), m["id"]), (m["id"], pid)
+        if [p for p in hub.members("person") if p["status"] == "active" and p["id"] not in offered]:
+            assert "Not offered" in form
+            left_out += 1
+    assert left_out
+
+
+def test_the_switch_off_form_says_who_could_take_each_dependent(hub):
+    app = App(hub, dev=False)
+    admin = next(m for m in hub.members("person") if hub.can(m, "member_admin", "practice:main"))
+    seen = 0
+    for p in hub.members("person"):
+        if p["id"] == admin["id"] or not hub.dependents(p["id"]):
+            continue
+        form = app._switch_off_form(p, "disable", "Switch off", me=admin)
+        assert "Could take it:" in form or "Nobody else reaches what it does" in form
+        for d in hub.dependents(p["id"]):
+            for pid in re.findall(rf'<select id="fate-{d["id"]}".*?</select>', form, re.S)[0].split('value="hand:')[1:]:
+                pid = pid.split('"', 1)[0]
+                assert pid not in (p["id"], admin["id"]) and not hub.reach_beyond(M(hub, pid), d["id"])
+        seen += 1
+    assert seen
+
+
+def test_the_member_a_switch_off_is_about_cannot_decline_it(hub):
+    app = App(hub, dev=False)
+    owners = [m for m in hub.members("person") if m["status"] == "active" and hub.is_policy_owner(m)]
+    target, other = owners[0], owners[1]
+    hub.db.set_setting(f"off_request:{target['id']}", {"by": other["id"], "reason": "leaving", "hand_over": {},
+                                                        "stop": []})
+    assert "withdraw-disable" not in "".join(app._off_request_card(target, target))
+    assert "withdraw-disable" in "".join(app._off_request_card(other, target))
+
+
+def test_the_role_approval_card_shows_the_account_history(hub):
+    app = App(hub, dev=False)
+    text = html.unescape(re.sub(r"<[^>]+>", "", app._account_history(M(hub, "jo"))))
+    assert "session" in text.lower() and "90 days" in text
+    passphrase(hub, "jo")
+    text = html.unescape(re.sub(r"<[^>]+>", "", app._account_history(M(hub, "jo"))))
+    assert "Passphrase set" in text
+
+
+def test_a_notice_reads_its_summary_and_names_records_in_words(hub):
+    app = App(hub, dev=False)
+    rana = M(hub, "rana")
+    pat = hub.records.search("Patient")[0]
+    out = app._output_html({"summary": "Noor opened a file in an emergency.", "about": f"Patient/{pat['id']}"},
+                           rana)
+    assert out.startswith('<p class="summary">Noor opened a file in an emergency.</p>')
+    assert f'href="/patients/{pat["id"]}"' in out and f">Patient/{pat['id']}<" not in out
+    assert app._values("Nothing/like-a-ref", rana) == "Nothing/like-a-ref"
+
+
+def test_unreviewed_emergency_access_is_shown_on_the_access_report(hub, server):
+    pid, cond = _nadia(hub)
+    hub.track.append(M(hub, "noor"), "access.unreviewed", cond,
+                     data={"subject": f"Patient/{pid}", "told": [], "why": "test"})
+    page = html.unescape(call(server, "GET", "/access", token(hub, "rana"))[1])
+    assert "Emergency access nobody could review in full" in page and "Noor Siddiqui" in page
+
+
+def test_the_break_glass_forms_on_one_page_have_their_own_ids(hub, server):
+    pid, cond = _nadia(hub)
+    page = call(server, "GET", f"/records/{cond}", token(hub, "noor"))[1]
+    ids = re.findall(r'id="(override[\w-]*)"', page)
+    assert ids and len(ids) == len(set(ids))
+    for i in ids:
+        if i.endswith("-reason"):
+            assert f'for="{i}"' in page
+
+
+def test_everyday_pages_say_roles_and_choices_in_words(hub, server):
+    jo = token(hub, "jo")
+    page = call(server, "GET", "/", jo)[1]
+    for r in hub.roles():
+        if r["name"] != r["id"]:
+            assert f"<td>{r['id']}</td>" not in page and f"<td>{r['id']}, " not in page, r["id"]
+    visit = next(v for v in hub.records.search("Encounter", limit=None)
+                 if "-" in str(((v.get("serviceType") or [{}])[0].get("concept") or {}).get("text") or ""))
+    code = visit["serviceType"][0]["concept"]["text"]
+    page = html.unescape(call(server, "GET", f"/records/Encounter/{visit['id']}", jo)[1])
+    assert code.replace("-", " ").capitalize() in page and f"</span> {code}</span>" not in page
+    assert f">{code}<" not in page.split("<summary>All values</summary>")[0]   # the raw values stay in reach
+    assert "· visits<br>" not in page

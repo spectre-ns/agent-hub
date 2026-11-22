@@ -13,7 +13,7 @@ physician mid-treatment, or answers that contradict each other. Do not judge the
 [[output]]
 name = "complete"
 type = "boolean"
-help = "true when nothing required is missing"
+help = "yes when nothing required is missing"
 
 [[output]]
 name = "missing"

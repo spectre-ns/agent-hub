@@ -250,7 +250,7 @@ fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "book
 [lifecycle]
 field = "status"
 initial = "planned"
-labels = { onleave = "On leave", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
+labels = { planned = "Booked", onleave = "On leave", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
 [[lifecycle.transition]]
 from = ["planned"]
 to = "arrived"
