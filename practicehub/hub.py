@@ -520,24 +520,28 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         for mid in self.installed_modules():
             self._load_one_module(mid)
 
-    def _load_one_module(self, mid: str) -> None:
-        listed = next((i for i, x in enumerate(self.pack.modules) if x.id == mid), None)
-        if listed is not None and self.pack.modules[listed].module is None and \
-                not self.pack.modules[listed].module_sha256:
+    def _load_one_module(self, mid: str, pack: packmod.Pack | None = None) -> None:
+        """Load one installed module into ``pack`` (the running practice by default; ``sync_modules`` passes a copy
+        it puts in place when it is done). Only the files sealed by its newest install or upgrade run: pack.py by its
+        hash, and every file (its definitions and any other code) by the digest a second policy owner reviewed."""
+        pack = self.pack if pack is None else pack
+        listed = next((i for i, x in enumerate(pack.modules) if x.id == mid), None)
+        if listed is not None and pack.modules[listed].module is None and \
+                not pack.modules[listed].module_sha256:
             return  # listed by the pack, read, and it has no code to run
-        old = self.pack.modules[listed] if listed is not None else None
+        old = pack.modules[listed] if listed is not None else None
         try:
             sha = self._module_code_sha(mid)
             if sha is None:
                 raise ValueError(f"the module {mid} has no signed install on the track: it is not run")
-            m = packmod.load_module(mid, expect_sha256=sha)
+            m = packmod.load_module(mid, expect_sha256=sha, expect_digest=self._module_digest(mid) or None)
             if listed is not None:  # a module the pack lists was read without its code: run it now it is checked
-                self.pack.modules[listed] = m
+                pack.modules[listed] = m
             try:
-                packmod.add_module(self.pack, m)
+                packmod.add_module(pack, m)
             except Exception:
                 if listed is not None:
-                    self.pack.modules[listed] = old
+                    pack.modules[listed] = old
                 raise
         except Exception as exc:  # noqa: BLE001 - one broken module never stops the practice starting
             self.module_problems[mid] = str(exc)
@@ -591,9 +595,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 return False
             want = list(mark[0])
             changed = False
-            for m in list(self.pack.modules):
+            # built off to the side and put in place with one assignment: a request in another thread reads the
+            # old modules or the new ones, never a module half taken out
+            new = packmod.forked(self.pack)
+            for m in list(new.modules):
                 if m.id not in want:
-                    packmod.remove_module(self.pack, m)
+                    packmod.remove_module(new, m)
                     changed = True
             for mid in [x for x in self.module_problems if x not in want and x in self._module_seq]:
                 self.module_problems.pop(mid, None)
@@ -603,15 +610,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 seq = self._module_event_seq(mid)
                 if mid in self._module_seq and self._module_seq[mid] == seq:
                     continue  # running the code its newest install or upgrade sealed (or refused that, already said)
-                old = next((x for x in self.pack.modules if x.id == mid), None)
+                old = next((x for x in new.modules if x.id == mid), None)
                 if old is not None:
-                    packmod.remove_module(self.pack, old)
+                    packmod.remove_module(new, old)
                 self.module_problems.pop(mid, None)
-                self._load_one_module(mid)
+                self._load_one_module(mid, new)
                 self._module_seq[mid] = seq
                 changed = True
             self._modules_seen = mark
             if changed:
+                self.pack = new
                 self._defs_reset()
                 self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "modules.reloaded",
                                   "practice:main", data={"modules": [m.id for m in self.pack.modules],
@@ -1153,7 +1161,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self._modules_changed()
             self._defs_reset()
         if m is not None:
-            packmod.remove_module(self.pack, m)
+            with self._modules_lock:  # off to the side, then in place: other threads never see it half taken out
+                new = packmod.forked(self.pack)
+                packmod.remove_module(new, m)
+                self.pack = new
         self.module_problems.pop(name, None)
         self._modules_noted(name)
         self._defs_reset()

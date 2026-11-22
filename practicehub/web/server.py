@@ -1294,7 +1294,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                          self._input(self._ref_input(f), {f["name"]: kept[f["name"]]} if kept.get(f["name"]) else None,
                                      me) if f["type"] == "reference" else
                          self._field(f, [{"value": c, "label": c} for c in f["choices"]] if f.get("choices") else None,
-                                     kept.get(f["name"])) for f in wf.inputs)
+                                     kept.get(f["name"])) for f in wf.inputs if not f.get("hidden"))
         err = f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>' if error else ""
         body = (f'<div data-modal-body>{err}<p class="muted">{e(self._brief(wf.summary))}</p>'
                 f'<form method="post" action="/start" class="card stack"><input type="hidden" name="_workflow" '

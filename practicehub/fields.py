@@ -25,7 +25,9 @@ def normalize(spec: dict) -> dict:
     f = {"name": spec["name"], "label": spec.get("label") or spec["name"].replace("_", " ").capitalize(),
          "type": spec.get("type", "string"), "required": bool(spec.get("required", False)),
          "help": spec.get("help", "")}
-    for k in ("choices", "choices_from", "default", "max_length", "min", "max", "target", "of_record", "active"):
+    # ``hidden``: a workflow input another page fills (not asked on the start form)
+    for k in ("choices", "choices_from", "default", "max_length", "min", "max", "target", "of_record", "active",
+              "hidden"):
         if k in spec:
             f[k] = spec[k]
     return f
