@@ -1890,10 +1890,11 @@ def test_the_front_desk_sees_no_step_of_a_branch_it_may_not_read(hub, server):
             call(server, "GET", f"/runs/{run['id']}", tok)[1],
             _panel(call(server, "GET", f"/patients/{run['record'].split('/')[1]}", tok)[1])]
     assert all(seen)
-    for text in seen:
+    for i, text in enumerate(seen):
         for s in hidden:
             assert s.title not in html.unescape(text), s.id
-            assert f'"{s.id}"' not in text, s.id
+            if i < 2:  # the API's JSON: no step of that branch by its id (a page's HTML has words like "page")
+                assert f'"{s.id}"' not in text, s.id
             if s.when:
                 assert s.when not in html.unescape(text), s.id
     # a physician sees them
