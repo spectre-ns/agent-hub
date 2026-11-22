@@ -492,7 +492,8 @@ def _words_value(hub, member: dict, rtype: str | None):
                 return v
             if rt.lifecycle and f["path"] == rt.lifecycle["path"] and hasattr(rt, "state_label"):
                 return rt.state_label(v)  # a state in the lifecycle's words
-            return schema.choice_words(f, v)
+            words = schema.choice_words(f, v)  # a code without a label as words: new-concern -> New concern
+            return schema.state_words(words) if words == str(v) and re.fullmatch(r"[a-z][a-z0-9_-]*", words) else words
         if f is None or f["type"] not in ("reference", "member"):
             return _value(row, f["path"] if f else path)
         raw = schema.first(row, f["path"])

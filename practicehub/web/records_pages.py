@@ -256,10 +256,9 @@ class RecordPages:
         if rt and (me is None or not self.hub.may_read(me, t)):  # its title is what it holds: not for this reader
             return f'<span class="muted">{e(rt.label)} you may not open</span>'
         rec = self.hub.records.read(t, rid) if self.hub.record_type(t) else None
-        text = self.hub.short_title(rec) if rec else ref
-        rt = self.hub.record_type(t)
-        return (f'<a href="{e(self.record_href(ref))}">{e(text)}</a> '
-                f'<span class="muted">{e(rt.label if rt else t)}</span>')
+        if rec:  # named by its title; the field's label says what it is
+            return f'<a href="{e(self.record_href(ref))}">{e(self.hub.short_title(rec))}</a>'
+        return f'<a href="{e(self.record_href(ref))}">{e(rt.label if rt else ref)}</a>'
 
     @staticmethod
     def _lower(label: str) -> str:
@@ -336,7 +335,7 @@ class RecordPages:
                 elif isinstance(item, str) and "\n" in item:
                     out.append(f"<pre class='wrap'>{e(item)}</pre>")
                 elif f["type"] == "choice":
-                    out.append(e(schema.choice_words(f, item)))
+                    out.append(e(self._choice_label(f, item)))
                 else:
                     out.append(e(str(item)))
         return "<br>".join(out) if out else "<span class='muted'>—</span>"
@@ -583,7 +582,7 @@ class RecordPages:
             cid, ids = self._control_id(name, bool(f.get("help")))
             return self._labelled(f, f'<select name="{e(name)}"{ids}>{opts}</select>', cid,
                                   [f["help"]] if f.get("help") else [])
-        choices = ([{"value": c, "label": schema.choice_words(f, c)} for c in f["choices"]]
+        choices = ([{"value": c, "label": self._choice_label(f, c)} for c in f["choices"]]
                    if f["type"] == "choice" else None)
         if f["type"] == "markdown":  # the editor starts from the text as its reader sees it, and offers the titles
             rt = self.hub.record_type((rec or {}).get("resourceType", "")) if rec else None
@@ -1267,12 +1266,13 @@ class RecordPages:
             return "<p class='muted'>If you need it, ask the privacy officer.</p>"
         t, _, rid = ref.partition("/")
         mins = int(self.hub.restrictions.window.total_seconds() // 60)
+        idp = f"override-{next(_IDS)}"  # the banner and the panel may both be on one page: each its own ids
         return (f'<details class="break-glass"{" open" if open_ else ""}><summary>Open it in an emergency…</summary>'
                 f'<form method="post" action="/records/{e(t)}/{e(rid)}/override" class="stack break-glass-form">'
-                f'<label for="override-reason">Why you need it now <span class="req" aria-hidden="true">*</span>'
-                f'</label><textarea id="override-reason" name="reason" required minlength="8" rows="3" '
-                f'aria-describedby="override-help"></textarea>'
-                f'<p class="muted" id="override-help">You will see the whole file for {mins} minutes. Your name, the '
+                f'<label for="{idp}-reason">Why you need it now <span class="req" aria-hidden="true">*</span>'
+                f'</label><textarea id="{idp}-reason" name="reason" required minlength="8" rows="3" '
+                f'aria-describedby="{idp}-help"></textarea>'
+                f'<p class="muted" id="{idp}-help">You will see the whole file for {mins} minutes. Your name, the '
                 f'time and this reason go on the track, and the privacy officer is asked to review it.</p>'
                 f'<div class="filters"><button class="danger">Open the withheld information</button></div>'
                 f'</form></details>')
@@ -1430,7 +1430,7 @@ class RecordPages:
                 sections, rail, hidden = self.owner_sections(me, ref) if not is_page else ("", [], 0)
                 main.append(sections)
                 if hidden:
-                    main.append(f'<p class="muted">{hidden} record(s) in classes you may not read are not shown.</p>')
+                    main.append('<p class="muted">Some records are kept from your role and are not shown.</p>')
         elif tab == "signatures":
             main.append(self._signatures_panel(me, rt, rec, ref, st, None if typed else kept, error))
         elif tab == "links":
@@ -1498,7 +1498,7 @@ class RecordPages:
         side = [self.work_panel(me, ref, rt=rt, st=st, moves_html=moves_html, auto=auto, url=url)]
         side.append(f"<h2>Signatures</h2><p>{len(cur)} on this version"
                     + (f", {len(sigs) - len(cur)} on earlier ones" if len(sigs) > len(cur) else "") + "</p>")
-        side.append(f'<h2>Record</h2><p class="muted">{e(rt.label)} · {e(rt.data_class)}<br>version '
+        side.append(f'<h2>Record</h2><p class="muted">{e(rt.label)}, kept with {e(self._class_name(rt.data_class))}<br>version '
                     f'{e(str(rec.get("meta", {}).get("versionId", "")))} · {self._at(rec.get("meta", {}).get("lastUpdated", ""))}</p>')
         from .. import markup
         heads = [h for f in prose for v in schema.get(rec, f["path"]) if isinstance(v, str)
