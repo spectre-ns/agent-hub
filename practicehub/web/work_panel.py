@@ -95,10 +95,66 @@ class WorkPanel:
             return f'<span class="muted">waiting for someone in</span> {e(name)}'
         return '<span class="muted">unassigned</span>'
 
+    def _role_name(self, role: str | None) -> str:
+        if not role:
+            return ""
+        try:
+            return self.hub.role(role).get("name") or role
+        except Exception:  # noqa: BLE001 - a role since removed
+            return role
+
+    def _step_facts(self, run: dict, s, item: dict | None, rt) -> list[str]:
+        """Who holds a step now, when it is due and who is told when it is late, whatever its state: a stopped step
+        keeps its role, its due time and its escalation, and says who is fixing it."""
+        from .server import duration_text
+        sst = run["steps"].get(s.id) or {}
+        out = []
+        live = item and item.get("status") in ("open", "claimed", "held") and item.get("step_id") == s.id
+        if live:
+            out.append(self._holder(item) + self._urgency(item))
+        elif sst.get("state") == "failed":
+            notes = list(self.hub.db.items.find({"run_id": run["id"], "step_id": s.id, "kind": "notice",
+                                                 "status": {"$in": ["open", "claimed"]}}))
+            fixers = sorted({self.who(n["assignee"]) if n.get("assignee") else self._role_name(n.get("role"))
+                             for n in notes} - {""})
+            role = self._role_name(s.role) if s.role else ""
+            out.append(("for " + e(role) + "; " if role else "")
+                       + ("being fixed by " + e(", ".join(fixers)) if fixers else
+                          '<span class="muted">retry it from the run\'s page</span>'))
+            if sst.get("error"):
+                out.append(f'<span class="muted small">{e(str(sst["error"])[:160])}</span>')
+        elif s.role and sst.get("state") != "waiting":
+            out.append(f'<span class="muted">for</span> {e(self._role_name(s.role))}')
+        if not live and s.due:
+            due = (item or {}).get("due_at") if item and item.get("step_id") == s.id else None
+            out.append(f'<span class="badge due" title="due {e(due)}">Due {e(due[:16].replace("T", " "))}</span>'
+                       if due else f'<span class="muted">due within {e(duration_text(s.due))}</span>')
+        if s.escalate_to:
+            out.append(f'<span class="muted">late: {e(self._role_name(s.escalate_to))} is told</span>')
+        if s.state and rt is not None and rt.lifecycle:
+            out.append(f'<span class="muted">puts it in</span> {e(rt.state_label(s.state))}')
+        return out
+
+    def _next_steps(self, wf, run: dict, now_ids: set, rt, visible: set) -> list[str]:
+        """What comes next: the steps waiting on the ones open now, with the state each puts the record in."""
+        out = []
+        for s in wf.steps:
+            if s.id not in visible or (run["steps"].get(s.id) or {}).get("state") not in (None, "pending") \
+                    or not set(s.after) & now_ids:
+                continue
+            label = f" ({rt.state_label(s.state)})" if s.state and rt is not None and rt.lifecycle else ""
+            who = f" · {self._role_name(s.role)}" if s.role else ""
+            out.append(f"{s.title}{who}{label}")
+        return out
+
     def run_card(self, me, run: dict, wf, viewer: Viewer, ref: str) -> str:
         """One open run: where it is now, who holds it, its steps in a strip, the viewer's own piece of it."""
         eng = self.hub.engine
         title = wf.title if run.get("record") == ref else self.hub.run_title(me, run)
+        try:
+            rt = self.hub.record_type(str(run.get("record") or "").split("/", 1)[0]) if run.get("record") else None
+        except Exception:  # noqa: BLE001 - a type since removed
+            rt = None
         cond = viewer.conditional(wf)  # a step under a condition that has not run: if needed, not surely to come
         states = [(s, "if-needed" if x == "pending" and s.id in cond else x)
                   for s in wf.steps for x in [viewer.step_state(wf, run, s.id)]]
@@ -122,8 +178,8 @@ class WorkPanel:
                 bits.append('<span class="loz removed">Stopped</span>')
             elif sst.get("state") == "waiting":
                 bits.append('<span class="muted">waiting</span>')
+            bits += self._step_facts(run, s, item, rt)
             if item and item.get("status") in ("open", "claimed", "held") and item.get("step_id") == s.id:
-                bits.append(self._holder(item) + self._urgency(item))
                 if item.get("claimed_by") == me["id"] or item.get("assignee") == me["id"] or (
                         item["status"] == "open" and not item.get("claimed_by") and eng.eligibility(me, item)[0]):
                     mine.append((s, item))
@@ -134,6 +190,10 @@ class WorkPanel:
                             f'</li>')
         if not now_html:
             now_html.append('<li class="muted">Between steps</li>')
+        ahead = self._next_steps(wf, run, {s.id for s in now_steps}, rt, {s.id for s, _ in seen}) \
+            if not hidden_now else []
+        next_html = (f'<div class="wnow"><span class="k">Next</span><ul class="plain">'
+                     + "".join(f"<li>{e(t)}</li>" for t in ahead) + "</ul></div>") if ahead else ""
         # the strip: each step it shows, in the workflow's order; the ones the member may not see as one
         segs, rows = [], []
         n = {"done": 0, "now": 0, "todo": 0, "maybe": 0}
@@ -169,6 +229,7 @@ class WorkPanel:
         return (f'<article class="wcard">'
                 f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a>{key}</div>'
                 f'<div class="wnow"><span class="k">Now</span><ul class="plain">{"".join(now_html)}</ul></div>'
+                f'{next_html}'
                 f'<ol class="wstrip" aria-hidden="true">{"".join(segs)}</ol>'
                 f'<details class="wsteps"><summary>{e(summary or "Steps")}</summary><ol class="plain">{"".join(rows)}'
                 f'</ol></details>{act}</article>')

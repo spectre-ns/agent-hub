@@ -34,6 +34,12 @@ state (a person's or wait step when it starts, an automation when it is done; an
 own page. The run keeps one item, moved from step to step: the hand-off of that record. A workflow started on what
 its record is about (a subject) makes the record first, from ``[new_record]`` (field = value, placeholders over
 ``run`` and ``input``); ``run.subject`` is then what it is about and ``run.start_state`` the state it began in.
+``trigger.one_open_within = "10m"`` and ``trigger.one_open_same = ["input.<name>", ...]`` narrow one_open_per to
+the same submission twice (a double press, two people taking one call): only an open run started that recently,
+with the same inputs, counts; any other start is a new piece of work with its own record.
+A person's or wait step's ``moves = ["<state>", ...]`` lists the states a person may move the record to on its
+page while the step is open; a wait also takes the states its ``until`` waits for. When a type names its workflow,
+that workflow alone moves the record's state: see ``Hub.state_move_refusal``.
 ``trigger.one_open_per = "subject"`` with ``trigger.one_open_while = "<condition over record>"`` keeps one open
 run per subject while its record is so. When the run ends with the record in a state only workflows move it out of,
 the type's ``lifecycle.abandoned`` says where it goes.
@@ -157,6 +163,7 @@ class Step:
     at: str | None = None            # a wait step: done at this moment (``at = "{{input.appointment}} - 1d"``)
     timeout: str | None = None       # a wait with until: done anyway, as timed out, after this long
     state: str | None = None         # the lifecycle state the run's record moves to when this step is done
+    moves: list = field(default_factory=list)  # states a person may move the record to on its page meanwhile
 
     @property
     def agents_may(self) -> bool:
@@ -184,6 +191,8 @@ class Workflow:
     allow_duplicate: bool = False    # trigger.allow_duplicate: the starter may confirm another one anyway
     one_open_while: str | None = None  # trigger.one_open_while: ...only while the open run's record is so
     new_record: dict = field(default_factory=dict)  # [new_record]: started on its subject, the record it makes
+    one_open_within: str | None = None  # trigger.one_open_within: ...only an open run started this recently
+    one_open_same: list = field(default_factory=list)  # trigger.one_open_same: ...and with these same inputs
 
     def step(self, sid: str) -> Step:
         for s in self.steps:
@@ -257,6 +266,19 @@ def parse(source: str, catalog=None) -> Workflow:
                 expr.check(while_)
             except expr.ExprError as exc:
                 problems.append(f"trigger.one_open_while: {exc}")
+    within = trig.get("one_open_within")
+    if within is not None and (not one or duration_seconds(str(within)) is None):
+        problems.append("trigger.one_open_within: a duration like '10m', with one_open_per: only a run started "
+                        "that recently counts (the same submission twice, not a new concern)")
+        within = None
+    same = trig.get("one_open_same") or []
+    names = {str(i.get("name")) for i in doc.get("input", []) or []}
+    if not isinstance(same, list) or not one or not all(
+            isinstance(x, str) and x.startswith("input.") and x[6:] in names for x in same):
+        if same:
+            problems.append("trigger.one_open_same: a list of the workflow's inputs (\"input.<name>\"), with "
+                            "one_open_per: only an open run with the same values counts")
+        same = []
     new_record = doc.get("new_record") or {}
     if not isinstance(new_record, dict) or not all(isinstance(k, str) for k in new_record):
         problems.append("new_record: a table of field = value (placeholders over run and input), the record a run "
@@ -317,7 +339,14 @@ def parse(source: str, catalog=None) -> Workflow:
             due=raw.get("due"), escalate_to=raw.get("escalate_to"), priority=raw.get("priority", "normal"), assign_to=raw.get("assign_to"),
             people_role=raw.get("people_role") or None, for_each=raw.get("for_each") or None, where=raw.get("where") or None,
             until=raw.get("until") or None, wait_for=raw.get("for") or None, at=raw.get("at") or None,
-            timeout=raw.get("timeout") or None, state=raw.get("state") or None)
+            timeout=raw.get("timeout") or None, state=raw.get("state") or None,
+            moves=list(raw.get("moves") or []) if isinstance(raw.get("moves") or [], list) else [None])
+        if not all(isinstance(m, str) and m for m in step.moves):
+            problems.append(f"{where}: moves lists the lifecycle states a person may move the record to while this "
+                            f"step is open, e.g. moves = [\"on-hold\"]")
+            step.moves = []
+        if step.moves and (kind not in ("task", "gate", "wait") or not doc.get("record")):
+            problems.append(f"{where}: moves is for a person's step or a wait of a workflow about a record")
         if step.state is not None and not isinstance(step.state, str):
             problems.append(f"{where}: state is the lifecycle state the record moves to when the step is done")
         if step.state and not doc.get("record"):
@@ -491,7 +520,8 @@ def parse(source: str, catalog=None) -> Workflow:
                   for_each=trig.get("for_each"), where=trig.get("where"),
                   deadline=deadline.get("within") or None, deadline_escalate_to=deadline.get("escalate_to") or None,
                   one_open_per=one or None, allow_duplicate=trig.get("allow_duplicate") is True,
-                  one_open_while=while_ or None, new_record=dict(new_record))
+                  one_open_while=while_ or None, new_record=dict(new_record),
+                  one_open_within=str(within) if within else None, one_open_same=list(same))
     if catalog is not None:  # report every problem at once, so an author fixes them in one go
         try:
             problems += [p for p in catalog.check_workflow(wf) if p not in problems]

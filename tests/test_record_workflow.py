@@ -109,16 +109,38 @@ def test_the_nurse_books_an_urgent_request_on_the_same_visit(hub):
     assert _status(hub, ref) == "planned" and hub.engine.run(run["id"])["steps"]["not-booked"]["state"] == "skipped"
 
 
-def test_a_second_request_for_the_same_patient_is_refused(hub):
-    from practicehub.hub import Invalid
-    jo = M(hub, "jo")
+def test_the_same_request_twice_is_refused_but_a_new_concern_is_its_own_screened_visit(hub):
+    """Only the same submission twice (a double press, two people taking one call) is refused, and the refusal
+    names the open request. Any other request, above all an urgent one, makes its own visit and is screened."""
+    from practicehub.hub import Duplicate
+    jo, noor = M(hub, "jo"), M(hub, "noor")
     pat = _pat(hub, "MacLeod")
     first = hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee hurts when I run"})
-    with pytest.raises(Invalid):
-        hub.engine.start(M(hub, "noor"), "appointment-request", record=pat, inputs={"reason": "the same knee"})
-    # once the first is booked, the patient may ask for another visit
+    with pytest.raises(Duplicate) as exc:  # the same call taken twice: refused, pointing at the first
+        hub.engine.start(noor, "appointment-request", record=pat, inputs={"reason": "my knee hurts when I run"})
+    assert exc.value.run["id"] == first["id"]
+    # a new complaint while the knee waits: its own visit, screened for red flags like any request
+    chest = hub.engine.start(noor, "appointment-request", record=pat,
+                             inputs={"reason": "crushing chest pain since this morning", "urgency": "urgent"})
+    chest = hub.engine.run(chest["id"])
+    assert chest["record"] != hub.engine.run(first["id"])["record"]
+    assert chest["steps"]["screen"]["state"] == "done"
+    assert _status(hub, chest["record"]) == "requested" and _status(hub, hub.engine.run(first["id"])["record"]) == \
+        "requested"
+    # the patient's chart keeps both pieces of work, each with its own item
+    runs = list(hub.db.runs.find({"workflow_id": "appointment-request", "subject": pat, "status": "running"}))
+    assert {r["id"] for r in runs} >= {first["id"], chest["id"]}
+    assert len({r["item"] for r in runs}) == len(runs)
+    from practicehub.web.server import App
+    app = App(hub, dev=False)
+    nurse = M(hub, "noor")
+    app._local.me = nurse
+    panel = app.work_panel(nurse, pat, rt=hub.record_type("Patient"), st=None)
+    assert panel.count('class="wcard"') >= 2  # two separate pieces of work on the chart, not one
+    assert "Urgent" in panel  # the urgent one is marked urgent there
+    # once the first is closed, the same words again are a new request
     hub.engine.cancel(jo, first["id"], "asked twice")
-    hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "the same knee"})
+    hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee hurts when I run"})
     # a visit booked straight on the calendar is never refused, and does not block a request
     hub.create_record(jo, "Encounter", {
         "status": "planned", "subject": {"reference": pat}, "plannedStartDate": "2027-03-10T09:00",
@@ -232,3 +254,192 @@ def test_the_run_page_and_the_visit_show_the_one_item_and_where_it_is(hub):
     assert "waiting for someone in" in visit or "with " in visit  # who holds it
     board = app.page_board(req("/board"))
     assert f'/items/{run["item"]}' in board
+
+
+def _to_the_visit(hub, by):
+    """A visit asked for, booked, checked in and started, its run at the physician's "end the visit"."""
+    jo = M(hub, "jo")
+    run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    ref = hub.engine.run(run["id"])["record"]
+    hub.update_record(jo, ref, {"status": "arrived"})
+    hub.update_record(by, ref, {"status": "in-progress"})
+    return run, ref
+
+
+def test_only_its_workflow_moves_the_visit_and_a_person_only_through_a_move_it_waits_on(hub):
+    """A type that names its workflow lets that workflow alone move its state: a person's move goes through only when
+    the open step waits on it (a wait's until, a step's moves), never another workflow's run, never a move the work
+    has gone past. The record's move and the run's step are one transaction."""
+    from practicehub.hub import Denied
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_visit(hub, amara)
+    hub.update_record(amara, ref, {"status": "onleave"})  # the end step lists it: the physician steps out
+    hub.update_record(amara, ref, {"status": "in-progress"})
+    hub.engine.complete(amara, item_for(hub, run, "end"), {"transcript": TRANSCRIPT, "visit_type": "minor",
+                                                           "minutes": 10})
+    with pytest.raises(Denied, match="not waiting for"):  # the visit has ended: being documented, not paused
+        hub.update_record(amara, ref, {"status": "onleave"})
+    # the page offers no move its workflow is not waiting for
+    from practicehub.web.server import App
+    app = App(hub, dev=False)
+    app._local.me = amara
+    page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert 'name="to" value="onleave"' not in page
+    # another workflow's run never moves it, whoever runs it
+    other = hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub, "MacLeod"),
+                             inputs={"reason": "another thing"})
+    with pytest.raises(Denied, match="its own workflow"):
+        hub.update_record(amara, ref, {"status": "onleave"}, run_id=other["id"])
+    assert _status(hub, ref) == "in-progress"
+
+
+def test_a_move_its_workflow_waits_on_and_the_step_it_takes_are_one_transaction(hub, monkeypatch):
+    jo = M(hub, "jo")
+    run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    ref = hub.engine.run(run["id"])["record"]
+    real = hub.engine._advance
+
+    def broken(run_id, cause):
+        raise RuntimeError("the database went away")
+    monkeypatch.setattr(hub.engine, "_advance", broken)
+    with pytest.raises(RuntimeError):
+        hub.update_record(jo, ref, {"status": "arrived"})
+    # neither happened: the visit is still booked and the run still waits for the check-in
+    assert _status(hub, ref) == "planned"
+    assert hub.engine.run(run["id"])["steps"]["checked-in"]["state"] == "waiting"
+    monkeypatch.setattr(hub.engine, "_advance", real)
+    hub.update_record(jo, ref, {"status": "arrived"})
+    assert _status(hub, ref) == "arrived" and hub.engine.run(run["id"])["steps"]["checked-in"]["state"] == "done"
+
+
+def test_the_note_names_who_wrote_it_and_who_signed_it_with_what_the_signature_means(hub):
+    """A note one physician wrote and another reviewed and signed: the writer is its author (and saw the patient),
+    the signer its legal attester, with the reviewer's meaning, never the reviewer as author."""
+    amara, liam = M(hub, "dr-amara"), M(hub, "dr-liam")
+    run, ref = _to_the_visit(hub, amara)
+    hub.engine.complete(amara, item_for(hub, run, "end"), {"transcript": TRANSCRIPT, "visit_type": "minor",
+                                                           "minutes": 10})
+    run_all_local(hub, log=quiet)
+    item = item_for(hub, run, "edit")
+    draft = hub.engine.context(amara, item)["draft"]
+    fields = {k: draft.get(k) or "x" for k in ("subjective", "assessment", "plan")}
+    hub.engine.complete(amara, item, {**fields, "diagnosis_codes": ["V68"]})
+    hub.engine.decide(liam, item_for(hub, run, "sign"), "sign", "")
+    run_all_local(hub, log=quiet)
+    (note,) = [c for c in hub.records.search("Composition", limit=None)
+               if (c.get("encounter") or {}).get("reference") == ref]
+    assert note["author"] == [{"reference": "Practitioner/dr-amara"}]
+    (att,) = note["attester"]
+    assert att["party"]["reference"] == "Practitioner/dr-liam"
+    assert att["mode"]["coding"][0]["code"] == "legal" and att["mode"]["text"] == "I reviewed this note and it is accurate"
+    visit = hub.records.read(*ref.split("/", 1))
+    assert visit["participant"][0]["individual"]["reference"] == "Practitioner/dr-amara"
+
+
+def test_the_record_page_says_who_holds_it_what_is_next_and_when_it_is_due_even_when_a_step_stopped(hub, monkeypatch):
+    from practicehub import engine
+    from practicehub.web.server import App
+    amara, jo = M(hub, "dr-amara"), M(hub, "jo")
+    run, ref = _to_the_visit(hub, amara)
+    app = App(hub, dev=False)
+    app._local.me = jo
+    app._local.me = amara  # the clinical steps are the clinical team's to see
+    panel = app.work_panel(amara, ref, rt=hub.record_type("Encounter"), st="in-progress")
+    app._local.me = jo
+    assert "End the visit" in panel and "is told" in panel  # who, and who hears when it is late
+    assert "Due" in panel or "due within" in panel
+    assert ">Next<" in panel  # what comes after it
+    # a step that stopped keeps saying who is fixing it, and why it stopped
+    other = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T14:00|dr-amara"})
+    vref = hub.engine.run(other["id"])["record"]
+
+    def down(*a, **k):
+        raise RuntimeError("the portal is down")
+    monkeypatch.setitem(engine.CORE_ACTIONS, "message.send", down)
+    hub.update_record(jo, vref, {"status": "noshow"})
+    assert hub.engine.run(other["id"])["steps"]["tell-missed"]["state"] == "failed"
+    app._local.me = amara
+    panel = app.work_panel(amara, vref, rt=hub.record_type("Encounter"), st="noshow")
+    assert "Stopped" in panel and "being fixed by" in panel and "the portal is down" in panel
+    assert "tell-missed" not in panel  # step titles, never step ids
+
+
+OLD_SHAPE = """id = "appointment-request"
+title = "Appointment request"
+record = "Patient"
+[trigger]
+starters = ["front-desk", "scheduler"]
+[[input]]
+name = "reason"
+type = "text"
+required = true
+[[steps]]
+id = "propose"
+title = "Propose a slot"
+kind = "task"
+role = "scheduler"
+[[steps.fields]]
+name = "slot"
+type = "string"
+required = true
+[[steps]]
+id = "book"
+title = "Book the visit"
+kind = "automation"
+after = ["propose"]
+action = "booking.book"
+[steps.params]
+slot = "{{propose.slot}}"
+subject = "{{run.record}}"
+reason = "{{input.reason}}"
+defaults = { status = "planned" }   # as the step was written then: a booked visit
+"""
+
+
+def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_visit(hub, monkeypatch):
+    """Today's runs about the patient move onto a visit of their own: once, each in its own transaction, keeping
+    their version, item, key and steps so far; a failure is noted and tried again; the run then books that visit
+    (not another one) and, when its older version ends, the visit's current workflow walks it from there."""
+    jo, rana = M(hub, "jo"), M(hub, "rana")
+    noor = jo  # the scheduler
+    pat = _pat(hub, "MacLeod")
+    old = hub.propose_workflow(jo, OLD_SHAPE, "the shape before")
+    hub.approve_workflow(rana, "appointment-request", old["version"])
+    run = hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee"})
+    rid = run["id"]
+    propose = item_for(hub, run, "propose")
+    hub.engine.claim(noor, propose)
+    before = hub.engine.run(rid)
+    assert before["record"] == pat  # about the patient, as runs were before the visit had its own
+    cur = hub.propose_workflow(jo, hub.pack.workflow_sources["appointment-request"], "its own visit")
+    hub.approve_workflow(rana, "appointment-request", cur["version"])
+    visits = len(hub.records.search("Encounter", limit=None))
+    # a failure: noted, the run left as it was, and tried again next time
+    real = hub.engine._make_record
+
+    def down(*a, **k):
+        raise RuntimeError("the database went away")
+    monkeypatch.setattr(hub.engine, "_make_record", down)
+    assert hub.engine.relink_runs()["failed"] == [rid]
+    assert hub.engine.run(rid)["record"] == pat
+    assert hub.db.events.find({"action": "run.relink_failed", "subject": rid})
+    monkeypatch.setattr(hub.engine, "_make_record", real)
+    hub.engine.tick()  # every tick tries again
+    after = hub.engine.run(rid)
+    ref = after["record"]
+    assert ref.startswith("Encounter/") and after["subject"] == pat and _status(hub, ref) == "requested"
+    assert after["version"] == before["version"] and after["item"] == before["item"]
+    assert after["steps"] == before["steps"] and after["ctx"]["run"]["record"] == pat  # its pinned steps say so
+    assert len(hub.records.search("Encounter", limit=None)) == visits + 1
+    assert hub.engine.relink_runs() == {"moved": [], "failed": []}  # once only
+    # its older step books that visit, not another one; when it ends, the visit's own workflow takes it on
+    hub.engine.complete(noor, propose, {"slot": "2027-03-09T15:00|dr-amara"})
+    assert _status(hub, ref) == "planned" and len(hub.records.search("Encounter", limit=None)) == visits + 1
+    assert hub.engine.run(rid)["status"] == "completed"
+    (walk,) = hub.engine.runs(record=ref, status="running")
+    assert walk["version"] == cur["version"] and walk["steps"]["checked-in"]["state"] == "waiting"
+    hub.update_record(jo, ref, {"status": "arrived"})
+    assert hub.engine.run(walk["id"])["steps"]["checked-in"]["state"] == "done"

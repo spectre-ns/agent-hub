@@ -128,7 +128,7 @@ type = "Encounter"
 status = "finished"
 class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" }
 subject = { reference = "{{run.record}}" }
-participant = [{ individual = { reference = "Practitioner/{{sign.by}}" } }]
+participant = [{ individual = { reference = "Practitioner/{{edit.by}}" } }]   # who saw the patient and wrote it up, not the reviewer
 type = [{ text = "{{input.visit_type}}" }]
 plannedStartDate = "{{timing.start}}"
 plannedEndDate = "{{timing.end}}"
@@ -152,8 +152,9 @@ title = "Visit note"
 date = "{{timing.now}}"
 subject = { reference = "{{run.record}}" }
 encounter = { reference = "{{file-visit.reference}}" }
-author = [{ reference = "Practitioner/{{sign.by}}" }]
-attester = [{ mode = "legal", time = "{{timing.now}}", party = { reference = "Practitioner/{{sign.by}}" } }]
+author = [{ reference = "Practitioner/{{edit.by}}" }]   # who wrote the note (edited the draft)
+# who signed it, with what their signature means (the reviewer: "I reviewed this note"; the author: "I am the author")
+attester = [{ mode = { coding = [{ system = "http://hl7.org/fhir/composition-attestation-mode", code = "legal" }], text = "{{sign.meaning}}" }, time = "{{timing.now}}", party = { reference = "Practitioner/{{sign.by}}" } }]
 section = [
   { title = "Subjective", text = "{{edit.subjective}}" },
   { title = "Objective", text = "{{edit.objective}}" },

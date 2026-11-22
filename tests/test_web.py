@@ -2123,7 +2123,9 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     page = call(server, "GET", f"/records/{visit}", token(hub, "dr-amara"))[1]
     panel = _panel(page)
     assert "Open work" in panel and f'href="/runs/{run["id"]}"' in panel and "Draft the note" in panel
-    assert "In progress" in panel and ">On leave<" in panel and "Move to" not in page  # words, not codes
+    assert "In progress" in panel and "Move to" not in page  # words, not codes
+    # being documented: its workflow waits on no pause now, so the page offers none (only its workflow moves it)
+    assert ">On leave<" not in panel
     assert "View workflow" in panel and f'/records/{visit}/workflow" data-modal' in panel
     status, modal = call(server, "GET", f"/records/{visit}/workflow", token(hub, "dr-amara"))
     assert status == 200 and "data-modal-body" in modal and "<svg" in modal

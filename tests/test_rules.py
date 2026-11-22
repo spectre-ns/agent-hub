@@ -4659,3 +4659,32 @@ def test_a_record_type_names_its_workflow_and_a_step_names_the_state_it_puts_the
     assert enc.workflow["id"] == "appointment-request" and "requested" in enc.states()
     states = {s.state for s in hub.workflow("appointment-request")[0].steps if s.state}
     assert states <= set(enc.states()) and {"cancelled", "finished"} <= states
+
+
+def test_a_step_lists_the_moves_it_waits_on_and_a_trigger_refuses_only_the_same_submission_twice(hub):
+    """``moves`` on a person's step or a wait (of a workflow about a record) lists the states a person may move the
+    record to while it is open. ``one_open_within`` (a duration) and ``one_open_same`` (the workflow's inputs) go with
+    one_open_per and narrow it to the same submission twice."""
+    from practicehub.workflows import DefinitionError, parse
+    head = ('id = "w"\ntitle = "W"\nrecord = "Encounter"\n[trigger]\nstarters = ["front-desk"]\n{trig}'
+            '[[input]]\nname = "reason"\ntype = "text"\n'
+            '[[steps]]\nid = "a"\ntitle = "A"\nkind = "{kind}"\nrole = "front-desk"\n{step}'
+            '[[steps.fields]]\nname = "done"\ntype = "boolean"\n'
+            '[[steps.fields]]\nname = "done"\ntype = "boolean"\n')
+    ok = parse(head.format(trig="", kind="task", step='moves = ["onleave"]\n'))
+    assert ok.steps[0].moves == ["onleave"]
+    for trig, kind, step, says in (
+            ("", "task", 'moves = "onleave"\n', "moves lists the lifecycle states"),
+            ("", "automation", 'action = "message.send"\nmoves = ["onleave"]\n', "moves is for a person's step"),
+            ('one_open_within = "10m"\n', "task", "", "one_open_within"),
+            ('one_open_per = "subject"\none_open_within = "soon"\n', "task", "", "one_open_within"),
+            ('one_open_per = "subject"\none_open_same = ["input.nope"]\n', "task", "", "one_open_same")):
+        with pytest.raises(DefinitionError) as exc:
+            parse(head.format(trig=trig, kind=kind, step=step))
+        assert any(says in x for x in exc.value.problems), (says, exc.value.problems)
+    wf = parse(head.format(trig='one_open_per = "subject"\none_open_within = "10m"\none_open_same = ["input.reason"]\n',
+                           kind="task", step=""))
+    assert wf.one_open_within == "10m" and wf.one_open_same == ["input.reason"]
+    # the practice's request refuses only the same reason a moment ago: any other is a new, screened request
+    req = hub.workflow("appointment-request")[0]
+    assert req.one_open_same == ["input.reason"] and req.one_open_within

@@ -1468,6 +1468,8 @@ class RecordPages:
         moves = [t for t in lc.get("transition", []) if (st in t["from"] or "*" in t["from"]) and t["to"] != st] \
             if lc else []
         mine = [t for t in moves if t["by"] != "workflow"] if may_write else []
+        if rt.workflow:  # its workflow moves it: only the moves it waits on now (no button beside the work)
+            mine = [t for t in mine if not hub.state_move_refusal(rt, ref, t, rec, None)]
         auto = [t for t in moves if t["by"] == "workflow"]
         ahead = self.forward_move(lc, st, mine) if mine else None
         moves_html = "".join(move(t) for t in mine) if not editing else ""

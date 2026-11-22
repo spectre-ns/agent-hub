@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -3173,6 +3174,54 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if f.get("by") == "workflow" and schema.get(before, f["path"]) != schema.get(after, f["path"]):
                 raise Denied(f"{f['label']} changes only through a workflow (it is not edited by hand)")
 
+    def state_move_refusal(self, rt, ref: str, t: dict, after: dict, run_id: str | None) -> str | None:
+        """Why a move of a record whose type names its workflow is refused, or None. That workflow alone moves its
+        state: its own run, or a person (an import, the portal, any other path) only through a move the run is
+        waiting on now (a wait whose ``until`` holds of the record as moved, or a state the open step lists in
+        ``moves``). Another workflow never moves it. A correction open from every state (``from = ["*"]``, entered
+        in error) stays anyone's who may write the record."""
+        owner = (rt.workflow or {}).get("id")
+        if not owner or "*" in t["from"]:
+            return None
+        label = rt.label.lower()
+        if run_id:
+            run = self.db.runs.get(run_id)
+            if run and run["workflow_id"] == owner and run.get("record") == ref:
+                return None
+            if run:
+                return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
+        if self.state_move_waited_on(rt, ref, after, t["to"]):
+            return None
+        if not self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
+            return None  # its workflow is not walking it (filed before the type named one, or its run is over)
+        return (f"a {label} is moved by its workflow; it is not waiting for "
+                f"{rt.state_label(t['to']).lower()} now")
+
+    def state_move_waited_on(self, rt, ref: str, after: dict, new: str) -> bool:
+        """Whether the open run of the type's workflow about ``ref`` is waiting on the record moving to ``new``."""
+        from . import expr
+        owner = (rt.workflow or {}).get("id")
+        field = (rt.lifecycle or {}).get("field")
+        for run in self.db.runs.find({"workflow_id": owner, "record": ref, "status": "running"}):
+            try:
+                wf = self.workflow(run["workflow_id"], run["version"])[0]
+            except NotFound:
+                continue
+            for s in wf.steps:
+                st = (run["steps"].get(s.id) or {}).get("state")
+                if st not in ("active", "waiting"):
+                    continue
+                if new in s.moves:
+                    return True
+                if s.kind == "wait" and s.until and field:
+                    moved = {**after, field: new}
+                    try:
+                        if expr.holds(s.until, {**run["ctx"], "record": moved}):
+                            return True
+                    except Exception:  # noqa: BLE001 - a wait that cannot be read waits on nothing
+                        continue
+        return False
+
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
 
@@ -3341,6 +3390,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                         raise Invalid(f"a {rt.label.lower()} does not move from {old!r} to {new!r}")
                     if t["by"] == "workflow" and not self._by_workflow(member, run_id) and _signature is None:
                         raise Denied(f"only a workflow moves a {rt.label.lower()} to {new!r}")
+                    why = self.state_move_refusal(rt, ref, t, after, run_id) if _signature is None else None
+                    if why:
+                        raise Denied(why)
                     # the move's own rule (a transition's require), whoever makes it: a person, a workflow, a signature
                     empty = [rt.field(n)["label"] for n in t.get("require", [])
                              if schema.first(after, rt.field(n)["path"]) in (None, "", [], {})]
@@ -3377,6 +3429,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                              **({"comment": comment.strip()} if comment and comment.strip() else {})})
             if clashes:
                 ev = self._note_overbook(member, rt, ref, clashes, over, cause=ev, run_id=run_id)
+            if moved and (rt.workflow or {}).get("id") and not run_id:
+                # the move its own workflow waited on: that run takes its step in this same transaction, so the
+                # record's state and the run's step change together or not at all (never the savepoint that lets a
+                # run that cannot go on fail alone)
+                for r in self.db.runs.find({"workflow_id": rt.workflow["id"], "record": ref, "status": "running"},
+                                           fields=["id"]):
+                    self.engine.advance(r["id"], ev)
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
         if rt.is_a("Restriction"):
             self.restrictions.reset()
@@ -3601,7 +3660,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self._require_sealed("workflow", r)
             except Invalid:
                 continue  # shown nowhere and started by nobody until restored; 'verify' names it
-            wf = wfmod.parse(r["source"], None)
+            try:
+                wf = wfmod.parse(r["source"], None)
+            except wfmod.DefinitionError as exc:  # an approved version a later rule refuses: never the whole list
+                logging.getLogger(__name__).warning("workflow %s@%s is not readable: %s", r["workflow_id"],
+                                                    r.get("version"), "; ".join(exc.problems))
+                continue
             pending = self.db.workflow_versions.count({"workflow_id": r["workflow_id"], "status": "proposed"})
             out.append({"workflow": wf, "row": r, "proposed": pending})
         return out

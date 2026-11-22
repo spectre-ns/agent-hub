@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from . import blocks as blockmod
 from . import clock
@@ -277,6 +277,9 @@ def act_booking_book(engine, run, step, params, actor):
         raise ValueError(f"booking.book: say which booking type ({', '.join(kinds) or 'the practice keeps none'})")
     minutes = int((hub.pack.calendar or {}).get("slot_minutes", 15)) if hub.pack else 15
     ref = str(params.get("ref") or "")
+    own = str(run.get("record") or "")
+    if not ref and run.get("subject") not in (None, "", own) and own.split("/", 1)[0] in kinds:
+        ref = own  # a run moved onto its own booking (asked for, not yet booked) books that one, not another
     existing = None
     if ref:
         if "/" not in ref or ref.split("/", 1)[0] not in kinds:
@@ -664,6 +667,89 @@ class Engine:
         return next((f for f in rt.fields if f["type"] == "reference" and f.get("rel") == "subject"
                      and "*" not in f["path"] and (subject_type in self.hub.concrete(f["target"]))), None)
 
+    def _hand_on(self, run: dict, cause) -> None:
+        """A run of an older version of a type's own workflow that ends with its record still where that workflow
+        starts (a version that stopped once the booking was made) hands the record on to the current version, which
+        walks it from there. A run of the current version never does (it ends its record closed)."""
+        hub = self.hub
+        ref = str(run.get("record") or "")
+        if "/" not in ref:
+            return
+        try:
+            rt = hub.record_type(ref.split("/", 1)[0])
+            rec = hub.records.read(*ref.split("/", 1))
+            if rt is None or rec is None or schema.starts_workflow(rt, rec) != run["workflow_id"]:
+                return
+            wf, row = hub.workflow(run["workflow_id"])
+            if row["version"] == run["version"] or self.runs(record=ref, status="running"):
+                return
+            with hub.db:
+                self.start({"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"},
+                           wf.id, record=ref, inputs=dict((run.get("ctx") or {}).get("input") or {}), cause=cause,
+                           via_automation=True, on_create=True)
+        except Exception as exc:  # noqa: BLE001 - the run that ended stays ended; the hand-on is noted
+            hub.track.append(self.automation_actor(run), "trigger.failed", ref, run_id=run["id"], cause=cause,
+                             data={"workflow": run["workflow_id"], "error": f"handing the record on: {exc}"})
+
+    def relink_runs(self) -> dict:
+        """Move running runs that are about the subject itself onto a record of their own: a workflow whose current
+        version makes its record (``[new_record]``) but whose older runs, started before it did, have the subject as
+        their record. Each run is re-read and moved in its own transaction, and skipped when already moved, so it is
+        safe to repeat (every tick does) with one writer; a run that cannot be moved is noted and tried again next
+        time, never holding up the others. A run keeps its version, its item and key, its steps (who did what,
+        ``ctx[step].by``) and ``ctx.run.record`` (what its pinned steps say); it gains ``record`` (the record it
+        walks: the one it already made, else one made now from ``[new_record]``) and ``subject``."""
+        hub = self.hub
+        moved, failed = [], []
+        for w in hub.workflows():
+            wf = w["workflow"]
+            if not wf.new_record or not wf.record:
+                continue
+            for r in hub.db.runs.find({"workflow_id": wf.id, "status": "running"},
+                                      fields=["id", "record"]):
+                if str(r.get("record") or "").split("/", 1)[0] == wf.record:
+                    continue
+                try:
+                    with hub.db:
+                        if self._relink(wf, w["row"], r["id"]):
+                            moved.append(r["id"])
+                except Exception as exc:  # noqa: BLE001 - tried again next time
+                    failed.append(r["id"])
+                    hub.track.append({"id": "engine", "kind": "automation"}, "run.relink_failed", r["id"],
+                                     run_id=r["id"], data={"error": str(exc)})
+        return {"moved": moved, "failed": failed}
+
+    def _relink(self, wf, row, run_id: str) -> bool:
+        hub = self.hub
+        run = self.run(run_id)  # read again inside the transaction: another pass may have moved it already
+        subject = str(run.get("record") or "")
+        if run["status"] != "running" or subject.split("/", 1)[0] == wf.record \
+                or "/" not in subject:
+            return False
+        field = self._new_record_field(wf, subject.split("/", 1)[0])
+        if field is None:
+            return False  # its subject is not what the record type is about: left as it is
+        made = None
+        for sid, out in (run.get("ctx") or {}).items():  # the record of that type it already made (the booking)
+            ref = out.get("reference") if isinstance(out, dict) else None
+            if sid not in ("run", "input") and isinstance(ref, str) and ref.split("/", 1)[0] == wf.record:
+                made = ref
+        if made is None:
+            ctx = {"run": {**run["ctx"].get("run", {}), "subject": subject},
+                   "input": run["ctx"].get("input") or {}}
+            made = self._make_record(wf, row, run_id, field, subject, ctx, None)
+        rec = hub.records.read(*made.split("/", 1)) or {}
+        rt = hub.record_type(wf.record)
+        run["ctx"].setdefault("run", {}).update(subject=subject, relinked_from=subject,
+                                                 start_state=run["ctx"]["run"].get("start_state")
+                                                 or (schema.first(rec, rt.lifecycle["path"]) if rt and rt.lifecycle
+                                                     else None))
+        hub.db.runs.set(run_id, {"record": made, "subject": subject, "ctx": run["ctx"],
+                                 "refs": run_refs({"ctx": run["ctx"], "record": made}), "updated_at": utcnow()})
+        hub.track.append({"id": "engine", "kind": "automation"}, "run.relinked", made, run_id=run_id,
+                         data={"from": subject, "to": made})
+        return True
+
     def _make_record(self, wf, row, run_id: str, subject_field: dict, subject: str, ctx: dict, cause) -> str:
         """The record a run started on its subject makes: the workflow's ``[new_record]`` fields (placeholders over
         ``run`` and ``input``), about the subject. Written by the workflow (its own run), never started again by it."""
@@ -880,6 +966,7 @@ class Engine:
                                    cause=cause)
             self._abandon(run, seq, stranded_only=True)
             self._late_finish(run, cause)
+            self._hand_on(run, seq)
         if run["status"] == "running":
             self._place(run_id, cause)
         elif run["status"] == "completed" and run.get("item"):
@@ -1220,6 +1307,13 @@ class Engine:
             return None
         flt = {"workflow_id": wf.id, "status": "running"}
         flt.update({"$or": [{"subject": value}, {"record": value}]} if key == "subject" else {path: value})
+        within = getattr(wf, "one_open_within", None)
+        if within:  # only the same submission twice: a run started a moment ago
+            since = datetime.now(timezone.utc) - timedelta(seconds=wfmod.duration_seconds(within))  # as created_at
+            flt["created_at"] = {"$gte": since.strftime("%Y-%m-%dT%H:%M:%S")}
+        for name in getattr(wf, "one_open_same", None) or []:
+            v = values.get(name[6:])
+            flt[f"ctx.input.{name[6:]}"] = v.get("reference") if isinstance(v, dict) and "reference" in v else v
         for row in self.hub.db.runs.find(flt, sort="created_at"):
             ref = row.get("record") or ""
             if wf.one_open_while and ref != value and "/" in ref:
@@ -2148,7 +2242,9 @@ class Engine:
                                data=data, signed=signed)
         run = self.run(run["id"])
         answer = {**values, "by": member["id"], "by_kind": member["kind"], "event": seq,
-                  **({"signature": seq} if signed else {"signature": signature} if signature else {})}
+                  # a signature keeps what it meant: a note filed from it names its signer's meaning
+                  **({"signature": seq, "meaning": signed.get("meaning") or ""} if signed
+                     else {"signature": signature} if signature else {})}
         st = run["steps"][step.id]
         if step.for_each and st.get("each"):  # once per person: done when each of them is
             got = run["ctx"].get(step.id) if isinstance(run["ctx"].get(step.id), dict) else {}
@@ -2388,6 +2484,7 @@ class Engine:
 
     def _tick(self, now: datetime, now_utc: datetime, stamp: str) -> dict:
         hub = self.hub
+        self.relink_runs()  # older runs about their subject, onto their own records; retried every tick
         tz = self.zone()
         started, overdue = [], []
         last = hub.db.get_setting("schedule_last", {}) or {}
