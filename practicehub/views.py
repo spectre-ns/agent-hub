@@ -220,5 +220,8 @@ def compute(hub, member: dict, view: View) -> list[dict]:
         else:
             d["rows"] = rows[: w["limit"]]
         d["value"] = _words_value(hub, member, w["type"]) if w["source"] == "records" else _value
+        if w["source"] == "records" and w["kind"] != "chart":  # a chart shows counts; the rest show the records
+            shown = d.get("rows") if "rows" in d else [r for v in d.get("groups", {}).values() for r in v]
+            hub.note_list(member, shown, how="view", what=f"view:{view.id}")
         out.append(d)
     return out

@@ -1270,7 +1270,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             dl += [("Step", e(step.title)), ("Agent risk", risk),
                    ("Agents", "may do this" if step.agents_may and not item["persons_only"] else "people only")]
             if step.kind == "gate":
-                dl.append(("Signer", "a person" if step.signer == "person" else "a person, or an agent within criteria"))
+                dl.append(("Decided by", "a person, who signs" if step.signer == "person" else
+                           "a person, who signs; or an agent within criteria, whose decision is its attestation, not a signature"))
         rec = ""
         if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
             subj = self._may_read(me, self.subj["type"]) and self.hub.records.read(*run["record"].split("/", 1))
@@ -1395,12 +1396,22 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                          f'class="card">{fields}<button>Done</button></form></div>')
         return "".join(parts)
 
+    def _signed_badge(self, ev) -> str:
+        """A person's signature, or an agent's attested decision, which is never a signature."""
+        if ev.get("signature"):
+            return ' <span class="badge signed">signed</span>'
+        att = (ev.get("data") or {}).get("attested")
+        if att:
+            return (f' <span class="badge">decided by {e(self.member_name(att.get("agent") or ev["actor"]))} (an agent)'
+                    f', not a signature</span>')
+        return ""
+
     def _activity(self, events, me) -> str:
         """Events as an activity feed, redacted for this viewer."""
         rows = []
         for ev in Viewer(self.hub, me).events(events):
-            signed = ' <span class="badge signed">signed</span>' if ev.get("signature") else ""
-            data = {k: v for k, v in ev["data"].items() if k != "signed"}
+            signed = self._signed_badge(ev)
+            data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             cause = f' · because of <a href="/track/{ev["cause"]}">#{ev["cause"]}</a>' if ev["cause"] else ""
             rows.append(f'<li>{self._av(ev["actor"])}<div class="body"><div><b>{e(self.member_name(ev["actor"]))}</b> '
                         f'{e(ev["action"].replace(".", " "))}{signed}</div><div class="meta">'
@@ -1445,7 +1456,9 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             if st["state"] == "done" and isinstance(out, dict):
                 ok, missing = viewer.step_visible(wf, s.id)
                 if ok:
-                    shown = {k: v for k, v in out.items() if k not in ("by", "by_kind", "event")}
+                    shown = {k: v for k, v in out.items() if k not in ("by", "by_kind", "event", "signature")}
+                    if out.get("by_kind") == "agent" and s.kind == "gate":
+                        shown = {"decided by": f"{self.member_name(out['by'])} (an agent)", **shown}
                     detail = f"<details><summary class='muted'>result</summary>{self._values(shown)}</details>"
                 else:
                     detail = f'<div class="muted">result needs access to: {e(", ".join(missing))}</div>'
@@ -1995,7 +2008,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
     def _confirm_signer(self, req, f) -> None:
         """A signature is made with the signer's own credential, given for it: on a page, their passphrase typed again;
         over the API, the call's ``Authorization: Bearer`` (sent with that request, never ambient like a cookie).
-        Agents never sign: the engine refuses them whatever they send."""
+        Agents never sign: the engine records their decisions as proposals or attestations, whatever they send."""
         given = str(f.get("passphrase", "") or "")
         if (not given and req["path"].startswith("/api/")
                 and req.get("headers", {}).get("authorization", "").lower().startswith("bearer ")):
@@ -2044,6 +2057,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         subs = self.hub.search_records(me, st, limit=SHOWN + 1, text=q or None)  # in the store: none is missed
         more = len(subs) > SHOWN
         subs = subs[:SHOWN]
+        self.hub.note_list(me, subs, how="search" if q else "list", what=f"records:{st}", text=q or None)
         heads = list(self.hub.facts(subs[0]).keys()) if subs else []
         rows = "".join(f'<tr><td>{self.subject_link(f"{st}/{p["id"]}", self.hub.title(p))}</td>'
                        + "".join(f"<td>{self._fact(v)}</td>" for v in self.hub.facts(p).values()) + "</tr>"
@@ -2145,12 +2159,14 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         raise Redirect(f"/runs/{rid}")
 
     def _events(self, events, me) -> str:
-        rows = []
+        rows, who = [], {}
         for ev in Viewer(self.hub, me).events(events):
-            signed = ' <span class="badge signed">signed</span>' if ev.get("signature") else ""
-            data = {k: v for k, v in ev["data"].items() if k != "signed"}
+            if ev["actor"] not in who:  # one look-up per member on the page, not one per event
+                who[ev["actor"]] = self.who(ev["actor"])
+            signed = self._signed_badge(ev)
+            data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             rows.append(f'<tr><td><a href="/track/{ev["seq"]}">#{ev["seq"]}</a></td>'
-                        f'<td class="muted">{e(ev["at"][11:19])}</td><td>{self.who(ev["actor"])}</td>'
+                        f'<td class="muted">{e(ev["at"][11:19])}</td><td>{who[ev["actor"]]}</td>'
                         f'<td>{e(ev["action"])}{signed}</td><td>{e(ev["subject"])}</td>'
                         f'<td class="muted">{"#" + str(ev["cause"]) if ev["cause"] else ""}</td>'
                         f'<td><details><summary>data</summary><pre>{e(json.dumps(data, indent=1))}</pre></details></td></tr>')
@@ -2635,10 +2651,26 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                   f'signature valid.{checked}</div>' if v["ok"] else
                   '<div class="error"><p>The track does not verify:</p><ul>'
                   + "".join(f"<li>{e(p)}</li>" for p in v["problems"]) + "</ul></div>")
-        actor = req["query"].get("actor")
+        q = req["query"]
+        actor = q.get("actor")
+        flt: dict = {"actor": actor} if actor else {}
+        before = int(q["before"]) if str(q.get("before") or "").isdigit() else None
+        if before:
+            flt["seq"] = {"$lt": before}
+        page = self.hub.db.events.find(flt, sort=[("seq", -1)], limit=self.TRACK_PAGE + 1)  # one page, by index
+        more, page = len(page) > self.TRACK_PAGE, page[:self.TRACK_PAGE]
+        nav = []
+        if before:
+            nav.append(f'<a href="/track{"?actor=" + urllib.parse.quote(actor) if actor else ""}">Newest</a>')
+        if more:
+            nav.append(f'<a href="/track?{"actor=" + urllib.parse.quote(actor) + "&" if actor else ""}'
+                       f'before={page[-1]["seq"]}">Older events</a>')
+        nav_html = f'<p class="muted">{" · ".join(nav)}</p>' if nav else ""
         return self.layout(req, "Track", banner + "<p class='muted'>Every action, by whom, and what caused it. Open an "
                            "event to see its whole chain of causes. <a href='/access'>Who accessed a file</a></p>"
-                           + self._events(self.hub.track.list(actor=actor, limit=300), req["me"]))
+                           + self._events(page, req["me"]) + nav_html)
+
+    TRACK_PAGE = 100  # events on one page of the track
 
     def page_access(self, req):
         """Who saw or changed a subject's file: the privacy officer's report, on screen or as CSV."""
@@ -2721,6 +2753,11 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             raise NotFound(f"there is no event {seq}")
         last = chain[-1]
         sig = ""
+        att = (last.get("data") or {}).get("attested")
+        if att and not last.get("signature"):
+            sig = (f'<div class="muted">Decided by {self.who(att.get("agent") or last["actor"])} (an agent) at '
+                   f'{e(last["at"])}: “{e(str(att.get("meaning", "")))}”. This is the agent\'s attested decision, '
+                   f'not a signature: agents never sign.</div>')
         if last.get("signature"):
             okay = self.hub.track.verify_signature(last)
             signed = last["data"].get("signed", {})

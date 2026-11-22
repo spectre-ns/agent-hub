@@ -77,7 +77,13 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
     item goes to people with the sponsor's reason.
 - **Clinicians sign; agents never do.** A gate with `signer = "person"` is never decided by an agent, even an agent
   holding the physician role. A gate with `signer = "any"` may be decided by an agent only while its
-  `agent_criteria` holds.
+  `agent_criteria` holds. The engine (not the caller) makes an agent's decision one of two things, and neither is a
+  signature, whichever way the agent calls (the API, the agent runner or MCP):
+  - a *proposal*, when the step is high risk or the agent calls over MCP: it waits for the sponsor, whose approval is
+    their own signature on that decision (and on the record it is about);
+  - an *attestation*, for a routine decision the workflow allows (a low-risk claim under the criteria): the agent's
+    own action on the track (`gate.decided` with `data.attested`, no signature), shown as "decided by <agent> (an
+    agent)". It never appears among a record's signatures.
 - **A person signs with their passphrase.** Each signature, on a decision, an approval or a record, asks again for
   the signer's passphrase. A passphrase is stored only as a salted scrypt hash and is never in the track. After five
   failed attempts in 15 minutes (signing in, signing, or a setup code), that member is locked out for 15 minutes.
@@ -382,7 +388,7 @@ Authority stays in the hub. A call uses the same methods as the pages and the AP
 `by`, required fields and eligibility. It is recorded on the track as `mcp.called` (how `mcp`, the server and the
 tool), and it is the cause of whatever it changed. A refusal is a tool result with `isError` and the hub's reason.
 Nothing signs: there is no signature tool, and an agent's `propose_decision` waits for its sponsor to approve and sign
-it. Moves that put a record into force are not offered to agents and are refused if called. Arguments are data,
+it (the engine also refuses a signature from any agent, on any path). Moves that put a record into force are not offered to agents and are refused if called. Arguments are data,
 checked against the schema and never evaluated.
 
 The `Origin` header is checked: another site gets a 403 (allow more with `PRACTICEHUB_MCP_ORIGINS`). A member's token

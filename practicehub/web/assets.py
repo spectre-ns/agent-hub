@@ -1762,7 +1762,7 @@ function editor(root) {
       put(el("fieldset", {}, el("legend", {}, "Decision and signature"),
         csv("Outcomes", s, "outcomes", { placeholder: "approve, decline" }),
         text("Meaning of the signature", s, "meaning", { placeholder: "I have reviewed this and I am responsible for it" }),
-        select("Who may sign", s, "signer", [["person", "a person only"], ["any", "a person, or an agent within criteria"]], { rebuild: true }),
+        select("Who may decide", s, "signer", [["person", "a person only, who signs"], ["any", "a person, or an agent within criteria (an agent attests, never signs)"]], { rebuild: true }),
         s.signer === "any" ? text("Agents may decide only when", s, "agent_criteria", { placeholder: "e.g. code.amount <= 80" }) : null));
     }
     if (s.kind === "task" && blk) {
