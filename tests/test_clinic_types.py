@@ -96,11 +96,6 @@ def test_every_clinic_type_says_what_it_is():
             assert any(lc["initial"] in t["from"] for t in lc["transition"]), f"{rt.id}: nothing leaves the start"
 
 
-# The core's forms edit a reference only at the top of a record (subject, author.*), not one inside a list
-# (participant.0.actor): records_pages._editable leaves those out. Until it edits them, the pickers below are missing.
-CORE_GAP = "core: a form does not edit a reference inside a list (records_pages._editable)"
-
-
 def _nested_ref(f) -> bool:
     return f["type"] == "reference" and "." in f["path"].removesuffix(".*")
 
@@ -118,13 +113,10 @@ def test_a_create_form_is_plain_inputs_and_starts_the_record(clinic, rtype):
     form = page.split('id="new"', 1)[1].split("</form>", 1)[0]
     assert 'class="mono"' not in form and "<small>JSON</small>" not in form  # nothing typed as JSON
     shown = [n for t in rt.screen("create") for n in t["fields"]]
-    nested = {rt.field(n)["path"] for n in shown if _nested_ref(rt.field(n))}
-    sent = {k: v for k, v in sent.items() if k not in nested}  # no picker for these yet (CORE_GAP)
     for name in shown:
         f = rt.field(name)
         assert not f["advanced"] and f["type"] not in ("object", "json"), f"{rtype}.{name}"
-        if f["path"] not in nested:
-            assert f'name="{f["path"].removesuffix(".*")}"' in form, f"{rtype}: {name} is not on the form"
+        assert f'name="{f["path"].removesuffix(".*")}"' in form, f"{rtype}: {name} is not on the form"
     for key in sent:
         assert f'name="{key}"' in form, f"{rtype}: {key} is not on the form"
     if rt.lifecycle:
@@ -138,8 +130,6 @@ def test_a_create_form_is_plain_inputs_and_starts_the_record(clinic, rtype):
     rec = recs[0]
     assert patient in str(rec)
     for path, want in LANDS[rtype]:
-        if any(path.startswith(q) for q in nested):
-            continue
         assert schema.first(rec, path) == want, f"{rtype}.{path}: {schema.first(rec, path)!r}"
     if rtype in STARTS:
         assert rec["status"] == STARTS[rtype]
@@ -149,14 +139,15 @@ NESTED = [("Encounter", "practitioner"),
           ("Immunization", "given_by"), ("MedicationRequest", "priorPrescription")]
 
 
-@pytest.mark.xfail(strict=True, reason=CORE_GAP)
 @pytest.mark.parametrize("rtype,name", NESTED)
 def test_a_reference_inside_a_list_is_a_picker(clinic, rtype, name):
     hub, base, patient, visit = clinic
     who = FORMS[rtype][0]
-    f = hub.record_type(rtype).field(name)
+    rt = hub.record_type(rtype)
+    f = rt.field(name)
     assert _nested_ref(f)
-    form = call(base, "GET", f"/records/{rtype}/new", token(hub, who))[1]
+    own = "?" + urllib.parse.urlencode({rt.field(rt.part_of["field"])["path"]: patient}) if rt.part_of else ""
+    form = call(base, "GET", f"/records/{rtype}/new{own}", token(hub, who))[1]
     assert f'<select name="{f["path"]}"' in form or f'<input name="{f["path"]}"' in form
 
 
@@ -176,3 +167,71 @@ def test_a_nurse_checks_a_patient_in(clinic):
     for st in ("arrived", "triaged", "in-progress", "finished"):
         hub.update_record(noor, ref, {"status": st})
     assert hub.records.read("Encounter", visit["id"])["status"] == "finished"
+
+
+def test_a_reference_inside_a_list_is_edited_in_place_and_read_as_a_link(clinic):
+    """participant.0.individual: the form shows who it is now, a change keeps the entry's other keys and the
+    {reference} shape, and the record reads it as a link."""
+    hub, base, patient, visit = clinic
+    rec = hub.records.create("Encounter", {"status": "planned", "subject": {"reference": patient},
+                                           "plannedStartDate": "2030-01-07T09:00", "participant": [
+        {"type": [{"text": "primary performer"}], "individual": {"reference": "Practitioner/dr-amara"}}]})
+    url = f"/records/Encounter/{rec['id']}"
+    noor = token(hub, "noor")
+    form = call(base, "GET", f"{url}?edit=1", noor)[1].split('id="edit"', 1)[1].split("</form>", 1)[0]
+    pick = form.split('name="participant.0.individual"', 1)[1].split("</select>", 1)[0]
+    assert '<option value="Practitioner/dr-amara" selected>' in pick and "Practitioner/dr-liam" in pick
+    code, body = call(base, "POST", f"{url}/edit", noor, form={"_version": str(rec["meta"]["versionId"]),
+                                                               "participant.0.individual": "Practitioner/dr-liam"})
+    assert code == 303, body
+    after = hub.records.read("Encounter", rec["id"])
+    assert after["participant"] == [{"type": [{"text": "primary performer"}],
+                                     "individual": {"reference": "Practitioner/dr-liam"}}]
+    assert after["subject"] == {"reference": patient}  # what the form did not send is kept
+    page = call(base, "GET", url, noor)[1]
+    assert "Liam" in page.split("Physician", 1)[1].split("</tr>", 1)[0]
+
+
+def test_a_nested_picker_past_the_list_is_typed_and_found_when_saved(clinic, monkeypatch):
+    """Past PICK records a nested reference is a search box: a typed name is found on save, and a name two records
+    share is refused, not guessed."""
+    from practicehub.web import records_pages
+    hub, base, patient, visit = clinic
+    monkeypatch.setattr(records_pages, "PICK", 3)
+    mk = lambda med: hub.records.create("MedicationRequest", {
+        "status": "active", "intent": "order", "subject": {"reference": patient},
+        "medicationCodeableConcept": {"text": med}})
+    old = mk("Metformin 500 mg")
+    for med in ("Ramipril 5 mg", "Ramipril 5 mg", "Amlodipine 5 mg", "Atorvastatin 20 mg"):
+        mk(med)
+    amara = token(hub, "dr-amara")
+    form = call(base, "GET", "/records/MedicationRequest/new", amara)[1].split('id="new"', 1)[1]
+    assert '<input name="priorPrescription.reference"' in form and 'list="dl-' in form
+    sent = {"subject": patient, "medicationCodeableConcept.text": "Metformin 1000 mg", "intent": "order"}
+    code, body = call(base, "POST", "/records/MedicationRequest", amara,
+                      form={**sent, "priorPrescription.reference": "Ramipril 5 mg"})
+    assert code == 422 and "2 records are called" in body, body
+    code, body = call(base, "POST", "/records/MedicationRequest", amara,
+                      form={**sent, "priorPrescription.reference": "Metformin 500 mg"})
+    assert code in (200, 303), body
+    new = next(r for r in hub.records.search("MedicationRequest")
+               if (r.get("medicationCodeableConcept") or {}).get("text") == "Metformin 1000 mg")
+    assert new["priorPrescription"] == {"reference": f"MedicationRequest/{old['id']}"}
+    page = call(base, "GET", f"/records/MedicationRequest/{new['id']}", amara)[1]
+    assert f'href="/records/MedicationRequest/{old["id"]}"' in page
+
+
+def test_a_part_page_lights_its_owner_in_the_sidebar(clinic):
+    hub, base, patient, visit = clinic
+    allergy = hub.records.create("AllergyIntolerance", {"patient": {"reference": patient},
+                                                        "code": {"text": "Penicillin"}})
+    owners = f'/{hub.pack.subject["path"]}'
+    amara = token(hub, "dr-amara")
+    lit = lambda page: page.split('class="nav on" href="', 1)[1].split('"', 1)[0]
+    assert lit(call(base, "GET", f"/records/AllergyIntolerance/{allergy['id']}", amara)[1]) == owners
+    q = urllib.parse.urlencode({"patient": patient})
+    assert lit(call(base, "GET", f"/records/AllergyIntolerance/new?{q}", amara)[1]) == owners
+    note = hub.records.create("Composition", {"status": "preliminary", "title": "Call", "subject": {"reference": patient},
+                                              "encounter": {"reference": visit}})
+    page = call(base, "GET", f"/records/Composition/{note['id']}", amara)[1]  # a visit's note: lit as the visit is
+    assert lit(page) == lit(call(base, "GET", f"/records/{visit}", amara)[1]) != "/records"

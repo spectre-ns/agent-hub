@@ -13,14 +13,12 @@ import re
 import urllib.parse
 
 from .. import pack as packmod
+from .. import export as exportmod
 from .. import schema
 from ..hub import Conflict, HubError, Denied, Invalid
 
 e = html.escape
-SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?")  # a field a form can edit: a top-level key, or a list of them
-# or one plain value inside a structure, by keys and list positions (name.0.given.0, telecom.0.value)
-NESTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.([0-9]+|[A-Za-z_][A-Za-z0-9_]*))+")
-SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "boolean")
+SIMPLE, NESTED, SCALAR = schema.FORM_SIMPLE, schema.FORM_NESTED, schema.SCALAR  # what a form can edit
 # shown in the browser; anything else is downloaded. Every file is served sandboxed, with no scripts.
 INLINE = {"application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain"}
 
@@ -100,6 +98,8 @@ class RecordPages:
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)", self.post_record_create)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/new", self.page_record_new)
         R("GET", r"/create", self.page_create)
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/export", self.page_export_list)  # before a record's own page
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/export", self.page_export_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)", self.page_record)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>edit|move|sign)", self.post_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/move", self.page_move)
@@ -115,6 +115,108 @@ class RecordPages:
         R("POST", r"/modules", self.post_module)
         R("GET", r"/modules/(?P<mid>[a-z][a-z0-9-]*)", self.page_module)
         R("POST", r"/modules/(?P<mid>[a-z][a-z0-9-]*)/(?P<verb>upgrade|remove|review-code)", self.post_module_verb)
+
+    # ------------------------------------------------------------------------------------------ export
+    # Each is a small dialog (``data-modal``) listing the formats in plain words; choosing one downloads the file
+    # (``?format=``). What goes out is a read on the track, as opening it is (practicehub/export.py).
+    def _export_pick(self, items: list[tuple[str, str, str]]) -> str:
+        """``items``: (href, format, hint). The print view opens in a tab of its own, the rest download."""
+        out = []
+        for href, fmt, hint in items:
+            label, _, ext, what = exportmod.FORMATS[fmt]
+            how = ' target="_blank" rel="noopener"' if fmt == "print" else " download"
+            out.append(f'<li><a href="{e(href)}"{how} data-export="{e(fmt)}"><b>{e(label)}</b>'
+                       f'<span class="muted">{e(hint or what)}</span></a></li>')
+        return f'<ul class="pick">{"".join(out)}</ul>'
+
+    def _export_page(self, req, title: str, intro: str, picks: str, crumbs, note: str = "") -> str:
+        body = (f'<div data-modal-body><p>{intro}</p>{picks}'
+                + (f'<p class="muted" role="note">{e(note)}</p>' if note else "")
+                + '<p class="muted">Each record in the file is recorded as read by you, as opening it is. Keep the '
+                  'file as safely as the record itself.</p></div>')
+        return self.layout(req, title, body, crumbs=crumbs)
+
+    @staticmethod
+    def _download(x) -> Download:
+        return Download((x.headers(), x.body))
+
+    def _format(self, req) -> str | None:
+        return (req["query"].get("format") or "").strip().lower() or None
+
+    def page_export_record(self, req, rtype, rid):
+        me, hub = req["me"], self.hub
+        ref = f"{rtype}/{rid}"
+        fmt = self._format(req)
+        if fmt:
+            return self._download(exportmod.record(hub, me, ref, fmt))
+        rt = hub.record_type(rtype)
+        if not rt or rtype in hub.member_types():
+            raise NotFound(f"there is no {ref}")
+        hub.require(me, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
+        rec = hub.records.read(rtype, rid)
+        if not rec:
+            raise NotFound(f"there is no {ref}")
+        base = f"/records/{rtype}/{urllib.parse.quote(rid)}/export?format="
+        hints = {"json": "This kind of record is not a FHIR resource: its fields as JSON, for another system"}
+        picks = self._export_pick([(base + f, f, hints.get(f, "")) for f in exportmod.offered(hub, rtype, "record")])
+        return self._export_page(req, "Export", f"Export <b>{e(hub.title(rec))}</b> ({e(self._lower(rt.label))}):",
+                                 picks, [("/records", "Records"), (f"/records/{rtype}", rt.plural),
+                                         (self.record_href(ref), hub.title(rec)), (None, "Export")])
+
+    def page_export_list(self, req, rtype):
+        me, hub, q = req["me"], self.hub, req["query"]
+        from .server import SHOWN
+        text = (q.get("q") or "").lower() or None
+        every = q.get("all") in ("1", "true", "yes")
+        fmt = self._format(req)
+        if fmt:
+            return self._download(exportmod.records_list(hub, me, rtype, fmt, text=text, limit=SHOWN, every=every))
+        rt = hub.record_type(rtype)
+        if not rt or rt.abstract or rtype in hub.member_types():
+            raise NotFound(f"there is no record type {rtype}")
+        hub.require(me, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
+        n = len(hub.records.search(rtype, limit=SHOWN, text=text))
+        qs = f"q={urllib.parse.quote(text)}&" if text else ""
+        fmts = exportmod.offered(hub, rtype, "list")
+        hints = {"ndjson": "One FHIR resource a line, for another clinic's system (FHIR Bulk Data)"}
+        what = (f'the {n} {e(self._lower(rt.plural if n != 1 else rt.label))} matching “{e(text)}”' if text
+                else f'the {n} {e(self._lower(rt.plural if n != 1 else rt.label))} this list shows')
+        picks = self._export_pick([(f"/records/{rtype}/export?{qs}format={f}", f, hints.get(f, "")) for f in fmts])
+        if hub.is_policy_owner(me):  # a bulk export: every record of the type, for the privacy officer
+            total = hub.db.records.count({"type": rtype})
+            picks += (f'<h2 class="pick-head">Every {e(self._lower(rt.label))} record ({total})</h2>'
+                      f'<p class="muted">A bulk export, which a policy owner may make. It is recorded as one.</p>'
+                      + self._export_pick([(f"/records/{rtype}/export?all=1&format={f}", f, hints.get(f, ""))
+                                           for f in fmts if f != "print"]))
+        return self._export_page(req, f"Export {self._lower(rt.plural)}", f"Export {what}, with the list's columns, "
+                                 "id, status and dates:", picks,
+                                 [("/records", "Records"), (f"/records/{rtype}", rt.plural), (None, "Export")])
+
+    def page_export_subject(self, req, pid):
+        """A subject's whole file: what a person asks for under PHIA, or what goes to the clinic taking over care."""
+        me, hub = req["me"], self.hub
+        st = self.subj["type"]
+        ref = f"{st}/{pid}"
+        fmt = self._format(req)
+        if fmt:
+            return self._download(exportmod.subject_file(hub, me, ref, fmt))
+        recs, hidden = exportmod.gather(hub, me, ref)
+        word = self.subj["label"].lower()
+        base = f"/{self.subj['path']}/{urllib.parse.quote(pid)}/export?format="
+        others = sum(1 for r in recs if not exportmod.is_fhir(hub.record_type(r["resourceType"])))
+        hints = {"fhir": f"A FHIR Bundle of the whole file, for the clinic taking over care"
+                         + (f" ({others} record{'s' if others != 1 else ''} of other kinds go in the document only)"
+                            if others else ""),
+                 "odt": "Every record's fields as a labelled table, to give to the person who asked",
+                 "json": "The whole file as JSON, for another system"}
+        picks = self._export_pick([(base + f, f, hints.get(f, "")) for f in exportmod.offered(hub, st, "file")])
+        name = hub.title(recs[0])
+        return self._export_page(req, f"Export this {word}'s file",
+                                 f"The whole file of <b>{e(name)}</b>: {len(recs)} record{'s' if len(recs) != 1 else ''}"
+                                 f" — the {e(word)}, what is part of the file and what links to it.", picks,
+                                 [(f"/{self.subj['path']}", self.subj["plural"]),
+                                  (f"/{self.subj['path']}/{pid}", name), (None, "Export")],
+                                 note=exportmod.left_out_words(hidden))
 
     # ------------------------------------------------------------------------------------------ helpers
     @staticmethod
@@ -208,11 +310,7 @@ class RecordPages:
 
     @staticmethod
     def _editable(rt) -> list[dict]:
-        return [f for f in rt.fields if (SIMPLE.fullmatch(f["path"]) or (NESTED.fullmatch(f["path"])
-                                                                          and f["type"] in SCALAR))
-                and f.get("show", True) is not False and f.get("by") != "workflow"
-                and f["type"] != "attachment" and not (rt.lifecycle and f["path"] == rt.lifecycle["path"])
-                and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields))]
+        return schema.form_fields(rt)
 
     def _value_html(self, f, rec) -> str:
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "", [], {})]
@@ -267,7 +365,8 @@ class RecordPages:
             size = a.get("size")
             kb = f' <span class="muted">{max(1, round(size / 1024))} KB</span>' if isinstance(size, int) else ""
             href = f"/records/{urllib.parse.quote(str(rec.get('resourceType', '')))}/{urllib.parse.quote(rec['id'])}/files/{a['blob']}"
-            return f'<a href="{e(href)}">{e(name)}</a>{kb}'
+            office = self.office_buttons(rec, a) if hasattr(self, "office_buttons") else ""  # Collabora, if set up
+            return f'<a href="{e(href)}">{e(name)}</a>{kb}{office}'
         url = str(a.get("url") or "")
         if re.match(r"https?://", url):
             return f'<a href="{e(url)}" rel="noopener noreferrer">{e(name if a.get("name") else url)}</a>'
@@ -576,6 +675,11 @@ class RecordPages:
                 current = {top: data[top]} if top in data else (before or {})
                 where = schema.locate(current, key, f.get("with"))
                 old = schema.first(before or {}, schema.locate(before or {}, key, f.get("with")))
+                if f["type"] == "reference":  # one inside a list or object (participant.0.actor): sent as Type/id
+                    if val == schema.ref_of(old):
+                        continue
+                    if isinstance(old, dict) and val:  # kept in the shape the record holds it in, display dropped
+                        val = {**{k: v for k, v in old.items() if k != "display"}, "reference": val}
                 if f["type"] == "datetime" and isinstance(old, str) and isinstance(val, str) and old.startswith(val):
                     continue  # the input shows minutes; an unchanged value keeps its seconds and zone
                 if val == old or (val in (None, "") and old in (None, "")):
@@ -631,10 +735,7 @@ class RecordPages:
         recs = hub.records.search(rtype, limit=SHOWN + 1, text=q or None)
         more, recs = len(recs) > SHOWN, recs[:SHOWN]
         lc = rt.lifecycle
-        heads = [f for f in self._editable(rt) if f["type"] in ("string", "choice", "date", "member", "number")][:3]
-        owner = self._owner_field(rt)  # a part: which record it is part of, first
-        if owner:
-            heads = [owner] + [f for f in heads if f is not owner][:2]
+        heads = schema.list_columns(rt)  # a part: which record it is part of, first; the export has the same
         rows = "".join(
             f'<tr><td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
             + (f'<td>{self._state_loz(schema.first(r, lc["path"]))}</td>' if lc else "")
@@ -654,9 +755,12 @@ class RecordPages:
                   f'<button class="secondary">Search</button></form>')
         note = (f"<p class='muted'>The {SHOWN} most recently changed are shown: search to find any other.</p>"
                 if more else "")
+        qs = f"?q={urllib.parse.quote(q)}" if q else ""
+        export = (f'<a class="btn secondary" href="/records/{e(rtype)}/export{e(qs)}" data-modal>Export</a>'
+                  if recs or hub.is_policy_owner(me) else "")
         return self.layout(req, rt.plural, search + table + note,
                            crumbs=[("/records", "Records"), (None, rt.plural)], subnav=self.navigator(me, rtype),
-                           actions=create)
+                           actions=export + create)
 
     def page_record_new(self, req, rtype, kept: dict | None = None, error: Exception | None = None):
         """A record type's create form, on its own: the Create dialog shows it over the page (``data-modal``), and
@@ -1100,13 +1204,14 @@ class RecordPages:
         refused = (f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>'
                    if editing and error else "")
         is_page = rt.layout == "page"
-        edit_btn = (f'<a class="btn primary" href="{url}?edit=1#edit" accesskey="e" aria-keyshortcuts="Alt+E">Edit</a>'
-                    if editable and not editing else "")
+        edit_btn = (f'<a class="btn secondary" href="{url}/export" data-modal>Export</a>' if not editing else "") + (
+            f'<a class="btn primary" href="{url}?edit=1#edit" accesskey="e" aria-keyshortcuts="Alt+E">Edit</a>'
+            if editable and not editing else "")
         if editable and not editing and rt.is_a("Booking") and schema.is_active(rt, rec):  # another time, member
             edit_btn = (f'<a class="btn secondary" href="{url}/reschedule" data-modal>Move</a>' + edit_btn)
         rail: list = []
         if tab == "details":
-            used = hub.in_use_version(me, ref)
+            used = hub.in_use_version(me, ref) if not is_page else None  # a page says so in its banner
             if used:
                 d = used["data"]
                 body = "".join(f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, d)}</td></tr>"
@@ -1140,13 +1245,16 @@ class RecordPages:
                             + f'<label>File (up to {self.hub.MAX_FILE // (1024 * 1024)} MB) '
                               f'<input type="file" name="file" required></label>'
                               f'<button>Attach</button></form>')
+                if hasattr(self, "office_new_html"):  # a blank office document, when Collabora is set up
+                    main.append(self.office_new_html(rt, rec, files))
             if rt.parent and not editing:
                 kids = hub.children(me, ref)
                 add = (f' <a class="btn secondary" href="/records/{e(rtype)}/new?parent={e(urllib.parse.quote(ref))}" data-modal>'
                        f'Add {e(a_an(self._lower(rt.label)))} under this one</a>' if may_write else "")
                 main.append(f"<section class='children'><h2>Under this {e(self._lower(rt.label))}{add}</h2>" + (
                     "<ul class='plain'>" + "".join(
-                        f'<li><a href="{e(self.record_href(f"{rtype}/{k["id"]}"))}">{e(hub.title(k))}</a></li>'
+                        f'<li><a href="{e(self.record_href(f"{k["resourceType"]}/{k["id"]}"))}">{e(hub.title(k))}</a>'
+                        f'{self._kind_badge(rtype, k)}</li>'
                         for k in kids) + "</ul>" if kids else "<p class='muted'>Nothing yet.</p>") + "</section>")
             if not editing:  # what is part of it, then what links to it
                 sections, rail, hidden = self.owner_sections(me, ref) if not is_page else ("", [], 0)
@@ -1200,9 +1308,11 @@ class RecordPages:
         if not nav and tab == "details" and not editing and len(rail) >= 3:  # a few sections need no column
             nav = self.owner_rail(title, rail, label=rt.label)
         if is_page:
-            body = refused + self._page_body(req, rt, shown if editing else rec, main, prose, st, tab, editing,
-                                                      url, ver, moves_html, edit_btn, auto, sigs, cur, may_write)
-            above = [(self.record_href(f"{rtype}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
+            lp = self.live_parts(req, rt, rec, ref, st, tab, may_write, locked) if not editing else {}
+            body = refused + self._page_body(req, rt, shown if editing else lp.get("rec", rec), main, prose, st, tab,
+                                             editing, url, ver, moves_html, lp.get("edit") or edit_btn, auto, sigs,
+                                             cur, may_write, live=lp)
+            above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
             return self.layout(req, hub.title(rec), body, heading=not editing,
                                crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
                                                       (None, hub.title(rec))], subnav=nav, above=banner)
@@ -1234,7 +1344,7 @@ class RecordPages:
                            actions=edit_btn, above=banner)
 
     def _page_body(self, req, rt, rec, main, prose, st, tab, editing, url, ver, moves_html, edit_btn, auto, sigs, cur,
-                   may_write) -> str:
+                   may_write, live=None) -> str:
         """A type with ``layout = "page"``: its formatted text is the page. Above it, one bar holds what it is (status,
         its other fields, version, signatures) and what can be done (the sections, moves, Edit). Edit turns the page
         itself into its editor, where it stood, with Save and Cancel in the bar."""
@@ -1277,11 +1387,14 @@ class RecordPages:
                f'<div class="page-controls">{controls}</div></div>')
         if not editing:
             rest = main[1:]
+            live = live or {}
             if tab == "details":  # its text is the page; the other fields are in the bar
-                rest[1] = '<article class="page-body">' + "".join(
+                rest[1] = f'<article class="page-body"{live.get("article", "")}>' + "".join(
                     (f"<h2 class='prose-label'>{e(f['label'])}</h2>" if len(prose) > 1 else "")
                     + self._value_html(f, rec) for f in prose) + "</article>"
-            return bar + "".join(rest)
+                if live.get("side"):  # its comments beside it
+                    rest[1] = f'<div class="page-with-side">{rest[1]}{live["side"]}</div>'
+            return bar + live.get("banner", "") + "".join(rest) + live.get("after", "")
         fields = self._editable(rt)
         title_f = next((f for f in fields if f["name"] == "title"), None)
         texts = [f for f in fields if f["type"] == "markdown"]
@@ -1301,11 +1414,13 @@ class RecordPages:
         if not nav:
             return ""
         hub, label = self.hub, nav["label"]
-        link = lambda r: f"{rtype}/{r['id']}"
+        rtype = nav["type"]
+        link = lambda r: f"{r['resourceType']}/{r['id']}"
 
         def a(r, cls=""):
             here = ' aria-current="page"' if link(r) == ref else ""
-            return f'<a class="{cls}" href="{e(self.record_href(link(r)))}"{here}>{e(hub.title(r))}</a>'
+            return (f'<a class="{cls}" href="{e(self.record_href(link(r)))}"{here}>{e(hub.title(r))}'
+                    f'{self._kind_badge(rtype, r)}</a>')
         tops = "".join(f'<li>{a(r, "top")}</li>' for r in nav["tops"]) or '<li class="muted">None yet</li>'
         top = next((r for r in nav["tops"] if link(r) == nav["top"]), None)
         rows = nav["tree"]
@@ -1328,11 +1443,22 @@ class RecordPages:
             inner, _ = branch(0, 0)
             add = (f'<a class="btn subtle add" href="/records/{e(rtype)}/new?parent={e(urllib.parse.quote(nav["top"]))}" data-modal>'
                    f'+ Add under {e(hub.title(top))}</a>' if hub.may_write(me, rtype) else "")
+            add += "".join(f'<a class="btn subtle add" href="/records/{e(t)}/new?parent={e(urllib.parse.quote(nav["top"]))}"'
+                           f' data-modal>+ New {e(hub.record_type(t).label)}</a>'
+                           for t in hub.tree_types(rtype)[1:] if hub.may_write(me, t))
             pages = (f'<div class="sec">{e(hub.title(top))}</div>{add}'
                      + (f'<ul class="pagetree">{inner}</ul>' if inner else '<p class="muted">No pages under it yet.</p>'))
         return (f'<nav class="subnav" aria-label="{e(label)} and pages"><details class="spaces" '
                 f'{"" if top is not None else "open"}><summary class="sec">{e(label)}</summary><ul class="tops">{tops}'
                 f'</ul></details>{pages}</nav>')
+
+    def _kind_badge(self, rtype: str, r: dict) -> str:
+        """In a tree of several types, a record of another type than the tree's carries its type's name."""
+        t = r.get("resourceType")
+        if not t or t == rtype:
+            return ""
+        other = self.hub.record_type(t)
+        return f' <span class="kind-badge">{e(other.label if other else t)}</span>' if other else ""
 
     def _signatures_panel(self, me, rt, rec, ref, st, kept: dict | None = None, error: Exception | None = None) -> str:
         kept = kept or {}
@@ -1411,8 +1537,11 @@ class RecordPages:
                        if schema.get(v["data"], schema.locate(v["data"], f["path"], f.get("with")))
                        != schema.get(prev, schema.locate(prev, f["path"], f.get("with")))]
             via = f' · <a href="/runs/{e(v["run_id"])}">in a run</a>' if v.get("run_id") else ""
+            note = f'<br><span class="muted">{e(v["comment"])}</span>' if v.get("comment") else ""
+            cmp_ = (f' <a href="/records/{e(rt.id)}/{e(ref.split("/", 1)[1])}/compare?a={versions[i + 1]["version"]}'
+                    f'&amp;b={v["version"]}">Compare</a>') if i + 1 < len(versions) else ""
             rows.append(f'<tr><td>v{v["version"]}</td><td>{self.who(v["actor"]) if v["actor"] else ""}{via}</td>'
-                        f'<td>{e(", ".join(changed) or "—")}</td><td class="muted">{e(v["at"][:16].replace("T", " "))}</td>'
+                        f'<td>{e(", ".join(changed) or "—")}{note}{cmp_}</td><td class="muted">{e(v["at"][:16].replace("T", " "))}</td>'
                         f'<td><details><summary>record</summary><pre>{e(json.dumps(v["data"], indent=1))}</pre></details></td></tr>')
         out = ("<div class='tablewrap'><table><tr><th>Version</th><th>By</th><th>Changed</th><th>When</th><th><span class='visually-hidden'>Record</span></th></tr>"
                + "".join(rows) + "</table></div>") if rows else "<p class='muted'>No history.</p>"
@@ -1435,9 +1564,9 @@ class RecordPages:
         t = rt.transition(schema.first(rec, rt.lifecycle["path"]), req["query"].get("to", ""))
         if t is None or t["by"] == "workflow":
             raise Invalid(f"{a_an(rt.label.lower())} does not move there from here")
-        return self._move_page(req, rt, rec, t)
+        return self._move_page(req, rt, rec, t, back=self.safe_back(req["query"].get("_back")))
 
-    def _move_page(self, req, rt, rec, t, *, form: dict | None = None, problem: str = ""):
+    def _move_page(self, req, rt, rec, t, *, form: dict | None = None, problem: str = "", back: str = ""):
         me = req["me"]
         ref = f"{rt.id}/{rec['id']}"
         shown = rec
@@ -1458,8 +1587,9 @@ class RecordPages:
         body = (f'<div data-modal-body>{err}<p>{e(self.hub.title(rec))}: from {self._state_loz(st)} to {self._state_loz(t["to"])}.</p>'
                 f'<form method="post" action="/records/{e(rt.id)}/{e(rec["id"])}/move" class="card stack">'
                 f'<input type="hidden" name="to" value="{e(t["to"])}"><input type="hidden" name="_version" '
-                f'value="{ver}">{self._req_note(inputs)}{inputs}{comment}<div class="filters"><button class="primary">{e(t["label"])}</button>'
-                f'<a class="btn secondary" href="/records/{e(rt.id)}/{e(rec["id"])}" data-modal-close>Cancel</a></div>'
+                f'value="{ver}">' + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")
+                + f'{self._req_note(inputs)}{inputs}{comment}<div class="filters"><button class="primary">{e(t["label"])}</button>'
+                f'<a class="btn secondary" href="{e(back or f"/records/{rt.id}/{rec['id']}")}" data-modal-close>Cancel</a></div>'
                 f'</form></div>')
         return self.layout(req, t["label"], body, crumbs=[("/records", "Records"),
                                                           (f"/records/{rt.id}", rt.plural),
@@ -1492,18 +1622,25 @@ class RecordPages:
             st, to = schema.first(rec, rt.lifecycle["path"]), f.get("to", "")
             t = rt.transition(st, to)
             asked = t["fields"] if t else []
+            back = self.safe_back(f.get("_back"))  # from a board: back to it
+            if f.get("_ask") and t and t["by"] != "workflow" and (asked or t["comment"]):
+                # a board's Move to…: a move that asks for fields or a comment shows its screen first
+                q = urllib.parse.urlencode({"to": to, **({"_back": back} if back else {})})
+                raise self._redirect(f"/records/{rtype}/{rid}/move?{q}")
             try:
                 changes = self._from_form(rt, f, partial=True, before=rec, only=asked) if asked else {}
                 after = schema.put({**rec, **changes}, rt.lifecycle["path"], to)
                 hub.update_record(me, ref, after, comment=f.get("_comment") if t and t["comment"] else None,
                                   expected_version=f.get("_version") or None)
-            except Invalid as exc:
-                if not (t and (asked or t["comment"])):
+            except (Denied, Invalid) as exc:
+                if not (t and (asked or t["comment"])) or isinstance(exc, Denied):
+                    if back:  # from a board: why, in the dialog, the card back where it was
+                        raise self.refused_move(req, hub.title(rec), exc, back) from None
                     raise
                 from .server import Rendered  # the move's screen again, in the dialog, saying why
                 raise Rendered(409 if isinstance(exc, Conflict) else 422,
-                               self._move_page(req, rt, rec, t, form=f, problem=str(exc))) from None
-            raise self._redirect(f"/records/{rtype}/{rid}")
+                               self._move_page(req, rt, rec, t, form=f, problem=str(exc), back=back)) from None
+            raise self._redirect(back or f"/records/{rtype}/{rid}")
         try:
             self._confirm_signer(req, f)
             hub.sign_record(me, ref, f.get("meaning", ""), f.get("comment", ""), seen=f.get("seen") or "-")
@@ -1596,10 +1733,18 @@ class RecordPages:
                                    f"{max(4, 100 * n // top)}%'></span> {n}</td></tr>" for k, n in w["counts"].items())
                     out.append(f"<div class='section'>{head}<table class='chart'><tbody>{bars}</tbody></table></div>")
                     continue
+                groups, counts = w["groups"], w["counts"]
+                moving = self._board_moves(me, w)
+                if moving:  # a board of a lifecycle: every state is a column, in the lifecycle's order
+                    order = moving.states()
+                    groups = {k: groups.get(k, []) for k in order + [k for k in groups if k not in order]}
+                    counts = {k: counts.get(k, 0) for k in groups}
+                back = self.here(req)
                 cols = "".join(
-                    f'<section class="col" aria-label="{e(k)}"><header>{self._state_loz(k)}<span class="n">'
-                    f'{w["counts"][k]}</span></header>'
-                    + "".join(self._view_tile(w, r) for r in rows) + "</section>" for k, rows in w["groups"].items())
+                    f'<section class="col" data-col="{e(k)}" aria-label="{e(k)}"><header>{self._state_loz(k)}'
+                    f'<span class="n">{counts[k]}</span></header>'
+                    + "".join(self._view_tile(w, r, moving, back) for r in rows) + "</section>"
+                    for k, rows in groups.items())
                 out.append(f"<div class='section'>{head}<div class='board'>{cols or '<p class=muted>Nothing yet.</p>'}"
                            f"</div></div>")
             else:
@@ -1626,12 +1771,43 @@ class RecordPages:
         text = e("" if val is None else str(val))
         return f'<a href="{e(self._view_href(w, r))}">{text or e(r.get("id", ""))}</a>' if first else text
 
-    def _view_tile(self, w, r) -> str:
+    def _board_moves(self, me, w):
+        """The record type whose lifecycle a board widget shows (grouped by its state), when the member may move
+        its records; else None."""
+        if w["kind"] != "board" or w["source"] != "records":
+            return None
+        rt = self.hub.record_type(w["type"])
+        lc = rt.lifecycle if rt else None
+        if not lc or w["group_by"] not in (lc["path"], lc.get("field")) or not self._may_write(me, rt.id):
+            return None
+        return rt
+
+    def _record_moves(self, rt, rec) -> dict:
+        """Where a record's card may go: the moves its page offers a person (not those only a workflow makes);
+        one that asks for fields or a comment opens its transition screen."""
+        st = schema.first(rec, rt.lifecycle["path"])
+        out = {}
+        for t in rt.lifecycle.get("transition", []):
+            if t["by"] == "workflow" or t["to"] == st or not (st in t["from"] or "*" in t["from"]) or t["to"] in out:
+                continue
+            asks = bool(t["fields"] or t["comment"])
+            out[t["to"]] = {"how": "screen" if asks else "post", "label": t["to"] + ("…" if asks else ""),
+                            **({"href": f"/records/{rt.id}/{rec['id']}/move?"
+                                        + urllib.parse.urlencode({"to": t["to"]})} if asks else {})}
+        return out
+
+    def _view_tile(self, w, r, moving=None, back: str = "") -> str:
         cols = w["columns"] or [{"label": "Title", "path": "title"}]
         first = w["value"](r, cols[0]["path"])
         rest = " · ".join(str(x) for x in (w["value"](r, c["path"]) for c in cols[1:]) if x not in (None, ""))
-        return (f'<a class="tile" href="{e(self._view_href(w, r))}"><div class="t">{e(str(first or r.get("id", "")))}'
-                f'</div>' + (f'<div class="about">{e(rest)}</div>' if rest else "") + "</a>")
+        inner = (f'<div class="t">{e(str(first or r.get("id", "")))}</div>'
+                 + (f'<div class="about">{e(rest)}</div>' if rest else ""))
+        if not moving:
+            return self.board_card(inner, self._view_href(w, r), "", "", "", {}, "", {})
+        ver = str((r.get("meta") or {}).get("versionId", ""))
+        return self.board_card(inner, self._view_href(w, r), "", f"{moving.id}/{r['id']}", str(first or r["id"]),
+                               self._record_moves(moving, r), f"/records/{moving.id}/{r['id']}/move",
+                               {"_version": ver, "_back": back, "_ask": "1"})
 
     # ------------------------------------------------------------------------------------------ modules
     def page_modules(self, req):

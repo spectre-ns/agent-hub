@@ -3,6 +3,7 @@ id = "ChargeItem"
 label = "Charge"
 plural = "Charges"
 data_class = "billing"
+standard = "fhir-r4"
 strict = true
 date = "occurrenceDateTime"
 active = "record.status in ['planned', 'billable']"

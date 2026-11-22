@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tomllib
 
 from .. import blocks as blockmod
+from .. import export as exportmod
 from .. import schema
 from .. import workflows as wfmod
 from ..backends import engines
@@ -31,6 +32,9 @@ from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
 from .calendar_pages import CalendarPages
+from .mcp_pages import McpPages
+from .office_pages import OfficePages
+from .live_pages import LivePages
 from .records_pages import Download, RecordPages, a_an
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
@@ -65,7 +69,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, RecordPages, DefinitionPages):
+class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, McpPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -90,6 +94,9 @@ class App(CalendarPages, RecordPages, DefinitionPages):
         R("GET", r"/api/events", self.api_track)
         R("GET", r"/api/events/(?P<seq>\d+)/chain", self.api_chain)
         R("GET", r"/api/track/verify", self.api_verify)
+        # FHIR-style operations: a subject's whole file (Patient/<id>/$everything) and a bulk export (Type/$export)
+        R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)/(?:\$|%24)everything", self.api_everything)
+        R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?:\$|%24)export", self.api_export_list)
         R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)", self.api_record)
         R("POST", r"/api/records/(?P<rtype>[A-Za-z]+)", self.api_create_record)
         R("PATCH", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)", self.api_update_record)
@@ -122,11 +129,13 @@ class App(CalendarPages, RecordPages, DefinitionPages):
         R("POST", r"/me/passphrase", self.post_passphrase)
         R("GET", r"/", self.page_inbox)
         R("GET", r"/board", self.page_board)
+        R("POST", r"/board/move", self.post_board_move)
         R("GET", r"/items/(?P<iid>[\w-]+)", self.page_item)
         R("POST", r"/items/(?P<iid>[\w-]+)/(?P<verb>claim|complete|decide|release|ack|take-over)", self.post_item)
         R("GET", rf"/{sp}", self.page_subjects)
         R("POST", rf"/{sp}", self.post_subject)
         R("GET", rf"/{sp}/(?P<pid>[\w.-]+)", self.page_subject)
+        R("GET", rf"/{sp}/(?P<pid>[\w.-]+)/export", self.page_export_subject)
         R("GET", r"/runs", self.page_runs)
         R("GET", r"/start", self.page_start)
         R("POST", r"/start", self.post_start_any)
@@ -161,8 +170,11 @@ class App(CalendarPages, RecordPages, DefinitionPages):
         R("GET", r"/outbox", self.page_outbox)
         R("POST", r"/outbox/(?P<oid>\d+)/delivered", self.post_outbox_delivered)
         self.calendar_routes(R)
+        self.live_routes(R)
         self.record_routes(R)
         self.definition_routes(R)
+        self.office_routes(R)
+        self.mcp_routes(R)
 
     def route(self, method, pattern, fn, auth=True):
         self.routes.append((method, re.compile(pattern + r"/?$"), fn, auth))
@@ -175,6 +187,10 @@ class App(CalendarPages, RecordPages, DefinitionPages):
         req = {"method": method, "path": path, "query": query, "headers": headers, "body": body, "me": None}
         self._local.me = None
         try:
+            if path.startswith("/wopi/"):  # Collabora, with an access token of its own (office_pages, wopi.py)
+                return self.handle_wopi(method, raw_path, headers, body)
+            if path.startswith("/mcp/"):  # MCP servers, with a member's token (mcp_pages, mcp.py)
+                return self.handle_mcp(method, raw_path, headers, body)
             return self._dispatch(method, path, query, is_api, req, headers)
         except Exception:  # a bug is a 500 with no detail to the client; the traceback goes to stderr
             import traceback
@@ -368,7 +384,29 @@ class App(CalendarPages, RecordPages, DefinitionPages):
         return self.hub.verify(full=(req.get("query") or {}).get("full") in ("1", "true", "yes"))
 
     def api_record(self, req, rtype, rid):
+        """A record as the hub keeps it; ``?format=fhir`` (or json, odt, print) exports it (a read with how=export)."""
+        fmt = (req["query"].get("format") or "").lower()
+        if fmt:
+            x = exportmod.record(self.hub, req["me"], f"{rtype}/{rid}", fmt)
+            return Download((x.headers(), x.body))
         return self.hub.read_record(req["me"], f"{rtype}/{rid}")
+
+    def api_everything(self, req, rtype, rid):
+        """A subject's whole file, as FHIR's ``$everything``: a Bundle (type collection) of what the caller may read;
+        the records left out are counted in the X-Left-Out header. ``?format=`` json, odt or print instead."""
+        x = exportmod.subject_file(self.hub, req["me"], f"{rtype}/{rid}", (req["query"].get("format") or "fhir").lower())
+        return Download((x.headers(), x.body))
+
+    def api_export_list(self, req, rtype):
+        """A type's records: ``?format=`` ndjson (FHIR Bulk Data, the default for a FHIR type), csv or ods; ``_text``
+        searches; ``all=1`` is every record, a bulk export a policy owner may make."""
+        q = req["query"]
+        rt = self.hub.record_type(rtype)
+        fmt = (q.get("format") or q.get("_outputFormat") or ("ndjson" if exportmod.is_fhir(rt) else "csv")).lower()
+        fmt = {"application/fhir+ndjson": "ndjson", "text/csv": "csv"}.get(fmt, fmt)
+        x = exportmod.records_list(self.hub, req["me"], rtype, fmt, text=q.get("_text") or None, limit=SHOWN,
+                                   every=q.get("all") in ("1", "true", "yes"))
+        return Download((x.headers(), x.body))
 
     def api_update_record(self, req, rtype, rid):
         """Change a record. The ``If-Match`` header (or ``_version`` in the body) names the version the caller read;
@@ -496,7 +534,8 @@ class App(CalendarPages, RecordPages, DefinitionPages):
                  ("/define/types", "Record types", "what the practice keeps records of", "records"),
                  ("/define/views", "Views", "boards and tables of records", "board"),
                  ("/blocks", "Blocks", "reusable steps", "block"),
-                 ("/define/skills", "Skills", "what agents know how to do", "skill")]
+                 ("/define/skills", "Skills", "what agents know how to do", "skill"),
+                 ("/settings/connections", "Connections (MCP)", "servers agents and tools connect to", "module")]
         audit = ([("/track", "Track", "everything that happened, signed and chained", "track"),
                   ("/access", "Access report", "who may read and write what", "access")] if owner else [])
         if me and (owner or self.hub.can(me, "reader", "data_class:correspondence")):
@@ -660,8 +699,28 @@ class App(CalendarPages, RecordPages, DefinitionPages):
                 + item(f"/team/{me['id']}", "Your profile") + item("/me/settings", "Settings")
                 + '<div role="separator"></div>' + item("/logout", "Sign out") + '</div></div>')
 
-    def _sidebar(self, req, me) -> str:
+    def _nav_path(self, req, me) -> str:
+        """The page the sidebar lights a link for: a part's page (an allergy, a visit's note) is lit as its owner's,
+        up to the first owner that is not itself a part."""
         path = req["path"]
+        for _ in range(4):  # a part of a part of a part, at most
+            m = re.fullmatch(r"/records/([A-Za-z][A-Za-z0-9_]*)/(new|[A-Za-z0-9_.-]+)(/.*)?", path)
+            rt = self.hub.record_type(m.group(1)) if m else None
+            if not (rt and rt.part_of and me and self._may_read(me, rt.id)):
+                break
+            if m.group(2) == "new":  # adding a part from its owner's page: the owner is in the query
+                of = self._owner_field(rt)
+                owner = str(req["query"].get(of["name"]) or req["query"].get(of["path"]) or "") if of else ""
+            else:
+                rec = self.hub.records.read(rt.id, m.group(2))
+                owner = self.hub.owner_of(rec) if rec else None
+            if not owner or not schema.REF_TEXT.fullmatch(owner):
+                break
+            path = self.record_href(owner)
+        return path
+
+    def _sidebar(self, req, me) -> str:
+        path = self._nav_path(req, me)
         mine = [i for i in self.hub.engine.inbox(me) if i["kind"] != "notice"]
         sp = f'/{self.subj["path"]}'
         hrefs = ["/", "/board", "/runs", sp, "/schedule", "/records"] + [f"/records/{t}" for t in self.shortcuts(me)] \
@@ -805,8 +864,8 @@ class App(CalendarPages, RecordPages, DefinitionPages):
     def page_login(self, req):
         q = req["query"]
         if self.dev and q.get("as"):
-            nxt = q.get("next", "/")
-            nxt = nxt if nxt.startswith("/") and not nxt.startswith("//") and "\\" not in nxt else "/"
+            nxt = str(q.get("next") or "/")
+            nxt = nxt if re.fullmatch(r"/(?![/\\])[^\s\\]*", nxt) else "/"  # a page here, never another site
             raise Redirect(nxt, f"ph_as={urllib.parse.quote(q['as'])}; Path=/; HttpOnly; SameSite=Strict")
         dev = ""
         if self.dev:
@@ -926,8 +985,8 @@ class App(CalendarPages, RecordPages, DefinitionPages):
                 return "wait"
             return {"open": "todo", "claimed": "prog", "done": "done"}.get(it["status"], "todo")
 
-        cols = [("todo", "To do", ""), ("prog", "In progress", "prog"), ("wait", "Awaiting approval", "wait"),
-                ("done", "Done recently", "done")]
+        cols = self.BOARD_COLS
+        back = self.here(req)
 
         def lane_of(it):
             if group == "workflow":
@@ -947,8 +1006,8 @@ class App(CalendarPages, RecordPages, DefinitionPages):
                 out.append(f'<div class="lane">{e(titles.get(lane, lane))} <span class="badge">{len(its)}</span></div>')
             colhtml = []
             for cid, label, cls in cols:
-                tiles = [self._tile(i) for i in its if column(i) == cid]
-                colhtml.append(f'<section class="col" aria-label="{e(label)}"><header><span class="loz {cls}">{e(label)}'
+                tiles = [self._tile(i, self._item_moves(me, i), back) for i in its if column(i) == cid]
+                colhtml.append(f'<section class="col" data-col="{cid}" aria-label="{e(label)}"><header><span class="loz {cls}">{e(label)}'
                                f'</span><span class="n">{len(tiles)}</span></header>{"".join(tiles)}</section>')
             out.append(f'<div class="board">{"".join(colhtml)}</div>')
         if not items:
@@ -962,14 +1021,94 @@ class App(CalendarPages, RecordPages, DefinitionPages):
         return self.layout(req, "Board", filters + "".join(out), crumbs=[("/", "Practice"), ("", "Board")],
                            actions='<a class="btn secondary" href="/runs">All work</a>')
 
-    def _tile(self, it) -> str:
+    BOARD_COLS = [("todo", "To do", ""), ("prog", "In progress", "prog"), ("wait", "Awaiting approval", "wait"),
+                  ("done", "Done recently", "done")]
+
+    def _tile(self, it, moves: dict | None = None, back: str = "/board") -> str:
         flag = '<span class="badge person">people only</span>' if it["persons_only"] else ""
         note = f'<div class="why">{e(it["note"])}</div>' if it.get("note") and it["status"] != "done" else ""
         urgent = " urgent" if it.get("priority") == "urgent" else ""
-        return (f'<a class="tile{urgent}" href="/items/{e(it["id"])}"><div class="t">{e(it["title"])}'
-                f'{self._urgency(it)}</div>'
-                f'<div class="about">{e(it.get("run_title", ""))}</div>{note}<div class="foot">{self._ki(it["kind"])}'
-                f'<span class="key">{self._key(it["id"])}</span>{flag}{self._av(it["claimed_by"])}</div></a>')
+        inner = (f'<div class="t">{e(it["title"])}{self._urgency(it)}</div>'
+                 f'<div class="about">{e(it.get("run_title", ""))}</div>{note}<div class="foot">{self._ki(it["kind"])}'
+                 f'<span class="key">{self._key(it["id"])}</span>{flag}{self._av(it["claimed_by"])}</div>')
+        return self.board_card(inner, f'/items/{it["id"]}', urgent, it["id"], it["title"], moves or {},
+                               "/board/move", {"item": it["id"], "_back": back})
+
+    def _item_moves(self, me, it) -> dict:
+        """Where a work item's card may go on the board, by the item page's own buttons: Assign to me (to In
+        progress), Give it back (to To do), and its form (to Done, which asks for what the step needs)."""
+        if it["kind"] not in ("task", "gate") or it["status"] not in ("open", "claimed"):
+            return {}
+        if it["status"] == "claimed" and it["claimed_by"] != me["id"]:
+            return {}
+        if not self.hub.engine.eligibility(me, it)[0]:
+            return {}
+        screen = {"how": "screen", "href": f"/items/{it['id']}", "label": "Done…"}
+        if it["status"] == "open":
+            return {"prog": {"how": "post", "label": "In progress"}, "done": screen}
+        return {"todo": {"how": "post", "label": "To do"}, "done": screen}
+
+    @staticmethod
+    def here(req) -> str:
+        q = urllib.parse.urlencode(req["query"])
+        return req["path"] + (f"?{q}" if q else "")
+
+    @staticmethod
+    def safe_back(v) -> str:
+        """Where a board's form returns to: a path on this hub, never another site."""
+        v = v if isinstance(v, str) else ""
+        return v if v.startswith("/") and not v.startswith("//") and not any(c in v for c in "\\\r\n") else ""
+
+    def board_card(self, inner: str, href: str, cls: str, key: str, title: str, moves: dict, action: str,
+                   hidden: dict) -> str:
+        """A card on a board. One that may move is dragged to a column it may go to (``data-moves``: each column,
+        and whether it moves at once or asks first), or moved with its Move to… list, a plain form without the
+        script. The server decides: the card stays where it was until the move is accepted."""
+        card = f' data-card="{e(key)}"' if key else ""
+        if not moves:
+            return f'<a class="tile{cls}" href="{e(href)}"{card}>{inner}</a>'
+        opts = "".join(f'<option value="{e(c)}">{e(m["label"])}</option>' for c, m in moves.items())
+        fields = "".join(f'<input type="hidden" name="{e(k)}" value="{e(str(v))}">' for k, v in hidden.items())
+        return (f'<div class="tile movable{cls}" data-card="{e(key)}" data-moves="{e(json.dumps(moves))}" '
+                f'draggable="true"><a class="tile-link" href="{e(href)}" draggable="false">{inner}</a>'
+                f'<form method="post" action="{e(action)}" class="move-to">{fields}'
+                f'<select name="to" aria-label="Move {e(title)} to" required><option value="">Move to…</option>'
+                f'{opts}</select><button class="secondary">Move</button></form></div>')
+
+    def refused_move(self, req, what: str, exc: Exception, back: str):
+        """A move the server would not make: why, in the dialog over the board (a page without the script)."""
+        code = getattr(exc, "status", None) or (403 if isinstance(exc, Denied) else 422)
+        body = (f'<div data-modal-body><div class="flash error" role="alert"><p>{e(what)} was not moved: {e(str(exc))}'
+                f'</p></div><p><a class="btn secondary" href="{e(back)}" data-modal-close>Back to the board</a></p></div>')
+        return Rendered(code, self.layout(req, "Not moved", body))
+
+    def post_board_move(self, req):
+        """A card moved on the work board: the same engine call as the item page's button, or its form."""
+        me, eng = req["me"], self.hub.engine
+        f = self.form(req)
+        back = self.safe_back(f.get("_back")) or "/board"
+        iid, to = str(f.get("item") or ""), f.get("to", "")
+        item = eng.item(iid)
+        try:
+            if to == "done":
+                ok, why = eng.eligibility(me, item)
+                if not ok:
+                    raise Denied(why)
+                if item["kind"] not in ("task", "gate") or item["status"] not in ("open", "claimed"):
+                    raise Invalid("only work still to do is finished")
+                raise Redirect(f"/items/{iid}")  # what the step needs is asked on its page
+            if to == "prog":
+                if item["kind"] == "hold" or item["status"] != "open":
+                    raise Invalid("only work still to do is assigned")
+                eng.claim(me, iid)
+            elif to == "todo":
+                eng.release(me, iid, f.get("note", ""))
+            else:
+                raise Invalid({"wait": "an approval waits for its sponsor; work is not moved there"}.get(
+                    to, "pick a column it may go to"))
+        except (Denied, Invalid) as exc:
+            raise self.refused_move(req, item["title"], exc, back) from None
+        raise Redirect(back)
 
     # ------------------------------------------------------------------------------------------ all work (runs)
     def page_runs(self, req):
@@ -1059,7 +1198,7 @@ class App(CalendarPages, RecordPages, DefinitionPages):
                          self._field(f, [{"value": c, "label": c} for c in f["choices"]] if f.get("choices") else None,
                                      kept.get(f["name"])) for f in wf.inputs)
         err = f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>' if error else ""
-        body = (f'<div data-modal-body>{err}<p class="muted">{e(wf.summary.strip()[:300])}</p>'
+        body = (f'<div data-modal-body>{err}<p class="muted">{e(self._brief(wf.summary))}</p>'
                 f'<form method="post" action="/start" class="card stack"><input type="hidden" name="_workflow" '
                 f'value="{e(wf.id)}">{self._req_note(pick + fields)}{pick}{fields}<div class="filters">'
                 f'<button class="primary">Start</button>'
@@ -1067,6 +1206,16 @@ class App(CalendarPages, RecordPages, DefinitionPages):
                 f'Cancel</a>' + ("" if about else '<a class="btn subtle back" href="/start" data-modal>← Back</a>')
                 + '</div></form></div>')
         return self.layout(req, wf.title, body, crumbs=[("/", "Practice"), ("/start", "Start work"), ("", wf.title)])
+
+    @staticmethod
+    def _brief(text: str, limit: int = 300) -> str:
+        """A summary short enough to read above a form: whole sentences up to the limit, else whole words and "…"."""
+        text = " ".join(text.split())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        end = cut.rfind(". ")
+        return cut[:end + 1] if end > limit // 3 else cut.rsplit(" ", 1)[0] + "…"
 
     def _record_field(self, wf) -> dict:
         rt = self.hub.record_type(wf.record)
@@ -1193,7 +1342,7 @@ class App(CalendarPages, RecordPages, DefinitionPages):
                            f'<button>{"Take over" if item["escalated"] else "Reassign"}</button></form>')
         events = [ev for ev in self.hub.track.list(run_id=run["id"], limit=500) if ev["subject"] == f"item:{iid}"]
         main.append(f'<div class="section"><h2>Activity</h2>{self._activity(list(reversed(events)), me)}</div>')
-        body = f'<div class="issue"><div>{"".join(main)}</div>{details}</div>'
+        body = f'<div class="issue"><div data-modal-body>{"".join(main)}</div>{details}</div>'
         return self.layout(req, item["title"], body, crumbs=crumbs, actions=actions)
 
     def _work_form(self, me, item, iid, step, kept: dict | None = None) -> str:
@@ -1881,7 +2030,7 @@ class App(CalendarPages, RecordPages, DefinitionPages):
             kept = {k: v for k, v in f.items() if k not in ("passphrase", "credential", "seen")}
             code = 403 if isinstance(exc, Denied) else 422
             raise Rendered(code, self.page_item(req, iid, kept=kept, error=exc)) from None
-        raise Redirect(f"/runs/{item['run_id']}")
+        raise Redirect(self.safe_back(f.get("_back")) or f"/runs/{item['run_id']}")  # from the board: back to it
 
     # ------------------------------------------------------------------------------------------ subjects
     def subject_link(self, ref: str, text: str | None = None) -> str:
@@ -1967,9 +2116,12 @@ class App(CalendarPages, RecordPages, DefinitionPages):
         if chart["hidden"] or hidden:
             parts.append(f'<p class="muted">{max(chart["hidden"], hidden)} record(s) in classes you may not read are '
                          f'not shown.</p>')
+        word = self.subj["label"].lower()
+        tools = f'<a class="btn secondary" href="/{e(self.subj["path"])}/{e(pid)}/export" data-modal>Export this {e(word)}\'s file</a>'
         if self.hub.is_policy_owner(me):
-            parts.append(f'<p><a class="btn secondary" href="/access?subject={urllib.parse.quote(ref)}">'
-                         f'Who opened or changed this file</a></p>')
+            tools += (f'<a class="btn secondary" href="/access?subject={urllib.parse.quote(ref)}">'
+                      f'Who opened or changed this file</a>')
+        parts.insert(1, f'<div class="file-tools" role="group" aria-label="This file">{tools}</div>')
         runs = self.hub.engine.runs(record=ref)
         parts.append(f"<h2 id='work'>Work about this {e(self.subj['label'].lower())}</h2>" + (
             "<table>" + "".join(f'<tr><td><a href="/runs/{r["id"]}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
@@ -1977,7 +2129,7 @@ class App(CalendarPages, RecordPages, DefinitionPages):
             + "</table>" if runs else "<p class='muted'>None.</p>"))
         starts = self.start_buttons(me, st, ref)
         if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
-            parts.insert(1, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
+            parts.insert(2, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
         extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))]
         return self.layout(req, self.hub.title(p), "".join(parts), heading=False,
                            crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.title(p))],
@@ -2526,15 +2678,13 @@ class App(CalendarPages, RecordPages, DefinitionPages):
             buf = io.StringIO()
             w = csv.writer(buf)
             w.writerow(["when", "who", "name", "kind", "action", "record", "how", "event"])
-            def cell(v):  # a spreadsheet must not read a name as a formula
-                v = str(v if v is not None else "")
-                return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+            from ..export import csv_cell as cell  # a spreadsheet must not read a name as a formula
             for r in rows:
                 w.writerow([cell(r[k]) for k in ("at", "who", "name", "kind", "action", "record", "how", "seq")])
             name = re.sub(r"[^\w.-]", "_", subject)
             return ({"Content-Type": "text/csv; charset=utf-8",
                      "Content-Disposition": f'attachment; filename="access-{name}.csv"'}, buf.getvalue().encode())
-        what = {"record.viewed": "Opened", "created": "Created", "updated": "Changed", "transitioned": "Moved on",
+        what = {"record.viewed": "Opened", "exported": "Exported", "created": "Created", "updated": "Changed", "transitioned": "Moved on",
                 "signed": "Signed"}
         trs = "".join(f'<tr><td class="muted">{self._when(r["at"])}</td><td>{self.who(r["who"])}</td>'
                       f'<td>{e(what.get(r["action"].split(".")[-1], what.get(r["action"], self.human(r["action"]))))}'
@@ -2797,15 +2947,42 @@ meaning = "I approve this"
 
 
 # ================================================================================================== server
-def make_handler(app: App):
+def make_handler(app: App, only: str | None = None):
+    """``only``: a path prefix this listener serves, and nothing else (the WOPI listener Collabora reaches)."""
     class Handler(BaseHTTPRequestHandler):
         server_version = "PracticeHub"
 
+        def _chunked(self) -> bytes | None:
+            out = b""
+            while True:
+                line = self.rfile.readline(64)
+                try:
+                    size = int(line.split(b";", 1)[0].strip(), 16)
+                except ValueError:
+                    return None
+                if size == 0:
+                    while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
+                        pass
+                    return out
+                if len(out) + size > MAX_BODY:
+                    return None
+                out += self.rfile.read(size)
+                self.rfile.readline(4)
+
         def _do(self):
+            if only and not self.path.startswith(only):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             try:
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 n = -1
+            chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
+            body = self._chunked() if chunked else None
+            if chunked and body is None:
+                n = MAX_BODY + 1
             if n < 0 or n > MAX_BODY:  # refused before it is read: a request is never larger than a file and a form
                 self.send_response(413 if n > 0 else 400)
                 self.send_header("Content-Length", "0")
@@ -2813,7 +2990,8 @@ def make_handler(app: App):
                 self.end_headers()
                 self.close_connection = True
                 return
-            body = self.rfile.read(n) if n else b""
+            if not chunked:
+                body = self.rfile.read(n) if n else b""
             headers = {k.lower(): v for k, v in self.headers.items()}
             status, h, payload = app.handle(self.command, self.path, headers, body)
             self.send_response(status)
@@ -2833,10 +3011,20 @@ def make_handler(app: App):
     return Handler
 
 
-def serve(hub, host: str = "127.0.0.1", port: int = 8200, *, dev: bool = False, oidc=None) -> None:
+def serve(hub, host: str = "127.0.0.1", port: int = 8200, *, dev: bool = False, oidc=None,
+          wopi_hosts: tuple[str, ...] = ()) -> None:
+    """``wopi_hosts``: more addresses to listen on, on the same port, for Collabora's WOPI calls only (a docker
+    bridge address, say): nothing else, dev sign-in included, is served there."""
     if port in FORBIDDEN_PORTS:
         raise SystemExit(f"port {port} is reserved on this machine; pick another (default 8200)")
-    httpd = ThreadingHTTPServer((host, port), make_handler(App(hub, dev=dev, oidc=oidc)))
+    app = App(hub, dev=dev, oidc=oidc)
+    httpd = ThreadingHTTPServer((host, port), make_handler(app))
+    for extra in wopi_hosts:
+        side = ThreadingHTTPServer((extra, port), make_handler(app, only="/wopi/"))
+        threading.Thread(target=side.serve_forever, daemon=True).start()
+        print(f"WOPI (Collabora) on http://{extra}:{port}/wopi/")
+    from ..live import live_of
+    live_of(hub).start_sweeper()  # saves idle live sessions and lets go of editors who closed their tab
     print(f"Practice Hub on http://{host}:{port}/" + (" (dev sign-in on)" if dev else ""))
     try:
         httpd.serve_forever()

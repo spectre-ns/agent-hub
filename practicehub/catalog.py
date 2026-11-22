@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import tomllib
 
 from . import schema
 from . import views as viewmod
@@ -387,6 +388,22 @@ class CatalogMixin:
             return blockmod.parse(source, self.pack)
         return self._def_parse(kind, source, self)
 
+    def with_module_additions(self, kind: str, source: str) -> str:
+        """The practice's text for a definition with what modules added to the one in force put back after it;
+        Invalid if the text adds, changes, removes or redefines a module's additions (the practice owns its own text
+        only: a module's lines change with the module)."""
+        from .hub import Invalid
+        try:
+            did = tomllib.loads(schema.own_text(source)).get("id")
+        except (tomllib.TOMLDecodeError, AttributeError):
+            did = None
+        row = self.db[DEFINITIONS[kind][0]].find_one({DEFINITIONS[kind][1]: did, "status": "active"}) \
+            if isinstance(did, str) else None
+        out, problems = schema.keep_module_additions(source, row["source"] if row else None)
+        if problems:
+            raise Invalid(f"the {DEFINITIONS[kind][2]} would change what a module added", problems)
+        return out
+
     def propose(self, kind: str, actor: dict, source: str, note: str = "") -> dict:
         """Propose a version of a record type, view or skill. Agents may propose them (they are data, never code);
         only a person who is a policy owner, and not the author, approves."""
@@ -395,6 +412,7 @@ class CatalogMixin:
             raise Invalid(f"there is no kind of definition {kind!r}")
         if actor.get("status") != "active":
             raise Denied("an inactive member cannot propose changes")
+        source = self.with_module_additions(kind, source)
         try:
             d = self.check_definition(kind, source)
         except DefinitionError as exc:

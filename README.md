@@ -184,6 +184,34 @@ sealed marker, and from then on verify holds the track to the anchors again. Not
 Searches ignore accents and case: "cote" and "helene" find "Hélène Côté". Records are stored as written, with a folded copy for searching. On
 Medplum the hub matches every page of results itself.
 
+### Office documents
+
+Practice Hub can open office documents (ODF: .odt, .ods, .odp, .odg; and .docx, .xlsx, .pptx, plus .csv and .txt
+where Collabora offers them) in **Collabora Online**, so several people edit one document at the same time. It is
+optional and off until you point the hub at a Collabora server; nothing about it is bundled.
+
+- Set `PRACTICEHUB_COLLABORA_URL` (Collabora as browsers reach it), `PRACTICEHUB_WOPI_BASE` (the hub as Collabora
+  reaches it) and, if the hub must use another address, `PRACTICEHUB_COLLABORA_DISCOVERY_URL`. Collabora's
+  `aliasgroup1` names the WOPI base, so it opens files from this hub only. `docker compose --profile office`
+  runs one; for local work, `practicehub serve --wopi-host 172.17.0.1` also listens on the docker bridge, for
+  `/wopi/` calls only.
+- An office attachment gets **Open** and **Edit together**; a record with a free attachment field gets **New
+  document** (a blank text document, spreadsheet or presentation). The editor is a full page with the record's
+  title, a way back, and who has it open.
+- The hub is the WOPI host: files stay in its database, and Collabora holds a copy only while it is open. Every call
+  carries a 10-hour access token bound to the member, record, field and file, and is checked against the hub's own
+  rules; WOPI proof keys are verified (RSA-SHA256, standard library) whenever Collabora's discovery publishes them.
+- Autosaves are a working copy, not a version. Closing the document, or saving it, makes a new version of the record
+  whose history names everyone who edited. A working copy left an hour (Collabora gone without a final save) becomes a
+  version as its last editor. Collabora saves with the token of whoever changed the document last, so the names are
+  the people whose changes were saved; someone who typed but whose change reached the hub in another person's save
+  is not named.
+- A released document (a locked lifecycle state) opens read-only; Revise it first. A signed file saved again is a new
+  version, which is not signed, and the page says so.
+- Licensing: Collabora Online is MPL-2.0. The `collabora/code` image is CODE, the development edition, with a welcome
+  banner and limits on connections; for production, use a supported Collabora build or subscription. The practice
+  decides.
+
 ## Crafting workflows for your practice
 
 Open **Workflows → Create workflow**, or **Edit workflow** on an existing one. The editor draws the workflow as a
@@ -270,13 +298,106 @@ The wiki rests on three core features that any module can use:
     links to its practitioner, and the patient's page shows its visits from the other side.
 - **Links written in the text**: they become links like a reference field's, including links to a page created after
   the text that named it.
+- **Trees of several types:** a parent field may point at more than one type (`target = ["WikiPage", "Procedure"]`).
+  The types are then one tree, with one navigator, and the page of each says what kind of record its children are.
+
+### Writing together
+
+A markdown field with `live = true` is edited by several people at once, on the page itself.
+
+- **Who:** whoever may write the record edits it. The check runs on every change, so a grant taken away stops the next
+  keystroke. Whoever may only read it sees "Jo is editing" and the text as it is typed. A locked state refuses edits.
+- **Saving:** the record changes only at a checkpoint: when the last editor leaves, after two quiet minutes, or on
+  Done. Each checkpoint is one version whose comment names its editors ("Edited by Jo and Noor"). All of them count
+  as its authors, so a review that is "not by the record's editors" excludes each of them.
+- **Changes made elsewhere:** a change saved some other way while people are editing is merged in, not lost. This
+  covers a form, an import or a workflow.
+- **Comments:** anyone who may read the page may comment on it. There is no separate grant, because a comment changes
+  nothing the record says. A comment is made on words selected on the page, or on the whole page. It stays with its
+  words while they are there; once they are gone, it shows as "on text that was removed". A thread is resolved by the
+  person who started it, or by someone who may change the page. An `@id` in a comment records a mention.
+- **History:** any two versions can be compared word by word. "Restore" makes an old version's text the page's text
+  again, as a new version.
+- **Editor:**
+  - A `/` menu offers headings, lists, checklists, tables, code, callouts and links to pages.
+  - Markdown shortcuts work as you type: `[] ` starts a checklist item, a code fence closes itself, and Enter continues
+    a list.
+  - A paste keeps only what Markdown can say.
+- **Markdown:** the text may have checklists (`- [ ] to do`, `- [x] done`) and callouts (`> [!note]`, `tip`,
+  `warning`, `important`).
+
+The merging is operational transformation (`practicehub/ot.py`, mirrored in the page script) around one ordered log per
+field. The server keeps the order and transforms each change past those made since its sender last heard.
+
+### Mentions: people and agents
+
+Write `@` in a page or a comment and pick a member: people first, then agents (marked *agent*). The mention is kept as
+that member's reference with the record, the passage and the thread (`practicehub/mentions.py`; it knows nothing of
+wikis, so any record with text can use it). The member gets a notice in their inbox; an agent finds it in
+`/api/inbox`, reads what it was asked with `GET /api/items/<item>/context` (the record, the passage and the thread,
+asked again as that agent: only what its grants let it read), and answers with its own token:
+`POST /api/mentions/<id>/reply {"body"}`, or `POST /api/mentions/<id>/suggest {"field", "find", "text", "body"}` to
+propose a change. Its words show in the thread marked as an agent's; a suggestion changes nothing until a person who
+may change the record accepts it (saved as their change, "Accepted a suggestion from …") or rejects it. An agent that
+may not read the record is not offered in the list as one to pick, and a comment naming it is refused with why. Give an
+agent the wiki's `wiki-reader` role to let it answer there. The track has `mention.created`, `mention.refused`,
+`mention.answered` and `suggestion.proposed`/`accepted`/`rejected`. An agent never releases a SOP (the release is a
+person's signature) and never signs.
+
+### Released documents (SOPs)
+
+A lifecycle with `in_use = "<state>"` keeps a record's approved revision in use while a new one is written.
+
+- **Readers:** someone who may only read the record reads the version in use, under a banner saying a new revision is
+  being written.
+- **Writers:** someone who may write it switches between the version in use and the draft.
+- **Read and sign:** a `[[signature]]` with `readers = true` asks every reader to read and sign the version they read.
+  Its page says whether you signed it, and tells writers who has.
+- **Workflow dates:** a workflow template can count days, months and years (`{{run.today + 1y}}`,
+  `{{record.effective + 30d}}`). A scheduled workflow's `where` can use `run.today`.
+- **The wiki's SOPs:** each SOP is released by an approver who did not write it, and comes back for review a year after
+  it is released.
+
+## MCP
+
+Every installed module, the practice pack's own definitions, and each member's work are Model Context Protocol
+servers (JSON-RPC 2.0, revision 2025-06-18 and later, negotiated at `initialize`), over Streamable HTTP at
+`POST /mcp/<server>`:
+
+| server     | tools |
+|------------|-------|
+| `core`     | `list_inbox`, `read_item`, `claim_item`, `complete_item`, `release_item`, and for agents `propose_decision` |
+| `practice` | the pack's record types, workflows and views |
+| `<module>` | each installed module's (`/mcp/dms`, `/mcp/qms`, ...) |
+
+Tools are never written by hand. They are generated on every call from the approved, versioned definitions in force:
+`search_<type>`, `read_<type>`, `create_<type>`, `update_<type>`, `move_<type>` (an enum of the lifecycle's moves,
+with the fields each needs), `start_<workflow>` and `view_<view>`. Their input schemas come from the TOML fields
+(required, choices as enums, references as `Type/id`). The list is filtered to what the calling member may do. A
+definition change, proposed and then approved by a second person, is the only thing that changes it. Clients learn of
+the change through `notifications/tools/list_changed`. `resources/list` gives the record types as JSON Schema and the
+controlled documents in force that the member may read.
+
+Authority stays in the hub. A call uses the same methods as the pages and the API: data classes, grants, lifecycle
+`by`, required fields and eligibility. It is recorded on the track as `mcp.called` (how `mcp`, the server and the
+tool), and it is the cause of whatever it changed. A refusal is a tool result with `isError` and the hub's reason.
+Nothing signs: there is no signature tool, and an agent's `propose_decision` waits for its sponsor to approve and sign
+it. Moves that put a record into force are not offered to agents and are refused if called. Arguments are data,
+checked against the schema and never evaluated.
+
+The `Origin` header is checked: another site gets a 403 (allow more with `PRACTICEHUB_MCP_ORIGINS`). A member's token
+is required as `Authorization: Bearer ph_...`, and cookies are not accepted (401). A server that is switched off is a
+404. **Settings → Connections (MCP)** lists each server's URL and tool count, shows how to connect, and lets a policy
+owner switch servers on and off, which is tracked. For clients that start a command:
+
+    PRACTICEHUB_TOKEN=ph_... practicehub mcp dms --url https://hub.example.ca
 
 ## Layout
 
 ```
 practicehub/          the core: hub, engine, workflows, blocks, sandbox, backends, track, authz, records, models, web, cli
   agents/runner.py    an agent's loop: inbox → context → model → answer (or escalate)
-  integrations/       Keycloak
+  integrations/       Keycloak; Collabora (discovery, proof keys, blank documents) and its WOPI host
 packs/general-practice/  roles, data classes, grants, members, 8 workflows, 8 skills, 3 blocks, stand-in answers
 modules/              dms (document control), qms (quality), wiki
 tests/                rules, web (real HTTP), another practice (accounting)

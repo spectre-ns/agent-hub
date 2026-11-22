@@ -764,6 +764,39 @@ def test_a_signature_stops_covering_a_record_that_changed(quality):
     assert not hub.signatures(amara, dref)[0]["current"]
 
 
+def test_an_office_document_saved_in_collabora_becomes_a_new_version_by_its_editors_and_a_released_one_opens_read_only(
+        quality):
+    """An office document saved in Collabora becomes a new version of the record, by the people who edited it; a
+    released document opens read-only."""
+    from practicehub.integrations import collabora as cool
+    from practicehub.integrations.wopi import EDITED_BY, Wopi
+    hub, rana, amara = quality, M(quality, "rana"), M(quality, "dr-amara")
+    w = Wopi(hub, cool.Collabora("http://127.0.0.1:9", "http://hub"))  # no Collabora: no proof keys to check
+    att = hub.add_file(rana, "Document", cool.blank_document("odt"), "Rota.odt", cool.mime_of("odt"))
+    ref = f"Document/{hub.create_record(rana, 'Document', {'title': 'Rota', 'status': 'draft', 'file': att})['id']}"
+    sess = w.open(rana, ref, "file", att["blob"])
+    assert w.open(amara, ref, "file", att["blob"])["_id"] == sess["_id"]  # both edit the one document
+
+    def put(m, data, **h):
+        tok, _ = w.issue(m, sess["_id"], write=True, origin="")
+        path = f"/wopi/files/{sess['_id']}/contents"
+        return w.handle("POST", path, {"access_token": tok}, h, data, f"{path}?access_token={tok}")[0]
+
+    n = len(hub.record_history(rana, ref))
+    assert put(rana, b"draft one", **{"x-cool-wopi-isautosave": "true"}) == 200
+    assert len(hub.record_history(rana, ref)) == n  # an autosave is not a version
+    assert put(amara, b"draft two", **{"x-cool-wopi-isexitsave": "true"}) == 200
+    v = hub.record_history(rana, ref)[0]
+    assert v["version"] == n + 1 and v["comment"] == EDITED_BY + "Rana Haddad, Dr. Amara Okafor"
+    assert hub.read_file(rana, ref, hub.read_record(rana, ref)["file"]["blob"])[0] == b"draft two"
+
+    installer = {"id": "module:dms", "kind": "automation", "name": "Document control", "status": "active"}
+    released = hub.create_record(installer, "Document", {"title": "Released", "status": "approved", "file": att})
+    assert not w.may_edit(rana, released)
+    sess = w.open(rana, f"Document/{released['id']}", "file", att["blob"])
+    assert put(rana, b"sneaky", **{"x-cool-wopi-isexitsave": "true"}) == 403
+
+
 def test_a_signature_can_be_limited_to_a_role_and_a_state(quality):
     hub = quality
     rana = M(hub, "rana")
@@ -925,6 +958,34 @@ def test_a_module_may_only_add_to_another_type(hub, mods):
     with pytest.raises(Invalid):
         install(hub, "dms-site")
     assert hub.record_type("Document").label != "Mine now"
+
+
+def test_a_practice_change_keeps_what_a_module_added_and_never_takes_it_over(hub, mods):
+    """The practice owns its own text of a type a module extends: the module's lines are put back after it on save,
+    and a proposal that adds, changes, removes or redefines them is refused, saying so."""
+    from practicehub import schema
+    rana = M(hub, "rana")
+    install(hub, "dms")
+    _site_module(mods)
+    install(hub, "dms-site")
+    full = next(v for v in hub.definition_versions("type", "Document") if v["status"] == "active")["source"]
+    own = schema.own_text(full)
+    assert "dms-site" not in own and schema.module_additions(full)[0][0] == "dms-site"
+    # its own text only, with a field of its own: the module's field is kept on
+    out = hub.propose("type", rana, own + '\n[[field]]\nname = "room"\nlabel = "Room"\n', "add a room")
+    row = next(v for v in hub.definition_versions("type", "Document") if v["version"] == out["version"])
+    assert schema.module_additions(row["source"]) == schema.module_additions(full) and 'name = "room"' in row["source"]
+    hub.propose("type", rana, full, "the text as it stands")  # the module's lines as they are: accepted
+    for bad, says in ((full.replace('"south"', '"east"'), "cannot be changed here"),
+                      (full.replace("# <<< dms-site\n", ""), "marks where a module's additions"),
+                      (own + "# >>> added by the dms-site module\nx = 1\n", "marks where"),
+                      (own + '\n# >>> added by the qms module\n[[field]]\nname = "q"\n# <<< qms\n',
+                       "only the module adds them"),
+                      (own + '\n[[field]]\nname = "site"\nlabel = "Site"\n', "added by the dms-site module")):
+        with pytest.raises(Invalid) as exc:
+            hub.propose("type", rana, bad, "take it over")
+        assert any(says in p for p in exc.value.problems), exc.value.problems
+    assert hub.record_type("Document").field("site")["choices"] == ["north", "south"]
 
 
 def test_a_module_is_named_never_given_as_a_path(hub):
@@ -2412,7 +2473,7 @@ def test_wiki_pages_form_a_tree_and_link_each_other_by_title_even_before_the_pag
     # a page knows the pages above it and below it
     assert [a["title"] for a in hub.ancestors(amara, f"WikiPage/{oncall['id']}")] == ["Clinic handbook"]
     assert [k["title"] for k in hub.children(amara, f"WikiPage/{home['id']}")] == [
-        "Booking rules", "On-call guide", "Onboarding"]
+        "Booking rules", "On-call guide", "Onboarding", "Procedures"]
 
 
 def test_a_wiki_page_never_sits_under_itself(wiki):
@@ -2814,3 +2875,263 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     assert hub.track.verify()["ok"]
     from practicehub.engine import bookings
     assert {b["record"]["id"] for b in bookings(hub)} == {booked["id"], filed["id"], walk_in["id"]}  # not cancelled
+
+
+# ------------------------------------------------------------------------------------------- live co-editing and SOPs
+def test_two_people_editing_a_page_live_keep_both_changes_and_the_version_names_both(wiki):
+    from practicehub.live import Live
+    hub = wiki
+    lv = hub._live = Live(hub)
+    jo, noor = M(hub, "jo"), M(hub, "noor")
+    p = _page(hub, "Onboarding")
+    ref = f"WikiPage/{p['id']}"
+    text = lv.join(jo, ref, "body")["text"]
+    lv.join(noor, ref, "body")
+    n = len(text.encode("utf-16-le")) // 2
+    lv.submit(jo, ref, "body", "jo-r-000001", 0, ["Hello. ", n])
+    lv.submit(noor, ref, "body", "noor-r-00001", 0, [n, " Bye."])  # made on the same text, at once
+    lv.leave(jo, ref, "body")
+    lv.leave(noor, ref, "body")
+    assert hub.records.read("WikiPage", p["id"])["body"] == "Hello. " + text + " Bye."
+    v = hub.record_history(jo, ref)[0]
+    assert v["comment"] == f"Edited by {jo['name']} and {noor['name']}" and set(v["authors"]) == {"jo", "noor"}
+
+
+def _sop(hub, title):
+    return next(p for p in hub.records.search("Procedure", limit=None) if p["title"] == title)
+
+
+def test_a_sop_is_released_only_by_an_approver_who_did_not_write_it(wiki):
+    hub = wiki
+    noor, liam, amara = M(hub, "noor"), M(hub, "dr-liam"), M(hub, "dr-amara")
+    sop = hub.create_record(noor, "Procedure", {"title": "Sharps", "number": "SOP-090", "owner": "noor",
+                                                "body": "Use the yellow bin."})
+    ref = f"Procedure/{sop['id']}"
+    with pytest.raises(Invalid):  # what changed is said first
+        hub.update_record(noor, ref, {"status": "in-review"})
+    # dr-liam writes part of it, live, with noor: he is one of its editors now
+    from practicehub.live import Live
+    lv = hub._live = Live(hub)
+    lv.join(noor, ref, "body")
+    lv.join(liam, ref, "body")
+    lv.submit(liam, ref, "body", "liam-s-0001", 0, [19, " Never recap."])
+    lv.leave(noor, ref, "body")
+    lv.leave(liam, ref, "body")
+    hub.update_record(noor, ref, {"change_summary": "First issue.", "status": "in-review"})
+    with pytest.raises(Invalid):  # locked: what the approver reads is what is released
+        hub.update_record(noor, ref, {"body": "Changed while in review."})
+    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release" and r["record"] == ref)
+    i = item_for(hub, run, "release")
+    with pytest.raises(Denied):  # a co-editor does not release it
+        hub.engine.claim(liam, i)
+        hub.engine.decide(liam, i, "release")
+    hub.engine.claim(amara, i)
+    hub.engine.decide(amara, i, "release")
+    rec = hub.records.read("Procedure", sop["id"])
+    today = hub.engine.now().date()
+    assert rec["status"] == "released" and rec["revision"] == 1 and rec["effective"] == today.isoformat()
+    assert rec["review_by"] == today.replace(year=today.year + 1).isoformat()
+    with pytest.raises(Invalid):
+        hub.update_record(noor, ref, {"body": "x"})
+
+
+def test_while_a_released_sop_is_revised_everyone_reads_the_released_revision(wiki):
+    hub = wiki
+    rana = M(hub, "rana")
+    sop = _sop(hub, "Hand hygiene")
+    ref = f"Procedure/{sop['id']}"
+    released = sop["body"]
+    hub.update_record(rana, ref, {"status": "draft"}, comment="the poster changed")  # Revise
+    rec = hub.records.read("Procedure", sop["id"])
+    assert rec["status"] == "draft" and hub.record_history(rana, ref)[0]["comment"] == "the poster changed"
+    hub.update_record(rana, ref, {"body": released + "\n\nNew poster."})
+    used = hub.in_use_version(M(hub, "jo"), ref)
+    assert used["data"]["body"] == released and used["data"]["revision"] == 2
+
+
+def test_a_returned_sop_says_why_and_goes_back_to_its_authors(wiki):
+    hub = wiki
+    amara = M(hub, "dr-amara")
+    sop = _sop(hub, "Cleaning the treatment rooms")
+    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release")
+    i = item_for(hub, run, "release")
+    hub.engine.claim(amara, i)
+    hub.engine.decide(amara, i, "return", "Say which detergent.")
+    rec = hub.records.read("Procedure", sop["id"])
+    assert rec["status"] == "draft" and rec["returned_because"] == "Say which detergent."
+    assert not rec.get("revision")
+
+
+def test_an_agent_is_mentioned_only_where_it_may_read_and_never_changes_the_text_itself(wiki):
+    """Rule: a mention hands an agent only what its grants let it read; what it proposes is a suggestion a person
+    accepts or rejects (tests/test_mentions.py has the whole of it)."""
+    hub = wiki
+    from practicehub.hub import member_ref
+    from practicehub.live import Live
+    lv = hub._live = Live(hub)
+    p = next(r for r in hub.records.search("WikiPage", limit=None) if r["title"] == "Backups")
+    ref, jo = f"WikiPage/{p['id']}", M(hub, "jo")
+    with pytest.raises(Invalid):
+        lv.comment(jo, ref, "@scribe-agent please look")
+    hub.authz.write([("role:wiki-reader", "assignee", member_ref("scribe-agent"))])
+    c = lv.comment(jo, ref, "@scribe-agent please look", quote="IT only")
+    s = lv.suggest(M(hub, "scribe-agent"), ref, c["id"], "body", "IT only", "nobody")["replies"][-1]
+    assert hub.records.read("WikiPage", p["id"])["body"] == p["body"]
+    with pytest.raises(Denied):
+        lv.decide_suggestion(M(hub, "scribe-agent"), ref, c["id"], s["id"], True)
+
+
+# ------------------------------------------------------------------------------------------- exports
+def _file_of_ellen(hub):
+    """A subject with a full file in the demo: allergies, problems, prescriptions, results, a visit."""
+    return max((f"{s}/{p['id']}" for s in hub.subject_types() for p in hub.records.search(s)),
+               key=lambda ref: len(hub.records.search(subject=ref, limit=None)))
+
+
+def _export_reads(hub, fmt=None):
+    return [x for x in hub.db.events.find({"action": "record.viewed"})
+            if (x.get("data") or {}).get("how") == "export" and (fmt is None or x["data"].get("format") == fmt)]
+
+
+def test_a_type_says_it_is_a_fhir_resource_and_the_hub_checks_it_can_be():
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    head = 'id = "Thing"\nlabel = "Thing"\ndata_class = "clinical"\nstrict = true\n'
+    field = '[[field]]\nname = "status"\nlabel = "Status"\ntype = "string"\n'
+    assert schema.parse(head + 'standard = "fhir-r4"\n' + field).standard == "fhir-r4"
+    assert schema.parse(head + field).standard is None
+    for bad in (head + 'standard = "hl7v2"\n' + field,                                      # not a standard we export
+                head.replace("Thing", "my-thing", 1) + 'standard = "fhir-r4"\n' + field,    # not a resource name
+                head.replace("strict = true", "strict = false") + 'standard = "fhir-r4"\n' + field):  # any key
+        with pytest.raises(DefinitionError, match="standard"):
+            schema.parse(bad)
+    # a field of the practice's own is allowed: it goes out as an extension
+    assert schema.parse(head + 'standard = "fhir-r4"\n' + field.replace('"status"', '"plan_code"')).standard
+
+
+def test_the_clinic_packs_types_are_fhir_resources(hub):
+    from practicehub import export
+    fhir = {t for t, rt in hub.record_types().items() if export.is_fhir(rt)}
+    assert hub.subject_types() and set(hub.subject_types()) <= fhir
+    assert {"MedicationRequest", "Observation", "AllergyIntolerance", "Condition", "Immunization"} <= fhir
+
+
+def test_a_record_exports_as_fhir_json_that_round_trips(hub):
+    from practicehub import export
+    amara = M(hub, "dr-amara")
+    rec = hub.records.search("MedicationRequest")[0]
+    x = export.record(hub, amara, f"MedicationRequest/{rec['id']}", "fhir")
+    assert x.content_type == "application/fhir+json" and x.filename == f"MedicationRequest-{rec['id']}.json"
+    res = json.loads(x.body)
+    assert res["resourceType"] == "MedicationRequest" and res["id"] == rec["id"]
+    assert set(res["meta"]) == {"versionId", "lastUpdated"} and res["meta"]["versionId"] == rec["meta"]["versionId"]
+    assert res["subject"] == {"reference": rec["subject"]} if isinstance(rec["subject"], str) else rec["subject"]
+    assert "/" in res["subject"]["reference"]
+    assert not any(k.startswith("_") for k in res)
+    assert len(_export_reads(hub, "fhir")) == 1
+
+
+def test_a_subjects_file_is_a_bundle_of_its_parts_and_links_and_counts_what_is_left_out(hub):
+    from practicehub import export
+    ref = _file_of_ellen(hub)
+    about = {f"{r['resourceType']}/{r['id']}" for r in hub.records.search(subject=ref, limit=None)}
+    x = export.subject_file(hub, M(hub, "dr-amara"), ref, "fhir")
+    b = json.loads(x.body)
+    assert b["resourceType"] == "Bundle" and b["type"] == "collection"
+    got = [e["resource"] for e in b["entry"]]
+    assert f"{got[0]['resourceType']}/{got[0]['id']}" == ref, "the subject comes first"
+    fhir = {r for r in about if export.is_fhir(hub.record_type(r.split("/")[0]))}
+    assert {f"{r['resourceType']}/{r['id']}" for r in got} == fhir
+    assert x.other == len(about - fhir) and x.left_out == 0
+    linked = {e["from_ref"] for e in hub.db.links.find({"to_ref": ref})}
+    assert linked & fhir, "records that link to the subject are in the file"
+    # parts of the subject (a part_of type) are in it
+    assert any(hub.record_type(r.split("/")[0]).part_of for r in fhir)
+    # the front desk may not read clinical records: they are left out, and counted, never named
+    jo = M(hub, "jo")
+    y = export.subject_file(hub, jo, ref, "fhir")
+    kept = [e["resource"]["resourceType"] for e in json.loads(y.body)["entry"]]
+    assert all(hub.may_read(jo, t) for t in kept)
+    hidden = sum(1 for r in about if r != ref and not hub.may_read(jo, r.split("/")[0]))
+    assert hidden and y.left_out == hidden
+    assert export.left_out_words(2) == "2 records you may not read were left out."
+    assert b"MedicationRequest" not in y.body
+
+
+def test_every_export_logs_each_record_as_a_read_and_the_export_itself(hub):
+    from practicehub import export
+    amara = M(hub, "dr-amara")
+    ref = _file_of_ellen(hub)
+    before = len(_export_reads(hub))
+    hub.read_record(amara, ref)  # a view a minute ago does not swallow the export's read
+    x = export.subject_file(hub, amara, ref, "odt")
+    assert len(_export_reads(hub, "odt")) == x.count and len(_export_reads(hub)) == before + x.count
+    ev = hub.db.events.find({"action": "records.exported", "subject": ref})
+    assert ev and ev[-1]["actor"] == "dr-amara" and ev[-1]["data"]["format"] == "odt"
+    assert ev[-1]["data"]["count"] == x.count
+    y = export.records_list(hub, amara, "Observation", "csv")
+    assert len(_export_reads(hub, "csv")) == y.count
+    lst = hub.db.events.find({"action": "records.exported", "subject": "records:Observation"})
+    assert lst[-1]["data"]["format"] == "csv" and lst[-1]["data"]["count"] == y.count
+    # the privacy officer sees the export in the access report; others never see who exported what
+    report = hub.access_report(M(hub, "rana"), ref)
+    assert any(r["action"] == "exported" for r in report)
+    assert any(r["how"] == "export (odt)" for r in report)
+    from practicehub.visibility import Viewer
+    assert "records.exported" in Viewer.ACCESS_EVENTS
+
+
+def test_only_a_policy_owner_makes_a_bulk_export(hub):
+    from practicehub import export
+    jo = M(hub, "jo")
+    with pytest.raises(Denied):
+        export.records_list(hub, jo, "Patient", "csv", every=True)
+    with pytest.raises(Denied):
+        export.everything(hub, jo)
+    assert not hub.db.events.find({"action": "records.exported"})
+    x = export.records_list(hub, M(hub, "rana"), "Patient", "ndjson", every=True)
+    lines = x.body.decode().splitlines()
+    assert len(lines) == len(hub.records.search("Patient", limit=None)) == x.count
+    assert all(json.loads(line)["resourceType"] == "Patient" for line in lines)
+    files, manifest = export.everything(hub, M(hub, "rana"))
+    assert "manifest.json" in files and manifest["output"]
+    # the owner reads no clinical records: those are counted, not exported
+    assert manifest["left_out"] and not any(o["type"] == "MedicationRequest" for o in manifest["output"])
+
+
+def test_a_type_that_is_not_a_fhir_resource_offers_no_fhir_format(quality):
+    from practicehub import export
+    hub = quality
+    rt = hub.record_type("Document")
+    assert not export.is_fhir(rt)
+    assert "fhir" not in export.offered(hub, "Document", "record") and "json" in export.offered(hub, "Document", "record")
+    assert "ndjson" not in export.offered(hub, "Document", "list")
+    reader = next(m for m in hub.members("person") if hub.may_read(m, "Document"))
+    rec = hub.records.search("Document")[0]
+    with pytest.raises(Invalid):
+        export.record(hub, reader, f"Document/{rec['id']}", "fhir")
+    with pytest.raises(Invalid):
+        export.records_list(hub, reader, "Document", "ndjson")
+    plain = json.loads(export.record(hub, reader, f"Document/{rec['id']}", "json").body)
+    assert plain["resourceType"] == "Document" and plain["id"] == rec["id"]
+    odt = export.record(hub, reader, f"Document/{rec['id']}", "odt")  # a document works for any type
+    assert odt.body[:2] == b"PK"
+
+
+def test_an_agents_proposed_decision_waits_for_its_sponsor_whatever_the_risk(hub):
+    """``decide(..., propose=True)`` (the MCP propose_decision tool): an agent's decision is held for its sponsor to
+    approve and sign, even on a low-risk gate it could decide alone."""
+    agent = M(hub, "intake-agent")
+    src = ('id = "propose-check"\ntitle = "Propose check"\n[trigger]\nstarters = ["intake-coordinator"]\n'
+           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[[steps]]\nid = "check"\ntitle = "Check"\n'
+           f'kind = "gate"\nrole = "{agent["roles"][0]}"\nsigner = "any"\nagent_criteria = "input.kind == \'routine\'"\n'
+           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "low"\noutcomes = ["ok", "not-ok"]\n'
+           'meaning = "I confirm the check"\ncontext = ["input.kind"]\n')
+    p = hub.propose_workflow(M(hub, "jo"), src, "a check")
+    hub.approve_workflow(M(hub, "rana"), "propose-check", p["version"])
+    run = hub.engine.start(M(hub, "jo"), "propose-check", inputs={"kind": "routine"})
+    iid = item_for(hub, run, "check")
+    hub.engine.decide(agent, iid, "ok", "", seen=hub.engine.shown_digest(agent, iid), propose=True)
+    assert hub.engine.item(iid)["status"] == "held"
+    hold = hub.db.items.find_one({"run_id": run["id"], "kind": "hold"})
+    assert hold["assignee"] == agent["sponsor"] and "(high risk)" not in hold["title"]

@@ -3,6 +3,7 @@ id = "Immunization"
 label = "Immunization"
 plural = "Immunizations"
 data_class = "clinical"
+standard = "fhir-r4"
 strict = true
 date = "occurrenceDateTime"
 active = "record.status == 'completed'"

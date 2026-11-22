@@ -3,6 +3,7 @@ id = "DiagnosticReport"
 label = "Report"
 plural = "Reports"
 data_class = "clinical"
+standard = "fhir-r4"
 strict = true
 date = "effectiveDateTime"
 active = "not record.status in ['cancelled', 'entered-in-error']"

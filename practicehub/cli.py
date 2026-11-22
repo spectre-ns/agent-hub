@@ -9,6 +9,8 @@
     practicehub verify                                  check the hash chain and signatures of the track
     practicehub backup /backups/2026-11-21              a consistent copy of the database, its files and the anchors (not the secret)
     practicehub restore /backups/2026-11-21 --force     put a backup back; then `track restored` records what was lost
+    practicehub export --as rana --type Patient --format csv --out patients.csv   every record of a type (a policy owner)
+    practicehub export --as rana --all --out /exports/2026-11-21    the whole hub: one .ndjson per type and a manifest
     practicehub owners recover --grant dr-amara         the server holder grants policy_owner when too few are left
     practicehub openfga init --url http://localhost:8081
     practicehub keycloak realm > realm.json
@@ -22,6 +24,7 @@ Configuration is by environment, so secrets never sit in files the hub writes:
     OPENFGA_URL, OPENFGA_TOKEN                      use OpenFGA (after ``openfga init``)
     MEDPLUM_URL, MEDPLUM_CLIENT_ID, MEDPLUM_CLIENT_SECRET   keep records in Medplum
     KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_CLIENT_SECRET    accept Keycloak tokens (client ``practicehub``)
+    PRACTICEHUB_COLLABORA_URL, PRACTICEHUB_WOPI_BASE, PRACTICEHUB_COLLABORA_DISCOVERY_URL   office documents (Collabora)
     PRACTICEHUB_PACKS       where packs live (default: packs/ next to the source)
     OLLAMA_URL, LITELLM_URL, LITELLM_API_KEY, ANTHROPIC_API_KEY, PRACTICEHUB_ALLOW_EXTERNAL_MODELS   model backends
 """
@@ -123,7 +126,10 @@ def cmd_serve(args):
     start_clock(hub, args.tick_interval)
     if args.agents:
         start_agent_loop(hub, args.agent_interval)
-    serve(hub, args.host, args.port, dev=args.dev, oidc=oidc)
+    wopi_hosts = tuple(args.wopi_host or ())
+    if any(h in ("0.0.0.0", "::", "") for h in wopi_hosts):
+        raise SystemExit("--wopi-host names one address (the docker bridge, say), never every address")
+    serve(hub, args.host, args.port, dev=args.dev, oidc=oidc, wopi_hosts=wopi_hosts)
 
 
 def start_clock(hub, interval: float = 60.0):
@@ -491,6 +497,35 @@ def _person(hub, mid):
         raise SystemExit(f"there is no member {mid}") from None
 
 
+def cmd_export(args):
+    """A bulk export, for a policy owner: every record of one type (``--type``), or of every type (``--all``), into
+    files. Each record is a read on the track (how=export) and the export is an event (records.exported)."""
+    from . import export
+    hub = build_hub(args)
+    me = _person(hub, args.as_member)
+    out = Path(args.out)
+    if args.all:
+        files, manifest = export.everything(hub, me, args.format or "ndjson")
+        out.mkdir(parents=True, exist_ok=False)
+        for name, body in files.items():
+            (out / name).write_bytes(body)
+        n = sum(x["count"] for x in manifest["output"])
+        left = sum(x["count"] for x in manifest["left_out"])
+        print(f"exported {n} records of {len(manifest['output'])} types into {out}/ (manifest.json lists them)"
+              + (f"; {left} records you may not read were left out" if left else ""))
+        return
+    rt = hub.record_type(args.type)
+    ext = out.suffix.lstrip(".").lower()  # the format the file's name says, else FHIR's for a FHIR type
+    fmt = args.format or (ext if ext in ("ndjson", "csv", "ods") else "ndjson" if export.is_fhir(rt) else "csv")
+    x = export.records_list(hub, me, args.type, fmt, every=True)
+    if out.is_dir():
+        out = out / x.filename
+    if out.exists():
+        raise SystemExit(f"{out} exists; name a new file")
+    out.write_bytes(x.body)
+    print(f"exported {x.count} {args.type} records as {fmt} into {out}")
+
+
 def cmd_module_review(args):
     hub = build_hub(args)
     out = hub.approve_module_code(_person(hub, args.as_member), args.name)
@@ -612,6 +647,18 @@ def cmd_contract_export(args):
     print(json.dumps(contract.export(types), indent=2))
 
 
+def cmd_mcp(args):
+    """A stdio bridge to one of the hub's MCP servers, for clients that start a command: JSON-RPC lines in on stdin,
+    POSTed to ``<url>/mcp/<server>`` with the member's token (from an environment variable, never an argument), and
+    the replies out on stdout. It keeps nothing but the session id the hub gave it."""
+    from . import mcp_bridge
+    token = os.environ.get(args.token_env, "")
+    if not token:
+        raise SystemExit(f"set {args.token_env} to a member's token (ph_...)")
+    raise SystemExit(mcp_bridge.run(f"{args.url.rstrip('/')}/mcp/{args.server}", token, sys.stdin, sys.stdout,
+                                    ping=args.ping))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="practicehub", description="A practice platform where agents are members.")
     ap.add_argument("--state", help="state directory (default $PRACTICEHUB_STATE or ./state)")
@@ -629,6 +676,8 @@ def main(argv=None):
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8200)
     p.add_argument("--dev", action="store_true", help="sign in as any member without a token (local only)")
+    p.add_argument("--wopi-host", action="append", metavar="ADDRESS",
+                   help="also listen here, for Collabora's WOPI calls only (e.g. the docker bridge, 172.17.0.1)")
     p.add_argument("--agents", action="store_true", help="also run the agents in this process, as work appears")
     p.add_argument("--agent-interval", type=float, default=30.0, help="seconds between agent rounds when idle")
     p.add_argument("--tick-interval", type=float, default=60.0, help="seconds between ticks (scheduled work, overdue items); 0 turns it off")
@@ -681,6 +730,15 @@ def main(argv=None):
     for p in mb.choices.values():
         p.add_argument("--as", dest="as_member", required=True)
         p.set_defaults(fn=cmd_member)
+    p = sub.add_parser("export", help="export every record of a type, or the whole hub, to files (a policy owner)")
+    p.add_argument("--as", dest="as_member", required=True, help="the policy owner making the export")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--type", help="every record of this type")
+    g.add_argument("--all", action="store_true", help="every record of every type, one file per type")
+    p.add_argument("--format", choices=["ndjson", "csv", "ods"], help="ndjson (FHIR Bulk Data; the default "
+                   "for a FHIR type), csv (the default otherwise), ods; --all takes ndjson or csv")
+    p.add_argument("--out", required=True, help="the file to write (a directory with --all)")
+    p.set_defaults(fn=cmd_export)
     p = sub.add_parser("verify", help="verify the track")
     p.set_defaults(fn=cmd_verify)
     tr = sub.add_parser("track", help="the track itself").add_subparsers(dest="sub", required=True)
@@ -764,6 +822,13 @@ def main(argv=None):
     p = ct.add_parser("export", help="print the core's base types as Avro schemas (and a pack's extensions of them)")
     p.add_argument("--pack", help="a practice pack or module (name or directory)")
     p.set_defaults(fn=cmd_contract_export)
+
+    p = sub.add_parser("mcp", help="bridge one of the hub's MCP servers to stdio (for clients that start a command)")
+    p.add_argument("server", help="core, practice, or an installed module's id")
+    p.add_argument("--url", required=True, help="the hub, e.g. https://hub.example.ca")
+    p.add_argument("--token-env", default="PRACTICEHUB_TOKEN", help="the environment variable holding the token")
+    p.add_argument("--ping", type=float, default=30.0, help="seconds between pings, to hear of tool changes (0: off)")
+    p.set_defaults(fn=cmd_mcp)
 
     args = ap.parse_args(argv)
     try:

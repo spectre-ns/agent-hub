@@ -59,6 +59,7 @@ def plain(text: str, limit: int = 200) -> str:
     """The words of formatted text, without its marks: for a list, a search result or a summary."""
     s = MENTION.sub(lambda m: m.group(2) or m.group(1), text or "")
     s = re.sub(r"\[([^\]\n]{1,300})\]\([^)\s]{1,2000}\)", r"\1", s)
+    s = re.sub(r"\[(?: |x|X|![A-Za-z]+)\]", " ", s)  # checklist boxes, callout kinds
     s = re.sub(r"[#>*`~|]|^\s*[-+]\s+|^\s*\d+\.\s+", " ", s, flags=re.M)
     s = " ".join(s.split())
     return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
@@ -134,6 +135,22 @@ def _anchor(words: str, seen: dict) -> str:
     return base if seen[base] == 1 else f"{base}-{seen[base]}"
 
 
+CALLOUTS = {"note": "Note", "tip": "Tip", "warning": "Warning", "important": "Important"}
+_CALLOUT = re.compile(r"\[!(note|tip|warning|important)\]", re.I)
+_TASK = re.compile(r"\[( |x|X)\]\s+(.*)")
+
+
+def _item(x: str, resolve) -> str:
+    """A list item; ``[ ] words`` and ``[x] words`` are the items of a checklist, ticked or not."""
+    t = _TASK.fullmatch(x)
+    if not t:
+        return f"<li>{_inline(x, resolve)}</li>"
+    done = t.group(1) != " "
+    box = (f'<span class="box{" done" if done else ""}" aria-hidden="true">{"✓" if done else ""}</span>'
+           f'<span class="visually-hidden">{"done: " if done else "to do: "}</span>')
+    return f'<li class="task{" done" if done else ""}">{box}{_inline(t.group(2), resolve)}</li>'
+
+
 def render(text: str, resolve=None, _depth: int = 0) -> str:
     """Formatted text as HTML. ``resolve(target)``: (href, words, exists) for a ``[[target]]``, or None."""
     lines = (text or "").replace("\r\n", "\n").split("\n")
@@ -183,9 +200,17 @@ def render(text: str, resolve=None, _depth: int = 0) -> str:
             while i < len(lines) and lines[i].strip().startswith(">"):
                 quote.append(lines[i].strip()[1:].lstrip())
                 i += 1
+            call = _CALLOUT.fullmatch(quote[0].strip()) if quote else None
+            if call:  # > [!note] ...: a callout, headed by its kind
+                quote = quote[1:]
             inner = (render(chr(10).join(quote), resolve, _depth + 1) if _depth < MAX_QUOTE_DEPTH
                      else "<p>" + "<br>".join(_inline(q, resolve) for q in quote if q) + "</p>")
-            out.append(f"<blockquote>{inner}</blockquote>")
+            if call:
+                kind = call.group(1).lower()
+                out.append(f'<aside class="callout {kind}" role="note"><p class="callout-title">'
+                           f'{_esc(CALLOUTS[kind])}</p>{inner}</aside>')
+            else:
+                out.append(f"<blockquote>{inner}</blockquote>")
             continue
         if s.startswith("|") and i + 1 < len(lines) and re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?",
                                                                      lines[i + 1].strip()):
@@ -216,7 +241,7 @@ def render(text: str, resolve=None, _depth: int = 0) -> str:
                     break
                 i += 1
             tag = "ol" if ordered else "ul"
-            out.append(f"<{tag}>" + "".join(f"<li>{_inline(x, resolve)}</li>" for x in items) + f"</{tag}>")
+            out.append(f"<{tag}>" + "".join(_item(x, resolve) for x in items) + f"</{tag}>")
             continue
         para.append(s)
         i += 1

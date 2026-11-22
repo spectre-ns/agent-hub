@@ -335,6 +335,120 @@ def test_a_manager_changes_a_record_type_from_the_web(hub, server):
     assert call(server, "GET", "/define/skills", rana)[0] == 200
 
 
+class _BuilderForm(__import__("html.parser").parser.HTMLParser):
+    """What a browser would send from the type builder (form#type-builder): every enabled control but its buttons."""
+
+    def __init__(self, page):
+        super().__init__(convert_charrefs=True)
+        self.pairs, self._in, self._sel, self._opt, self._ta = [], False, None, None, None
+        self.feed(page)
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form":
+            self._in = a.get("id") == "type-builder"
+        if not self._in or "disabled" in a:
+            return
+        if tag == "input" and a.get("name") and a.get("type") not in ("submit", "button"):
+            if a.get("type") not in ("checkbox", "radio") or "checked" in a:
+                self.pairs.append((a["name"], a.get("value", "on" if a.get("type") == "checkbox" else "")))
+        elif tag == "select":
+            self._sel = a.get("name")
+        elif tag == "option" and self._sel and "selected" in a:
+            self.pairs.append((self._sel, a.get("value", "")))
+        elif tag == "textarea" and a.get("name"):
+            self._ta = [a["name"], ""]
+
+    def handle_data(self, data):
+        if self._ta:
+            self._ta[1] += data
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self._in = False
+        elif tag == "select":
+            self._sel = None
+        elif tag == "textarea" and self._ta:
+            self.pairs.append((self._ta[0], self._ta[1].removeprefix("\n")))
+            self._ta = None
+
+
+def _textarea(page, name):
+    return html.unescape(re.search(rf'<textarea name="{name}"[^>]*>(.*?)</textarea>', page, re.S).group(1))
+
+
+def test_the_type_builder_round_trips_through_toml(hub, server):
+    """The form is the default editor; "Edit as TOML" gives the text the validator checks, and back to the form gives
+    the same form: nothing is lost either way."""
+    rana = _modules(hub, server)
+    code, page = call(server, "GET", "/define/types/Document/edit", rana)
+    assert code == 200 and 'id="type-builder"' in page and "Edit as TOML" in page
+    form = _BuilderForm(page).pairs
+    assert ("t.id", "Document") in form and any(k.endswith(".name") for k, _ in form)
+    code, page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "toml")])
+    assert code == 200
+    source = _textarea(page, "source")
+    doc = __import__("tomllib").loads(source)
+    assert doc["id"] == "Document" and doc["field"]
+    code, page = call(server, "POST", "/define/types/build", rana,
+                      form=[("source", source), ("did", "Document"), ("note", ""), ("op", "form")])
+    assert code == 200 and _BuilderForm(page).pairs == form
+    code, page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "check")])
+    assert "The hub accepts this" in page
+
+
+def test_the_type_builder_shows_a_problem_on_the_field_it_is_about(hub, server):
+    rana = _modules(hub, server)
+    form = _BuilderForm(call(server, "GET", "/define/types/Document/edit", rana)[1]).pairs
+    n = int(dict(form)["f.n"])
+    page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "add-field")])[1]
+    form = [(k, v) for k, v in _BuilderForm(page).pairs if k not in (f"f.{n}.name", f"f.{n}.type")]
+    form += [(f"f.{n}.name", "room"), (f"f.{n}.type", "choice"), ("op", "check")]
+    code, page = call(server, "POST", "/define/types/build", rana, form=form)
+    assert code == 200
+    err = re.search(rf'<ul class="fb-errors" id="b-f{n}-choices-err"[^>]*>(.*?)</ul>', page, re.S)
+    assert err and "a choice needs choices" in err.group(1)
+    assert f'href="#b-f{n}-choices"' in page  # the summary at the top links to it
+    assert not any(v["status"] == "proposed" for v in hub.definition_versions("type", "Document"))
+
+
+def test_the_editors_show_what_a_module_added_but_never_let_it_be_changed(hub, server, tmp_path, monkeypatch):
+    import shutil
+
+    from practicehub import pack as packmod
+    d = tmp_path / "modules"
+    for name in ("dms", "qms"):
+        shutil.copytree(packmod.MODULES_DIR / name, d / name)
+    (d / "dms-site" / "extends" / "types").mkdir(parents=True)
+    (d / "dms-site" / "module.toml").write_text(
+        '[module]\nid = "dms-site"\nname = "Sites"\nversion = "1"\nrequires = ["dms"]\n')
+    (d / "dms-site" / "extends" / "types" / "Document.toml").write_text(
+        '[[field]]\nname = "site"\nlabel = "Site"\ntype = "choice"\nchoices = ["north", "south"]\n')
+    monkeypatch.setattr(packmod, "MODULES_DIR", d)
+    rana = _modules(hub, server)
+    hub.approve_module_code(M(hub, "dr-amara"), "dms-site")
+    hub.install_module(M(hub, "rana"), "dms-site")
+    page = call(server, "GET", "/define/types/Document/edit", rana)[1]
+    assert "From modules" in page and "dms-site" in page
+    form = _BuilderForm(page).pairs
+    assert ("f.0.name", "site") not in form and not any(v == "site" for k, v in form if k.endswith(".name"))
+    toml = call(server, "GET", "/define/types/Document/edit?as=toml", rana)[1]
+    own = _textarea(toml, "source")
+    assert "# >>>" not in own and "From modules" in toml
+    full = next(v for v in hub.definition_versions("type", "Document") if v["status"] == "active")["source"]
+    altered = full.replace('choices = ["north", "south"]', 'choices = ["north", "east"]')
+    code, page = call(server, "POST", "/define/types/propose", rana, form={"source": altered, "note": "x"})
+    assert code == 200 and "It was not saved" in page and "cannot be changed here" in html.unescape(page)
+    redefined = own + '\n[[field]]\nname = "site"\ntype = "string"\n'
+    page = call(server, "POST", "/define/types/propose", rana, form={"source": redefined, "note": "x"})[1]
+    assert "added by the dms-site module" in html.unescape(page)
+    assert not any(v["status"] == "proposed" for v in hub.definition_versions("type", "Document"))
+    code, page = call(server, "POST", "/define/types/build", rana, form=form + [("note", "same"), ("op", "propose")])
+    assert code == 303  # the practice's own part, proposed from the form: the module's part comes back on its own
+    prop = next(v for v in hub.definition_versions("type", "Document") if v["status"] == "proposed")["source"]
+    assert "# >>> added by the dms-site module" in prop and 'name = "site"' in prop
+
+
 def test_views_show_in_the_sidebar_and_work_starts_about_any_record(hub, server):
     rana = _modules(hub, server)
     qm = next(m for m in hub.members() if "quality-manager" in (m.get("roles") or []) and m["kind"] == "person")
@@ -846,7 +960,7 @@ def test_a_wiki_page_reads_as_a_page_with_its_place_in_the_tree_and_its_links(hu
     assert "<blockquote>" in page and 'class="mention"' in page          # the link to the controlled document
     assert f'href="/records/WikiPage/{pages["Clinic handbook"]["id"]}"' in page  # its parent, in the breadcrumbs
     # a page: its text leads, under one bar of what it is and what can be done; no side column, no form until Edit
-    assert '<div class="page-bar">' in page and '<article class="page-body">' in page and 'class="issue-side"' not in page
+    assert '<div class="page-bar">' in page and '<article class="page-body"' in page and 'class="issue-side"' not in page
     assert 'href="/records/WikiPage/' + oncall["id"] + '?edit=1#edit"' in page and 'class="markdown"' not in page
     editing = call(server, "GET", f"/records/WikiPage/{oncall['id']}?edit=1", sam)[1]
     assert '<form method="post" action="/records/WikiPage/' + oncall["id"] + '/edit" class="page-edit" id="edit">' in editing
@@ -1380,3 +1494,290 @@ def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do
+
+
+def _theme_tokens():
+    """The colour tokens of both themes, parsed from the stylesheet: light is the :root block, dark overrides it."""
+    from practicehub.web import assets
+    light = dict(re.findall(r"--([\w-]+):([^;}]+)", assets.CSS.split(":root{color-scheme:light;", 1)[1].split("}", 1)[0]))
+    dark = {**light, **dict(re.findall(r"--([\w-]+):([^;}]+)", assets._DARK))}
+    return {"light": light, "dark": dark}
+
+
+def _contrast(tokens, fg, bg):
+    """WCAG contrast of token fg over token bg; a bg written "a/b" is token a composited over token b."""
+    def rgba(name):
+        v = tokens[name].strip()
+        while v.startswith("var("):
+            v = tokens[v[4:-1].split(",")[0].strip()[2:]].strip()
+        h = v.lstrip("#")
+        return [int(h[i:i + 2], 16) for i in (0, 2, 4)], (int(h[6:8], 16) / 255 if len(h) == 8 else 1.0)
+
+    def over(top, base):
+        rgb, a = rgba(top)
+        return [c * a + b * (1 - a) for c, b in zip(rgb, base)]
+
+    def lum(rgb):
+        lin = [(c / 255) / 12.92 if c / 255 <= 0.03928 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    *layers, base = bg.split("/")
+    back = rgba(base)[0]
+    for layer in reversed(layers):
+        back = over(layer, back)
+    hi, lo = sorted((lum(over(fg, back)), lum(back)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+_TEXT_PAIRS = [  # text: 4.5:1
+    ("fg", "bg"), ("fg", "raised"), ("fg", "sunken"), ("fg", "input-bg"), ("fg", "neutral/bg"),
+    ("fg", "info-bg"), ("fg", "success-bg"), ("fg", "danger-bg"), ("fg", "warning-bg"),
+    ("subtle", "bg"), ("subtle", "raised"), ("subtle", "sunken"), ("subtle", "neutral/bg"), ("subtle", "neutral-hover/bg"),
+    ("subtlest", "bg"), ("subtlest", "raised"), ("subtlest", "sunken"), ("subtlest", "neutral/bg"), ("subtlest", "raised-hover"),
+    ("selected-fg", "selected-bg"), ("link", "bg"), ("link", "raised"), ("link", "sunken"),
+    ("brand-fg", "brand"), ("brand-fg", "brand-hover"), ("danger-on", "danger"), ("danger-fg", "danger-bg"),
+    ("success-fg", "success-bg"), ("warning-fg", "warning-bg"), ("info-fg", "info-bg"), ("discovery-fg", "discovery-bg"),
+    ("service", "service-bg"), ("surface", "info-icon"), ("surface", "success-icon"), ("surface", "danger-icon"),
+    ("loz-default-fg", "loz-default-bg/bg"), ("loz-default-fg", "loz-default-bg/raised"),
+] + [(f"loz-{k}-fg", f"loz-{k}-bg") for k in ("inprogress", "success", "removed", "moved", "new")] \
+  + [(f"lozb-{k}-fg", f"lozb-{k}-bg") for k in ("default", "inprogress", "success", "removed", "moved", "new")] \
+  + [("ki-fg", f"ki-{k}") for k in ("task", "gate", "notice", "hold", "automation")]
+
+_EDGE_PAIRS = [  # input borders, button and chip edges, card edges, table rules, the focus ring: 3:1
+    ("input-border", "input-bg"), ("input-border", "bg"), ("input-border", "raised"),
+    ("border", "bg"), ("border", "raised"), ("border", "sunken"), ("border-bold", "bg"), ("border-bold", "raised"),
+    ("control-border", "bg"), ("control-border", "raised"), ("card-edge", "bg"), ("card-edge", "sunken"),
+    ("focus", "bg"), ("focus", "raised"), ("focus", "sunken"), ("focus", "input-bg"), ("brand", "bg"), ("danger", "bg"),
+]
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_colour_tokens_keep_wcag_contrast_in_both_themes(theme):
+    tokens = _theme_tokens()[theme]
+    low = [f"{fg} on {bg}: {r:.2f} < {need}" for need, pairs in ((4.5, _TEXT_PAIRS), (3.0, _EDGE_PAIRS))
+           for fg, bg in pairs if (r := _contrast(tokens, fg, bg)) < need]
+    assert not low, low
+    # disabled reads as disabled: fainter than enabled text, yet not invisible
+    assert 2.5 <= _contrast(tokens, "disabled-fg", "disabled-bg/bg") < _contrast(tokens, "subtle", "neutral/bg")
+    # the focus ring and the card edges come from the tokens, not from fixed colours
+    from practicehub.web.assets import CSS
+    assert "#388BFF" not in CSS and "var(--card-edge)" in tokens["shadow-raised"]
+
+
+# ------------------------------------------------------------------------------------------- boards: moving cards
+def _moves(page: str, card: str) -> dict:
+    """The columns a card on a board may be dropped on, as the page says (its data-moves)."""
+    m = re.search(r'data-card="' + re.escape(card) + r'" data-moves="([^"]*)"', page)
+    return json.loads(html.unescape(m.group(1))) if m else {}
+
+
+def test_a_board_marks_where_each_card_may_be_dropped_by_the_same_rules_as_its_move_buttons(hub, server):
+    """A lifecycle board has a column per state; each card lists only the moves its page offers a person (none
+    reserved to a workflow), and one that asks for fields or a comment opens its transition screen."""
+    rana = _modules(hub, server)
+    doc = hub.create_record(M(hub, "rana"), "Document", {"title": "Hand hygiene"})
+    capa = hub.create_record(M(hub, "rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
+    page = call(server, "GET", "/views/dms-documents", rana)[1]
+    assert all(f'data-col="{s}"' in page for s in ("draft", "in-review", "approved", "obsolete"))
+    moves = _moves(page, f"Document/{doc['id']}")
+    assert set(moves) == {"in-review", "obsolete"} and moves["in-review"]["how"] == "post"  # approved: a workflow's
+    card = page.split(f'data-card="Document/{doc["id"]}"')[1].split("</form>")[0]
+    assert f'action="/records/Document/{doc["id"]}/move"' in card and '<select name="to"' in card \
+        and '<option value="in-review">' in card and 'value="approved"' not in card and 'type="radio"' not in card
+    moves = _moves(call(server, "GET", "/views/qms-capas", rana)[1], f"CAPA/{capa['id']}")
+    assert moves["investigating"] == {"how": "screen", "label": "investigating…",
+                                      "href": f"/records/CAPA/{capa['id']}/move?to=investigating"}
+    # the work board: what the item page's buttons allow, for whoever looks
+    jo = token(hub, "jo")
+    page = call(server, "GET", "/board", jo)[1]
+    assert 'data-col="todo"' in page and 'data-col="prog"' in page and 'data-col="done"' in page
+    iid = re.search(r'data-card="(item-[^"]+)" data-moves', page).group(1)
+    assert set(_moves(page, iid)) == {"prog", "done"} and _moves(page, iid)["done"]["how"] == "screen"
+    item = hub.engine.item(iid)
+    other = next(m for m in hub.members("person") if not hub.engine.eligibility(m, item)[0])
+    assert _moves(call(server, "GET", "/board", token(hub, other["id"]))[1], iid) == {}
+
+
+def test_a_move_from_a_board_applies_the_same_rules_and_a_refused_one_says_why(hub, server):
+    rana = _modules(hub, server)
+    doc = hub.create_record(M(hub, "rana"), "Document", {"title": "Hand hygiene"})
+    url, back = f"/records/Document/{doc['id']}/move", "/views/dms-documents"
+    ver = str(doc["meta"]["versionId"])
+    # refused: not a move a person may make from here; the reason, in the dialog, and nothing moved
+    code, page = call(server, "POST", url, rana, form={"to": "approved", "_version": ver, "_back": back, "_ask": "1"})
+    assert code == 422 and "does not move from" in page and "data-modal-body" in page and 'role="alert"' in page
+    assert hub.records.read("Document", doc["id"])["status"] == "draft"
+    # accepted: back to the board
+    code, _ = call(server, "POST", url, rana, form={"to": "in-review", "_version": ver, "_back": back, "_ask": "1"})
+    assert code == 303 and hub.records.read("Document", doc["id"])["status"] == "in-review"
+    # changed since the board was drawn: refused as a conflict
+    other = hub.create_record(M(hub, "rana"), "Document", {"title": "Sharps"})
+    hub.update_record(M(hub, "rana"), f"Document/{other['id']}", {"title": "Sharps disposal"})
+    code, page = call(server, "POST", f"/records/Document/{other['id']}/move", rana,
+                      form={"to": "obsolete", "_version": str(other["meta"]["versionId"]), "_back": back, "_ask": "1"})
+    assert code == 409 and "changed this record" in page and hub.records.read("Document", other["id"])["status"] == "draft"
+    # a move that asks for fields: its screen first, which returns to the board once it is accepted
+    capa = hub.create_record(M(hub, "rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
+    curl = f"/records/CAPA/{capa['id']}/move"
+    code, _ = call(server, "POST", curl, rana, form={"to": "investigating", "_back": "/views/qms-capas", "_ask": "1"})
+    assert code == 303 and hub.records.read("CAPA", capa["id"])["status"] == "open"
+    code, page = call(server, "GET", f"{curl}?to=investigating&_back=/views/qms-capas", rana)
+    assert code == 200 and 'name="_back" value="/views/qms-capas"' in page and 'name="owner"' in page
+    code, page = call(server, "POST", curl, rana, form={"to": "investigating", "_back": "/views/qms-capas"})
+    assert code == 422 and "fill in Owner" in page and 'name="_back" value="/views/qms-capas"' in page
+    code, _ = call(server, "POST", curl, rana, form={"to": "investigating", "owner": "rana", "_back": "//elsewhere.example"})
+    assert code == 303 and hub.records.read("CAPA", capa["id"])["status"] == "investigating"
+
+
+def test_the_work_boards_move_to_form_works_without_the_script(hub, server):
+    """Move to… is a plain form: In progress assigns it, To do gives it back, Done opens the item's form; a move the
+    member may not make is refused with the reason, and the item stays where it was."""
+    jo = token(hub, "jo")
+    page = call(server, "GET", "/board", jo)[1]
+    iid = re.search(r'data-card="(item-[^"]+)" data-moves', page).group(1)
+    form = page.split(f'data-card="{iid}"')[1].split("</form>")[0]
+    assert 'action="/board/move"' in form and f'name="item" value="{iid}"' in form and '<button' in form
+    code, _ = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "prog", "_back": "/board?who=mine"})
+    assert code == 303 and hub.engine.item(iid)["status"] == "claimed" and hub.engine.item(iid)["claimed_by"] == "jo"
+    code, page = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "wait", "_back": "/board"})
+    assert code == 422 and "not moved" in page and hub.engine.item(iid)["status"] == "claimed"
+    other = next(m for m in hub.members("person") if m["id"] != "jo")
+    code, page = call(server, "POST", "/board/move", token(hub, other["id"]), form={"item": iid, "to": "todo"})
+    assert code == 403 and "only whoever is working on an item gives it back" in page
+    assert hub.engine.item(iid)["claimed_by"] == "jo"
+    code, _ = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "done"})
+    assert code == 303  # what the step needs is asked on the item's page
+    code, _ = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "todo", "_back": "/board"})
+    assert code == 303 and hub.engine.item(iid)["status"] == "open"
+
+
+# ------------------------------------------------------------------------------------------- exports
+def fetch(base, path, tok):
+    """(status, headers, bytes): a download as it is."""
+    req = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {tok}"})
+    try:
+        with opener.open(req) as r:
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read()
+
+
+def _odf_ok(body, mimetype):
+    import io
+    import zipfile
+    z = zipfile.ZipFile(io.BytesIO(body))
+    first = z.infolist()[0]
+    assert first.filename == "mimetype" and first.compress_type == zipfile.ZIP_STORED
+    assert z.read("mimetype").decode() == mimetype
+    assert body[30:38] == b"mimetype" and body[38:38 + len(mimetype)] == mimetype.encode()  # readable as magic
+    assert {"content.xml", "META-INF/manifest.xml"} <= set(z.namelist())
+    import xml.dom.minidom
+    xml.dom.minidom.parseString(z.read("content.xml"))  # well-formed
+    return z.read("content.xml").decode()
+
+
+def test_a_record_exports_from_the_api_and_its_page(server, hub):
+    tok = token(hub, "dr-amara")
+    rec = hub.records.search("MedicationRequest")[0]
+    st, h, body = fetch(server, f"/api/records/MedicationRequest/{rec['id']}?format=fhir", tok)
+    assert st == 200 and h["content-type"] == "application/fhir+json"
+    assert f'filename="MedicationRequest-{rec["id"]}.json"' in h["content-disposition"]
+    res = json.loads(body)
+    assert res["resourceType"] == "MedicationRequest" and res["id"] == rec["id"]
+    st, h, body = fetch(server, f"/records/MedicationRequest/{rec['id']}/export?format=odt", tok)
+    assert st == 200 and h["content-type"] == "application/vnd.oasis.opendocument.text"
+    content = _odf_ok(body, "application/vnd.oasis.opendocument.text")
+    assert "<table:table " in content and rec["medicationCodeableConcept"]["text"] in content
+    st, h, body = fetch(server, f"/records/MedicationRequest/{rec['id']}/export?format=print", tok)
+    assert st == 200 and h["content-type"].startswith("text/html") and b"window.print()" in body
+    assert "default-src 'none'" in h["content-security-policy"]
+    # the dialog: plain words, a button opening it on the record's page
+    st, page = call(server, "GET", f"/records/MedicationRequest/{rec['id']}", tok)
+    assert f'href="/records/MedicationRequest/{rec["id"]}/export" data-modal>Export</a>' in page
+    st, dlg = call(server, "GET", f"/records/MedicationRequest/{rec['id']}/export", tok)
+    assert st == 200 and "data-modal-body" in dlg and 'type="radio"' not in dlg
+    for words in ("FHIR (for another clinic&#x27;s system)", "Document (.odt)", "Print / save as PDF"):
+        assert words in dlg
+    reads = [x for x in hub.db.events.find({"action": "record.viewed", "subject": f"MedicationRequest/{rec['id']}"})
+             if (x.get("data") or {}).get("how") == "export"]
+    assert [x["data"]["format"] for x in reads] == ["fhir", "odt", "print"]
+
+
+def test_a_list_exports_as_csv_with_formulas_guarded_and_as_a_spreadsheet(server, hub):
+    jo = M(hub, "jo")
+    hub.create_record(jo, "Patient", {"name": [{"given": ["=HYPERLINK(\"http://x\")"], "family": "@Sum"}],
+                                      "birthDate": "1990-01-01", "gender": "other"})
+    tok = token(hub, "jo")
+    st, page = call(server, "GET", "/records/Patient", tok)
+    assert 'href="/records/Patient/export" data-modal>Export</a>' in page
+    st, h, body = fetch(server, "/records/Patient/export?format=csv", tok)
+    assert st == 200 and h["content-type"] == "text/csv; charset=utf-8"
+    assert re.fullmatch(r'attachment; filename="Patient-list-\d{4}-\d\d-\d\d\.csv"', h["content-disposition"])
+    import csv
+    import io
+    rows = list(csv.reader(io.StringIO(body.decode())))
+    assert rows[0][-4:] == ["id", "Date", "Last updated", "Version"]
+    cells = [c for r in rows for c in r]
+    assert not any(c[:1] in ("=", "+", "-", "@") for c in cells), "a spreadsheet must not run a cell"
+    assert any(c.startswith("'=HYPERLINK") for c in cells) and any(c == "'@Sum" for c in cells)
+    assert len(rows) - 1 == len(hub.records.search("Patient")) == int(h["x-records"])
+    st, h, body = fetch(server, "/records/Patient/export?format=ods", tok)
+    assert st == 200 and h["content-type"] == "application/vnd.oasis.opendocument.spreadsheet"
+    content = _odf_ok(body, "application/vnd.oasis.opendocument.spreadsheet")
+    assert "of:=" not in content and "table:formula" not in content
+    st, h, body = fetch(server, "/records/Patient/export?format=ndjson", tok)
+    assert h["content-type"] == "application/fhir+ndjson"
+    assert all(json.loads(line)["resourceType"] == "Patient" for line in body.decode().splitlines())
+    ev = hub.db.events.find({"action": "records.exported", "subject": "records:Patient"})
+    assert [x["data"]["format"] for x in ev] == ["csv", "ods", "ndjson"] and ev[0]["actor"] == "jo"
+    # a bulk export of every record is a policy owner's: the front desk is refused, on the page and the API
+    st, dlg = call(server, "GET", "/records/Patient/export", tok)
+    assert "all=1" not in dlg and "A bulk export" not in dlg
+    assert fetch(server, "/records/Patient/export?all=1&format=csv", tok)[0] == 403
+    assert fetch(server, "/api/records/Patient/$export?all=1", tok)[0] == 403
+    st, dlg = call(server, "GET", "/records/Patient/export", token(hub, "rana"))
+    assert "all=1&amp;format=csv" in dlg
+    st, h, body = fetch(server, "/api/records/Patient/$export?all=1", token(hub, "rana"))
+    assert st == 200 and h["content-type"] == "application/fhir+ndjson"
+
+
+def test_a_subjects_file_exports_as_a_bundle_leaving_out_what_the_member_may_not_read(server, hub):
+    sub = hub.pack.subject
+    ref = max((f"{sub['type']}/{p['id']}" for p in hub.records.search(sub["type"])),
+              key=lambda r: len(hub.records.search(subject=r, limit=None)))
+    pid = ref.split("/", 1)[1]
+    tok = token(hub, "jo")
+    st, page = call(server, "GET", f"/{sub['path']}/{pid}", tok)
+    assert f"Export this {sub['label'].lower()}&#x27;s file</a>" in page or \
+        f"Export this {sub['label'].lower()}'s file</a>" in page
+    st, dlg = call(server, "GET", f"/{sub['path']}/{pid}/export", tok)
+    assert st == 200 and "records you may not read were left out" in dlg
+    st, h, body = fetch(server, f"/api/records/{ref}/$everything", tok)
+    assert st == 200 and h["content-type"] == "application/fhir+json" and int(h["x-left-out"]) > 0
+    b = json.loads(body)
+    assert b["resourceType"] == "Bundle" and b["type"] == "collection"
+    assert b["entry"][0]["resource"]["id"] == pid
+    st, h, body = fetch(server, f"/{sub['path']}/{pid}/export?format=fhir", token(hub, "dr-amara"))
+    full = json.loads(body)
+    assert len(full["entry"]) > len(b["entry"]) and h["x-left-out"] == "0"
+    st, h, body = fetch(server, f"/{sub['path']}/{pid}/export?format=odt", token(hub, "dr-amara"))
+    _odf_ok(body, "application/vnd.oasis.opendocument.text")
+    ev = hub.db.events.find({"action": "records.exported", "subject": ref})
+    assert [(x["actor"], x["data"]["format"]) for x in ev] == [("jo", "fhir"), ("dr-amara", "fhir"),
+                                                               ("dr-amara", "odt")]
+    assert ev[0]["data"]["left_out"] > 0 and ev[1]["data"]["left_out"] == 0
+
+
+def test_a_type_that_is_not_a_fhir_resource_has_no_fhir_export_on_the_web(server, hub):
+    from practicehub import export
+    t = next((t for t, rt in hub.record_types().items() if not rt.abstract and not export.is_fhir(rt)
+              and t not in hub.member_types() and hub.records.search(t)), None)
+    if t is None:
+        pytest.skip("every type with records here is a FHIR resource")
+    rid = hub.records.search(t)[0]["id"]
+    tok = token(hub, "dr-amara")
+    st, dlg = call(server, "GET", f"/records/{t}/{rid}/export", tok)
+    assert st == 200 and "format=fhir" not in dlg and "FHIR (for another" not in dlg and "JSON" in dlg
+    assert fetch(server, f"/records/{t}/{rid}/export?format=fhir", tok)[0] == 422
+    st, h, body = fetch(server, f"/api/records/{t}/{rid}?format=json", tok)
+    assert st == 200 and h["content-type"] == "application/json" and json.loads(body)["id"] == rid
