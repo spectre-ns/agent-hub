@@ -4716,21 +4716,23 @@ def _portal_person(hub):
 
 
 def test_the_portal_books_only_through_workflows_and_never_reads_the_chart(hub):
-    """Rule: everything the portal does for a person is a workflow its member starts (a booking, a request, a
-    cancellation), never a write of its own; and its member may not read the practice's clinical records, so what the
-    person sees of a booking is when, with whom, what kind and its state, never why."""
+    """Rule: everything the portal does for a person is a workflow its member starts (a booking or a request is the
+    practice's own appointment-request, screened like any other), or a move of a visit's state that the visit's own
+    workflow waits on (a cancellation), never a write of its own; and its member may not read the practice's clinical
+    records, so what the person sees of a booking is when, with whom, what kind and its state, never why."""
     from practicehub.portal import Portal
     p = Portal(hub, dev=True)
     ref = _portal_person(hub)
-    slot = p.free_slots("forms")[0]["value"]
     before = {r["id"] for r in hub.engine.runs(limit=1000)}
-    p.book(ref, "forms", slot, {"reason": "a form for school"})
+    got = p.book(ref, "new-concern", None, {"reason": "a form for school", "urgency": "routine"})
     new = [r for r in hub.engine.runs(limit=1000) if r["id"] not in before]
-    assert [(r["workflow_id"], r["started_by"]) for r in new] == [("portal-booking", p.member["id"])]
-    b = p.upcoming(ref)[0]
-    assert set(b) == {"ref", "start", "when", "with", "kind", "state", "can_cancel", "kind_id"}
+    assert [(r["workflow_id"], r["started_by"], r["subject"]) for r in new] == [
+        ("appointment-request", p.member["id"], ref)]
+    assert got["run"] == new[0]["id"]
+    seen = json.dumps(hub.read_record(p.member, new[0]["record"]))
+    assert "a form for school" not in seen, "why the person comes is clinical: the portal's member never reads it"
     with pytest.raises(Denied):
-        hub.read_record(p.member, b["ref"])
+        hub.require(p.member, "reader", "data_class:clinical", "read the chart")
 
 
 def test_the_portal_answers_the_same_whoever_is_on_file(hub):
@@ -4749,3 +4751,53 @@ def test_the_portal_answers_the_same_whoever_is_on_file(hub):
     p.finish_sign_in(yes["challenge"], yes["dev_code"], client="10.9.0.1")
     with pytest.raises(Invalid):
         p.finish_sign_in(yes["challenge"], yes["dev_code"], client="10.9.0.1")
+
+
+def test_a_portal_token_opens_the_portals_api_and_nothing_else(hub):
+    """Rule: the portal's process holds a token of the [portal] service member with scope portal. It opens
+    /api/portal/ and nothing else; no other token (a staff member's API token, another service's) opens /api/portal/;
+    a person never holds one."""
+    import json as _json
+    from practicehub.web.server import App
+    app = App(hub, dev=False)
+    tok = hub.issue_token(M(hub, "jo"), "portal", "portal", scope="portal")
+    staff = hub.issue_token(M(hub, "jo"), "jo", "api")
+
+    def call(method, path, token):
+        return app.handle(method, path, {"authorization": f"Bearer {token}"}, b"{}" if method == "POST" else b"")[0]
+    assert call("POST", "/api/portal/config", tok) == 200
+    assert call("POST", "/api/portal/config", staff) == 401
+    assert call("GET", "/api/me", tok) in (401, 403)
+    assert call("GET", "/api/inbox", tok) in (401, 403)
+    with pytest.raises(Invalid):
+        hub.issue_token(M(hub, "jo"), "jo", "x", scope="portal")
+    cfg = _json.loads(app.handle("POST", "/api/portal/config", {"authorization": f"Bearer {tok}"}, b"{}")[2])
+    assert "member" not in cfg, "the portal is told words and kinds, not the hub's settings"
+
+
+def test_a_new_portal_setting_on_an_existing_hub_is_not_taken_from_disk(tmp_path, monkeypatch):
+    """Rule: [portal] is a pinned setting like the rest of the pack. On a hub that pinned its settings before it
+    knew [portal], what the files on disk say of it is taken only if they are exactly the files put into force;
+    otherwise it starts empty (no portal) and waits for pack review and pack upgrade by two policy owners."""
+    import shutil
+    from practicehub import pack as packmod
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    copy = tmp_path / "packs" / "general-practice"
+    shutil.copytree(Path(packmod.find("general-practice", "practice")), copy, ignore=shutil.ignore_patterns("__pycache__"))
+    state = tmp_path / "state"
+    Hub(state, pack=str(copy)).install(str(copy))
+
+    def older_hub():  # as a hub from before [portal] was pinned left its settings
+        raw = _raw_db()
+        cfg = raw.get_setting("pack_config")
+        cfg.pop("portal", None)
+        raw.set_setting("pack_config", cfg)
+    older_hub()
+    assert Hub(state).pack.portal, "the files are the ones put into force: pinned as they are"
+    older_hub()
+    toml = (copy / "pack.toml").read_text()
+    (copy / "pack.toml").write_text(toml.replace("cancel_before_hours = 24", "cancel_before_hours = 1", 1))
+    hub = Hub(state)
+    assert hub.db.get_setting("pack_config")["portal"] == {}, "changed files: nothing pinned from them"
+    assert not hub.pack.portal and hub.pack_problem

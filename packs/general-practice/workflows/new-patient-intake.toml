@@ -48,11 +48,22 @@ meanings = { waitlist = "I put this patient on the waitlist", decline = "I decli
 context = ["record:demographics", "record:intake", "review"]
 instructions = "Read the intake agent's summary and flags. The roster has room unless the practice manager has said otherwise."
 
+# A patient who registered online is a request until now: accepted, they may sign in and book.
+[[steps]]
+id = "activate"
+title = "Take the patient in"
+kind = "automation"
+after = ["accept"]
+when = "accept.outcome == 'accept'"
+action = "record.update"
+[steps.params]
+set = { active = true }
+
 [[steps]]
 id = "book-first-visit"
 title = "Book the first visit"
 kind = "automation"
-after = ["accept"]
+after = ["activate"]
 when = "accept.outcome == 'accept'"
 action = "workflow.start"
 [steps.params]
