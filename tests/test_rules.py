@@ -4349,3 +4349,87 @@ def test_an_emergency_access_nobody_may_fully_review_is_still_reviewed(hub):
     assert got["told"] and "noor" not in got["told"]
     notes = hub.db.items.find({"run_id": got["run"], "kind": "notice"})
     assert notes and all("Collapsed" not in json.dumps(n["output"]) for n in notes)
+
+
+
+# ------------------------------------------------------------------------------- reach, switch-off and directives
+def test_the_member_a_switch_off_is_about_does_not_withdraw_it(hub):
+    _a_third_policy_owner(hub)
+    hub.request_switch_off(M(hub, "dr-amara"), "rana", "left the practice", stop="all")
+    with pytest.raises(Invalid):
+        hub.withdraw_switch_off(M(hub, "rana"), "rana")
+    hub.withdraw_switch_off(M(hub, "deputy"), "rana")
+
+
+def test_a_switch_off_hands_nothing_to_whoever_asked_for_it(hub):
+    _a_third_policy_owner(hub)
+    with pytest.raises(Invalid):
+        hub.request_switch_off(M(hub, "rana"), "dr-amara", "left", hand_over={"scribe-agent": "rana"}, stop="all")
+
+
+def test_a_search_finds_only_what_the_member_reads(hub):
+    jo = M(hub, "jo")
+    with pytest.raises(Denied):
+        hub.search_records(jo, "Condition")
+    assert not [r for r in hub.search_records(jo) if r["resourceType"] in ("Condition", "Observation")]
+
+
+def test_the_reach_sweep_names_an_agent_whose_sponsor_no_longer_reaches_it(hub):
+    assert not hub.sponsors_out_of_reach()
+    hub.authz.write([("data_class:clinical", "reader", "member:portal")])  # widened past jo, its sponsor
+    got = hub.reach_sweep(None, "a test widened a grant")
+    assert [x["id"] for x in got["sponsors_out_of_reach"]] == ["portal"]
+    assert hub.db.events.find_one({"action": "access.reach_checked"})
+
+
+def test_work_on_a_file_a_directive_keeps_from_the_agent_goes_to_the_one_person_allowed(hub):
+    ref, _ = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-liam"}])
+    run = hub.engine.start(M(hub, "dr-liam"), "visit-documentation", record=ref, inputs={"transcript": "she is well"})
+    iid = item_for(hub, run, "draft")
+    item = hub.engine.item(iid)
+    assert item["role"] == "physician" and item["persons_only"] and item["assignee"] == "dr-liam"
+    scribe = M(hub, "scribe-agent")
+    assert not hub.engine.eligibility(scribe, item)[0]
+    with pytest.raises(Denied):
+        hub.engine.context(scribe, iid)
+
+
+def test_a_page_about_a_restricted_file_tells_the_excluded_only_that_there_is_one(hub):
+    ref, obs = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-liam"}])
+    run = hub.engine.start(M(hub, "dr-liam"), "lab-result-review", record=ref,
+                           inputs={"test": "Potassium", "value": "7.2", "unit": "mmol/L", "range": "3.5-5.0",
+                                   "flag": "critical", "observation": obs})
+    rows = {m["recipient"]: m for m in hub.db.outbox.find({"run_id": run["id"], "channel": "page"})}
+    assert "7.2" in rows["member:dr-liam"]["body"] and "clinical" in rows["member:dr-liam"]["classes"]
+    kept = rows["member:dr-amara"]
+    assert "7.2" not in kept["body"] and "Potassium" not in kept["body"] and "clinical" not in kept["classes"]
+
+
+def test_an_emergency_access_notice_says_what_happened_in_words_and_its_reason_reaches_only_the_allowed(hub):
+    ref, obs = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-liam"}])
+    got = hub.break_glass(M(hub, "noor"), obs, "Collapsed in the waiting room; need her results now")
+    notes = hub.db.items.find({"run_id": got["run"], "kind": "notice"})
+    assert notes
+    for n in notes:
+        out = n["output"]
+        assert out["summary"] and out["subject_ref"] == ref and "/" not in n["title"]
+        if "reason" in out or "record" in out:
+            assert not hub.restrictions.withholds_from(M(hub, n["assignee"]), ref, reaching=True)
+
+
+def test_a_member_is_told_at_once_when_a_setup_code_is_issued_for_them(hub):
+    hub.add_member(M(hub, "rana"), {"id": "temp", "name": "Tess Temp", "roles": []})
+    hub.issue_setup_code(M(hub, "rana"), "temp")
+    told = [i for i in hub.db.items.find({"assignee": "temp", "kind": "notice"}) if "setup code" in i["title"]]
+    assert told and told[0]["priority"] == "urgent" and told[0]["output"]["issued_by"] == "rana"
+
+
+def test_an_agent_is_given_no_role_its_sponsor_does_not_reach_and_nothing_is_written_first(hub):
+    hub.set_roles(M(hub, "rana"), "portal", ["patient-portal", "physician"])
+    before = set(hub.authz.read(relation="assignee"))
+    with pytest.raises(Invalid):
+        hub.approve_roles(M(hub, "dr-amara"), "portal")
+    assert set(hub.authz.read(relation="assignee")) == before and "physician" not in M(hub, "portal")["roles"]

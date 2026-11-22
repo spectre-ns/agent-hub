@@ -61,14 +61,51 @@ def act_message_send(engine, run, step, params, actor):
     gap = hub.restrictions.incomplete(run.get("record"), classes) if str(to) != run.get("record") else None
     if gap and gap not in body:  # a letter written from a file the patient limited says it is incomplete
         body = f"{body.rstrip()}\n\n{gap}"
-    oid = hub.db.next_seq("outbox")
-    hub.db.outbox.insert({"_id": oid, "id": oid, "at": utcnow(), "channel": params.get("channel", "message"),
-                          "recipient": str(to), "subject": str(params.get("subject", "")),
-                          "body": body, "run_id": run["id"], "sent_by": actor["id"],
-                          "status": "queued", "classes": ",".join(sorted(classes)), "claimed_by": None,
-                          "claimed_at": None, "done_at": None, "done_by": None, "note": "", "escalated": 0,
-                          "purpose": purpose})
-    return {"message_id": oid, "to": to}
+    subject = str(params.get("subject", ""))
+
+    def put(recipient, subject, body, classes):
+        oid = hub.db.next_seq("outbox")
+        hub.db.outbox.insert({"_id": oid, "id": oid, "at": utcnow(), "channel": params.get("channel", "message"),
+                              "recipient": str(recipient), "subject": subject,
+                              "body": body, "run_id": run["id"], "sent_by": actor["id"],
+                              "status": "queued", "classes": ",".join(sorted(classes)), "claimed_by": None,
+                              "claimed_at": None, "done_at": None, "done_by": None, "note": "", "escalated": 0,
+                              "purpose": purpose})
+        return oid
+    split = _split_for_directive(hub, run, str(to))
+    if split is None:
+        return {"message_id": put(to, subject, body, classes), "to": to}
+    # a message to a role about a file whose directive keeps it from some who hold the role: each holder gets their
+    # own, and those it is kept from are told only that there is one, and to open it on the hub
+    raw_subject = str((step.params or {}).get("subject", "")) if step else ""
+    neutral_subject = subject if "{{" not in raw_subject else "A message about a restricted file"
+    base = {(hub.pack.practice if hub.pack else {}).get("message_class") or "messages"}
+    ids = []
+    for m, kept in split:
+        if kept:
+            ids.append(put(f"member:{m['id']}", neutral_subject, NEUTRAL_BODY, base))
+        else:
+            ids.append(put(f"member:{m['id']}", subject, body, classes))
+    return {"message_id": ids[0] if ids else None, "message_ids": ids, "to": to}
+
+
+NEUTRAL_BODY = ("A message for you about someone whose file is restricted at their request. It is not sent here: "
+                "open it on the hub.")
+
+
+def _split_for_directive(hub, run, to: str):
+    """For a message to ``role:<id>`` about a file with a subject's directive that keeps it from some of the role's
+    holders: [(holder, kept_from_them)], one per person on duty who holds it. None when nothing needs splitting."""
+    if not to.startswith("role:") or not run.get("record"):
+        return None
+    subject = hub.restrictions.subject_of_ref(run["record"])
+    if not subject or not hub.restrictions.of_subject(subject):
+        return None
+    holders = hub.active_holders(to.split(":", 1)[1])
+    marks = [(m, hub.restrictions.withholds_from(m, subject, reaching=True)) for m in holders]
+    if not any(k for _, k in marks):
+        return None
+    return marks
 
 
 def message_classes(hub, run, step) -> set[str]:
@@ -887,11 +924,15 @@ class Engine:
                 m = None
             if m and m["status"] == "active" and step.role in m["roles"]:
                 assignee = m["id"]
+        role, persons_only = step.role, bool(step.persons_only)
+        if run.get("record") and step.role and self.hub.restrictions.of_subject(
+                self.hub.restrictions.subject_of_ref(run["record"]) or ""):
+            role, persons_only, assignee = self._directive_route(run, step, assignee)
         self.hub.db.items.insert(_item_doc(
-            self.hub, id=item_id, run_id=run["id"], step_id=step.id, kind=step.kind, title=step.title, role=step.role,
-            assignee=assignee, persons_only=int(step.persons_only), status="open", cause=cause, due_at=due_at,
+            self.hub, id=item_id, run_id=run["id"], step_id=step.id, kind=step.kind, title=step.title, role=role,
+            assignee=assignee, persons_only=int(persons_only), status="open", cause=cause, due_at=due_at,
             priority=step.priority))
-        if not assignee and step.role and not self.hub.active_holders(step.role, persons_only=bool(step.persons_only)):
+        if not assignee and role and not self.hub.active_holders(role, persons_only=persons_only):
             self._nobody_holds(run, step, item_id, cause)
         self.hub.wake_agents()
         return item_id
@@ -1026,6 +1067,9 @@ class Engine:
         if is_agent:
             if member["kind"] == "service":
                 return False, "services do not take work items"
+            if run["record"] and hub.restrictions.withholds_from(member, run["record"], reaching=True):
+                # the subject's directive gives an agent nothing of what it withholds: the work's inputs copy it
+                return False, "what it is about is withheld from agents at the subject's request: a person does it"
             sponsor = hub.member(member["sponsor"]) if member["sponsor"] else None
             if not sponsor or sponsor["status"] != "active":
                 return False, "its sponsor is not active"
@@ -1197,6 +1241,27 @@ class Engine:
                                assignee=before, cause=None)
         return self.item(item_id)
 
+    def _directive_route(self, run: dict, step, assignee: str | None) -> tuple[str, bool, str | None]:
+        """Where work on a file with a subject's directive goes: (role, persons_only, assignee). An agent the
+        directive withholds the file from never gets it (its inputs copy the file), so the item goes to people:
+        the step's people_role when a person holds it, else its own role. And when some people who hold the role
+        are excluded by the directive and exactly one who holds it is allowed, it is offered to that one first."""
+        hub = self.hub
+        rec = run["record"]
+        role, persons_only = step.role, bool(step.persons_only)
+        if not persons_only and any(m["kind"] != "person" and hub.restrictions.withholds_from(m, rec, reaching=True)
+                                    for m in hub.active_holders(step.role)):
+            persons_only = True
+            people_role = getattr(step, "people_role", None)
+            if people_role and hub.active_holders(people_role, persons_only=True):
+                role = people_role
+        if not assignee:
+            people = hub.active_holders(role, persons_only=True)
+            allowed = [m for m in people if not hub.restrictions.withholds_from(m, rec, reaching=True)]
+            if len(allowed) == 1 and len(allowed) < len(people):
+                assignee = allowed[0]["id"]
+        return role, persons_only, assignee
+
     def _to_people(self, item: dict) -> tuple[str | None, str | None]:
         """Where an item goes when it is handed from agents to people: (role, assignee). Never to a role no person
         holds, where it would wait for good."""
@@ -1290,10 +1355,19 @@ class Engine:
     def context(self, member: dict, item_id: str) -> dict:
         """What the member sees to do this item: the step, its instructions, the data it reads (only what the
         member's data classes allow), and the shape of the answer."""
+        from .hub import Denied
         item = self.item(item_id)
         self._require_eligible(member, item)
         run, wf, step = self.step_of(item)
         hub = self.hub
+        if run["record"] and hub.restrictions.withholds_from(member, run["record"], reaching=True):
+            # a step's inputs are copies of the file (a transcript, a result's value): never handed to an agent, or
+            # to a person, the subject's directive keeps it from (MCP and the API read context through here too)
+            hub.track.append(member, "access.denied", f"item:{item_id}", run_id=run["id"],
+                             data={"relation": "reader", "what": "read the work's inputs, withheld at the subject's "
+                                                                "request"})
+            raise Denied(f"what '{item['title']}' is about is withheld from {member.get('name') or member['id']} "
+                         f"at the subject's request")
         data: dict = {}
         for c in step.context:
             if c.startswith("record:"):

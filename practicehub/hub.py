@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -332,10 +333,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     proposed.append({"kind": kind, "id": did, **self._propose(
                         kind, actor, did, src, f"The practice pack {p.version} changes this", module=None)})
             self._defs_reset()
+            reach = self.reach_sweep(actor, f"the practice pack {p.version} changed what roles reach")
         # what this process's pack.py can do now (the new one runs after the restart), in batches of their own: the
         # upgrade stands whether or not they finish here, and what they did not finish goes on at the next start
         self._upgrades_after(actor)
-        return {"pack": p.id, "version": p.version, "restart": True, "added": added_defs, "proposed": proposed}
+        return {"pack": p.id, "version": p.version, "restart": True, "added": added_defs, "proposed": proposed,
+                **reach}
 
     UPGRADE_BATCH = 200       # records a pack upgrade converts in one transaction
     upgrade_state: dict = {}  # the running upgrade's own place, kept with each batch (run_pack_upgrades)
@@ -848,12 +851,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self._install_definitions(actor, m, m.id, root)
                 self._install_extensions(actor, m, root)
                 self._modules_changed()
+                reach = self.reach_sweep(actor, f"the {m.id} module was installed")
         except Exception:
             packmod.remove_module(self.pack, m)
             self._defs_reset()
             raise
         self._modules_noted(m.id)
-        return {"module": m.id, "version": m.version}
+        return {"module": m.id, "version": m.version, **reach}
 
     EXT_BEGIN, EXT_END = "# >>> added by the {} module", "# <<< {}"
 
@@ -1105,6 +1109,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                                          module=None if (kind, did) in new.extensions else new.id)})
                 self.module_problems.pop(new.id, None)
                 self._modules_changed()
+                reach = self.reach_sweep(actor, f"the {new.id} module was upgraded")
         except Exception:
             packmod.remove_module(self.pack, new)
             if old is not None:
@@ -1112,7 +1117,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self._defs_reset()
             raise
         self._modules_noted(new.id)
-        return {"module": new.id, "version": new.version, "proposed": proposed, "plan": plan}
+        return {"module": new.id, "version": new.version, "proposed": proposed, "plan": plan, **reach}
 
     def uninstall_module(self, actor: dict, name: str, reason: str = "") -> dict:
         """Take a module out: its workflows, views, blocks, skills and types are retired (records stay, readable,
@@ -1506,22 +1511,59 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 for dc in self.restricted_classes() for rel in ("reader", "writer")
                 for t in self.authz.read(obj=f"data_class:{dc}", relation=rel) if t[2].startswith("role:")}
 
+    _reach_local = threading.local()  # per thread: a page served in another thread never reads this one's
+
+    @property
+    def _reach_memo(self) -> dict | None:
+        return getattr(self._reach_local, "memo", None)
+
+    @_reach_memo.setter
+    def _reach_memo(self, value: dict | None) -> None:
+        self._reach_local.memo = value
+
+    @contextmanager
+    def reach_memo(self):
+        """Within it, what roles reach (``beyond_roles``) is read once per actor: for a page or a sweep that asks
+        about many members (every policy owner, every agent), not once per question."""
+        if self._reach_memo is not None:
+            yield
+            return
+        self._reach_memo = {}
+        try:
+            yield
+        finally:
+            self._reach_memo = None
+
+    def _role_reach_grants(self) -> dict[tuple, set]:
+        """The role grants that reach restricted data: (relation, object) -> the roles granted it. Read from those
+        objects only (each restricted class, and the practice's break_glass), never the whole tuple store."""
+        memo = self._reach_memo
+        if memo is not None and "grants" in memo:
+            return memo["grants"]
+        out: dict[tuple, set] = {}
+        objs = [(rel, f"data_class:{dc}") for dc in sorted(self.restricted_classes()) for rel in ("reader", "writer")]
+        for rel, obj in [*objs, ("break_glass", "practice:main")]:
+            for _, _, sub in self.authz.read(obj=obj, relation=rel):
+                if sub.startswith("role:") and sub.endswith("#assignee"):
+                    out.setdefault((rel, obj), set()).add(sub.removeprefix("role:").removesuffix("#assignee"))
+        if memo is not None:
+            memo["grants"] = out
+        return out
+
     def beyond_roles(self, actor: dict) -> set[str]:
         """Roles that reach further than the actor does themselves: reading or writing a restricted data class they
         may not, or opening what a patient asked to withhold. Giving one to anyone waits for a second policy owner,
         so a member admin never reaches a patient's file through an account they hand out (a person's included)."""
+        memo = self._reach_memo
+        key = ("beyond", actor.get("id"), actor.get("status"))
+        if memo is not None and key in memo:
+            return set(memo[key])
         out = set()
-        rclasses = self.restricted_classes()
-        for obj, rel, sub in self.authz.read():
-            if not (sub.startswith("role:") and sub.endswith("#assignee")):
-                continue
-            role = sub.removeprefix("role:").removesuffix("#assignee")
-            if role in out:
-                continue
-            if ((rel in ("reader", "writer") and obj.startswith("data_class:")
-                 and obj.removeprefix("data_class:") in rclasses) or (rel == "break_glass" and obj == "practice:main")):
-                if not self.can(actor, rel, obj):
-                    out.add(role)
+        for (rel, obj), roles in self._role_reach_grants().items():
+            if roles - out and not self.can(actor, rel, obj):
+                out |= roles
+        if memo is not None:
+            memo[key] = set(out)
         return out
 
     def held_back_roles(self, actor: dict, kind: str = "person") -> set[str]:
@@ -1547,6 +1589,34 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             out.append(f"a file whose directive keeps it from {actor.get('name') or actor['id']}")
         return list(dict.fromkeys(out))
 
+    def sponsors_out_of_reach(self) -> list[dict]:
+        """Switched-on agents and services whose sponsor does not reach what they do (``reach_beyond`` not empty):
+        ``[{"id", "sponsor", "beyond": [...]}]``. A pack upgrade or a module that widens a role's grants, or a hub
+        set up before the rule, can leave one; a member admin names a sponsor who reaches as far."""
+        out = []
+        with self.reach_memo():
+            for m in self.members():
+                if m["kind"] == "person" or m["status"] != "active":
+                    continue
+                sp = self.db.members.get(m.get("sponsor") or "")
+                beyond = self.reach_beyond(sp, m["id"]) if sp else ["no sponsor"]
+                if beyond:
+                    out.append({"id": m["id"], "sponsor": m.get("sponsor") or "", "beyond": beyond})
+        return out
+
+    def reach_sweep(self, actor: dict | None, why: str) -> dict:
+        """After grants widen (a pack upgrade, a module installed or upgraded) and when the hub starts: end the
+        credentials whose issuer no longer reaches as far (``credentials_within_reach``), and put on the track the
+        agents and services whose sponsor does not reach them, so nothing of it goes unreported."""
+        actor = actor or {"id": "hub", "kind": "automation", "name": "Practice Hub"}
+        with self.reach_memo():
+            ended = self.credentials_within_reach(actor, why)
+            out_of_reach = self.sponsors_out_of_reach()
+        if ended or out_of_reach:
+            self.track.append(actor, "access.reach_checked", "practice:main",
+                              data={"why": why, "credentials_ended": ended, "sponsors_out_of_reach": out_of_reach})
+        return {"credentials_ended": ended, "sponsors_out_of_reach": out_of_reach}
+
     def credentials_within_reach(self, actor: dict, why: str) -> list[str]:
         """End every credential whose issuer no longer reaches as far as its holder: after someone's roles are taken
         away, or a directive starts allowing a member it keeps from their issuer. An agent's or service's tokens end
@@ -1554,6 +1624,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         person's passphrase set with a code from someone who falls short is cleared, with their tokens and sessions
         (a policy owner who reaches as far issues a new code). Returns the names of the members affected."""
         hit = []
+        with self.reach_memo():
+            self._credentials_sweep(actor, why, hit)
+        return hit
+
+    def _credentials_sweep(self, actor: dict, why: str, hit: list) -> None:
         for m in self.members():
             if m["status"] != "active":
                 continue
@@ -1570,7 +1645,6 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self._clear_passphrase(actor, m["id"], f"set with a setup code from someone who no longer reaches "
                                                       f"what they do ({why})")
                 hit.append(m["name"])
-        return hit
 
     def _clear_passphrase(self, actor: dict, mid: str, why: str) -> None:
         self.db.passphrases.delete({"_id": mid})
@@ -1662,6 +1736,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return
         with self.db:
             owners, admins = self.policy_owner_count(), len(self.member_admins())
+            # every refusal before the first authz write: an external authorizer (OpenFGA) does not roll back with
+            # the database, so a refusal after it would leave the roles granted there
+            target = self.member(mid)
+            if target["status"] == "active" and target["kind"] == "person":
+                def lose(rel):
+                    return self.can(target, rel, "practice:main") and not self._held_through(mid, rel, after)
+                self._keep_a_policy_owner(owners, now=owners - (1 if lose("policy_owner") else 0))
+                self._keep_a_member_admin(admins, now=admins - (1 if lose("member_admin") else 0))
+            if after - before and target["kind"] != "person":
+                self._sponsor_reaches(target, after - before)
             self.authz.delete([(f"role:{r}", "assignee", member_ref(mid)) for r in before - after])
             self.authz.write([(f"role:{r}", "assignee", member_ref(mid)) for r in after - before])
             self._keep_a_policy_owner(owners)
@@ -1674,6 +1758,18 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                               data={"added": sorted(after - before), "removed": sorted(before - after),
                                     **({"asked_by": approved_from} if approved_from else {})})
 
+    def _held_through(self, mid: str, rel: str, roles: set) -> bool:
+        """Whether the member would still hold ``rel`` on the practice holding exactly ``roles``: granted to them
+        directly, or through one of those roles (``owner`` implies both practice relations)."""
+        sets = {member_ref(mid), *(f"role:{r}#assignee" for r in roles)}
+        return any(t[2] in sets for r in (rel, "owner") for t in self.authz.read(obj="practice:main", relation=r))
+
+    def _sponsor_reaches(self, target: dict, added: set) -> None:
+        sp = self.db.members.get(target.get("sponsor") or "")
+        if sp and sp["id"] != target["id"] and self.reach_beyond(sp, target["id"], added):
+            raise Invalid(f"{target['name']}'s sponsor does not reach what those roles reach: name a sponsor who "
+                          f"does first (whoever sponsors it issues its credentials and can act through it)")
+
     def _credentials_within_reach(self, actor: dict, mid: str, added: set) -> None:
         """A member given roles that reach further than whoever issued their credential: that credential ends.
         A person's passphrase set with a setup code from such an issuer is cleared (and unused codes from them
@@ -1681,15 +1777,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         as the agent, so its tokens end and the approval is refused while its sponsor does not."""
         target = self.member(mid)
 
-        def short(who):
+        def short(who):  # the same rule as at issue time: reach_beyond, direct grants and directives included
             if not who or who == mid:
                 return False
             m = self.db.members.get(who)
-            return bool(m) and bool(added & self.beyond_roles(m))
+            return bool(m) and bool(self.reach_beyond(m, mid, added))
         if target["kind"] != "person":
-            if short(target.get("sponsor")):
-                raise Invalid(f"{target['name']}'s sponsor does not reach what those roles reach: name a sponsor who "
-                              f"does first (whoever sponsors it issues its credentials and can act through it)")
+            self._sponsor_reaches(target, added)
             return
         for row in self.db.setup_codes.find({"member": mid, "used_at": None}):
             if short(row.get("issued_by")):
@@ -1705,10 +1799,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         """Active people who are policy owners."""
         return sum(1 for m in self.members("person") if m["status"] == "active" and self.is_policy_owner(m))
 
-    def _keep_a_policy_owner(self, before: int | None = None) -> None:
+    def _keep_a_policy_owner(self, before: int | None = None, *, now: int | None = None) -> None:
         """Changes are approved by a second policy owner, so a practice needs two. Refuse whatever takes it below two
-        (or leaves it with none). With fewer than two, the server holder adds one: ``practicehub owners recover``."""
-        now = self.policy_owner_count()
+        (or leaves it with none). With fewer than two, the server holder adds one: ``practicehub owners recover``.
+        ``now``: the count a change would leave, checked before it is written."""
+        now = self.policy_owner_count() if now is None else now
         if now == 0:
             raise Invalid("that would leave the practice with no active policy owner to approve changes")
         if before is not None and now < before and now < self.MIN_POLICY_OWNERS:
@@ -1765,9 +1860,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     "does: one asks, the other approves.")
         return None
 
-    def _keep_a_member_admin(self, before: int) -> None:
+    def _keep_a_member_admin(self, before: int, *, now: int | None = None) -> None:
         """Refuse whatever leaves the practice with nobody who manages members (it had someone before)."""
-        if before and not self.member_admins():
+        if before and not (len(self.member_admins()) if now is None else now):
             raise Invalid("that would leave nobody who manages members (adds people, changes roles, switches someone "
                           "off): give another person a role that manages members first")
 
@@ -1854,6 +1949,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         out = self.member(mid)
         out["roles_left_empty"] = [r for r in had if not self.active_holders(r)] if status == "disabled" else []
         out["released"] = released or []
+        out["stopped"] = list((plan or {}).get("stop") or [])
+        out["handed_over"] = dict((plan or {}).get("hand_over") or {})
         return out
 
     def _set_status(self, actor: dict, target: dict, status: str, reason: str, plan: dict | None = None,
@@ -1912,6 +2009,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if not (reason or "").strip():
             raise Invalid("say why they are being switched off")
         plan = self._dependents_plan(target, hand_over, stop)
+        self._not_handed_to_asker(plan, actor["id"])
         req = {"by": actor["id"], "reason": reason.strip(), **plan, "at": utcnow()}
         with self.db:
             self.db.set_setting(f"off_request:{mid}", req)
@@ -1934,6 +2032,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if target["status"] != "active":
             raise Invalid(f"{target['name']} is already switched off")
         plan = self._dependents_plan(target, req["hand_over"], req["stop"])  # their agents may have changed since
+        self._not_handed_to_asker(plan, req["by"])
         with self.db:
             self.db.del_setting(f"off_request:{mid}")
             return self._switch(actor, target, "disabled", req["reason"], plan, asked_by=req["by"])
@@ -1959,19 +2058,29 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         asker = self.db.members.get(req["by"])
         if not asker or asker["status"] != "active" or not self.is_policy_owner(asker):
             raise Denied("whoever asked is no longer an active policy owner: a policy owner asks again")
-        if req["by"] in (req.get("hand_over") or {}).values():
-            raise Denied("the one who asked hands nothing to themselves on the server holder's say: name another "
-                         "sponsor, or a second policy owner (after owners recover) approves it")
         holder = {"id": "server-holder", "kind": "installer", "name": "the server holder"}
         plan = self._dependents_plan(target, req["hand_over"], req["stop"])
+        self._not_handed_to_asker(plan, req["by"])
         with self.db:
             self.db.del_setting(f"off_request:{mid}")
             return self._switch(holder, target, "disabled", req["reason"], plan, asked_by=req["by"], keep=False)
+
+    def _not_handed_to_asker(self, plan: dict, asker: str) -> None:
+        """Whoever asks to switch someone off does not name themselves the new sponsor of that person's agents: the
+        sponsor issues an agent's credentials and can act through it, so that takes someone else's say."""
+        mine = sorted(aid for aid, sp in plan["hand_over"].items() if sp == asker)
+        if mine:
+            name = (self.db.members.get(asker) or {}).get("name") or asker
+            raise Invalid(f"{name} asks to switch them off, so may not also take over {', '.join(mine)}: name "
+                          f"another sponsor, or hand it over later through a member admin")
 
     def withdraw_switch_off(self, actor: dict, mid: str) -> None:
         req = self.off_request(mid)
         if not req:
             raise Invalid("nobody has asked to switch them off")
+        if actor["id"] == mid:
+            raise Invalid("the member a switch-off request is about does not withdraw it: the one who asked, or "
+                          "another policy owner, does")
         if actor["id"] != req["by"]:
             self.require(actor, "policy_owner", "practice:main", "withdraw a request to switch someone off")
         with self.db:
@@ -2307,20 +2416,44 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         ``offset``), counted in the database. A search by words matches only what the member may read of each
         record: the database looks for each word in the parts of the record whose data classes they read, so a
         hidden field's value never matches and nothing is read into the hub to be filtered. A range over a field
-        they may not read is refused."""
+        they may not read is refused.
+
+        The member must read the type's data class, as for :meth:`read_record` (a caller that forgets to check
+        does not leak a class); across every type (no ``rtype``), records of types they may not read are left out.
+        ``member`` None (a lookup that sees only what every reader does) and the hub's own automation are not
+        checked."""
+        checked = member is not None and not visibility._sees_all(member)
+        if checked and rtype:
+            dc = self.class_or_none(rtype)
+            if dc:
+                self.require(member, "reader", f"data_class:{dc}", f"read {rtype} records")
         if field and rtype and visibility.hides_path(self, member, rtype, field):
             raise Denied(f"{member.get('name', '')} may not search {rtype} records by {field}")
         if not text:
-            return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, field=field,
+            recs = self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, field=field,
                                                                since=since, until=until, offset=offset))
+            return self._readable_only(member, recs) if checked and not rtype else recs
         recs = self._search_words(member, rtype, text=text, limit=limit, subject=subject, field=field,
                                   since=since, until=until, offset=offset)
+        if checked and not rtype:
+            recs = self._readable_only(member, recs)
         if not self.restrictions.any():
             return recs
         # what a patient's directive withholds never matches: a record shown masked is matched against what is shown
         from .records import search_text, words_of
         words = words_of(text)
         return [r for r in recs if not visibility.withheld(r) or all(w in search_text(r) for w in words)]
+
+    def _readable_only(self, member: dict, recs: list[dict]) -> list[dict]:
+        seen: dict[str, bool] = {}
+
+        def ok(r):
+            t = r.get("resourceType") or ""
+            if t not in seen:
+                dc = self.class_or_none(t)
+                seen[t] = not dc or self.can(member, "reader", f"data_class:{dc}")
+            return seen[t]
+        return [r for r in recs if ok(r)]
 
     def _search_words(self, member: dict, rtype: str | None, *, text: str, limit: int | None, subject: str | None,
                       field: str | None, since: str | None, until: str | None, offset: int) -> list[dict]:
@@ -3256,6 +3389,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return wfmod.parse(OVERRIDE_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
                                                          "source": OVERRIDE_SOURCE, "author": "hub", "note": "",
                                                          "module": "", "approved_by": None, "approved_at": None}
+        from .credentials import ACCOUNT_SOURCE, ACCOUNT_WORKFLOW
+        if wid == ACCOUNT_WORKFLOW and version == 0:  # the home of a notice to a member about their own account
+            return wfmod.parse(ACCOUNT_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
+                                                        "source": ACCOUNT_SOURCE, "author": "hub", "note": "",
+                                                        "module": "", "approved_by": None, "approved_at": None}
         from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
         if wid == MENTION_WORKFLOW and version == 0:  # the home of a notice that someone mentioned a member
             return wfmod.parse(MENTION_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",

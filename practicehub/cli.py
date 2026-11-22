@@ -123,6 +123,15 @@ def cmd_serve(args):
     if not args.dev and not os.environ.get("PRACTICEHUB_SECRET"):
         print("warning: PRACTICEHUB_SECRET is not set, so the key that seals the track and signatures is the file "
               ".secret in the state directory. Set PRACTICEHUB_SECRET from a secret store.")
+    # a hub set up before a rule, or grants widened by a reviewed upgrade, can hold a credential whose issuer or
+    # sponsor does not reach as far as its holder: end it now, and say which agents need a new sponsor
+    reach = hub.reach_sweep(None, "the hub started")
+    if reach["credentials_ended"]:
+        print(f"credentials ended because whoever issued them does not reach as far: "
+              f"{', '.join(reach['credentials_ended'])}")
+    for row in reach["sponsors_out_of_reach"]:
+        print(f"warning: {hub.member(row['id'])['name']}'s sponsor does not reach what it does "
+              f"({', '.join(row['beyond'])}): a member admin names a sponsor who does (practicehub member sponsor)")
     hub.track.anchor()
     start_clock(hub, args.tick_interval)
     if args.agents:
@@ -541,9 +550,21 @@ def cmd_owners_approve_switch_off(args):
         raise SystemExit("approving as the server holder needs the secret that sealed the track: set PRACTICEHUB_SECRET")
     hub = build_hub(args)
     out = hub.holder_approves_switch_off(args.member)
-    print(f"{out['name']} is switched off; the track records that the server holder approved it"
-          + ("" if hub.policy_owner_count() >= hub.MIN_POLICY_OWNERS
-             else "; fewer than two policy owners are left: practicehub owners recover --grant <person>"))
+    print(f"{out['name']} is switched off; the track records that the server holder approved it")
+    if hub.policy_owner_count() < hub.MIN_POLICY_OWNERS:
+        print("Fewer than two policy owners are left, so nothing can be approved: "
+              "practicehub owners recover --grant <person>")
+    if not hub.member_admins():
+        print("Nobody switched on manages members now (adds people, changes roles, switches someone off) until two "
+              "policy owners give someone that role: one asks, the other approves.")
+    if out.get("roles_left_empty"):
+        names = [hub.role(r)["name"] if hub._role_known(r) else r for r in out["roles_left_empty"]]
+        print(f"Nobody switched on now holds: {', '.join(names)}")
+    for aid in out.get("stopped") or []:
+        print(f"{hub.member(aid)['name']} stopped with them: it needs a new sponsor (practicehub member sponsor) and "
+              f"new credentials from that sponsor before it runs again")
+    for aid, sp in (out.get("handed_over") or {}).items():
+        print(f"{hub.member(aid)['name']} is now sponsored by {hub.member(sp)['name']}")
 
 
 def cmd_module_list(args):
