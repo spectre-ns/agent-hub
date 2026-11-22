@@ -158,6 +158,8 @@ class Pack:
         for r in wf.starters:
             if r not in roles:
                 problems.append(f"trigger.starters: there is no role {r!r}")
+        if getattr(wf, "deadline_escalate_to", None) and wf.deadline_escalate_to not in roles:
+            problems.append(f"deadline: there is no role {wf.deadline_escalate_to!r} (roles: {', '.join(sorted(roles))})")
         for s in wf.steps:
             if s.role and s.role not in roles:
                 problems.append(f"step {s.id}: there is no role {s.role!r} (roles: {', '.join(sorted(roles))})")

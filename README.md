@@ -239,6 +239,23 @@ The hub checks the workflow as you edit it and lists every problem, in words. Sa
 owner approves it, after seeing the diff and what agents may now do. Runs that have already started finish on the
 version they started with.
 
+Time is the practice's (its time zone), and the clock's tick (`practicehub tick`, or every minute while serving)
+acts on it:
+
+- a **wait** step waits until a condition holds (`until`), for a while (`for = "3d"`), or until a moment
+  (`at = "{{input.appointment}} - 1d"`: one placeholder giving a date or a time, optionally moved by `+`/`-` a
+  duration; a date alone means its midnight). A wait on `until` may give up: `timeout = "2d"` ends it as timed out,
+  and later steps branch on it with `when = "chase.timed_out"` (or `not chase.timed_out`);
+- a **deadline** for the whole run: `[deadline]` with `within = "5d"` and `escalate_to = "<role>"`. A run still open
+  after it is flagged once (`run.deadline_missed` on the track, a notice to that role, else the practice's
+  escalation role) and keeps `deadline_at` and `deadline_missed_at`, so late runs can be counted;
+- a **schedule** (`trigger.schedule`): `hourly`, `every 15m` / `every 2h` (15 minutes to 24 hours), `daily 07:00`,
+  `weekdays 07:00`, `weekly mon 08:00` / `weekly mon,wed,fri 08:00`, `monthly 1 09:00` (day 1 to 28) or
+  `monthly last 17:00`. Each fires once per slot.
+
+The diagram editor's step panel sets a wait's condition, duration, moment and timeout; the workflow panel its
+schedule and deadline. The workflow's page says them in words.
+
 - **Blocks** in the sidebar lists the blocks and the engines under the hub; create or change one there.
 - `docs/workflows.md` is the reference.
 - `docs/packs.md` explains how to set up another kind of practice: its roles, data classes, subject (Patient, Client,

@@ -939,13 +939,13 @@ function drawFlow(svg, data, opts) {
     const clickable = !!(opts.onSelect || links[s.id]);
     const g = sv("g", { class: `fl-node k-${s.kind} ${st ? "st-" + st : ""} ${opts.selected === s.id ? "sel" : ""} ${clickable ? "click" : ""}`,
       tabindex: clickable ? "0" : "-1" });
-    g.append(sv("title", {}, `${s.title} (${s.kind}${s.role ? ", " + s.role : ""})${s.when ? " — only when " + s.when : ""}`));
+    g.append(sv("title", {}, `${s.title} (${s.kind}${s.role ? ", " + s.role : ""})${s.when ? " — only when " + s.when : ""}${s.timing ? " — " + s.timing : ""}`));
     g.append(sv("rect", { x, y, width: W, height: H, rx: 7, class: "box" }));
     g.append(sv("rect", { x, y: y + 6, width: 4, height: H - 12, rx: 2, class: "bar" }));
     const kind = (s.kind === "gate" ? "decision" : s.kind).toUpperCase();
     g.append(sv("text", { x: x + 14, y: y + 18, class: "k" }, clip(kind + " · " + (s.role || s.action || ""), 30)));
     g.append(sv("text", { x: x + 14, y: y + 36 }, clip(s.title || s.id, 26)));
-    g.append(sv("text", { x: x + 14, y: y + 52, class: "s" }, st ? st : (s.when ? "if " + clip(s.when, 24) : s.id)));
+    g.append(sv("text", { x: x + 14, y: y + 52, class: "s" }, st ? st : (s.when ? "if " + clip(s.when, 24) : s.timing ? clip(s.timing, 28) : s.id)));
     if (s.agents_may) {
       g.append(sv("rect", { x: x + W - 30, y: y + 7, width: 22, height: 14, rx: 3, class: "ai" }));
       g.append(sv("text", { x: x + W - 25, y: y + 18, class: "ai-t" }, "AI"));
@@ -1614,10 +1614,15 @@ function editor(root) {
 
   const agentsMay = (s) => s.kind !== "automation" && !s.persons_only && !(s.kind === "gate" && s.signer === "person");
   const stepById = (id) => wf.steps.find((s) => s.id === id);
+  const dur = (d) => { const m = /^(\d+)([mhdw])$/.exec(String(d || "").trim()); if (!m) return String(d || "");
+    return `${m[1]} ${{ m: "minute", h: "hour", d: "day", w: "week" }[m[2]]}${m[1] === "1" ? "" : "s"}`; };
+  const timingOf = (s) => [s.for ? "waits " + dur(s.for) : "", s.at ? "waits until a set time" : "",
+    s.timeout ? "gives up after " + dur(s.timeout) : "", s.due ? "due in " + dur(s.due) : ""].filter(Boolean).join("; ");
 
   function redraw() {
     drawFlow(svg, { steps: wf.steps.map((s) => ({ id: s.id, title: s.title || s.id, kind: s.kind || "task",
-      role: s.role, action: s.block ? "block " + s.block : s.action, after: s.after || [], when: s.when, agents_may: agentsMay(s) })) },
+      role: s.role, action: s.block ? "block " + s.block : s.action, after: s.after || [], when: s.when, agents_may: agentsMay(s),
+      timing: timingOf(s) })) },
       { selected, onSelect: (id) => { selected = id; redraw(); renderPanel(); } });
   }
   function changed(rebuild) {
@@ -1823,7 +1828,7 @@ function editor(root) {
       text("Title", s, "title"),
       text("Id", s, "id", { onchange: (v) => renameStep(s, v), help: "lower-case letters, digits and dashes; other steps refer to it" }),
       select("Kind", s, "kind", [["task", "Task: someone fills in a form"], ["gate", "Decision: someone signs an outcome"],
-        ["automation", "Automation: a deterministic action"]], { rebuild: true }),
+        ["automation", "Automation: a deterministic action"], ["wait", "Wait: until something holds, or for a time"]], { rebuild: true }),
       s.kind !== "automation" ? select("Role", s, "role", roles, { blank: "choose a role", help: "steps name roles, never people" }) : null,
       checks("Starts after", s, "after", others.map((o) => [o.id, o.title || o.id]), { none: "no other steps yet", help: "nothing ticked: it starts as soon as the run does" }),
       text("Only when", s, "when", { placeholder: "e.g. triage.category == 'urgent'", help: "a condition on earlier steps or the input; otherwise the step is skipped" }));
@@ -1838,7 +1843,15 @@ function editor(root) {
           : "a Python or engine block: deterministic, approved and signed")));
     }
     if (blk) put(paramsEditor(s, blk));
-    if (s.kind !== "automation") {
+    if (s.kind === "wait") {
+      put(el("fieldset", {}, el("legend", {}, "What it waits for"),
+        el("small", { class: "muted" }, "Fill in one of the first three."),
+        text("Until this holds", s, "until", { placeholder: "e.g. record.status == 'approved'", help: "checked whenever a record changes, and by the clock" }),
+        text("Or for", s, "for", { placeholder: "e.g. 3d", help: "a duration: 30m, 4h, 3d or 1w" }),
+        text("Or until", s, "at", { placeholder: "e.g. {{input.appointment}} - 1d", help: "a date or time from the run, moved by + or - a duration if you like" }),
+        text("Give up after", s, "timeout", { placeholder: "e.g. 2d", help: "with Until only: then it ends as timed out, and later steps can say when = \"" + s.id + ".timed_out\"" })));
+    }
+    if (s.kind !== "automation" && s.kind !== "wait") {
       const skills = Object.values(cat.skills).map((k) => [k.id, k.title]);
       put(el("fieldset", {}, el("legend", {}, "Who may do it"),
         select("Risk", s, "risk", [["low", "low: an agent's work goes ahead"], ["medium", "medium: goes ahead, the sponsor is told"],
@@ -1866,7 +1879,9 @@ function editor(root) {
       put(fieldsEditor(s, "fields", "What it produces",
         sk ? `Leave empty to use the skill's fields: ${sk.output.join(", ")}.` : ""));
     }
-    if (s.kind !== "automation") {
+    if (s.kind === "wait") {
+      // a wait reads nothing and does nothing
+    } else if (s.kind !== "automation") {
       const ctxOpts = [...cat.data_classes.map((d) => ["record:" + d.id, d.name + " records"]), ["input", "the run's input"],
         ...cat.providers.map((p) => ["provider:" + p, p]), ...others.map((o) => [o.id, "output of " + (o.title || o.id)])];
       put(el("fieldset", {}, el("legend", {}, "What it reads"),
@@ -1887,6 +1902,13 @@ function editor(root) {
     }
     put(el("p", {}, el("button", { type: "button", class: "danger", onclick: (ev) => removeStep(s, ev.currentTarget) }, "Remove step")));
   }
+  function deadlineOf() {  // [deadline] only once something is in it
+    const get = (k) => (wf.deadline || {})[k];
+    const set = (k, v) => { wf.deadline = Object.assign({}, wf.deadline, { [k]: v || undefined });
+      if (!wf.deadline.within && !wf.deadline.escalate_to) delete wf.deadline; };
+    return { get within() { return get("within"); }, set within(v) { set("within", v); },
+      get escalate_to() { return get("escalate_to"); }, set escalate_to(v) { set("escalate_to", v); } };
+  }
   function workflowPanel() {
     wf.trigger = wf.trigger || {};
     const roles = cat.roles.map((r) => [r.id, r.name]);
@@ -1897,7 +1919,11 @@ function editor(root) {
       text("Summary", wf, "summary", { area: true, rows: 3 }),
       el("fieldset", {}, el("legend", {}, "How it starts"),
         checks("Roles that may start it", wf.trigger, "starters", roles),
-        text("Or when this event happens", wf.trigger, "event", { placeholder: "e.g. lab.result-received" })),
+        text("Or when this event happens", wf.trigger, "event", { placeholder: "e.g. lab.result-received" }),
+        text("Or on a schedule", wf.trigger, "schedule", { placeholder: "e.g. weekdays 07:00", help: "hourly, every 15m, daily 07:00, weekdays 07:00, weekly mon,wed,fri 08:00, monthly 1 09:00 or monthly last 17:00" })),
+      el("fieldset", {}, el("legend", {}, "Deadline"),
+        text("Done within", deadlineOf(), "within", { placeholder: "e.g. 5d", help: "a run still open after this is flagged, once" }),
+        select("Then tell", deadlineOf(), "escalate_to", roles, { blank: "the practice's escalation role" })),
       fieldsEditor(wf, "input", "What the starter gives"),
       el("p", { class: "muted" }, "Select a step in the diagram to edit it, or add one."));
   }

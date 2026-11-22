@@ -1269,6 +1269,10 @@ def test_a_wait_step_is_checked(hub):
     with pytest.raises(DefinitionError, match="until is for wait"):
         parse(head + 'kind = "task"\nrole = "nurse"\nuntil = "record.done"\n[[steps.fields]]\nname = "a"\n')
     assert parse(head + 'kind = "wait"\nuntil = "record.done == true"\n').steps[0].kind == "wait"
+    # or on time: for a while, or until a moment; one of the three (tests/test_engine_timing.py has the rest)
+    assert parse(head + 'kind = "wait"\nfor = "3d"\n').steps[0].wait_for == "3d"
+    with pytest.raises(DefinitionError, match="one of until, for or at"):
+        parse(head + 'kind = "wait"\nuntil = "record.done"\nfor = "3d"\n')
 
 
 def test_only_the_authors_of_this_revision_may_not_approve_it(quality):

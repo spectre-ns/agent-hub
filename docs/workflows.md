@@ -75,6 +75,43 @@ note = [{ text = "{{decide.comment}}" }]
 `{{path}}` in params is filled from the run: `run.record`, `input.<name>`, `<step>.<field>`, `<step>.by` and
 `<step>.outcome`. Values are substituted as data and never evaluated.
 
+### wait
+
+Does nothing until what it waits for comes; one of:
+
+```toml
+kind = "wait"
+until = "record.status == 'approved'"   # checked whenever a record changes, and by the clock's tick
+timeout = "2d"                          # optional, with until only: then it ends anyway, as timed out
+# or
+for = "3d"                              # a duration: 30m, 4h, 3d, 1w
+# or
+at = "{{input.appointment}} - 1d"       # one placeholder, optionally moved by + or - a duration
+```
+
+`at` takes a date (`2026-12-01`: its midnight), a wall time (`2026-12-01T09:30`) or an instant (`...Z`, or with an
+offset). Dates and wall times are the practice's, in its time zone; durations are counted in real time, so a clock
+change does not move them. A value that is not a date or a time fails the step and asks the escalation role.
+
+The output is `waited_for`; a wait with `timeout` also has `timed_out` (true or false), so a later step can say
+`when = "chase.timed_out"`. A timeout is on the track as `step.timed_out`.
+
+### Timing: deadlines and schedules
+
+```toml
+[deadline]
+within = "5d"                    # a run still open after this is late
+escalate_to = "practice-manager" # told once (else the practice's escalation role)
+
+[trigger]
+schedule = "weekly mon,wed,fri 08:00"
+```
+
+A late run is flagged once, `run.deadline_missed` on the track, and keeps `deadline_at` and `deadline_missed_at` (a
+run that finishes late before the tick sees it is marked too). Schedules: `hourly`, `every 15m` to `every 24h`
+(stretches counted from midnight), `daily 07:00`, `weekdays 07:00`, `weekly mon 08:00` or `weekly mon,wed,fri 08:00`,
+`monthly 1 09:00` (day 1 to 28) or `monthly last 17:00`. Each fires once per slot, by the practice's clock.
+
 ## Blocks: reusable, parameterised steps
 
 A block is a step the practice builds once (on **Blocks** in the sidebar) and uses in any workflow. A step names it
