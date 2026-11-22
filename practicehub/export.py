@@ -147,6 +147,10 @@ def fhir_resource(hub, rt, rec: dict) -> dict:
     keys = {f["path"].split(".")[0] for f in rt.fields}
     out = {"resourceType": rt.id, "id": rec.get("id")}
     meta = {k: (rec.get("meta") or {}).get(k) for k in ("versionId", "lastUpdated") if (rec.get("meta") or {}).get(k)}
+    gone = visibility.withheld(rec)
+    if gone:  # FHIR's own word for it: the resource was redacted (and the reader is told why)
+        meta["security"] = [{"system": "http://terminology.hl7.org/CodeSystem/v3-ObservationValue",
+                             "code": "REDACTED", "display": gone["note"]}]
     if meta:
         out["meta"] = meta
     out.update({k: v for k, v in rec.items() if k in keys and not k.startswith("_") and v not in (None, "", [], {})})
@@ -196,7 +200,7 @@ def plain_json(rec: dict) -> dict:
     """A record of a type that is not a FHIR resource, as the hub keeps it (its type, id and version too)."""
     meta = rec.get("meta") or {}
     return {"resourceType": rec.get("resourceType"), "id": rec.get("id"),
-            **({"meta": {k: meta[k] for k in ("versionId", "lastUpdated") if k in meta}} if meta else {}),
+            **({"meta": {k: meta[k] for k in ("versionId", "lastUpdated", "withheld") if k in meta}} if meta else {}),
             **{k: v for k, v in rec.items() if k not in schema.RESERVED and not k.startswith("_")}}
 
 
@@ -267,6 +271,11 @@ def record_rows(hub, member, rt, rec) -> list[tuple[str, str]]:
                   and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields))]
     fields = visibility.shown(hub, member, rt, fields)
     rows = []
+    gone = visibility.withheld(rec)
+    if gone:  # never silently incomplete
+        rows.append(("Withheld", gone["note"] + ("" if gone.get("whole") else f": {', '.join(gone.get('fields') or [])}")))
+        if gone.get("whole"):
+            return rows
     if lc:
         rows.append(("Status", str(schema.first(rec, lc["path"]) or "")))
     for f in fields:
@@ -652,13 +661,18 @@ def subject_file(hub, member, ref: str, fmt: str) -> Export:
         blocks = [("h1", title), ("note", f"The {rt.label.lower()}'s file: {len(recs)} records. {_stamp(hub, member)}")]
         if hidden:
             blocks.append(("note", left_out_words(hidden)))
+        gap = sum(1 for r in recs if visibility.withheld(r))
+        if gap:
+            blocks.append(("note", f"Incomplete: {hub.restrictions.note(ref).lower()} "
+                                   f"({gap} record{'s' if gap != 1 else ''} shown without what is withheld)."))
         for r in recs:
             t = hub.record_type_for_reading(r["resourceType"])
             blocks += [("h2", f"{t.label}: {hub.title(r)}" if r is not recs[0] else f"{t.label}"),
                        ("kv", record_rows(hub, member, t, r))]
         body = odt(title, blocks) if fmt == "odt" else print_html(title, blocks).encode()
     _log(hub, member, kept, fmt, what=ref, data={"type": rtype, "scope": "file", "left_out": hidden,
-                                                 "not_fhir": other})
+                                                 "not_fhir": other,
+                                                 "withheld": sum(1 for r in recs if visibility.withheld(r))})
     return Export(body, fmt, safe_filename(f"{rtype}-{rid}-file", FORMATS[fmt][2]), len(kept), hidden, other)
 
 

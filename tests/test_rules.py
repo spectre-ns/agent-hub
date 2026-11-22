@@ -3398,7 +3398,7 @@ def test_the_clinic_packs_types_are_fhir_resources(hub):
 def test_a_record_exports_as_fhir_json_that_round_trips(hub):
     from practicehub import export
     amara = M(hub, "dr-amara")
-    rec = hub.records.search("MedicationRequest")[0]
+    rec = next(r for r in hub.records.search("MedicationRequest") if not hub.restrictions.restricted(r))  # no directive
     x = export.record(hub, amara, f"MedicationRequest/{rec['id']}", "fhir")
     assert x.content_type == "application/fhir+json" and x.filename == f"MedicationRequest-{rec['id']}.json"
     res = json.loads(x.body)
@@ -3781,6 +3781,122 @@ def test_an_mcp_token_is_not_an_api_token_and_an_agent_still_cannot_sign(hub):
         mcp.ask_access(hub, agent, "practice", roles=roles, reason="x", acknowledged=True)  # agents decide nothing
 
 
+# ------------------------------------------------------------------------------- a subject's restriction (lockbox)
+def _ellen_and_her_result(hub):
+    ref = _file_of_ellen(hub)
+    obs = next(r for r in hub.records.search("Observation", subject=ref) if r.get("status") == "final")
+    return ref, f"Observation/{obs['id']}"
+
+
+def _lockbox(hub, ref, who="rana", **data):
+    """Rana, the privacy officer, records the patient's directive."""
+    return hub.create_record(M(hub, who), "Consent", {
+        "patient": {"reference": ref}, "status": "active", "received": "2026-11-01",
+        "request": "Please keep my lab results from the people at the desk and the nurses.", **data})
+
+
+def test_only_the_privacy_officer_records_a_consent_directive_and_it_is_on_the_track(hub):
+    ref, _ = _ellen_and_her_result(hub)
+    for who in ("jo", "dr-amara", "noor"):
+        with pytest.raises(Denied):
+            _lockbox(hub, ref, who, withhold_classes=["clinical"])
+    c = _lockbox(hub, ref, withhold_classes=["clinical"])
+    made = hub.db.events.find_one({"action": "record.created", "subject": f"Consent/{c['id']}"})
+    assert made and made["actor"] == "rana"
+    with pytest.raises(Denied):
+        hub.update_record(M(hub, "dr-amara"), f"Consent/{c['id']}", {"status": "withdrawn"})
+
+
+def test_a_directive_names_only_the_practices_own_classes_and_must_withhold_something(hub):
+    ref, _ = _ellen_and_her_result(hub)
+    with pytest.raises(Invalid) as e:
+        _lockbox(hub, ref, withhold_classes=["clinicle"])
+    assert "not a data class" in str(e.value.problems)
+    with pytest.raises(Invalid):
+        _lockbox(hub, ref)  # withholds nothing
+
+
+def test_what_a_directive_withholds_is_a_stub_that_says_so_for_everyone_it_does_not_allow(hub):
+    ref, obs = _ellen_and_her_result(hub)
+    amara, noor, liam = M(hub, "dr-amara"), M(hub, "noor"), M(hub, "dr-liam")
+    assert hub.read_record(noor, obs).get("valueQuantity")
+    _lockbox(hub, ref, withhold_types=["Observation"], allow_members=[{"reference": "Practitioner/dr-amara"}])
+    stub = hub.read_record(noor, obs)
+    assert "valueQuantity" not in stub and "code" not in stub
+    assert stub["meta"]["withheld"]["note"] == "Information withheld at the patient's request"
+    assert hub.title(hub.records.read(*obs.split("/"))) == "Result, restricted at the patient's request"
+    assert "valueQuantity" not in hub.read_record(liam, obs)
+    assert hub.read_record(amara, obs)["valueQuantity"]["value"] == 5.9  # she is named: she still sees it
+    chart = hub.chart(noor, ref)
+    assert chart["withheld"] >= 1 and chart["withheld_note"]
+    assert "withheld_note" not in hub.chart(amara, ref)
+    assert hub.db.events.find_one({"action": "record.viewed", "actor": "dr-liam", "subject": obs,
+                                   "data.how": "withheld"}), "the track says what they were shown: a stub"
+
+
+def test_a_role_can_be_allowed_and_withdrawing_the_directive_lifts_it(hub):
+    ref, obs = _ellen_and_her_result(hub)
+    c = _lockbox(hub, ref, withhold_classes=["clinical"], allow_roles=["physician"])
+    assert "valueQuantity" in hub.read_record(M(hub, "dr-liam"), obs)
+    assert "valueQuantity" not in hub.read_record(M(hub, "noor"), obs)
+    hub.update_record(M(hub, "rana"), f"Consent/{c['id']}", {"status": "withdrawn"})
+    assert "valueQuantity" in hub.read_record(M(hub, "noor"), obs)
+
+
+def test_withheld_fields_of_another_class_are_stripped_and_named(hub):
+    ref, _ = _ellen_and_her_result(hub)
+    visit = next(r for r in hub.records.search("Encounter", subject=ref) if r.get("reasonCode"))
+    vref = f"Encounter/{visit['id']}"
+    _lockbox(hub, ref, withhold_classes=["clinical"])
+    seen = hub.read_record(M(hub, "noor"), vref)
+    assert "reasonCode" not in seen and seen.get("plannedStartDate"), "the booking stays, its clinical reason goes"
+    assert seen["meta"]["withheld"]["whole"] is False and seen["meta"]["withheld"]["fields"]
+    with pytest.raises(Denied):  # nobody writes over what they cannot see
+        hub.update_record(M(hub, "noor"), vref, {"reasonCode": [{"text": "something else"}]})
+
+
+def test_a_withheld_record_is_not_found_by_what_it_says_nor_its_files_read(hub):
+    ref, obs = _ellen_and_her_result(hub)
+    noor = M(hub, "noor")
+    assert any(f"{r['resourceType']}/{r['id']}" == obs for r in hub.search_records(noor, "Observation", text="HbA1c"))
+    _lockbox(hub, ref, withhold_types=["Observation"])
+    assert not any(f"{r['resourceType']}/{r['id']}" == obs
+                   for r in hub.search_records(noor, "Observation", text="HbA1c"))
+
+
+def test_an_agent_is_never_given_what_a_directive_withholds(hub):
+    ref, obs = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["clinical"])
+    agent = M(hub, "clinical-admin-agent")
+    for r in hub.redact_all(agent, hub.records.search(subject=ref, limit=None)):
+        if r["resourceType"] in ("Observation", "Condition", "MedicationRequest", "AllergyIntolerance"):
+            assert r["meta"]["withheld"]["whole"] and "code" not in r and "valueQuantity" not in r
+    assert not hub.restrictions.may_override(agent), "an agent cannot break the glass"
+    with pytest.raises(Denied):
+        hub.break_glass(agent, obs, "an agent wants to read this result")
+
+
+def test_breaking_the_glass_needs_the_grant_and_a_reason_and_the_privacy_officer_reviews_it(hub):
+    ref, obs = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["clinical"])
+    noor, jo = M(hub, "noor"), M(hub, "jo")
+    with pytest.raises(Denied):
+        hub.break_glass(jo, obs, "I would like to see it please")  # the front desk may not override
+    assert hub.db.events.find_one({"action": "access.denied", "actor": "jo"})
+    with pytest.raises(Invalid):
+        hub.break_glass(noor, obs, "urgent")  # a reason, not a word
+    got = hub.break_glass(noor, obs, "Patient collapsed in the waiting room; need her results")
+    assert hub.read_record(noor, obs)["valueQuantity"]["value"] == 5.9, "the override opens the file"
+    assert hub.withheld(noor, ref)["override"]["reason"].startswith("Patient collapsed")
+    ev = hub.db.events.find_one({"seq": got["seq"]})
+    assert ev["action"] == "record.viewed" and ev["data"]["how"] == "override" and ev["actor"] == "noor"
+    review = hub.db.items.find_one({"run_id": got["run"], "kind": "notice"})
+    owners = {m["id"] for m in hub.members("person") if hub.can(m, "policy_owner", "practice:main")}
+    assert review and review["assignee"] in owners and review["priority"] == "urgent"
+    assert "Patient collapsed" in review["title"]
+    report = hub.access_report(M(hub, "rana"), ref)
+    assert any(r.get("how") == "override" or (r.get("data") or {}).get("how") == "override" for r in report)
+    assert "valueQuantity" not in hub.read_record(M(hub, "dr-liam"), obs), "only for the one who broke the glass"
 # ------------------------------------------------------------------------------------------- agents never sign
 def _agent_check(hub, risk="low"):
     """A gate an agent may decide on its own (signer any, within criteria), about a patient record."""

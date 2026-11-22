@@ -281,6 +281,10 @@ border-radius:0;clip-path:polygon(50% 0,100% 100%,0 100%);padding-top:4px}
 .flash>:last-child,.section-msg>:last-child,.error>:last-child,.ok>:last-child,.warn>:last-child{margin-bottom:0}
 .flash h2,.flash h3,.section-msg h2,.section-msg h3{margin:0 0 8px;font-size:14px;line-height:20px}
 .flash ul,.section-msg ul,.error ul{margin:4px 0;padding-left:16px}
+/* ---- a restriction: what is withheld at the subject's request, and the emergency override */
+details.break-glass{margin-top:8px}details.break-glass>summary{cursor:pointer;font-weight:600;color:var(--link)}
+.break-glass-form{margin-top:8px;max-width:560px}.break-glass-form textarea{width:100%;box-sizing:border-box}
+.withheld-panel{border-left:4px solid var(--warning-icon)}tr.withheld td{color:var(--muted)}
 .note{font-size:14px;color:var(--danger-fg)}
 nav.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid var(--border);margin:0 0 16px}nav.tabs a{padding:6px 10px;color:var(--subtle);text-decoration:none;margin-bottom:-2px;border-bottom:2px solid transparent}nav.tabs a:hover{color:var(--fg)}nav.tabs a[aria-current]{color:var(--selected-fg);border-bottom-color:currentColor;font-weight:600}.issue-side h2{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--subtle);margin:16px 0 4px}.sign{font-size:14px}
 

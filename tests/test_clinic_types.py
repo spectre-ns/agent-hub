@@ -58,7 +58,7 @@ STARTS = {"Encounter": "planned", "Observation": "registered",
 
 
 # what owns a record of each type: it exists only inside its patient or its visit
-OWNED = {"AllergyIntolerance": "Patient", "Condition": "Patient", "Immunization": "Patient",
+OWNED = {"AllergyIntolerance": "Patient", "Consent": "Patient", "Condition": "Patient", "Immunization": "Patient",
          "MedicationStatement": "Patient", "Coverage": "Patient", "RelatedPerson": "Patient",
          "QuestionnaireResponse": "Patient", "Composition": "Encounter", "ChargeItem": "Encounter"}
 

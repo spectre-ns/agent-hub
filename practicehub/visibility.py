@@ -111,12 +111,20 @@ def strip_classed(hub, rec: dict | None) -> dict | None:
 
 
 def redact(hub, member: dict | None, rec: dict | None) -> dict | None:
-    """What the member may see of a record: without the fields whose data class they may not read."""
+    """What the member may see of a record: without the fields whose data class they may not read, and without what
+    a restriction of its subject withholds from them (``practicehub/restrictions.py``: a record it masks becomes a
+    stub saying so, ``meta.withheld``)."""
     if not rec or not isinstance(rec, dict):
         return rec
     rt = hub.record_type_for_reading(rec.get("resourceType") or "")
     hidden = hidden_fields(hub, member, rt)
-    return strip(rec, hidden) if hidden else rec
+    out = strip(rec, hidden) if hidden else rec
+    return hub.restrictions.apply(member, out) if hasattr(hub, "restrictions") else out
+
+
+def withheld(rec: dict | None) -> dict | None:
+    """What a record handed out says is withheld from it at its subject's request: ``{"note", "whole", "fields"}``."""
+    return ((rec or {}).get("meta") or {}).get("withheld") if isinstance(rec, dict) else None
 
 
 def shown(hub, member: dict | None, rt, fields: list[dict]) -> list[dict]:
@@ -162,6 +170,13 @@ def guard_write(hub, member: dict, rt, before: dict | None, after: dict) -> dict
     left it out, and is refused (Denied, naming it) when they set or changed it."""
     from .hub import Denied
     hidden = hidden_fields(hub, member, rt, write=True)
+    # what a restriction withholds from them is not theirs to change (adding to the file is: it is withheld too)
+    masked = hub.restrictions.mask(member, before) if before and hasattr(hub, "restrictions") else None
+    if masked and masked["whole"]:
+        raise Denied(f"{member.get('name') or member.get('id')} may not change this {rt.label.lower()}: "
+                     f"{hub.restrictions.note(masked['subject']).lower()}")
+    if masked:
+        hidden = hidden + [dict(f, data_class=hub.restrictions.note(masked["subject"]).lower()) for f in masked["fields"]]
     if not hidden:
         return after
     before = before or {}

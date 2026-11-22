@@ -707,8 +707,10 @@ def _conn_data(conn: dict | None) -> dict:
 
 def _summary(hub, rt, rec: dict) -> dict:
     st = schema.first(rec, rt.lifecycle["path"]) if rt.lifecycle else None
+    gone = visibility.withheld(rec)
     return {"ref": f"{rt.id}/{rec['id']}", "title": hub.title(rec), "state": st,
-            "version": str((rec.get("meta") or {}).get("versionId", ""))}
+            "version": str((rec.get("meta") or {}).get("versionId", "")),
+            **({"withheld": gone["note"]} if gone else {})}
 
 
 def _run(hub, sid, member, what, target, a, seq, how) -> dict:
@@ -753,8 +755,10 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
         rec = hub.redact(member, hub.records.read(target, a["id"]))
         if not rec:
             raise NotFound(f"there is no {ref}")
-        hub.note_view(member, ref, how=how)
-        return {"record": rec, **_summary(hub, rt, rec), "_text": hub.title(rec)}
+        gone = visibility.withheld(rec)
+        hub.note_view(member, ref, how="withheld" if gone and gone.get("whole") else how)
+        return {"record": rec, **_summary(hub, rt, rec),
+                "_text": hub.title(rec) + (f" ({gone['note'].lower()})" if gone else "")}
     if what == "create":
         rt = hub.record_type(target)
         rec = hub.create_record(member, target, _values(rt, a), cause=seq)

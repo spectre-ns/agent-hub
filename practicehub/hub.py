@@ -168,6 +168,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self._modules_noted()
         self._defs_reset()
         self._sealed_ok: set = set()
+        from .restrictions import Restrictions
+        self.restrictions = Restrictions(self)  # a subject's limits on who sees what of their file
         self._subjects()
         if self.pack and pack is None:
             self._everyone_holds_everyone()
@@ -981,6 +983,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 tuples.append(("practice:main", "policy_owner", f"role:{role}#assignee"))
             if g.get("member_admin"):
                 tuples.append(("practice:main", "member_admin", f"role:{role}#assignee"))
+            if g.get("break_glass"):  # may open what a subject's restriction withholds, with a reason (restrictions.py)
+                tuples.append(("practice:main", "break_glass", f"role:{role}#assignee"))
         return tuples
 
     def _module_grants(self, mid: str) -> list[list]:
@@ -2099,8 +2103,28 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         rec = self.records.read(rtype, rid)
         if not rec:
             raise NotFound(f"there is no {ref}")
-        self.note_view(member, ref)
-        return rec if raw else self.redact(member, rec)
+        out = self.redact(member, rec)
+        gone = visibility.withheld(out)
+        self.note_view(member, ref, how="withheld" if gone and gone.get("whole") else "opened")
+        return rec if raw else out
+
+    # ------------------------------------------------------------------ restrictions (restrictions.py)
+    def withheld(self, member: dict | None, subject: str) -> dict:
+        """What restrictions on a subject's file withhold from the member, for a page to say so: ``{"note",
+        "restrictions", "override" (their emergency access in force, or None), "may_override"}``; an empty dict
+        when nothing in the file is restricted."""
+        ds = self.restrictions.of_subject(subject)
+        if not ds:
+            return {}
+        over = self.restrictions.override(member, subject)
+        mine = [d["ref"] for d in ds if not self.restrictions._allowed(member, d)]
+        return {"note": self.restrictions.note(subject), "restrictions": mine, "allowed": not mine,
+                "override": over if mine else None, "may_override": bool(mine) and self.restrictions.may_override(member)}
+
+    def break_glass(self, member: dict, ref: str, reason: str) -> dict:
+        """Open, in an emergency and with a reason, what a restriction withholds of ``ref``'s file from the member:
+        tracked as a view (``how = "override"``), reviewed by the privacy officer (``restrictions.py``)."""
+        return self.restrictions.break_glass(member, ref, reason)
 
     def redact(self, member: dict | None, rec: dict | None) -> dict | None:
         """What the member may see of a record (visibility.redact): every record handed to a member goes through
@@ -2123,6 +2147,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if not text:
             return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, field=field,
                                                                since=since, until=until, offset=offset))
+        recs = self._search_words(member, rtype, text=text, limit=limit, subject=subject, field=field,
+                                  since=since, until=until, offset=offset)
+        if not self.restrictions.any():
+            return recs
+        # what a patient's directive withholds never matches: a record shown masked is matched against what is shown
+        from .records import search_text, words_of
+        words = words_of(text)
+        return [r for r in recs if not visibility.withheld(r) or all(w in search_text(r) for w in words)]
+
+    def _search_words(self, member: dict, rtype: str | None, *, text: str, limit: int | None, subject: str | None,
+                      field: str | None, since: str | None, until: str | None, offset: int) -> list[dict]:
         types = {rtype: self.record_type_for_reading(rtype)} if rtype else self.record_types()
         guarded = {t for t, rt in types.items() if visibility.hidden_fields(self, member, rt)}
         if guarded and hasattr(self.records, "reindex"):
@@ -2225,8 +2260,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if not _SHA256.fullmatch(blob or ""):
             raise NotFound("there is no such file")
         named = None
+        masked = self.restrictions.mask(member, self.records.read(rtype, rid))
         for v in self.db.record_versions.find({"type": rtype, "id": rid}, sort=[("version", DESC)], fields=["data"]):
-            named = next((a for a in _files_in(v["data"]) if a["blob"] == blob), None)
+            # a file in what a restriction withholds from them is withheld too
+            seen = self.restrictions.apply(member, v["data"]) if masked else v["data"]
+            named = next((a for a in _files_in(seen) if a["blob"] == blob), None)
             if named:
                 break
         got = self.db.get_file(blob) if named else None
@@ -2466,9 +2504,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 continue
             recs = [r for r in (self.records.read(*x["from_ref"].split("/", 1)) for x in rows)
                     if r and schema.ref_of(schema.first(r, rt.part_of["path"])) == ref]
-            for r in recs:
-                self.note_view(member, f"{rt.id}/{r['id']}", how=f"part of {ref}")
-            out[rt.id] = sorted(self.redact_all(member, recs), key=lambda r: schema.record_date(rt, r), reverse=True)
+            shown = self.redact_all(member, recs)
+            for r in shown:
+                if not visibility.withheld(r) or not visibility.withheld(r).get("whole"):
+                    self.note_view(member, f"{rt.id}/{r['id']}", how=f"part of {ref}")
+            out[rt.id] = sorted(shown, key=lambda r: schema.record_date(rt, r), reverse=True)
         return out, hidden
 
     def tree(self, member: dict, rtype: str, where=None) -> list[tuple[int, dict]]:
@@ -2555,6 +2595,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 break
             above = self.records.read(*up.split("/", 1))
             up, hops = (self.parent_of(rt, above) if above else None), hops + 1
+        if rt.is_a("Restriction") and not problems:
+            problems += self.restrictions.problems(rt, rec)
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
 
@@ -2766,6 +2808,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if clashes:
                 ev = self._note_overbook(member, rt, f"{rtype}/{rec['id']}", clashes, over, cause=ev, run_id=run_id)
             self.engine.on_record("created", rt, rec, None, member, ev)
+        if rt.is_a("Restriction"):
+            self.restrictions.reset()  # in force at once, in this process
         return self.redact(member, rec)  # what they wrote, as they may read it
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
@@ -2854,7 +2898,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if clashes:
                 ev = self._note_overbook(member, rt, ref, clashes, over, cause=ev, run_id=run_id)
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
-            return self.redact(member, rec)
+        if rt.is_a("Restriction"):
+            self.restrictions.reset()
+        return self.redact(member, rec)
 
     # ------------------------------------------------------------------ signatures on any record
     def _record_digest(self, rec: dict) -> str:
@@ -3005,8 +3051,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def chart(self, member: dict, subject: str) -> dict:
         """Every record about a subject the member may read, grouped by data class; what they may not read is
-        counted, not shown."""
-        out, hidden = {}, 0
+        counted, not shown. What a restriction withholds from them is there as a stub that says so (``withheld``
+        counts them): the file is never shown as if it were complete."""
+        out, hidden, withheld = {}, 0, 0
         self.note_view(member, subject, how="chart")
         for rec in self.records.search(subject=subject, limit=None):
             if rec.get("resourceType") == subject.split("/")[0] and f"{rec['resourceType']}/{rec['id']}" == subject:
@@ -3016,11 +3063,18 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 continue
             dc = rt.data_class
             if self.can(member, "reader", f"data_class:{dc}"):
-                out.setdefault(dc, []).append(self.redact(member, rec))
+                shown = self.redact(member, rec)
+                out.setdefault(dc, []).append(shown)
+                gone = visibility.withheld(shown)
+                if gone and gone.get("whole"):
+                    withheld += 1
+                    continue
                 self.note_view(member, f"{rec['resourceType']}/{rec['id']}", how=f"chart of {subject}")
             else:
                 hidden += 1
-        return {"classes": out, "hidden": hidden}
+        rest = self.withheld(member, subject)
+        return {"classes": out, "hidden": hidden, "withheld": withheld,
+                **({"withheld_note": rest["note"]} if rest and not rest["allowed"] and not rest["override"] else {})}
 
     # ------------------------------------------------------------------ workflows and change control
     def workflow(self, wid: str, version: int | None = None) -> tuple[wfmod.Workflow, dict]:
@@ -3029,6 +3083,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return wfmod.parse(UNHANDLED_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
                                                           "source": UNHANDLED_SOURCE, "author": "hub", "note": "",
                                                           "module": "", "approved_by": None, "approved_at": None}
+        from .restrictions import OVERRIDE_SOURCE, OVERRIDE_WORKFLOW
+        if wid == OVERRIDE_WORKFLOW and version == 0:  # the home of the privacy officer's notice of an emergency access
+            return wfmod.parse(OVERRIDE_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
+                                                         "source": OVERRIDE_SOURCE, "author": "hub", "note": "",
+                                                         "module": "", "approved_by": None, "approved_at": None}
         from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
         if wid == MENTION_WORKFLOW and version == 0:  # the home of a notice that someone mentioned a member
             return wfmod.parse(MENTION_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",

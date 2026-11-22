@@ -34,6 +34,7 @@ type practice
     define owner: [member]
     define policy_owner: [member, role#assignee] or owner
     define member_admin: [member, role#assignee] or owner
+    define break_glass: [member, role#assignee]
 
 type data_class
   relations
@@ -193,9 +194,10 @@ def model_json() -> dict:
             {"type": "role", "relations": {"assignee": this()}, "metadata": {"relations": {"assignee": direct("member")}}},
             {"type": "practice",
              "relations": {"owner": this(), "policy_owner": union(this(), computed("owner")),
-                           "member_admin": union(this(), computed("owner"))},
+                           "member_admin": union(this(), computed("owner")), "break_glass": this()},
              "metadata": {"relations": {"owner": direct("member"), "policy_owner": direct("member", "role#assignee"),
-                                        "member_admin": direct("member", "role#assignee")}}},
+                                        "member_admin": direct("member", "role#assignee"),
+                                        "break_glass": direct("member", "role#assignee")}}},
             {"type": "data_class",
              "relations": {"writer": this(), "reader": union(this(), computed("writer"))},
              "metadata": {"relations": {"writer": direct("member", "role#assignee"),

@@ -1,0 +1,81 @@
+id = "privacy-request"
+title = "Patient asks to withhold information"
+record = "Patient"
+summary = """
+A patient asks the practice to limit who sees part of their file, or withdraws their consent to its use or disclosure
+(PHIA). Whoever hears the request writes it down in the patient's words; the privacy officer (the practice manager)
+records the consent directive: what is withheld and who is still allowed. From then on the chart says "information
+withheld at the patient's request" to everyone else, agents included; a physician or nurse can open it in an emergency
+with a reason, which the privacy officer reviews. The patient is told what was recorded and what it can mean for their
+care. To lift or change it later, the privacy officer edits the directive on the patient's page.
+"""
+
+[trigger]
+starters = ["front-desk", "nurse", "physician", "practice-manager", "medical-director"]
+
+[[input]]
+name = "request"
+type = "text"
+label = "What the patient asks, in their words"
+required = true
+help = "what they want withheld (a result, their mental-health notes, everything clinical) and from whom"
+
+[[steps]]
+id = "directive"
+title = "Record the patient's consent directive"
+kind = "task"
+role = "practice-manager"
+persons_only = true
+due = "2d"
+escalate_to = "medical-director"
+context = ["record:demographics", "record:privacy", "input.request"]
+instructions = """Check the request is the patient's own (or their substitute decision-maker's). Say what is withheld (by
+kind of information) and who still sees it. A record that must be withheld on its own can be added on the directive
+afterwards, from the patient's page. Tell the patient that the people caring for them may not see it, that an
+emergency may still open it (and that each such access is reviewed), and that they can lift it at any time."""
+[[steps.fields]]
+name = "withhold"
+label = "Withhold these kinds of information"
+type = "list"
+required = true
+help = "one a line: clinical, intake, visits, correspondence, billing"
+[[steps.fields]]
+name = "allow_roles"
+label = "Still allowed: roles"
+type = "list"
+help = "one a line, e.g. physician; leave empty for nobody"
+[[steps.fields]]
+name = "told"
+label = "What the patient was told"
+type = "text"
+required = true
+
+[[steps]]
+id = "save"
+title = "Put the directive in force"
+kind = "automation"
+after = ["directive"]
+action = "record.create"
+[steps.params]
+type = "Consent"
+[steps.params.data]
+patient = { reference = "{{run.record}}" }
+status = "active"
+received = "{{run.today}}"
+request = "{{input.request}}"
+withhold_classes = "{{directive.withhold}}"
+allow_roles = "{{directive.allow_roles}}"
+told = "{{directive.told}}"
+
+[[steps]]
+id = "confirm"
+title = "Confirm to the patient"
+kind = "automation"
+after = ["save"]
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.record}}"
+subject = "Your request about your health information"
+body = """We have recorded your request to limit who sees part of your health information. {{directive.told}}
+You can change or lift it at any time by calling the office."""

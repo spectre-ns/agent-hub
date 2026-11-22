@@ -22,6 +22,7 @@ Notes for anyone, human or agent, changing this code.
 | Who may take an item (agents, sponsors, signing, criteria, risk, skills, data classes, separation of duties) | `Engine.eligibility` in `practicehub/engine.py`, the one place to read |
 | Risk tiers (medium: sponsor notice; high: held for sponsor approval) | `Engine._finish`, `Engine._hold`, `Engine._decide_hold` |
 | What a member sees of runs and the track | `practicehub/visibility.py` |
+| What a subject withheld from whom (consent directive, lockbox), and the emergency override | `practicehub/restrictions.py` (base type `practicehub/base/Restriction.toml`) |
 | Sponsors, kill switch, tokens, change control | `practicehub/hub.py` |
 | Hash chain and signatures | `practicehub/track.py` |
 | Collections, document shapes, indexes; transactions and files | `practicehub/db.py`, `practicehub/store.py` |

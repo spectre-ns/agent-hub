@@ -158,16 +158,23 @@ id = "billing"
 name = "Billing"
 record_types = ["ChargeItem", "Claim"]
 
+[[data_classes]]
+id = "privacy"
+name = "Consent directives (what a patient asked to have withheld)"
+record_types = ["Consent"]
+
 # ----------------------------------------------------------------------------------------------------------- grants
 # Writing a class implies reading it.
 
 [grants.physician]
 write = ["clinical", "visits", "correspondence"]
 read = ["demographics", "intake", "billing"]
+break_glass = true               # may open what a patient asked to withhold, in an emergency, with a reason (reviewed)
 
 [grants.nurse]
 write = ["clinical", "visits", "correspondence", "intake"]   # a nurse checks patients in and triages
 read = ["demographics"]
+break_glass = true
 
 [grants.front-desk]
 write = ["demographics", "visits", "correspondence"]
@@ -194,11 +201,12 @@ read = ["visits", "demographics"]
 
 [grants.practice-manager]
 read = ["demographics", "billing", "visits"]
+write = ["privacy"]              # the privacy officer: records and changes a patient's consent directive
 policy_owner = true
 member_admin = true
 
 [grants.medical-director]
-read = ["clinical", "visits", "demographics"]
+read = ["clinical", "visits", "demographics", "privacy"]
 policy_owner = true              # a second policy owner: approvals never wait on one person
 
 [grants.patient-portal]
@@ -238,6 +246,7 @@ Immunization = "Immunization"
 Communication = "Message"
 ChargeItem = "Charge"
 Claim = "Claim"
+Consent = "Consent directive"
 
 # ----------------------------------------------------------------------------------------------------------- events
 # Every event the practice's workflows listen for, with the fields it carries (they become the run's input).
