@@ -4704,3 +4704,48 @@ def test_a_step_lists_the_moves_it_waits_on_and_a_trigger_refuses_only_the_same_
     # the practice's request refuses only the same reason a moment ago: any other is a new, screened request
     req = hub.workflow("appointment-request")[0]
     assert req.one_open_same == ["input.reason"] and req.one_open_within
+
+
+# ------------------------------------------------------------------------------------------- the booking portal
+def _portal_person(hub):
+    rec = hub.create_record(M(hub, "jo"), "Patient", {
+        "name": [{"given": ["Ada"], "family": "Lane"}], "birthDate": "1990-02-03",
+        "identifier": [{"system": "https://novascotia.ca/health-card", "value": "1234 567 890"}],
+        "telecom": [{"system": "phone", "value": "902-555-0100"}]})
+    return f"Patient/{rec['id']}"
+
+
+def test_the_portal_books_only_through_workflows_and_never_reads_the_chart(hub):
+    """Rule: everything the portal does for a person is a workflow its member starts (a booking, a request, a
+    cancellation), never a write of its own; and its member may not read the practice's clinical records, so what the
+    person sees of a booking is when, with whom, what kind and its state, never why."""
+    from practicehub.portal import Portal
+    p = Portal(hub, dev=True)
+    ref = _portal_person(hub)
+    slot = p.free_slots("forms")[0]["value"]
+    before = {r["id"] for r in hub.engine.runs(limit=1000)}
+    p.book(ref, "forms", slot, {"reason": "a form for school"})
+    new = [r for r in hub.engine.runs(limit=1000) if r["id"] not in before]
+    assert [(r["workflow_id"], r["started_by"]) for r in new] == [("portal-booking", p.member["id"])]
+    b = p.upcoming(ref)[0]
+    assert set(b) == {"ref", "start", "when", "with", "kind", "state", "can_cancel", "kind_id"}
+    with pytest.raises(Denied):
+        hub.read_record(p.member, b["ref"])
+
+
+def test_the_portal_answers_the_same_whoever_is_on_file(hub):
+    """Rule: the portal's sign-in says the same thing, sends nothing and counts a failure for details that match no
+    one, so it never tells anyone whether a person is on file; the code is kept only as a hash and is used once."""
+    from practicehub import portal as portal_mod
+    p = portal_mod.Portal(hub, dev=True)
+    _portal_person(hub)
+    yes = p.begin_sign_in("1990-02-03", "1234 567 890", client="10.9.0.1")
+    no = p.begin_sign_in("1990-02-03", "1234 567 891", client="10.9.0.2")
+    assert set(yes) == set(no) and no["dev_code"] is None
+    assert hub.db.outbox.count({"purpose": "sign-in"}) == 1
+    assert hub.db.signin_failures.get("portal client 10.9.0.2")["count"] == 1
+    row = hub.db.portal_codes.get(portal_mod._sha(yes["challenge"]))
+    assert yes["dev_code"] not in str(row)
+    p.finish_sign_in(yes["challenge"], yes["dev_code"], client="10.9.0.1")
+    with pytest.raises(Invalid):
+        p.finish_sign_in(yes["challenge"], yes["dev_code"], client="10.9.0.1")

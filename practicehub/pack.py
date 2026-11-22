@@ -81,6 +81,7 @@ class Pack:
     types_fn: object = None          # set by the hub: the record types the practice has now
     requires: list = field(default_factory=list)  # modules this one builds on (a CAPA points at a controlled Document)
     extensions: dict = field(default_factory=dict)  # (kind, id) -> TOML that adds to another part's type or view
+    portal: dict = field(default_factory=dict)      # [portal]: the online booking portal (``practicehub/portal.py``)
 
     @property
     def name(self) -> str:
@@ -366,7 +367,7 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
                 block_sources=blocks, type_sources=_sources(pack_dir / "types"), view_sources=_sources(pack_dir / "views"),
                 events=list(doc.get("events", [])), version=str(doc.get("version") or doc["practice"].get("version", "0")),
                 kind=kind, module_sha256=mod_sha, digest=digest(pack_dir), requires=list(doc["practice"].get("requires", []) or []),
-                extensions=_extensions(pack_dir))
+                extensions=_extensions(pack_dir), portal=dict(doc.get("portal") or {}))
     if any(r.get("id") == "everyone" for r in pack.roles):
         raise ValueError("roles: 'everyone' is reserved: [grants.everyone] gives every member read access")
     if set(pack.grants.get("everyone", {})) - {"read"}:
@@ -393,6 +394,11 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
         pack.upgrades = dict(getattr(mod, "UPGRADES", {}))
     for m in pack.modules:
         add_module(pack, m)
+    if kind == "practice":  # [portal] names roles, workflows and members of the practice and its modules: checked
+        from .portal import check_config  # once they are all read, with every problem named at once
+        problems = check_config(pack)
+        if problems:
+            raise ValueError(f"the practice {pack_dir.name}: [portal]: " + "; ".join(problems))
     return pack
 
 

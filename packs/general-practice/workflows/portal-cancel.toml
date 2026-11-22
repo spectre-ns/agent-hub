@@ -1,0 +1,19 @@
+id = "portal-cancel"
+title = "Cancelled online"
+record = "Encounter"
+summary = """
+A patient cancels a visit on the portal (one of their own, of a kind the practice lets them cancel online, far
+enough ahead). The visit moves to cancelled by its lifecycle, and the time is free again. The portal starts this
+workflow about the visit; it never writes the visit itself.
+"""
+
+[trigger]
+starters = ["patient-portal", "front-desk"]
+
+[[steps]]
+id = "cancel"
+title = "Cancel the visit"
+kind = "automation"
+action = "record.update"
+[steps.params]
+set = { status = "cancelled" }

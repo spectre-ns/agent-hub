@@ -2,6 +2,7 @@
 
     practicehub init --pack general-practice --demo     a new hub in ./state with the pack (and demo patients)
     practicehub serve --dev                             web + API on http://127.0.0.1:8200/
+    practicehub portal serve --dev                      the booking portal on http://127.0.0.1:8210/
     practicehub serve --dev --agents                    serve, and let the agents work as soon as work appears
     practicehub agents run                              every active agent works its inbox (in-process)
     practicehub agents run --agent scribe-agent --url http://127.0.0.1:8200 --token-file agent.token
@@ -143,6 +144,25 @@ def cmd_serve(args):
     if any(h in ("0.0.0.0", "::", "") for h in wopi_hosts):
         raise SystemExit("--wopi-host names one address (the docker bridge, say), never every address")
     serve(hub, args.host, args.port, dev=args.dev, oidc=oidc, wopi_hosts=wopi_hosts)
+
+
+def cmd_portal_serve(args):
+    """The portal for the people the practice serves: its own small app, apart from the staff hub."""
+    from .web.portal_app import serve as serve_portal
+    from .web.server import FORBIDDEN_PORTS
+    if args.port in FORBIDDEN_PORTS:
+        raise SystemExit(f"port {args.port} is reserved on this machine; pick another (default 8210)")
+    if args.dev and args.host not in ("127.0.0.1", "localhost"):
+        raise SystemExit("a dev portal shows sign-in codes on screen, so it only listens on 127.0.0.1")
+    hub = build_hub(args)
+    if not hub.pack:
+        raise SystemExit("no practice here yet; run `practicehub init` first")
+    if not (hub.pack.portal or {}):
+        raise SystemExit("the practice pack has no [portal] section, so there is no portal to serve")
+    print("Sign-in codes are queued in the hub's outbox; no message provider is connected, so nobody receives "
+          "them until one is (it must keep the data in Canada)." + (" Dev: codes are shown on screen." if args.dev
+                                                                    else ""))
+    serve_portal(hub, args.host, args.port, dev=args.dev)
 
 
 def start_clock(hub, interval: float = 60.0):
@@ -845,6 +865,15 @@ def main(argv=None):
     p.add_argument("--agent-interval", type=float, default=30.0, help="seconds between agent rounds when idle")
     p.add_argument("--tick-interval", type=float, default=60.0, help="seconds between ticks (scheduled work, overdue items); 0 turns it off")
     p.set_defaults(fn=cmd_serve)
+
+    po = sub.add_parser("portal", help="the online booking portal for the people the practice serves"
+                        ).add_subparsers(dest="sub", required=True)
+    p = po.add_parser("serve", help="serve the portal (its own pages, sessions and cookies; meant to face the "
+                                    "internet behind TLS)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8210)
+    p.add_argument("--dev", action="store_true", help="show sign-in codes on screen (local only, never real people)")
+    p.set_defaults(fn=cmd_portal_serve)
 
     ag = sub.add_parser("agents", help="run agents").add_subparsers(dest="sub", required=True)
     p = ag.add_parser("run", help="let agents work their inboxes")

@@ -204,7 +204,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self._upgrades_after(None)
 
     # ------------------------------------------------------------------ the practice pack, under change control
-    PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants")
+    PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants",
+                   "portal")
 
     @classmethod
     def _pack_config(cls, p: packmod.Pack) -> dict:
