@@ -694,6 +694,8 @@ color:var(--subtle)}.col>header .col-name{font-size:14px;line-height:20px;color:
 .fl-node .ai{fill:var(--discovery-bg)}.fl-node text.ai-t{fill:var(--discovery-fg);font-size:9px;font-weight:800}
 .legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;line-height:16px;color:var(--subtle);margin:8px 4px}
 .legend span{display:inline-flex;align-items:center;gap:4px}
+.board-legend{margin:8px 4px;font-size:12px;color:var(--subtle)}.board-legend ul{display:flex;flex-wrap:wrap;gap:6px 16px;margin:6px 0;padding:0}
+.board-legend li{display:inline-flex;align-items:center;gap:4px}
 
 /* ---- workflow editor */
 .ed-tabs{display:flex;gap:4px;border-bottom:2px solid var(--border);margin-bottom:12px}
@@ -931,7 +933,7 @@ function drawFlow(svg, data, opts) {
     const x1 = p.x + W, y1 = p.y + H / 2, x2 = q.x - 2, y2 = q.y + H / 2, c = Math.max(24, (x2 - x1) / 2);
     const path = sv("path", { d: `M${x1} ${y1}C${x1 + c} ${y1} ${x2 - c} ${y2} ${x2} ${y2}`,
       class: "fl-edge" + (s.when ? " cond" : ""), "marker-end": `url(#${mid})` });
-    if (s.when) path.append(sv("title", {}, "only when " + s.when));
+    if (s.when) path.append(sv("title", {}, "only " + s.when));
     svg.append(path);
   }
   for (const s of steps) {
@@ -939,13 +941,13 @@ function drawFlow(svg, data, opts) {
     const clickable = !!(opts.onSelect || links[s.id]);
     const g = sv("g", { class: `fl-node k-${s.kind} ${st ? "st-" + st : ""} ${opts.selected === s.id ? "sel" : ""} ${clickable ? "click" : ""}`,
       tabindex: clickable ? "0" : "-1" });
-    g.append(sv("title", {}, `${s.title} (${s.kind}${s.role ? ", " + s.role : ""})${s.when ? " — only when " + s.when : ""}${s.timing ? " — " + s.timing : ""}`));
+    g.append(sv("title", {}, `${s.title} (${s.kind}${s.role ? ", " + s.role : ""})${s.when ? " — only " + s.when : ""}${s.timing ? " — " + s.timing : ""}`));
     g.append(sv("rect", { x, y, width: W, height: H, rx: 7, class: "box" }));
     g.append(sv("rect", { x, y: y + 6, width: 4, height: H - 12, rx: 2, class: "bar" }));
     const kind = (s.kind === "gate" ? "decision" : s.kind).toUpperCase();
     g.append(sv("text", { x: x + 14, y: y + 18, class: "k" }, clip(kind + " · " + (s.role || s.action || ""), 30)));
     g.append(sv("text", { x: x + 14, y: y + 36 }, clip(s.title || s.id, 26)));
-    g.append(sv("text", { x: x + 14, y: y + 52, class: "s" }, st ? st : (s.when ? "if " + clip(s.when, 24) : s.timing ? clip(s.timing, 28) : s.id)));
+    g.append(sv("text", { x: x + 14, y: y + 52, class: "s" }, st ? st : (s.when ? clip(s.when, 28) : s.timing ? clip(s.timing, 28) : s.id)));
     if (s.agents_may) {
       g.append(sv("rect", { x: x + W - 30, y: y + 7, width: 22, height: 14, rx: 3, class: "ai" }));
       g.append(sv("text", { x: x + W - 25, y: y + 18, class: "ai-t" }, "AI"));
@@ -1142,6 +1144,26 @@ document.addEventListener("submit", (ev) => {
     confirmed.delete(f);  // requestSubmit dispatches synchronously; never leave a stale pass behind
   });
 }, true);
+// A form posts once: a second press (or Enter) while it is being sent does nothing, and its buttons say so, so
+// pressing Start twice never starts two of anything. A submit another check stopped (nothing was sent) frees it again;
+// a page brought back with the browser's Back, or a post that only downloaded a file, frees it too.
+function freeForm(f) {
+  delete f.dataset.sending; delete f.dataset.posted; f.removeAttribute("aria-busy");
+  f.querySelectorAll("button[data-was-enabled]").forEach((b) => { b.disabled = false; b.removeAttribute("data-was-enabled"); });
+}
+document.addEventListener("submit", (ev) => {
+  const f = ev.target;
+  if (!(f instanceof HTMLFormElement) || ev.defaultPrevented || (f.getAttribute("method") || "").toLowerCase() !== "post") return;
+  if (f.dataset.sending) { ev.preventDefault(); ev.stopImmediatePropagation(); return; }
+  f.dataset.sending = "1";
+  setTimeout(() => {  // after the post has taken the form's values (a disabled button sends none)
+    if (ev.defaultPrevented && !f.dataset.posted) { freeForm(f); return; }
+    f.setAttribute("aria-busy", "true");
+    f.querySelectorAll("button:not([type=button]):not([disabled])").forEach((b) => { b.disabled = true; b.setAttribute("data-was-enabled", ""); });
+    setTimeout(() => { if (f.isConnected) freeForm(f); }, 15000);
+  }, 0);
+}, true);
+window.addEventListener("pageshow", (ev) => { if (ev.persisted) document.querySelectorAll("form[data-sending]").forEach(freeForm); });
 
 // ------------------------------------------------------------------ avatar menu
 function avatarMenu(m) {
@@ -1621,7 +1643,7 @@ function editor(root) {
 
   function redraw() {
     drawFlow(svg, { steps: wf.steps.map((s) => ({ id: s.id, title: s.title || s.id, kind: s.kind || "task",
-      role: s.role, action: s.block ? "block " + s.block : s.action, after: s.after || [], when: s.when, agents_may: agentsMay(s),
+      role: s.role, action: s.block ? "block " + s.block : s.action, after: s.after || [], when: s.when ? "when " + s.when : s.when, agents_may: agentsMay(s),
       timing: timingOf(s) })) },
       { selected, onSelect: (id) => { selected = id; redraw(); renderPanel(); } });
   }
@@ -2160,6 +2182,7 @@ function formModal() {
     }
     if (f.method.toLowerCase() !== "post" || f.querySelector("input[type=file]")) return;  // files: an ordinary post
     ev.preventDefault();
+    f.dataset.posted = "1";  // sent from here: the form stays busy until its answer replaces it
     f.dispatchEvent(new Event("modal-submit"));
     const btn = f.querySelector("button:not([type=button])");
     if (btn) btn.disabled = true;
@@ -2180,6 +2203,7 @@ function formModal() {
       show(got.html || "<p>That did not work.</p>", dlg ? dlg.querySelector("#fm-title").textContent : got.title, true);
     } catch (e) {
       if (btn) btn.disabled = false;
+      freeForm(f);
       f.submit();
     }
   }

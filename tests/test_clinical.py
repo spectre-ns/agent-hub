@@ -422,9 +422,10 @@ def test_a_screen_that_fails_still_reaches_a_nurse(hub, monkeypatch):
             raise RuntimeError("the screen ran out of time")
         return real(self, run, step, params)
     monkeypatch.setattr(type(hub.engine), "_run_block", broken)
-    for inputs in ({"reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-liam"},
-                   {"reason": "a form for work"}):
-        run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub),
+    pats = [f"Patient/{p['id']}" for p in hub.records.search("Patient")][:3]  # one open request per patient
+    for pat, inputs in zip(pats, ({"reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-liam"},
+                                  {"reason": "a form for work"})):
+        run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=pat,
                                               inputs=inputs)["id"])
         assert run["steps"]["screen"]["state"] == "failed"
         nurse = hub.engine.item(item_for(hub, run, "nurse-call"))
@@ -432,7 +433,7 @@ def test_a_screen_that_fails_still_reaches_a_nurse(hub, monkeypatch):
         assert run["steps"]["book-chosen"]["state"] == "pending" and not _visits_at(hub, "2027-03-09T11:00")
     # a screen that runs: no nurse call for plain paperwork
     monkeypatch.setattr(type(hub.engine), "_run_block", real)
-    run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub),
+    run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=pats[2],
                                           inputs={"reason": "a form for work"})["id"])
     assert run["steps"]["nurse-call"]["state"] == "skipped"
 

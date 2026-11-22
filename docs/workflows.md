@@ -19,6 +19,22 @@ type = "string"
 required = true
 ```
 
+### One open run at a time
+
+```toml
+[trigger]
+one_open_per = "record"           # or "input.<name>": one open run per value
+allow_duplicate = true            # optional: the starter may confirm "Start another anyway"
+```
+
+With `one_open_per`, starting the workflow by hand (the start form, a calendar slot, the API) while another open run
+of it has the same value (the same record, or the same value of that input) is refused in the same transaction that
+would start it, so pressing Start twice, or two people taking the same call, starts one. The refusal names the open
+item: its key with a link, who holds it and the step it is at (to whoever may see it). Only with `allow_duplicate =
+true` does the form offer **Start another anyway** (the API: `"allow_duplicate": true`); otherwise there is just the
+link. An event or a schedule always starts its run: a request that came in is never dropped. An empty value is never
+a duplicate. Forms also post once: a second press while one is being sent does nothing.
+
 ## Steps
 
 ```toml

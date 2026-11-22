@@ -580,7 +580,7 @@ def test_who_opened_what_is_hidden_from_everyone_but_the_privacy_officer(hub, se
         assert (call(server, "GET", f"/api/events/{view}/chain", tok)[0] == 200) is sees
         assert (call(server, "GET", f"/track/{view}", tok)[0] == 200) is sees
         team = call(server, "GET", "/team/dr-amara", tok)[1]
-        assert ("record.viewed" in team) is sees
+        assert ("Record viewed" in team) is sees  # the action in words
     sam = token(hub, "sam")
     assert call(server, "GET", "/outbox", sam)[0] == 403  # billing reads no messages to patients
     noor = M(hub, "noor")

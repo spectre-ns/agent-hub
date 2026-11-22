@@ -20,7 +20,7 @@ import urllib.parse
 from datetime import date, datetime, timedelta
 
 from .. import schema, visibility
-from ..hub import Denied, Invalid, NotFound
+from ..hub import Denied, Duplicate, Invalid, NotFound
 
 e = html.escape
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -438,13 +438,18 @@ class CalendarPages:
         lc = rt.lifecycle
         start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
         err = ""
-        if error is not None:
+        anyway = ""
+        if isinstance(error, Duplicate):  # the request workflow already has one open for this person
+            err = self.duplicate_notice(me, error)
+            anyway = ('<button class="secondary" name="_anyway" value="1">Start another anyway</button>'
+                      if error.allowed else "")
+        elif error is not None:
             probs = getattr(error, "problems", None) or []
             err = (f'<div class="flash error" role="alert"><p>{e(str(error))}</p>'
                    + (f'<ul>{"".join(f"<li>{e(p)}</li>" for p in probs)}</ul>' if probs else "") + "</div>")
         body = (f'<div data-modal-body>{err}<form method="post" action="/schedule/new" class="card stack" id="book">'
                 f'<p class="muted">{e(a_an_label(rt.label))}.{start}</p>{"".join(rows)}'
-                f'<div class="filters"><button class="primary">Book</button>'
+                f'<div class="filters"><button class="primary">Book</button>{anyway}'
                 f'<a class="btn secondary" href="/schedule" data-modal-close>Cancel</a></div></form></div>')
         return self.layout(req, f"New {rt.label.lower()}", body, crumbs=[("/schedule", "Schedule"), (None, "Book")])
 
@@ -490,7 +495,8 @@ class CalendarPages:
         except (Invalid, NotFound, Denied) as exc:
             if isinstance(exc, NotFound):
                 exc = Invalid(str(exc))
-            raise Rendered(422, self.page_booking_new({**req, "query": {}}, kept=f, error=exc)) from None
+            raise Rendered(409 if isinstance(exc, Duplicate) else 422,
+                           self.page_booking_new({**req, "query": {}}, kept=f, error=exc)) from None
         raise self._redirect(f"/schedule?date={start.date().isoformat()}#cal")
 
     def tell_the_caller(self, run_id: str, waiting: list[dict] | None = None) -> str:
@@ -520,7 +526,7 @@ class CalendarPages:
                           [self.hub._clash_text(c, w) for c, w in clashes])
         inputs = {i["name"]: f[f"req_{i['name']}"] for i in wf.inputs if f.get(f"req_{i['name']}") not in (None, "")}
         inputs["slot"] = f"{start.isoformat(timespec='minutes')}|{who}"
-        run = self.hub.engine.start(me, wf.id, record=subject, inputs=inputs)
+        run = self.hub.engine.start(me, wf.id, record=subject, inputs=inputs, allow_duplicate=f.get("_anyway") == "1")
         if self._run_bookings(run["id"]):
             raise self._redirect(f"/schedule?date={start.date().isoformat()}#cal")
         waiting = [it for it in self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})]

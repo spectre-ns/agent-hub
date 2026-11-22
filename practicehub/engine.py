@@ -514,7 +514,10 @@ class Engine:
         return bad
 
     def start(self, actor: dict, wid: str, *, record: str | None = None, inputs: dict | None = None,
-              cause: int | None = None, via_automation: bool = False, parent: str | None = None) -> dict:
+              cause: int | None = None, via_automation: bool = False, parent: str | None = None,
+              allow_duplicate: bool = False) -> dict:
+        """``allow_duplicate``: the starter confirmed starting another run although one with the same
+        ``trigger.one_open_per`` value is open (only where the trigger has ``allow_duplicate = true``)."""
         from .hub import Denied, Invalid
         hub = self.hub
         wf, row = hub.workflow(wid)
@@ -562,7 +565,9 @@ class Engine:
                        "blocks": pins, "skills": skills, "now": utcnow(),
                        "today": self.now().date().isoformat()},
                "input": values}
-        with hub.db:
+        with hub.db:  # checked in the transaction that starts it: two people pressing at once start one
+            self._refuse_duplicate(wf, record, values, by_hand=not via_automation and cause is None,
+                                   confirmed=allow_duplicate)
             hub.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": wid, "version": row["version"],
                                 "title": title, "record": record, "status": "running", "ctx": ctx,
                                 "steps": {s.id: {"state": "pending"} for s in wf.steps}, "started_by": actor["id"],
@@ -1047,6 +1052,34 @@ class Engine:
     # into it. The item's ``history`` says who did which step, and when.
     STEP_KINDS = ("task", "gate", "wait")
 
+    def open_duplicate(self, wf, record: str | None, values: dict) -> dict | None:
+        """The open run of ``wf`` that already has the value its ``trigger.one_open_per`` names, if any."""
+        key = getattr(wf, "one_open_per", None)
+        if not key:
+            return None
+        if key == "record":
+            path, value = "record", record
+        else:
+            path, value = f"ctx.input.{key[6:]}", values.get(key[6:])
+        if isinstance(value, dict):
+            value = value.get("reference") or None
+        if value in (None, "", []):
+            return None
+        row = self.hub.db.runs.find_one({"workflow_id": wf.id, "status": "running", path: value})
+        return _plain(row) if row else None
+
+    def _refuse_duplicate(self, wf, record, values, *, by_hand: bool, confirmed: bool) -> None:
+        """``trigger.one_open_per``: a run started by hand while another open one has the same value is refused,
+        unless the trigger allows another and the starter confirmed it. An event or a schedule always starts its run
+        (a request that came in is never dropped)."""
+        from .hub import Duplicate
+        if not by_hand:
+            return
+        other = self.open_duplicate(wf, record, values)
+        if other is None or (confirmed and wf.allow_duplicate):
+            return
+        raise Duplicate(f"{wf.title} is already open for this", other, wf.allow_duplicate)
+
     def _run_item(self, run_id: str, wf, title: str, cause: int) -> str | None:
         if not any(s.kind in self.STEP_KINDS for s in wf.steps):
             return None  # automations only: nothing for anyone to see waiting
@@ -1317,7 +1350,8 @@ class Engine:
         if item["status"] not in ("open", "claimed"):
             return False, "this item is finished"
         if item["status"] == "claimed" and item["claimed_by"] != member["id"]:
-            return False, f"{item['claimed_by']} is working on it"
+            who = hub.db.members.get(item["claimed_by"]) or {}
+            return False, f"{who.get('name') or 'someone else'} is working on it"
         if item["kind"] == "notice":
             ok = item["assignee"] == member["id"] or (item["role"] and member["id"] in self._holders(item["role"]))
             return (True, "") if ok else (False, "this notice is for someone else")
@@ -1360,14 +1394,15 @@ class Engine:
         if (not is_agent and run["record"]
                 and hub.restrictions.withholds_from(member, run["record"], reaching=True)):
             # the work shows the file's content: a member a directive keeps from it takes it only in an emergency
-            return False, ("what it is about is withheld from you at the subject's request: open the file in an "
-                           "emergency first, or leave it to someone the directive allows")
+            return False, (f"what it is about is withheld from you at the {hub.subject_word()}'s request: use "
+                           f"emergency access on the file first, or leave it to someone the directive allows")
         if is_agent:
             if member["kind"] == "service":
                 return False, "services do not take work items"
             if run["record"] and hub.restrictions.withholds_from(member, run["record"], reaching=True):
                 # the subject's directive gives an agent nothing of what it withholds: the work's inputs copy it
-                return False, "what it is about is withheld from agents at the subject's request: a person does it"
+                return False, (f"what it is about is withheld from agents at the {hub.subject_word()}'s request: "
+                               f"a person must do this")
             sponsor = hub.member(member["sponsor"]) if member["sponsor"] else None
             if not sponsor or sponsor["status"] != "active":
                 return False, "its sponsor is not active"
@@ -1669,7 +1704,7 @@ class Engine:
                              data={"relation": "reader", "what": "read the work's inputs, withheld at the subject's "
                                                                 "request"})
             raise Denied(f"what '{self.what(item)}' is about is withheld from {member.get('name') or member['id']} "
-                         f"at the subject's request")
+                         f"at the {hub.subject_word()}'s request")
         data: dict = {}
         for c in step.context:
             if c.startswith("record:"):
@@ -1789,6 +1824,10 @@ class Engine:
                 problems = guard(values, ctxview) or []
                 if problems:
                     raise Invalid("the answer does not pass the step's checks", problems)
+            if item["status"] == "open":  # Done on an open item takes it first, on the record: nobody presses
+                # Assign to me only to be allowed to finish
+                hub.track.append(member, "item.claimed", f"item:{item_id}", run_id=item["run_id"], cause=item["cause"],
+                                 data={"step": item["step_id"], "how": "taken by finishing it"})
             if member["kind"] == "agent" and step.risk == "high":
                 return self._hold(member, item, run, step, values, action="item.completed")
             return self._finish(member, item, run, step, values, action="item.completed")

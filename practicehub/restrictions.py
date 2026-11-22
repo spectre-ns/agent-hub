@@ -253,7 +253,7 @@ class Restrictions:
     def note(self, subject: str | None) -> str:
         """``Information withheld at the patient's request``: the subject type's own word."""
         rt = self._rt((subject or "").split("/")[0]) if subject else None
-        who = rt.label.lower() if rt is not None else "subject"
+        who = rt.label.lower() if rt is not None else self.hub.subject_word()
         return f"Information withheld at the {who}'s request"
 
     def incomplete(self, subject: str | None, classes=()) -> str | None:
@@ -374,8 +374,8 @@ class Restrictions:
         if not self.may_override(member):
             hub.track.append(member, "access.denied", ref, data={"relation": "break_glass",
                                                                  "what": "open restricted information"})
-            raise Denied(f"{member.get('name') or member['id']} may not open information withheld at a "
-                         f"subject's request (no role of theirs may override a restriction)")
+            raise Denied(f"{member.get('name') or member['id']} may not open information withheld at the "
+                         f"{hub.subject_word()}'s request (no role of theirs may use emergency access)")
         reason = " ".join(str(reason or "").split())[:500]
         if len(reason) < MIN_REASON:
             raise Invalid("say why you need to open it (a few words at least): the privacy officer reviews it")
@@ -385,7 +385,7 @@ class Restrictions:
         subject = self.subject_of(rec) if self._load() else None
         ds = [d for d in self.of_subject(subject or "") if not self._allowed(member, d)]
         if not ds:
-            raise Invalid("nothing in this file is withheld from you: there is nothing to override")
+            raise Invalid("nothing in this file is withheld from you: there is nothing to open with emergency access")
         from .engine import _item_doc, _new_id
         from .store import utcnow
         # a short title (a name, never a card number): it travels in notice titles and lists

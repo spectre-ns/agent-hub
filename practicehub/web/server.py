@@ -22,12 +22,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tomllib
 
 from .. import blocks as blockmod
+from .. import expr
 from .. import export as exportmod
 from .. import schema
 from .. import workflows as wfmod
 from ..backends import engines
 from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
-from ..hub import Denied, HubError, Invalid, NotFound, member_ref
+from ..hub import Denied, Duplicate, HubError, Invalid, NotFound, member_ref
 from ..store import Transient
 from ..visibility import Viewer, workflow_classes as visibility_classes
 from .analytics_pages import AnalyticsPages
@@ -401,7 +402,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
 
     def api_start(self, req):
         b = self.body_json(req)
-        run = self.hub.engine.start(req["me"], b.get("workflow", ""), record=b.get("record"), inputs=b.get("input"))
+        run = self.hub.engine.start(req["me"], b.get("workflow", ""), record=b.get("record"), inputs=b.get("input"),
+                                    allow_duplicate=b.get("allow_duplicate") is True)
         return self._run_view(req["me"], run)
 
     def api_cancel(self, req, rid):
@@ -853,14 +855,16 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
     def _av(self, m) -> str:
         """An avatar: round for people, square for agents and services."""
         if m is None:
-            return '<span class="av empty" title="Unassigned">?</span>'
+            return ('<span class="av empty" role="img" title="Nobody has taken this yet" '
+                    'aria-label="Nobody has taken this yet">?</span>')
         if isinstance(m, str):
             if m.startswith(("workflow:", "pack:")):
                 return '<span class="av automation" title="automation">⚙</span>'
             try:
                 m = self.hub.member(m)
             except NotFound:
-                return f'<span class="av" style="background:#5b6b84" title="{e(m)}">?</span>'
+                return ('<span class="av" style="background:#5b6b84" role="img" title="Someone no longer in the '
+                        'team" aria-label="Someone no longer in the team">?</span>')
         color = self.AV_COLORS[sum(map(ord, m["id"])) % len(self.AV_COLORS)]
         return (f'<span class="av {e(m["kind"])}" style="background:{color}" title="{e(m["name"])} ({e(m["kind"])})">'
                 f'{e(self._initials(m["name"])[:2])}</span>')
@@ -888,11 +892,25 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             return '<span class="loz wait">Awaiting approval</span>'
         return self._loz(self.ITEM_STATUS, item["status"])
 
-    @staticmethod
-    def _ki(kind: str) -> str:
-        letter = {"task": "T", "gate": "D", "notice": "!", "hold": "H", "automation": "A", "wait": "W"}.get(kind, "?")
-        label = {"gate": "decision", "hold": "approval", "wait": "waiting"}.get(kind, kind)
-        return f'<span class="ki {e(kind)}" title="{e(label)}">{letter}</span>'
+    KI = {"task": ("T", "Task: something to do and fill in"), "gate": ("D", "Decision: a person decides and signs"),
+          "hold": ("H", "Approval: a person checks an agent's high-risk work"),
+          "notice": ("!", "Notice: something to read and acknowledge"),
+          "automation": ("A", "Automation: the system does this step"),
+          "wait": ("W", "Waiting: for a time or for something to happen")}
+
+    @classmethod
+    def _ki(cls, kind: str) -> str:
+        letter, label = cls.KI.get(kind, ("?", "Other work"))
+        return f'<span class="ki {e(kind)}" role="img" title="{e(label)}" aria-label="{e(label)}">{letter}</span>'
+
+    def _board_legend(self) -> str:
+        """What the marks on a card mean: the kind letters and the avatars."""
+        kinds = "".join(f'<li><span class="ki {k}" aria-hidden="true">{letter}</span> {e(label)}</li>'
+                        for k, (letter, label) in self.KI.items())
+        return (f'<details class="board-legend"><summary>What the marks on a card mean</summary>'
+                f'<ul class="plain">{kinds}<li><span class="av empty" aria-hidden="true">?</span> Nobody has taken '
+                f'it yet: anyone it is for may</li><li><span class="badge person">a person must do this</span> No '
+                f'agent may take it</li><li><span class="badge urgent">Urgent</span> Do it first</li></ul></details>')
 
     def member_name(self, mid):
         if not mid:
@@ -1008,7 +1026,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         for it in items:
             note = f'<div class="note">{e(it["note"])}</div>' if it.get("note") else ""
             reason = f'<div class="note">Not for you: {e(it["reason"])}</div>' if show_reason and it.get("reason") else ""
-            flag = ' <span class="badge person">people only</span>' if it["persons_only"] and it["kind"] != "notice" else ""
+            flag = (' <span class="badge person" title="No agent may take this">a person must do this</span>'
+                    if it["persons_only"] and it["kind"] != "notice" else "")
             rows.append(f'<tr><td style="white-space:nowrap">{self._ki(it["kind"])} <span class="key">{self._key(it["id"])}'
                         f'</span></td><td><a href="/items/{it["id"]}">{e(it["title"])}</a>{self._urgency(it)}{flag}{note}{reason}</td>'
                         f'<td><a href="/runs/{it["run_id"]}">{e(it.get("run_title", ""))}</a></td>'
@@ -1168,14 +1187,16 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             filters += (f'<form method="get" action="/board" class="filters"><input type="hidden" name="group" '
                         f'value="step"><label>One workflow, by step <select name="workflow">{opts}</select></label>'
                         f'<button class="secondary">Show</button></form>')
-        return self.layout(req, "Board", filters + "".join(out), crumbs=[("/", "Practice"), ("", "Board")],
+        return self.layout(req, "Board", filters + self._board_legend() + "".join(out),
+                           crumbs=[("/", "Practice"), ("", "Board")],
                            actions='<a class="btn secondary" href="/runs">All work</a>')
 
     BOARD_COLS = [("todo", "To do", ""), ("prog", "In progress", "prog"), ("wait", "Waiting", "wait"),
                   ("done", "Done recently", "done")]
 
     def _tile(self, it, moves: dict | None = None, back: str = "/board") -> str:
-        flag = '<span class="badge person">people only</span>' if it["persons_only"] else ""
+        flag = ('<span class="badge person" title="No agent may take this">a person must do this</span>'
+                if it["persons_only"] else "")
         note = f'<div class="why">{e(it["note"])}</div>' if it.get("note") and it["status"] != "done" else ""
         urgent = " urgent" if it.get("priority") == "urgent" else ""
         now = it.get("waiting") if it["status"] == "waiting" else it.get("step_title")
@@ -1265,8 +1286,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
     # ------------------------------------------------------------------------------------------ all work (runs)
     def page_runs(self, req):
         q = req["query"]
-        status, wid, text = q.get("status", "running"), q.get("workflow", ""), q.get("q", "").lower()
-        runs = self.hub.engine.runs(status=status or None, limit=300)
+        status, wid, text = q.get("status") or "running", q.get("workflow", ""), q.get("q", "").lower()
+        if status not in ("running", "completed", "cancelled", "any"):
+            status = "running"
+        # "any" is a value of its own: an empty one is dropped from the query and would read as the default
+        runs = self.hub.engine.runs(status=None if status == "any" else status, limit=300)
         if wid:
             runs = [r for r in runs if r["workflow_id"] == wid]
         if text:
@@ -1288,7 +1312,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                         f'{self._at(r["updated_at"])}</td></tr>')
         opts = "".join(f'<option value="{e(k)}"{" selected" if k == wid else ""}>{e(w.title)}</option>' for k, w in wfs.items())
         sopts = "".join(f'<option value="{v}"{" selected" if v == status else ""}>{t}</option>'
-                        for v, t in (("running", "In progress"), ("completed", "Done"), ("cancelled", "Cancelled"), ("", "Any status")))
+                        for v, t in (("running", "In progress"), ("completed", "Done"), ("cancelled", "Cancelled"), ("any", "Any status")))
         filt = (f'<form class="filters" method="get"><input name="q" value="{e(text)}" placeholder="Search work" '
                 f'style="width:auto;margin:0;flex:1;min-width:180px"><select name="workflow" style="width:auto;margin:0">'
                 f'<option value="">Every workflow</option>{opts}</select><select name="status" style="width:auto;margin:0">'
@@ -1355,11 +1379,14 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                                      me) if f["type"] == "reference" else
                          self._field(f, [{"value": c, "label": c} for c in f["choices"]] if f.get("choices") else None,
                                      kept.get(f["name"])) for f in wf.inputs if not f.get("hidden"))
-        err = f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>' if error else ""
+        err = self.duplicate_notice(me, error) if isinstance(error, Duplicate) else \
+            f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>' if error else ""
+        anyway = ('<button class="secondary" name="_anyway" value="1">Start another anyway</button>'
+                  if isinstance(error, Duplicate) and error.allowed else "")
         body = (f'<div data-modal-body>{err}<p class="muted">{e(self._brief(wf.summary))}</p>'
                 f'<form method="post" action="/start" class="card stack"><input type="hidden" name="_workflow" '
                 f'value="{e(wf.id)}">{self._req_note(pick + fields)}{pick}{fields}<div class="filters">'
-                f'<button class="primary">Start</button>'
+                f'<button class="primary">Start</button>{anyway}'
                 f'<a class="btn secondary" href="{e(self.record_href(about)) if about else "/start"}" data-modal-close>'
                 f'Cancel</a>' + ("" if about else '<a class="btn subtle back" href="/start" data-modal>← Back</a>')
                 + '</div></form></div>')
@@ -1433,11 +1460,40 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         try:
             self._start_from(req, dict(f))
         except Invalid as exc:  # the start form again, saying why, with what was typed kept
-            raise Rendered(422, self.page_start_one({**req, "query": {}}, wid, kept=f, error=exc)) from None
+            raise Rendered(409 if isinstance(exc, Duplicate) else 422,
+                           self.page_start_one({**req, "query": {}}, wid, kept=f, error=exc)) from None
+
+    def duplicate_notice(self, me, exc) -> str:
+        """Why a start was refused as a duplicate (``trigger.one_open_per``): the open item by its key, with a link,
+        who holds it and the step it is at (to a member who may see it), and whether another may be started."""
+        run = exc.run
+        wf = self.hub.workflow(run["workflow_id"], run.get("version"))[0]
+        iid = run.get("item")
+        item = self.hub.db.items.get(iid) if iid else None
+        if item is None or not self.may_see_item(me, item, run):
+            what = f"<b>{e(wf.title)} is already open for this.</b> " + (
+                f"It is {e(self._key(iid))}; whoever holds it can tell you more." if item else "")
+        else:
+            holder = item.get("claimed_by") or item.get("assignee")
+            role = item.get("role") or ""
+            who = (f"held by {e(self.member_name(holder))}" if holder else
+                   f"waiting for {e(self.hub.role(role)['name'])}" if role and self.hub._role_known(role) else
+                   "not held by anyone yet")
+            at = ""
+            if item.get("step_id"):
+                try:
+                    at = f', at “{e(wf.step(item["step_id"]).title)}”'
+                except KeyError:
+                    at = ""
+            what = (f'<b>{e(wf.title)} is already open for this:</b> <a href="/items/{e(iid)}">'
+                    f'{e(self._key(iid))}</a>, {who}{at}. Open it instead of starting another.')
+        more = (" If this is a separate request, you can start another anyway." if exc.allowed else "")
+        return f'<div class="flash warning" role="alert"><p>{what}{e(more)}</p></div>'
 
     def _start_from(self, req, f: dict):
         wid, rec = f.pop("_workflow", ""), f.pop("_record", "") or None
         f.pop("_fixed", None)
+        anyway = f.pop("_anyway", "") == "1"
         wf, _ = self.hub.workflow(wid)
         for i in wf.inputs:  # a name typed in a picker becomes the record it names (refused if it fits two)
             if i["type"] == "reference" and f.get(i["name"]):
@@ -1447,7 +1503,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         if wf.record and not (rec and rec.startswith(wf.record + "/")):
             rt = self.hub.record_type(wf.record)
             raise Invalid(f"choose {a_an((rt.label if rt else wf.record).lower())} to start this about")
-        run = self.hub.engine.start(req["me"], wid, record=rec, inputs=f)
+        run = self.hub.engine.start(req["me"], wid, record=rec, inputs=f, allow_duplicate=anyway)
         tell = self.tell_the_caller(run["id"])
         if not tell:
             raise Redirect(f"/runs/{run['id']}")
@@ -1480,7 +1536,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         if step and item["kind"] in ("task", "gate"):
             risk = f'<span class="badge risk-{e(step.risk)}">{e(step.risk)}</span>'
             dl += [("Step", e(step.title)), ("Agent risk", risk),
-                   ("Agents", "may do this" if step.agents_may and not item["persons_only"] else "people only")]
+                   ("Agents", "may do this" if step.agents_may and not item["persons_only"] else "a person must do this")]
             if step.kind == "gate":
                 dl.append(("Decided by", "a person, who signs" if step.signer == "person" else
                            "a person, who signs; or an agent within criteria, whose decision is its attestation, not a signature"))
@@ -1556,9 +1612,12 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             main.append(self._work_form(me, item, iid, step, kept))
             ok, _ = eng.eligibility(me, item)
             ok_free = eng.eligibility(me, {**item, "status": "open", "claimed_by": None, "assignee": None})[0]
-            if ok and item["status"] == "open":
-                actions = (f'<form method="post" action="/items/{iid}/claim" class="inline"><button class="secondary">'
-                           f'Assign to me</button></form>')
+            if ok and item["status"] == "open" and item["assignee"] != me["id"]:
+                # only on a shared queue, where it tells the others it is taken; Done takes it anyway
+                actions = (f'<form method="post" action="/items/{iid}/claim" class="inline"><button class="secondary" '
+                           f'aria-describedby="claim-hint-{iid}">Assign to me</button> <span class="muted" '
+                           f'id="claim-hint-{iid}">Optional: tells the others you are on it. Done assigns it to you '
+                           f'anyway.</span></form>')
             elif ok:
                 actions = (f'<form method="post" action="/items/{iid}/release" class="inline"><input name="note" '
                            f'placeholder="why you give it back"><button class="secondary">Give it back</button></form>')
@@ -1677,9 +1736,112 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                     f', not a signature</span>')
         return ""
 
+    EVENT_QUIET = {"signed", "attested", "refs", "refs_sha256", "hash", "mac", "signature", "version", "parent",
+                   "blocks", "skills", "cause", "credential", "token", "jti", "token_id"}
+
+    def _event_words(self, ev: dict, me: dict, memo: dict | None = None) -> str:
+        """An event's data as plain lines, "Label: value", members by name, records by their title or kind, a step
+        by its title, no ids; the raw data stays under Details for whoever needs it."""
+        memo = {} if memo is None else memo
+        data = {k: v for k, v in (ev.get("data") or {}).items() if k not in ("signed", "attested")}
+        if not data:
+            return ""
+        wf = None
+        if ev.get("run_id"):
+            key = ("wf", ev["run_id"])
+            if key not in memo:
+                memo[key] = Viewer(self.hub, me).workflow_of_run(ev["run_id"])
+            wf = memo[key]
+
+        def member(v):
+            if ("m", v) not in memo:
+                memo[("m", v)] = self.hub.db.members.get(v) if self.SLUG_RE.fullmatch(v) else None
+            return memo[("m", v)]
+
+        def say(k, v, depth=0) -> str:
+            if v is None or v == "" or v == [] or v == {}:
+                return ""
+            if isinstance(v, bool):
+                return "Yes" if v else "No"
+            if isinstance(v, (int, float)):
+                return e(str(v))
+            if isinstance(v, str):
+                if k == "workflow":
+                    try:
+                        return e(self.hub.workflow(v)[0].title)
+                    except HubError:
+                        return e(self.human(v))
+                if v in ("override", "break_glass"):
+                    return "emergency access"
+                if k == "when" and wf is not None:
+                    return e(cond_words(wf, v).removeprefix("when "))
+                if k in ("role", "escalate_to", "to_role") and self.hub._role_known(v):
+                    return e(self.hub.role(v)["name"])
+                if k in ("step", "step_id") and wf is not None:
+                    try:
+                        return e(wf.step(v).title)
+                    except KeyError:
+                        pass
+                m = member(v)
+                if m:
+                    return e(m["name"])
+                if v.startswith("workflow:"):
+                    return "automation"
+                ref = self._ref_html(me, v)
+                if ref:
+                    return ref
+                if self.ID_RE.fullmatch(v):
+                    return ""  # an internal id says nothing to a reader
+                plain = " ".join(self.ID_RE.sub("", v).split())
+                if plain != v and plain.lower() in ("", "run", "item", "event"):
+                    return ""
+                return e(plain if len(plain) <= 160 else plain[:160] + "…")
+            if isinstance(v, list):
+                parts = [x for x in (say(k, x, depth + 1) for x in v[:6]) if x]
+                return ", ".join(parts) + (" …" if len(v) > 6 else "")
+            if isinstance(v, dict) and depth < 1:
+                parts = [f"{e(self.human(kk))} {x}" for kk, x in ((kk, say(kk, vv, depth + 1)) for kk, vv in v.items()
+                                                                    if kk not in self.EVENT_QUIET) if x]
+                return "; ".join(parts[:6]) + (" …" if len(parts) > 6 else "")
+            return ""
+
+        lines = []
+        for k, v in data.items():
+            if k in self.EVENT_QUIET:
+                continue
+            text = say(k, v)
+            if text:
+                lines.append(f'<li><span class="muted">{e(self.human(k))}:</span> {text}</li>')
+        plain = f'<ul class="plain ev-lines">{"".join(lines[:10])}</ul>' if lines else ""
+        return (plain + f'<details><summary class="meta">Details</summary><pre>{e(json.dumps(data, indent=1))}</pre>'
+                        f'</details>')
+
+    SLUG_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+    ID_RE = re.compile(r"\b(?:(?:run|item|ev|evt|out|tok|cred)[-_][A-Za-z0-9]{6,}|[0-9a-f]{10,})\b")
+
+    def _event_on(self, me, subject: str) -> str:
+        """What an event was about, in words: a record by its title (or its kind), a workflow by its title."""
+        if not subject:
+            return ""
+        ref = self._ref_html(me, subject)
+        if ref:
+            return ref
+        kind, _, rest = subject.partition(":")
+        if kind == "workflow":
+            try:
+                return e(self.hub.workflow(rest.split("@")[0])[0].title)
+            except HubError:
+                return "a workflow"
+        words = {"step": "a step", "item": "a work item", "member": "a member", "role": "a role", "block": "a block",
+                 "type": "a record type", "view": "a view", "skill": "a skill", "module": "a module"}
+        if kind in words and rest:
+            m = self.hub.db.members.get(rest) if kind == "member" else None
+            return e(m["name"]) if m else words[kind]
+        return e(self.human(subject)) if not self.ID_RE.search(subject) else ""
+
     def _activity(self, events, me) -> str:
         """Events as an activity feed, redacted for this viewer."""
-        rows = []
+        rows, memo = [], {}
         for ev in Viewer(self.hub, me).events(events):
             signed = self._signed_badge(ev)
             data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
@@ -1687,8 +1849,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             rows.append(f'<li>{self._av(ev["actor"])}<div class="body"><div><b>{e(self.member_name(ev["actor"]))}</b> '
                         f'{e(ev["action"].replace(".", " "))}{signed}</div><div class="meta">'
                         f'<a href="/track/{ev["seq"]}">#{ev["seq"]}</a> · {self._at(ev["at"])}{cause}</div>'
-                        + (f'<details><summary class="meta">details</summary><pre>{e(json.dumps(data, indent=1))}</pre>'
-                           f'</details>' if data else "") + "</div></li>")
+                        + (self._event_words(ev, me, memo) if data else "") + "</div></li>")
         return f'<ul class="activity">{"".join(rows)}</ul>' if rows else '<p class="muted">No activity yet.</p>'
 
     # ------------------------------------------------------------------------------------------ runs
@@ -1704,7 +1865,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                                "when": None, "agents_may": False} if s.id in hide else
                               {"title": s.title, "kind": s.kind, "role": s.role, "action": s.action,
                                "when": None if viewer and run and viewer.step_state(wf, run, s.id) == "if-needed"
-                               and not viewer.full(wf) else s.when,
+                               and not viewer.full(wf) else (cond_words(wf, s.when) or None),
                                "agents_may": s.agents_may and s.kind != "automation", "timing": step_timing(s)})}
                           for s in wf.steps]}
         if run:
@@ -1759,7 +1920,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                                f'required><button>Retry this step</button></form>')
             title = (f'<a href="/items/{e(st["item"])}">{e(s.title)}</a>' if st.get("item") else e(s.title))
             key = f'<span class="key">{self._key(st["item"])}</span>' if st.get("item") else ""
-            cond = (f"only when {s.when}" if s.when and viewer.full(wf) else "only if needed" if s.when else "")
+            cond = (f"only {cond_words(wf, s.when)}" if s.when and viewer.full(wf) else "only if needed" if s.when else "")
             meta = " · ".join(x for x in [s.role or s.action or "", cond] if x)
             rows.append(f'<div class="row{" skipped" if st["state"] == "skipped" else ""}">{self._ki(s.kind)}{key}'
                         f'<div class="t">{title} <span class="muted">{e(meta)}</span>{detail}</div>'
@@ -2511,7 +2672,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         raise Redirect(f"/runs/{rid}")
 
     def _events(self, events, me) -> str:
-        rows, who = [], {}
+        rows, who, memo = [], {}, {}
         for ev in Viewer(self.hub, me).events(events):
             if ev["actor"] not in who:  # one look-up per member on the page, not one per event
                 who[ev["actor"]] = self.who(ev["actor"])
@@ -2519,9 +2680,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             rows.append(f'<tr><td><a href="/track/{ev["seq"]}">#{ev["seq"]}</a></td>'
                         f'<td class="muted">{self._at(ev["at"])}</td><td>{who[ev["actor"]]}</td>'
-                        f'<td>{e(ev["action"])}{signed}</td><td>{e(ev["subject"])}</td>'
+                        f'<td>{e(self.human(ev["action"].replace(".", " ")))}{signed}</td>'
+                        f'<td>{self._event_on(me, ev["subject"])}</td>'
                         f'<td class="muted">{"#" + str(ev["cause"]) if ev["cause"] else ""}</td>'
-                        f'<td><details><summary>data</summary><pre>{e(json.dumps(data, indent=1))}</pre></details></td></tr>')
+                        f'<td>{self._event_words(ev, me, memo) if data else ""}</td></tr>')
         return ('<table><tr><th>#</th><th>at</th><th>who</th><th>what</th><th>on</th><th>because</th><th></th></tr>'
                 + "".join(rows) + "</table>")
 
@@ -3794,6 +3956,22 @@ def schedule_text(sch: str) -> str:
         day = "the last day" if parts[1] == "last" else f"day {parts[1]}"
         return f"on {day} of each month at {at}"
     return str(sch)
+
+
+def cond_words(wf, src: str | None) -> str:
+    """A step's condition as people read it ("when urgency is urgent"), never as code: inputs and step fields by
+    their labels."""
+    if not src:
+        return ""
+    names = {f"input.{i['name']}": i.get("label") for i in wf.inputs}
+    for st in wf.steps:
+        names.update({f"{st.id}.{f['name']}": f.get("label") for f in st.fields})
+
+    def name(path):
+        lab = names.get(path)
+        return (lab[:1].lower() + lab[1:]) if lab and not lab[:2].isupper() else lab
+
+    return "when " + expr.words(src, name)
 
 
 def step_timing(s) -> str:

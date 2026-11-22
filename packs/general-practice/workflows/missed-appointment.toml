@@ -2,7 +2,7 @@ id = "missed-appointment"
 title = "Missed appointment"
 record = "Patient"
 summary = """
-A patient missed an appointment or cancelled late. The practice's policy (the missed-appointment-fee block, Python)
+A patient missed an appointment or cancelled late. The practice's missed-appointment policy
 decides whether there is a fee, and the patient is told either way.
 """
 

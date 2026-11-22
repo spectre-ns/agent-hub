@@ -3101,8 +3101,10 @@ def test_the_front_desk_books_through_the_red_flag_screen(hub):
     assert "reasonCode" not in hub.read_record(jo, f"Encounter/{v['id']}")  # clinical: the desk wrote it, cannot read it
     assert "serviceType" in hub.read_record(jo, f"Encounter/{v['id']}")
     assert not hub.db.items.find_one({"run_id": run["id"], "step_id": "triage"})
-    for reason, urgency in (("crushing chest pain and short of breath", "routine"), ("a form", "urgent")):
-        run = hub.engine.start(jo, "appointment-request", record=pat, inputs={
+    others = [f"Patient/{p['id']}" for p in hub.records.search("Patient")][1:3]  # one open request per patient
+    for other, (reason, urgency) in zip(others, (("crushing chest pain and short of breath", "routine"),
+                                                 ("a form", "urgent"))):
+        run = hub.engine.start(jo, "appointment-request", record=other, inputs={
             "reason": reason, "kind": "new-concern", "urgency": urgency, "slot": "2027-03-08T10:00|dr-liam"})
         assert not [v for v in hub.records.search("Encounter", limit=None)
                     if v.get("plannedStartDate") == "2027-03-08T10:00"]  # not booked
