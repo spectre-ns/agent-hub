@@ -57,10 +57,12 @@ class CatalogMixin:
         return parse_skill(source)
 
     def _def_get(self, kind: str, did: str, version: int | None = None):
-        row = self._def_row(kind, did, version)
+        return self._def_of_row(kind, self._def_row(kind, did, version))
+
+    def _def_of_row(self, kind: str, row: dict | None):
         if not row:
             return None
-        key = (kind, did, row["version"], hashlib.sha256(row["source"].encode()).hexdigest())
+        key = (kind, row[DEFINITIONS[kind][1]], row["version"], hashlib.sha256(row["source"].encode()).hexdigest())
         if key not in self._defs:
             if row["status"] in ("active", "retired"):
                 self._require_sealed(kind, row)
@@ -81,14 +83,20 @@ class CatalogMixin:
         permissive (any keys). A type that was retired is gone: its records can be read, not written. A type stored
         before a check that now refuses it is treated as absent (no page fails on it) and named on the record types
         page, until a fixed version is proposed and approved."""
+        return self._record_type_of(tid, version, self._def_row("type", tid, version),
+                                    lambda: self._ever_defined("type", tid))
+
+    def _record_type_of(self, tid: str, version: int | None, row: dict | None, ever_defined):
+        """``record_type`` from the type's row as read (active, or the version asked for) and whether it was ever
+        defined (asked only when there is no row): ``record_types`` reads every type's row at once."""
         try:
-            rt = self._def_get("type", tid, version)
+            rt = self._def_of_row("type", row)
         except DefinitionError as exc:
             self.__dict__.setdefault("broken_types", {})[tid] = str(exc)
             return None
         if rt is not None or version is not None:
             return rt
-        if self._ever_defined("type", tid):
+        if ever_defined():
             return None
         dc = self.pack.class_of(tid) if self.pack else None
         if not dc:
@@ -108,10 +116,16 @@ class CatalogMixin:
         return self._def_get("type", tid, row["version"]) if row else None
 
     def record_types(self) -> dict[str, schema.RecordType]:
-        ids = set(self._def_ids("type")) | set(self.pack.record_types() if self.pack else [])
+        table, col, _ = DEFINITIONS["type"]
+        active, ever = {}, set()  # one read of every type's rows, not one per type (this runs on every record write)
+        for row in self.db[table].find({"status": {"$in": ["active", "retired"]}}):
+            ever.add(row[col])
+            if row["status"] == "active":
+                active.setdefault(row[col], row)  # the first found, as find_one takes it
+        ids = set(active) | set(self.pack.record_types() if self.pack else [])
         out = {}
         for tid in sorted(ids):
-            rt = self.record_type(tid)
+            rt = self._record_type_of(tid, None, active.get(tid), lambda t=tid: t in ever)
             if rt is not None:
                 out[tid] = rt
         return dict(sorted(out.items(), key=lambda kv: (kv[1].order, kv[1].label)))
@@ -121,8 +135,9 @@ class CatalogMixin:
 
     def subject_types(self) -> set[str]:
         """The types work is about: those that extend the core's Subject (or say ``subject = true``)."""
-        out = {t for t, rt in self.record_types().items() if rt.subject or rt.extends == "Subject"}
-        if self.pack and self.pack.subject_type in self.type_ids():
+        rts = self.record_types()
+        out = {t for t, rt in rts.items() if rt.subject or rt.extends == "Subject"}
+        if self.pack and self.pack.subject_type in rts:
             out.add(self.pack.subject_type)
         return out
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import M, item_for, quiet, run_of
+from conftest import M, item_for, quiet, run_of, snapshot_onto
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid
 from practicehub.models import ModelError, ModelGateway
@@ -626,11 +626,12 @@ def install(hub, name, by="rana"):
 @pytest.fixture
 def quality(hub):
     """The demo practice with document control and quality installed, and their demo data."""
-    rana = M(hub, "rana")
-    install(hub, "dms")
-    install(hub, "qms")
-    for m in hub.pack.modules:
-        m.module.demo(hub)
+    def build(hub):
+        install(hub, "dms")
+        install(hub, "qms")
+        for m in hub.pack.modules:
+            m.module.demo(hub)
+    snapshot_onto(hub, "rules:quality", build, modules=["dms", "qms"])
     return hub
 
 

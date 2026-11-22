@@ -13,11 +13,33 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
   docker run -d --name "$NAME" -p "$bind" --ulimit nofile=1048576:1048576 --tmpfs /data/db \
     mongo:7.0 --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB "$CACHE" >/dev/null
 fi
-i=0
-until docker exec "$NAME" mongosh --quiet --eval 'db.adminCommand("ping").ok' >/dev/null 2>&1; do
-  i=$((i + 1)); [ "$i" -gt 60 ] && { echo "MongoDB did not start" >&2; exit 1; }; sleep 1
-done
-docker exec "$NAME" mongosh --quiet --eval \
-  "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}).ok }" >/dev/null
 PORT=$(docker port "$NAME" 27017/tcp | head -n 1 | sed 's/.*://')
+PY=$(dirname "$0")/../.venv/bin/python
+if [ -x "$PY" ]; then
+  # from the host, every 0.1 s (a mongosh in the container costs a second each time): up, initiated, and primary
+  "$PY" - "$PORT" <<'PYEOF' || { echo "MongoDB did not start" >&2; exit 1; }
+import sys, time
+import pymongo
+c = pymongo.MongoClient(f"mongodb://127.0.0.1:{sys.argv[1]}/?directConnection=true", serverSelectionTimeoutMS=500)
+end = time.time() + 60
+while time.time() < end:
+    try:
+        hello = c.admin.command("hello")
+        if hello.get("isWritablePrimary"):
+            sys.exit(0)
+        if not hello.get("setName"):
+            c.admin.command("replSetInitiate", {"_id": "rs0", "members": [{"_id": 0, "host": "localhost:27017"}]})
+    except pymongo.errors.PyMongoError:
+        pass
+    time.sleep(0.1)
+sys.exit(1)
+PYEOF
+else
+  i=0
+  until docker exec "$NAME" mongosh --quiet --eval 'db.adminCommand("ping").ok' >/dev/null 2>&1; do
+    i=$((i + 1)); [ "$i" -gt 60 ] && { echo "MongoDB did not start" >&2; exit 1; }; sleep 1
+  done
+  docker exec "$NAME" mongosh --quiet --eval \
+    "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}).ok }" >/dev/null
+fi
 echo "MongoDB replica set rs0 on 127.0.0.1:$PORT"

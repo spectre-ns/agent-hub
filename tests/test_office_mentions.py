@@ -9,7 +9,7 @@ import zipfile
 
 import pytest
 
-from conftest import M
+from conftest import M, snapshot_onto
 from practicehub import filetext
 from practicehub.hub import Denied, Invalid, member_ref
 from practicehub.integrations import collabora as cool
@@ -36,16 +36,19 @@ def _odt(*paras: str) -> bytes:
 @pytest.fixture
 def doc(hub):
     """Document control installed, and a draft document holding a text document with words in it."""
-    hub.approve_module_code(M(hub, "dr-amara"), "dms")
-    hub.install_module(M(hub, "rana"), "dms")
-    for m in hub.pack.modules:
-        m.module.demo(hub)
-    rana = M(hub, "rana")
-    att = hub.add_file(rana, "Document", _odt(TEXT, "Ask the duty nurse."), "Visitors.odt", cool.mime_of("odt"))
-    rec = hub.create_record(rana, "Document", {"title": "Visitors", "number": "SOP-021", "status": "draft",
-                                               "file": att})
+    def build(hub):
+        hub.approve_module_code(M(hub, "dr-amara"), "dms")
+        hub.install_module(M(hub, "rana"), "dms")
+        for m in hub.pack.modules:
+            m.module.demo(hub)
+        rana = M(hub, "rana")
+        att = hub.add_file(rana, "Document", _odt(TEXT, "Ask the duty nurse."), "Visitors.odt", cool.mime_of("odt"))
+        rec = hub.create_record(rana, "Document", {"title": "Visitors", "number": "SOP-021", "status": "draft",
+                                                   "file": att})
+        return f"Document/{rec['id']}", att
+    ref, att = snapshot_onto(hub, "office_mentions:doc", build, modules=["dms"])
     hub._live = Live(hub)
-    return hub, f"Document/{rec['id']}", att
+    return hub, ref, att
 
 
 READ = ("data_class:documents", "reader", member_ref(AGENT))
