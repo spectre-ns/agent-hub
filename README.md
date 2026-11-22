@@ -358,6 +358,40 @@ A lifecycle with `in_use = "<state>"` keeps a record's approved revision in use 
 - **The wiki's SOPs:** each SOP is released by an approver who did not write it, and comes back for review a year after
   it is released.
 
+## MCP
+
+Every installed module, the practice pack's own definitions, and each member's work are Model Context Protocol
+servers (JSON-RPC 2.0, revision 2025-06-18 and later, negotiated at `initialize`), over Streamable HTTP at
+`POST /mcp/<server>`:
+
+| server     | tools |
+|------------|-------|
+| `core`     | `list_inbox`, `read_item`, `claim_item`, `complete_item`, `release_item`, and for agents `propose_decision` |
+| `practice` | the pack's record types, workflows and views |
+| `<module>` | each installed module's (`/mcp/dms`, `/mcp/qms`, ...) |
+
+Tools are never written by hand. They are generated on every call from the approved, versioned definitions in force:
+`search_<type>`, `read_<type>`, `create_<type>`, `update_<type>`, `move_<type>` (an enum of the lifecycle's moves,
+with the fields each needs), `start_<workflow>` and `view_<view>`. Their input schemas come from the TOML fields
+(required, choices as enums, references as `Type/id`). The list is filtered to what the calling member may do. A
+definition change, proposed and then approved by a second person, is the only thing that changes it. Clients learn of
+the change through `notifications/tools/list_changed`. `resources/list` gives the record types as JSON Schema and the
+controlled documents in force that the member may read.
+
+Authority stays in the hub. A call uses the same methods as the pages and the API: data classes, grants, lifecycle
+`by`, required fields and eligibility. It is recorded on the track as `mcp.called` (how `mcp`, the server and the
+tool), and it is the cause of whatever it changed. A refusal is a tool result with `isError` and the hub's reason.
+Nothing signs: there is no signature tool, and an agent's `propose_decision` waits for its sponsor to approve and sign
+it. Moves that put a record into force are not offered to agents and are refused if called. Arguments are data,
+checked against the schema and never evaluated.
+
+The `Origin` header is checked: another site gets a 403 (allow more with `PRACTICEHUB_MCP_ORIGINS`). A member's token
+is required as `Authorization: Bearer ph_...`, and cookies are not accepted (401). A server that is switched off is a
+404. **Settings → Connections (MCP)** lists each server's URL and tool count, shows how to connect, and lets a policy
+owner switch servers on and off, which is tracked. For clients that start a command:
+
+    PRACTICEHUB_TOKEN=ph_... practicehub mcp dms --url https://hub.example.ca
+
 ## Layout
 
 ```

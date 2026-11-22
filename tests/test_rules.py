@@ -3022,3 +3022,22 @@ def test_a_type_that_is_not_a_fhir_resource_offers_no_fhir_format(quality):
     assert plain["resourceType"] == "Document" and plain["id"] == rec["id"]
     odt = export.record(hub, reader, f"Document/{rec['id']}", "odt")  # a document works for any type
     assert odt.body[:2] == b"PK"
+
+
+def test_an_agents_proposed_decision_waits_for_its_sponsor_whatever_the_risk(hub):
+    """``decide(..., propose=True)`` (the MCP propose_decision tool): an agent's decision is held for its sponsor to
+    approve and sign, even on a low-risk gate it could decide alone."""
+    agent = M(hub, "intake-agent")
+    src = ('id = "propose-check"\ntitle = "Propose check"\n[trigger]\nstarters = ["intake-coordinator"]\n'
+           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[[steps]]\nid = "check"\ntitle = "Check"\n'
+           f'kind = "gate"\nrole = "{agent["roles"][0]}"\nsigner = "any"\nagent_criteria = "input.kind == \'routine\'"\n'
+           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "low"\noutcomes = ["ok", "not-ok"]\n'
+           'meaning = "I confirm the check"\ncontext = ["input.kind"]\n')
+    p = hub.propose_workflow(M(hub, "jo"), src, "a check")
+    hub.approve_workflow(M(hub, "rana"), "propose-check", p["version"])
+    run = hub.engine.start(M(hub, "jo"), "propose-check", inputs={"kind": "routine"})
+    iid = item_for(hub, run, "check")
+    hub.engine.decide(agent, iid, "ok", "", seen=hub.engine.shown_digest(agent, iid), propose=True)
+    assert hub.engine.item(iid)["status"] == "held"
+    hold = hub.db.items.find_one({"run_id": run["id"], "kind": "hold"})
+    assert hold["assignee"] == agent["sponsor"] and "(high risk)" not in hold["title"]

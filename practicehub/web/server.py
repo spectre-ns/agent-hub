@@ -31,6 +31,7 @@ from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
+from .mcp_pages import McpPages
 from .office_pages import OfficePages
 from .live_pages import LivePages
 from .records_pages import Download, RecordPages, a_an
@@ -67,7 +68,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(RecordPages, DefinitionPages, OfficePages, LivePages):
+class App(RecordPages, DefinitionPages, OfficePages, LivePages, McpPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -172,6 +173,7 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
         self.record_routes(R)
         self.definition_routes(R)
         self.office_routes(R)
+        self.mcp_routes(R)
 
     def route(self, method, pattern, fn, auth=True):
         self.routes.append((method, re.compile(pattern + r"/?$"), fn, auth))
@@ -186,6 +188,8 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
         try:
             if path.startswith("/wopi/"):  # Collabora, with an access token of its own (office_pages, wopi.py)
                 return self.handle_wopi(method, raw_path, headers, body)
+            if path.startswith("/mcp/"):  # MCP servers, with a member's token (mcp_pages, mcp.py)
+                return self.handle_mcp(method, raw_path, headers, body)
             return self._dispatch(method, path, query, is_api, req, headers)
         except Exception:  # a bug is a 500 with no detail to the client; the traceback goes to stderr
             import traceback
@@ -529,7 +533,8 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
                  ("/define/types", "Record types", "what the practice keeps records of", "records"),
                  ("/define/views", "Views", "boards and tables of records", "board"),
                  ("/blocks", "Blocks", "reusable steps", "block"),
-                 ("/define/skills", "Skills", "what agents know how to do", "skill")]
+                 ("/define/skills", "Skills", "what agents know how to do", "skill"),
+                 ("/settings/connections", "Connections (MCP)", "servers agents and tools connect to", "module")]
         audit = ([("/track", "Track", "everything that happened, signed and chained", "track"),
                   ("/access", "Access report", "who may read and write what", "access")] if owner else [])
         if me and (owner or self.hub.can(me, "reader", "data_class:correspondence")):
