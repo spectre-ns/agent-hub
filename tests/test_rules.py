@@ -4305,3 +4305,47 @@ def test_a_member_admin_gives_nobody_more_than_they_reach_on_their_own(hub):
     # an agent's sponsor issues its token only for what they reach themselves (the lab feed writes the chart)
     with pytest.raises(Denied):
         hub.issue_token(rana, "lab-feed")
+    # nor by changing that passphrase as her, or by a token made as her, before the roles come back
+    hub.set_roles(rana, "locum", [])
+    code = hub.issue_setup_code(rana, "locum")["code"]
+    hub.redeem_setup_code("locum", code, WORDS)
+    hub.set_passphrase(M(hub, "locum"), "locum", "seven amber kites drifting", current=WORDS)
+    tok = hub.issue_token(M(hub, "locum"), "locum")
+    hub.set_roles(rana, "locum", ["physician"])
+    hub.approve_roles(amara, "locum")
+    assert not hub.has_passphrase("locum") and hub.authenticate(tok) is None
+
+
+def test_a_sponsor_who_loses_roles_loses_the_tokens_of_what_they_no_longer_reach(hub):
+    rana, jo = M(hub, "rana"), M(hub, "jo")
+    tok = hub.issue_token(jo, "portal")
+    assert hub.authenticate(tok)["id"] == "portal"
+    hub.set_roles(rana, "jo", ["billing"])  # she moves to billing: the portal writes what she no longer reaches
+    assert hub.authenticate(tok) is None
+    assert hub.db.events.find_one({"action": "credential.revoked", "subject": "member:portal"})
+
+
+def test_a_directive_that_allows_an_agent_but_not_its_sponsor_ends_its_tokens(hub):
+    """'Only Dr. Fraser and his scribe': the scribe's sponsor is the physician the patient left out. Her tokens for it
+    end, and she issues no new one: through it she would read the file kept from her."""
+    ref, _ = _ellen_and_her_result(hub)
+    amara = M(hub, "dr-amara")
+    tok = hub.issue_token(amara, "scribe-agent")
+    _lockbox(hub, ref, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-liam"}],
+             allow_roles=["documentation-assistant"])
+    assert hub.authenticate(tok) is None
+    with pytest.raises(Denied, match="directive keeps"):
+        hub.issue_token(amara, "scribe-agent")
+
+
+def test_an_emergency_access_nobody_may_fully_review_is_still_reviewed(hub):
+    """A directive withholding visits leaves out everyone who would review it: the privacy role is still told who
+    opened which file, and when, but not why."""
+    ref, _ = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["visits"], allow_members=[{"reference": "Practitioner/dr-liam"}])
+    enc = hub.records.search("Encounter", subject=ref, limit=None)
+    where = f"Encounter/{enc[0]['id']}" if enc else ref
+    got = hub.break_glass(M(hub, "noor"), where, "Collapsed in the waiting room, need her last visit")
+    assert got["told"] and "noor" not in got["told"]
+    notes = hub.db.items.find({"run_id": got["run"], "kind": "notice"})
+    assert notes and all("Collapsed" not in json.dumps(n["output"]) for n in notes)

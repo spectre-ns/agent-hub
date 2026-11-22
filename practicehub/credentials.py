@@ -174,7 +174,10 @@ class CredentialsMixin:
         problem = self._passphrase_problem(mid, new)
         if problem:
             raise Invalid(problem)
-        self._store_passphrase(actor, mid, new, how="set by the member")
+        # a passphrase changed in a session the code's issuer could have opened is still theirs to know: whoever
+        # issued the code stays on it, so roles given later that they do not reach still clear it
+        prev = self.db.passphrases.get(mid) or {}
+        self._store_passphrase(actor, mid, new, how="set by the member", issued_by=prev.get("issued_by"))
 
     def _store_passphrase(self, actor: dict, mid: str, new: str, how: str, cause: int | None = None,
                           issued_by: str | None = None) -> None:
@@ -200,18 +203,13 @@ class CredentialsMixin:
             waiting = set((self.role_request(mid) or {}).get("roles") or []) if target["kind"] == "person" else set()
             beyond = (self.reach_beyond(actor, mid, set(target["roles"]) | waiting)
                       if target["kind"] == "person" else [])
-            # and a directive that lets this member see what it keeps from the actor: the actor signing in as them
-            # would open the file the patient kept from them
-            beyond += [f"a file whose directive keeps it from {actor['name']}"
-                       for _ in [1] if target["kind"] == "person" and self.restrictions.allows_beyond(target, actor)]
             if beyond:
                 if not self.can(actor, "member_admin", "practice:main") and not self.is_policy_owner(actor):
                     self.require(actor, "member_admin", "practice:main", "issue a passphrase setup code")
                 self.track.append(actor, "access.denied", f"member:{mid}",
                                   data={"relation": "member_admin", "what": "issue a setup code"})
                 who = [m["name"] for m in self.members("person") if m["status"] == "active" and m["id"] != mid
-                       and self.is_policy_owner(m) and not self.reach_beyond(m, mid, set(target["roles"]) | waiting)
-                       and not self.restrictions.allows_beyond(target, m)]
+                       and self.is_policy_owner(m) and not self.reach_beyond(m, mid, set(target["roles"]) | waiting)]
                 raise Denied(f"{target['name']} reaches information {actor['name']} does not ("
                              f"{', '.join(beyond)}): a policy owner who does issues their "
                              f"setup code" + (f" ({', '.join(who)})" if who else ""))

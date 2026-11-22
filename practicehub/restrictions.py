@@ -331,12 +331,26 @@ class Restrictions:
         people = [m for m in hub.members("person") if m["status"] == "active" and m["id"] != member["id"]]
         classes = {hub.class_of(t) for t in (hub.of_base(BASE) if BASE in schema.bases() else [])} - {None, ""}
         everyone = self.of_subject(ds[0]["subject"]) if ds else []
-        for pool in ([m for m in people if any(hub.can(m, "writer", f"data_class:{c}") for c in classes)],
-                     [m for m in people if hub.is_policy_owner(m)],
-                     [m for m in people if hub.can(m, "member_admin", "practice:main")]):
+        pools = ([m for m in people if any(hub.can(m, "writer", f"data_class:{c}") for c in classes)],
+                 [m for m in people if hub.is_policy_owner(m)],
+                 [m for m in people if hub.can(m, "member_admin", "practice:main")])
+        for pool in pools:
             fit = [m for m in pool if not self.excluded_by(m, everyone or ds)]
             if fit:
                 return fit
+        return []
+
+    def _blind_reviewers(self, member: dict) -> list[dict]:
+        """Who is still told of an emergency access nobody may fully review: the privacy role, else the policy
+        owners, else the member admins, shown who opened which file and when, never why."""
+        hub = self.hub
+        people = [m for m in hub.members("person") if m["status"] == "active" and m["id"] != member["id"]]
+        classes = {hub.class_of(t) for t in (hub.of_base(BASE) if BASE in schema.bases() else [])} - {None, ""}
+        for pool in ([m for m in people if any(hub.can(m, "writer", f"data_class:{c}") for c in classes)],
+                     [m for m in people if hub.is_policy_owner(m)],
+                     [m for m in people if hub.can(m, "member_admin", "practice:main")]):
+            if pool:
+                return pool
         return []
 
     def break_glass(self, member: dict, ref: str, reason: str) -> dict:
@@ -377,10 +391,21 @@ class Restrictions:
                                 "started_by": member["id"], "root_event": seq, "created_at": utcnow(),
                                 "updated_at": utcnow()})
             owners = self._reviewers(member, ds, rtype)
+            blind = [] if owners else self._blind_reviewers(member)
             if not owners:
                 hub.track.append(member, "access.unreviewed", ref,
-                                 data={"subject": subject, "why": "nobody in the practice may review it without "
-                                                                  "seeing what the subject withheld from them"})
+                                 data={"subject": subject, "told": [o["id"] for o in blind],
+                                       "why": "nobody in the practice may see why without seeing what the subject "
+                                              "withheld from them: who opened which file and when is reviewed"})
+            for o in blind:
+                # the directive keeps the file from them too: they review who opened it and when, not why
+                hub.db.items.insert(_item_doc(
+                    hub, id=_new_id("item"), run_id=run_id, step_id="review", kind="notice", role=None,
+                    assignee=o["id"], persons_only=1, status="open", cause=seq, priority="urgent",
+                    title=f"Review: {member['name']} used emergency access to {title}'s withheld information",
+                    output={"about": subject, "opened by": member["name"],
+                            "why": "not shown to you: the file's directive keeps what it withholds from you too. "
+                                   "Ask them, or the server holder can read it on the track"}))
             for o in owners:
                 # the notice names the file, never why it was opened (that can be the very thing withheld): the
                 # reason is on the item's page, which only the reviewer it is for may open
@@ -391,4 +416,4 @@ class Restrictions:
                     output={"about": subject, "record": ref, "reason": reason}))
         self._over.pop((member["id"], subject), None)
         return {"seq": seq, "subject": subject, "run": run_id, "until": _iso(_now() + OVERRIDE_WINDOW),
-                "told": [o["id"] for o in owners]}
+                "told": [o["id"] for o in owners + blind]}

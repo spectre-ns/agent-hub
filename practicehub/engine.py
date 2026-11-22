@@ -1018,6 +1018,11 @@ class Engine:
                 for dc in sorted(step_classes(wf, wf.step(ref))):
                     if not hub.can(member, "reader", f"data_class:{dc}"):
                         return False, f"it reads '{wf.step(ref).title}', which holds {dc} data"
+        if (not is_agent and run["record"]
+                and hub.restrictions.withholds_from(member, run["record"], reaching=True)):
+            # the work shows the file's content: a member a directive keeps from it takes it only in an emergency
+            return False, ("what it is about is withheld from you at the subject's request: open the file in an "
+                           "emergency first, or leave it to someone the directive allows")
         if is_agent:
             if member["kind"] == "service":
                 return False, "services do not take work items"

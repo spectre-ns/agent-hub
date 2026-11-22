@@ -1530,7 +1530,42 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if (rel in ("reader", "writer") and obj.startswith("data_class:")
                     and obj.removeprefix("data_class:") in rclasses and not self.can(actor, rel, obj)):
                 out.append(f"{rel} of {obj.removeprefix('data_class:')}")
+        # and a directive that lets the member see what it keeps from the actor: acting as the member would open
+        # the file the subject kept from them
+        if self.restrictions.allows_beyond(target, actor):
+            out.append(f"a file whose directive keeps it from {actor.get('name') or actor['id']}")
         return list(dict.fromkeys(out))
+
+    def credentials_within_reach(self, actor: dict, why: str) -> list[str]:
+        """End every credential whose issuer no longer reaches as far as its holder: after someone's roles are taken
+        away, or a directive starts allowing a member it keeps from their issuer. An agent's or service's tokens end
+        when its sponsor falls short (a member admin names a sponsor who reaches as far, who issues new ones); a
+        person's passphrase set with a code from someone who falls short is cleared, with their tokens and sessions
+        (a policy owner who reaches as far issues a new code). Returns the names of the members affected."""
+        hit = []
+        for m in self.members():
+            if m["status"] != "active":
+                continue
+            if m["kind"] != "person":
+                sp = self.db.members.get(m.get("sponsor") or "")
+                if (sp and self.db.tokens.find_one({"member": m["id"], "revoked": 0})
+                        and self.reach_beyond(sp, m["id"])):
+                    self._revoke_all(actor, m["id"], f"its sponsor no longer reaches what it does ({why})")
+                    hit.append(m["name"])
+                continue
+            row = self.db.passphrases.get(m["id"]) or {}
+            issuer = self.db.members.get(row.get("issued_by") or "")
+            if issuer and issuer["id"] != m["id"] and self.reach_beyond(issuer, m["id"]):
+                self._clear_passphrase(actor, m["id"], f"set with a setup code from someone who no longer reaches "
+                                                      f"what they do ({why})")
+                hit.append(m["name"])
+        return hit
+
+    def _clear_passphrase(self, actor: dict, mid: str, why: str) -> None:
+        self.db.passphrases.delete({"_id": mid})
+        self._revoke_all(actor, mid, why)  # tokens made while it was in force too, and its sessions
+        self.end_sessions(mid)
+        self.track.append(actor, "credential.passphrase_cleared", member_ref(mid), data={"why": why})
 
     def _request_for(self, actor: dict, mid: str, **change) -> dict:
         """Put a change into the member's waiting role request, keeping everyone who asked: none of them approves
@@ -1622,6 +1657,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self._keep_a_member_admin(admins)
             if after - before:
                 self._credentials_within_reach(actor, mid, after - before)
+            if before - after:  # whoever lost roles may no longer reach what they sponsor, or gave a code for
+                self.credentials_within_reach(actor, f"{self.member(mid)['name']}'s roles changed")
             self.track.append(actor, "member.roles_changed", member_ref(mid),
                               data={"added": sorted(after - before), "removed": sorted(before - after),
                                     **({"asked_by": approved_from} if approved_from else {})})
@@ -1648,11 +1685,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self.db.setup_codes.set(row["code_hash"], {"used_at": "superseded " + utcnow()})
         row = self.db.passphrases.get(mid)
         if row and short(row.get("issued_by")):
-            self.db.passphrases.delete({"_id": mid})
-            self.end_sessions(mid)
-            self.track.append(actor, "credential.passphrase_cleared", member_ref(mid),
-                              data={"why": "set with a setup code from someone who does not reach the roles now "
-                                           "given: a policy owner who does issues a new one"})
+            self._clear_passphrase(actor, mid, "set with a setup code from someone who does not reach the roles now "
+                                               "given: a policy owner who does issues a new one")
 
     MIN_POLICY_OWNERS = 2  # every change is approved by a second person, so it takes two to approve anything
 
@@ -2931,6 +2965,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.engine.on_record("created", rt, rec, None, member, ev)
         if rt.is_a("Restriction"):
             self.restrictions.reset()  # in force at once, in this process
+            self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)  # what they wrote, as they may read it
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
@@ -3021,6 +3056,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
         if rt.is_a("Restriction"):
             self.restrictions.reset()
+            self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)
 
     # ------------------------------------------------------------------ signatures on any record

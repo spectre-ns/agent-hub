@@ -430,6 +430,29 @@ class Viewer:
                 return True
         return False
 
+    def run_withheld(self, run: dict) -> str | None:
+        """The note shown in place of a run's content (its input, its steps' outputs and drafts, an item's result)
+        when a directive on its file withholds from the member what they would otherwise read: the chart shows
+        stubs, so the work about that file must not show the content itself. None when nothing is withheld."""
+        ref = (run or {}).get("record")
+        r = self.hub.restrictions
+        if not ref or not r.any():
+            return None
+        if ref not in self._withheld:
+            try:
+                self._withheld[ref] = bool(r.withholds_from(self.me, ref, reaching=True))
+            except Exception:  # noqa: BLE001
+                self._withheld[ref] = False
+        if not self._withheld[ref]:
+            return None
+        subject = ref
+        try:
+            rec = self.hub.records.read(*ref.split("/", 1))
+            subject = (r.subject_of(rec) if rec else None) or ref
+        except Exception:  # noqa: BLE001
+            pass
+        return r.note(subject)
+
     ACCESS_EVENTS = frozenset({"record.viewed", "records.exported", "records.listed", "access.reported"})
 
     def events(self, evs: list[dict]) -> list[dict]:

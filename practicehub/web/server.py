@@ -332,10 +332,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             ok = item.get("assignee") == me.get("id") or (bool(wf) and viewer.step_visible(wf, item["step_id"])[0])
         if item["kind"] == "notice" and item.get("assignee") == me.get("id"):
             return True  # told by name (a break-glass review goes to whom it is for)
-        if item["kind"] != "notice" and (item.get("assignee") == me.get("id")
-                                         or (item.get("role") and item["role"] in (me.get("roles") or []))):
-            # who may take it opens it, directive or not: an urgent call-back for a patient with a lockbox must not
-            # dead-end. What the directive withholds is already reduced to stubs in what the step shows
+        if item.get("assignee") == me.get("id") or (item.get("role") and item["role"] in (me.get("roles") or [])):
+            # whoever it is for opens it, directive or not, so urgent work on a lockboxed file is not a dead end: the
+            # page then shows the directive's note in place of the content, and points to emergency access
             return True
         return ok and not self.hub.restrictions.withholds_from(me, run.get("record"))
 
@@ -1455,7 +1454,21 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             main.insert(0, f'<div class="error" role="alert"><p>That did not go through: {e(str(error))}</p>'
                            + ("<ul>" + "".join(f"<li>{e(str(p))}</li>" for p in problems) + "</ul>" if problems else "")
                            + "<p>Nothing was saved. What you typed is kept below.</p></div>")
-        if item["status"] in ("done", "cancelled"):
+        # a notice told to this member by name says only what is theirs to know (a review of an emergency access);
+        # any other work about a file a directive keeps from them shows the directive's note instead
+        withheld = (None if item["kind"] == "notice" and item.get("assignee") == me.get("id")
+                    else Viewer(self.hub, me).run_withheld(run))
+        if withheld:
+            # what the directive keeps from this member: not the request, a draft, a result or a notice's content
+            main.append(f'<div class="card withheld"><p><b>{e(withheld)}</b></p><p class="muted">What this is about '
+                        f'is not shown to you. In an emergency, open the file with emergency access first (the '
+                        f'privacy officer reviews it); otherwise leave it to someone the directive allows.</p>'
+                        + (f'<p><a href="{e(self.record_href(run["record"]))}">Open the file</a></p>'
+                           if run.get("record") else "") + '</div>')
+            if item["kind"] == "notice" and item["status"] not in ("done", "cancelled"):
+                actions = (f'<form method="post" action="/items/{iid}/ack" class="inline"><button>Acknowledge'
+                           f'</button></form>')
+        elif item["status"] in ("done", "cancelled"):
             out = item["output"] or {}
             ok, missing = (True, [])
             if item["kind"] != "notice":
@@ -1620,7 +1633,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             if st.get("item"):
                 links[s.id] = f'/items/{st["item"]}'
             detail = ""
-            if st["state"] == "done" and isinstance(out, dict):
+            if st["state"] == "done" and isinstance(out, dict) and viewer.run_withheld(run):
+                detail = f'<div class="muted">{e(viewer.run_withheld(run))}</div>'
+            elif st["state"] == "done" and isinstance(out, dict):
                 ok, missing = viewer.step_visible(wf, s.id)
                 if ok:
                     shown = {k: v for k, v in out.items() if k not in ("by", "by_kind", "event", "signature")}
@@ -1630,7 +1645,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 else:
                     detail = f'<div class="muted">result needs access to: {e(", ".join(missing))}</div>'
             if st.get("error"):
-                detail = f'<div class="error">{e(st["error"])}</div>'
+                detail = f'<div class="error">{e(viewer.run_withheld(run) or st["error"])}</div>'
                 if st["state"] == "failed" and run["status"] == "running" and hub.is_policy_owner(me):
                     detail += (f'<form method="post" action="/runs/{rid}/steps/{e(s.id)}/retry" class="inline">'
                                f'<input name="reason" placeholder="what was fixed" aria-label="What was fixed" '
@@ -2344,7 +2359,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             signed = self._signed_badge(ev)
             data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             rows.append(f'<tr><td><a href="/track/{ev["seq"]}">#{ev["seq"]}</a></td>'
-                        f'<td class="muted">{e(ev["at"][11:19])}</td><td>{who[ev["actor"]]}</td>'
+                        f'<td class="muted">{self._at(ev["at"])}</td><td>{who[ev["actor"]]}</td>'
                         f'<td>{e(ev["action"])}{signed}</td><td>{e(ev["subject"])}</td>'
                         f'<td class="muted">{"#" + str(ev["cause"]) if ev["cause"] else ""}</td>'
                         f'<td><details><summary>data</summary><pre>{e(json.dumps(data, indent=1))}</pre></details></td></tr>')

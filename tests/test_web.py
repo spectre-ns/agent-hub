@@ -1584,13 +1584,6 @@ def test_an_item_page_is_for_who_may_see_it(hub, server):
     hub.create_record(hub.member("rana"), "Consent", {
         "patient": {"reference": ellen}, "status": "active", "received": "2026-11-01",
         "request": "Keep my results private.", "withhold_classes": ["clinical"]})
-    got = hub.break_glass(hub.member("noor"), f"Observation/{obs['id']}", "Collapsed at the desk; need her results")
-    (review,) = hub.db.items.find({"run_id": got["run"], "kind": "notice"})
-    status, page = call(server, "GET", f"/items/{review['id']}", token(hub, "rana"))
-    assert status == 200 and "Collapsed at the desk" in page
-    for who in ("jo", "dr-amara", "dr-liam"):
-        status, page = call(server, "GET", f"/items/{review['id']}", token(hub, who))
-        assert status == 404 and "Collapsed" not in page and "emergency" not in page.lower(), who
     # an urgent call-back about her is opened by the nurse who must make it: the directive masks what it holds,
     # it does not dead-end the work
     status, _ = call(server, "POST", "/start", token(hub, "jo"), form={
@@ -1600,7 +1593,23 @@ def test_an_item_page_is_for_who_may_see_it(hub, server):
     calls = [i for i in hub.db.items.find({"run_id": run["id"], "status": "open"}) if i.get("role") == "nurse"]
     assert calls
     for it in calls:
-        assert call(server, "GET", f"/items/{it['id']}", token(hub, "noor"))[0] == 200
+        status, page = call(server, "GET", f"/items/{it['id']}", token(hub, "noor"))
+        # she opens it, but the work shows the directive's note, not what the caller said: emergency access first
+        assert status == 200 and "crushing chest pain" not in page and "withheld at the patient" in page
+        assert not hub.engine.eligibility(M(hub, "noor"), it)[0]
+    for who in ("noor", "dr-amara"):
+        status, page = call(server, "GET", f"/runs/{run['id']}", token(hub, who))
+        assert "crushing chest pain" not in page, who
+    got = hub.break_glass(hub.member("noor"), f"Observation/{obs['id']}", "Collapsed at the desk; need her results")
+    (review,) = hub.db.items.find({"run_id": got["run"], "kind": "notice"})
+    status, page = call(server, "GET", f"/items/{review['id']}", token(hub, "rana"))
+    assert status == 200 and "Collapsed at the desk" in page
+    for who in ("jo", "dr-amara", "dr-liam"):
+        status, page = call(server, "GET", f"/items/{review['id']}", token(hub, who))
+        assert status == 404 and "Collapsed" not in page and "emergency" not in page.lower(), who
+    assert hub.engine.eligibility(M(hub, "noor"), calls[0])[0]  # her emergency access opens the call-back too
+    assert "crushing chest pain" in call(server, "GET", f"/items/{calls[0]['id']}", token(hub, "noor"))[1]
+
 
 def test_moving_a_visit(hub, server):
     _book(server, hub)
