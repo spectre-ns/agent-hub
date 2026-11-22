@@ -55,7 +55,7 @@ def _a_third_policy_owner(hub):
 def test_disabling_a_sponsor_disables_their_agents(hub):
     _a_third_policy_owner(hub)
     rana = M(hub, "rana")
-    hub.set_status(rana, "dr-amara", "disabled", "on leave")
+    hub.set_status(rana, "dr-amara", "disabled", "on leave", stop="all")
     assert hub.member("scribe-agent")["status"] == "disabled"
     assert hub.member("clinical-admin-agent")["status"] == "disabled"
     assert hub.member("billing-agent")["status"] == "active"
@@ -526,7 +526,8 @@ def test_an_injected_prompt_goes_only_to_agents_given_it(hub):
     agent = M(hub, "clinical-admin-agent")
     assert hub.engine.eligibility(agent, item) == (True, "")
     rana = M(hub, "rana")
-    hub.update_agent_profile(rana, agent["id"], {"skills": ["renewal-prep", "lab-triage", "referral-letter"]})
+    out = hub.propose_agent_profile(rana, agent["id"], {"skills": ["renewal-prep", "lab-triage", "referral-letter"]})
+    hub.approve_agent_profile(M(hub, "dr-amara"), agent["id"], out["version"])
     ok, why = hub.engine.eligibility(M(hub, "clinical-admin-agent"), item)
     assert not ok and "patient-reply-draft" in why
 
@@ -1720,7 +1721,7 @@ def test_when_someone_leaves_their_work_and_their_agents_approvals_are_not_stran
     only_agents = [r for r in M(hub, "clinical-admin-agent")["roles"]
                    if all(x["sponsor"] == "dr-amara" for x in hub.active_holders(r))]
     _a_third_policy_owner(hub)
-    out = hub.set_status(M(hub, "rana"), "dr-amara", "disabled", "left the practice")
+    out = hub.set_status(M(hub, "rana"), "dr-amara", "disabled", "left the practice", stop="all")
     assert set(only_agents) <= set(out["roles_left_empty"])
     assert task in out["released"]
     notes = hub.db.items.find({"kind": "notice", "status": "open", "title": {"$regex": "^Back in the queue"}})
@@ -1741,7 +1742,7 @@ def test_an_overdue_item_whose_escalation_role_is_empty_reaches_someone(hub):
     iid = item_for(hub, run, "clinician")
     _a_third_policy_owner(hub)
     for mid in ("dr-liam", "dr-amara"):
-        hub.set_status(M(hub, "rana"), mid, "disabled", "away")
+        hub.set_status(M(hub, "rana"), mid, "disabled", "away", stop="all")
     assert not hub.active_holders("physician", persons_only=True)
     hub.db.items.set(iid, {"due_at": "2000-01-01T00:00:00Z"})
     hub.engine.tick(datetime.now(timezone.utc) + timedelta(minutes=1))
@@ -1761,7 +1762,7 @@ def test_a_practice_takes_on_and_replaces_people_without_code(hub):
     hub.approve_roles(amara, "dr-chen")
     assert "medical-director" in hub.member("dr-chen")["roles"] and hub.is_policy_owner(hub.member("dr-chen"))
     agent = next(m["id"] for m in hub.members("agent") if m["sponsor"] == "dr-amara")
-    hub.set_status(rana, "dr-amara", "disabled", "left the practice")
+    hub.set_status(rana, "dr-amara", "disabled", "left the practice", stop="all")
     hub.set_sponsor(rana, agent, "dr-chen")
     assert hub.set_status(rana, agent, "active")["status"] == "active"
 
@@ -2072,7 +2073,7 @@ def test_the_practice_keeps_two_policy_owners(hub):
     rana = M(hub, "rana")
     assert hub.policy_owner_count() == 2
     with pytest.raises(Invalid):
-        hub.set_status(rana, "dr-amara", "disabled", "leaving")
+        hub.set_status(rana, "dr-amara", "disabled", "leaving", stop="all")
     with pytest.raises(Invalid):
         hub.set_roles(rana, "dr-amara", ["physician"])
     assert hub.policy_owner_count() == 2
@@ -2106,16 +2107,125 @@ def test_giving_an_agent_restricted_data_waits_for_a_second_policy_owner(hub):
 
 def test_raising_an_agents_max_risk_waits_for_a_second_policy_owner(hub):
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    hub.update_agent_profile(rana, "intake-agent", {"max_risk": "high"})
+    v = hub.propose_agent_profile(rana, "intake-agent", {"max_risk": "high"})["version"]
     assert M(hub, "intake-agent")["profile"]["max_risk"] == "low"
-    assert hub.role_request("intake-agent")["max_risk"] == "high"
     with pytest.raises(Denied):
-        hub.approve_roles(rana, "intake-agent")
-    hub.approve_roles(amara, "intake-agent")
+        hub.approve_agent_profile(rana, "intake-agent", v)
+    hub.approve_agent_profile(amara, "intake-agent", v)
     assert M(hub, "intake-agent")["profile"]["max_risk"] == "high"
-    hub.update_agent_profile(rana, "intake-agent", {"max_risk": "low"})  # lowering applies at once
-    assert M(hub, "intake-agent")["profile"]["max_risk"] == "low"
 
+
+# ------------------------------------------------------------------------- someone always manages members
+def test_the_practice_always_keeps_someone_who_manages_members(hub):
+    """The practice manager is the only member admin: the hub says so, refuses to leave nobody who manages members,
+    and two policy owners together can give the role to someone else and then switch her off."""
+    _a_third_policy_owner(hub)
+    amara, deputy, rana = M(hub, "dr-amara"), M(hub, "deputy"), M(hub, "rana")
+    assert [m["id"] for m in hub.member_admins()] == ["rana"]
+    assert "Rana" in hub.member_admin_warning() and "only person who manages members" in hub.member_admin_warning()
+    with pytest.raises(Denied):  # a policy owner alone does not switch anyone off
+        hub.set_status(amara, "rana", "disabled", "left")
+    # two policy owners ask and approve; the hub refuses to leave nobody who manages members
+    hub.request_switch_off(amara, "rana", "left the practice", hand_over={"portal": "dr-amara", "lab-feed": "dr-amara"})
+    with pytest.raises(Denied):
+        hub.approve_switch_off(amara, "rana")  # who asked does not approve
+    with pytest.raises(Invalid, match="nobody who manages members"):
+        hub.approve_switch_off(deputy, "rana")
+    assert M(hub, "rana")["status"] == "active"
+    # the way back: two policy owners give someone else a role that manages members
+    hub.set_roles(amara, "jo", [*M(hub, "jo")["roles"], "practice-manager"])
+    assert "practice-manager" not in M(hub, "jo")["roles"]
+    with pytest.raises(Denied):
+        hub.approve_roles(amara, "jo")
+    hub.approve_roles(deputy, "jo")
+    assert {m["id"] for m in hub.member_admins()} == {"rana", "jo"} and hub.member_admin_warning() is None
+    out = hub.approve_switch_off(deputy, "rana")
+    assert out["status"] == "disabled" and hub.off_request("rana") is None
+    assert M(hub, "lab-feed")["status"] == "active" and M(hub, "lab-feed")["sponsor"] == "dr-amara"
+    ev = hub.db.events.find_one({"action": "member.disabled", "subject": "member:rana"})
+    assert ev["actor"] == "deputy" and ev["data"]["asked_by"] == "dr-amara"
+    assert ev["data"]["handed_over"] == {"portal": "dr-amara", "lab-feed": "dr-amara"}
+    assert "Jo" in hub.member_admin_warning()
+    # taking the role from the last one who manages members is refused, whoever asks
+    hub.set_roles(amara, "jo", ["front-desk"])  # asked by a policy owner: it waits
+    assert "practice-manager" in M(hub, "jo")["roles"]
+    with pytest.raises(Invalid, match="nobody who manages members"):
+        hub.approve_roles(deputy, "jo")
+    hub.withdraw_roles(amara, "jo")
+    hub.request_switch_off(amara, "jo", "leaving", stop="all")
+    with pytest.raises(Invalid, match="nobody who manages members"):
+        hub.approve_switch_off(deputy, "jo")
+    assert M(hub, "jo")["status"] == "active" and M(hub, "intake-agent")["status"] == "active"
+
+
+def test_switching_off_a_sponsor_asks_what_becomes_of_their_agents(hub):
+    """Nothing stops silently: each agent or service a person sponsors is handed to a new sponsor, or stops because
+    someone chose that, and the track says which."""
+    _a_third_policy_owner(hub)
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    token = hub.issue_token(amara, "scribe-agent", "dictation")
+    deps = {d["id"]: d for d in hub.dependents("dr-amara")}
+    assert set(deps) == {"scribe-agent", "clinical-admin-agent"} and deps["scribe-agent"]["credentials"] == 1
+    assert "documentation-assistant" in deps["scribe-agent"]["only_holder_of"]
+    with pytest.raises(Invalid) as exc:
+        hub.set_status(rana, "dr-amara", "disabled", "left the practice")
+    assert any("Scribe" in p or "scribe" in p for p in exc.value.problems)
+    assert M(hub, "dr-amara")["status"] == "active" and hub.authenticate(token)
+    with pytest.raises(Invalid):  # the new sponsor is someone staying
+        hub.set_status(rana, "dr-amara", "disabled", "left", hand_over={"scribe-agent": "dr-amara"},
+                       stop=["clinical-admin-agent"])
+    with pytest.raises(Invalid):  # every one is decided
+        hub.set_status(rana, "dr-amara", "disabled", "left", hand_over={"scribe-agent": "dr-liam"})
+    out = hub.set_status(rana, "dr-amara", "disabled", "left the practice", hand_over={"scribe-agent": "dr-liam"},
+                         stop=["clinical-admin-agent"])
+    assert out["status"] == "disabled"
+    scribe = M(hub, "scribe-agent")
+    assert scribe["status"] == "active" and scribe["sponsor"] == "dr-liam"
+    assert hub.authenticate(token)["id"] == "scribe-agent"  # handed over: the dictation feed keeps working
+    assert M(hub, "clinical-admin-agent")["status"] == "disabled"
+    ev = hub.db.events.find_one({"action": "member.disabled", "subject": "member:dr-amara"})
+    assert ev["data"]["handed_over"] == {"scribe-agent": "dr-liam"} and ev["data"]["stopped"] == ["clinical-admin-agent"]
+    moved = hub.db.events.find_one({"action": "member.sponsor_changed", "subject": "member:scribe-agent"})
+    assert moved["data"]["to"] == "dr-liam" and "switched off" in moved["data"]["reason"]
+    stopped = hub.db.events.find_one({"action": "member.disabled", "subject": "member:clinical-admin-agent"})
+    assert "chose that it stops" in stopped["data"]["reason"]
+
+
+def test_an_agents_profile_changes_only_through_a_reviewed_version(hub):
+    """An agent's model, skills and risk are a versioned record: proposed, approved by a second person who is a
+    policy owner, then in force; every version is kept and the approval is signed."""
+    rana, amara, jo = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "jo")
+    before = M(hub, "scribe-agent")["profile"]
+    assert [v["status"] for v in hub.agent_profile_versions("scribe-agent")] == ["active"]  # v1: as installed
+    out = hub.propose_agent_profile(rana, "scribe-agent", {"model": "anthropic/claude-opus-5-5"}, "a better model")
+    assert M(hub, "scribe-agent")["profile"] == before  # nothing changes at once
+    assert hub.agent_profile_proposal("scribe-agent")["version"] == out["version"]
+    with pytest.raises(Denied):
+        hub.approve_agent_profile(rana, "scribe-agent", out["version"])  # not the one who proposed it
+    with pytest.raises(Denied):
+        hub.approve_agent_profile(jo, "scribe-agent", out["version"])  # a policy owner approves
+    hub.approve_agent_profile(amara, "scribe-agent", out["version"])
+    assert M(hub, "scribe-agent")["profile"]["model"] == "anthropic/claude-opus-5-5"
+    assert [v["status"] for v in hub.agent_profile_versions("scribe-agent")] == ["active", "retired"]
+    ev = hub.db.events.find_one({"action": "agent.profile_approved", "subject": "member:scribe-agent"})
+    assert ev["signature"] and ev["data"]["asked_by"] == "rana"
+    # skills too; a newer proposal replaces one still waiting; a withdrawn one changes nothing
+    first = hub.propose_agent_profile(rana, "scribe-agent", {"skills": []})
+    second = hub.propose_agent_profile(rana, "scribe-agent", {"skills": [], "max_risk": "low"})
+    assert hub.db.agent_profile_versions.get(f"scribe-agent@{first['version']}")["status"] == "withdrawn"
+    with pytest.raises(Invalid):
+        hub.approve_agent_profile(amara, "scribe-agent", first["version"])
+    hub.withdraw_agent_profile(rana, "scribe-agent", second["version"], "not now")
+    assert M(hub, "scribe-agent")["profile"]["skills"] == before["skills"]
+    # its sponsor may propose; someone else who does not manage members may not
+    hub.propose_agent_profile(jo, "intake-agent", {"skills": ["intake-review", "slot-proposal"]})
+    with pytest.raises(Denied):
+        hub.propose_agent_profile(M(hub, "sam"), "intake-agent", {"model": "x"})
+    # a new agent may do nothing until what it asks for is approved
+    hub.add_member(rana, {"id": "helper", "kind": "agent", "name": "Helper", "sponsor": "jo", "roles": [],
+                          "profile": {"model": "standin", "max_risk": "medium", "skills": ["slot-proposal"]}})
+    assert M(hub, "helper")["profile"] == {"model": "standin", "max_risk": "low", "skills": []}
+    assert hub.agent_profile_proposal("helper")["profile"]["skills"] == ["slot-proposal"]
 
 def test_only_its_sponsor_issues_an_agents_credentials(hub):
     with pytest.raises(Denied):
@@ -2321,7 +2431,7 @@ def test_switching_a_member_off_ends_their_sessions(hub):
     hub.set_passphrase(M(hub, "jo"), "jo", "a whole new set of words", current=WORDS)
     assert hub.session_member(sess) is None  # a new passphrase ends every session
     sess = hub.start_session(hub.sign_in("jo", "a whole new set of words"))
-    hub.set_status(M(hub, "rana"), "jo", "disabled", "left")
+    hub.set_status(M(hub, "rana"), "jo", "disabled", "left", stop="all")
     assert hub.session_member(sess) is None
 
 

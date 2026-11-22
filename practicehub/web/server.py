@@ -115,7 +115,10 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
         R("POST", r"/api/members/(?P<mid>[\w-]+)/status", self.api_member_status)
         R("POST", r"/api/members/(?P<mid>[\w-]+)/tokens", self.api_member_token)
         R("POST", r"/api/members", self.api_member_add)
-        R("POST", r"/api/members/(?P<mid>[\w-]+)/(?P<verb>roles|approve-roles|sponsor|profile|revoke)",
+        R("GET", r"/api/members/(?P<mid>[\w-]+)/dependents", self.api_member_dependents)
+        R("GET", r"/api/members/(?P<mid>[\w-]+)/profile-versions", self.api_member_profiles)
+        R("POST", r"/api/members/(?P<mid>[\w-]+)/(?P<verb>roles|approve-roles|withdraw-roles|sponsor|profile|"
+          r"approve-profile|withdraw-profile|switch-off-request|approve-switch-off|withdraw-switch-off|revoke)",
           self.api_member_change)
         R("GET", r"/api/outbox", self.api_outbox)
         R("POST", r"/api/outbox/(?P<oid>\d+)/(?P<verb>claim|sent|failed)", self.api_outbox_verb)
@@ -165,7 +168,8 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
         R("GET", r"/team/(?P<mid>[\w-]+)", self.page_member)
         R("POST", r"/team", self.post_team_add)
         R("POST", r"/team/(?P<mid>[\w-]+)/(?P<verb>enable|disable|token|roles|approve-roles|withdraw-roles|sponsor|"
-          r"profile|revoke|setup-code)", self.post_member)
+          r"profile|approve-profile|withdraw-profile|ask-disable|approve-disable|withdraw-disable|revoke|setup-code)",
+          self.post_member)
         R("GET", r"/track", self.page_track)
         R("GET", r"/access", self.page_access)
         R("GET", r"/track/(?P<seq>\d+)", self.page_chain)
@@ -465,12 +469,22 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
         return self.hub.approve_block(req["me"], bid, int(ver), self.body_json(req).get("meaning", ""))
 
     def api_members(self, req):
+        warn = self.hub.member_admin_warning()
         return {"members": [{k: m[k] for k in ("id", "kind", "name", "title", "sponsor", "status", "roles", "profile")}
-                            for m in self.hub.members()]}
+                            for m in self.hub.members()], "warnings": [warn] if warn else []}
 
     def api_member_status(self, req, mid):
+        """Switch a member on or off. Switching off a person who sponsors agents or services names what becomes of
+        each: ``hand_over`` {agent: new sponsor} and ``stop`` [agent, ...] (or "all"); GET .../dependents lists them."""
         b = self.body_json(req)
-        return self.hub.set_status(req["me"], mid, b.get("status", ""), b.get("reason", ""))
+        return self.hub.set_status(req["me"], mid, b.get("status", ""), b.get("reason", ""),
+                                   hand_over=b.get("hand_over"), stop=b.get("stop"))
+
+    def api_member_dependents(self, req, mid):
+        return {"dependents": self.hub.dependents(mid), "switch_off_request": self.hub.off_request(mid)}
+
+    def api_member_profiles(self, req, mid):
+        return {"versions": [{k: v for k, v in r.items() if k != "_id"} for r in self.hub.agent_profile_versions(mid)]}
 
     def api_member_token(self, req, mid):
         return {"token": self.hub.issue_token(req["me"], mid, self.body_json(req).get("label", ""))}
@@ -484,10 +498,27 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
             return hub.set_roles(me, mid, list(b.get("roles", [])))
         if verb == "approve-roles":
             return hub.approve_roles(me, mid)
+        if verb == "withdraw-roles":
+            hub.withdraw_roles(me, mid)
+            return {"withdrawn": True}
         if verb == "sponsor":
             return hub.set_sponsor(me, mid, str(b.get("sponsor", "")))
-        if verb == "profile":
-            return hub.update_agent_profile(me, mid, b)
+        if verb == "profile":  # proposed: in force once a second policy owner approves it
+            return hub.propose_agent_profile(me, mid, {k: v for k, v in b.items() if k != "note"},
+                                             str(b.get("note", "")))
+        if verb == "approve-profile":
+            return hub.approve_agent_profile(me, mid, int(b.get("version", 0)), str(b.get("meaning", "")))
+        if verb == "withdraw-profile":
+            hub.withdraw_agent_profile(me, mid, int(b.get("version", 0)), str(b.get("reason", "")))
+            return {"withdrawn": True}
+        if verb == "switch-off-request":
+            return hub.request_switch_off(me, mid, str(b.get("reason", "")), hand_over=b.get("hand_over"),
+                                          stop=b.get("stop"))
+        if verb == "approve-switch-off":
+            return hub.approve_switch_off(me, mid)
+        if verb == "withdraw-switch-off":
+            hub.withdraw_switch_off(me, mid)
+            return {"withdrawn": True}
         hub.revoke_token(me, mid, str(b.get("credential", "")))
         return {"revoked": True}
 
@@ -2411,6 +2442,9 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
             if any(h["status"] == "active" for h in r["holders"]):
                 return ""
             return '<div class="lozenge danger">nobody on duty</div>'
+        lone = hub.member_admin_warning()
+        if lone and (hub.can(me, "member_admin", "practice:main") or hub.is_policy_owner(me)):
+            parts.insert(0, f'<div class="warn" role="status">{e(lone)}</div>')
         empty = hub.empty_roles()
         if empty:
             parts.insert(0, '<div class="error">Work is routed to roles that nobody switched on holds: '
@@ -2514,9 +2548,14 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
                         skills=", ".join(m["profile"].get("skills", [])))
         actions = []
         can_admin = hub.can(me, "member_admin", "practice:main")
-        if m["status"] == "active" and (can_admin or m["sponsor"] == me["id"]) and m["id"] != me["id"]:
-            actions.append(f'<form method="post" action="/team/{e(mid)}/disable" class="inline"><input name="reason" '
-                           f'placeholder="reason" required><button class="danger">Switch off</button></form>')
+        off_form = ""
+        if m["status"] == "active" and m["id"] != me["id"]:
+            if can_admin or m["sponsor"] == me["id"]:
+                off_form = self._switch_off_form(m, "disable", "Switch off")
+            elif hub.is_policy_owner(me) and me["kind"] == "person" and not hub.off_request(mid):
+                off_form = self._switch_off_form(m, "ask-disable", "Ask to switch off",
+                                                 "Two policy owners together switch someone off: a second policy "
+                                                 "owner approves.")
         if m["status"] == "disabled" and can_admin:
             actions.append(f'<form method="post" action="/team/{e(mid)}/enable" class="inline"><button>Switch on</button></form>')
         if m["status"] == "active" and (m["id"] == me["id"] if m["kind"] == "person" else m["sponsor"] == me["id"]):
@@ -2536,7 +2575,11 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
             token += ('<div class="error">Nobody switched on now holds: ' + ", ".join(e(names.get(r, r)) for r in empty)
                       + ". Work for these roles is raised with the escalation role or a policy owner until someone "
                       "holds them. Give the roles to someone below, or re-sponsor the agents that stopped.</div>")
-        actions += self._member_admin_forms(me, m)
+        lone = hub.member_admin_warning()
+        if (lone and m["status"] == "active" and (can_admin or hub.is_policy_owner(me))
+                and mid in {a["id"] for a in hub.member_admins()}):
+            token += f'<div class="warn" role="status">{e(lone)}</div>'
+        actions += self._off_request_card(me, m) + self._member_admin_forms(me, m)
         sponsored = [x for x in hub.members() if x["sponsor"] == mid]
         sp = ("<h2>Sponsors</h2><ul class='plain'>" + "".join(f"<li>{self.who(x['id'])} · {e(x['status'])}</li>"
                                                               for x in sponsored) + "</ul>") if sponsored else ""
@@ -2544,34 +2587,165 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
         own = ""
         if mid == me["id"] and m["kind"] == "person":  # your own profile holds your passphrase
             own = self._own_passphrase(me, *passphrase)
-        body = (self._values(info) + own + token + "".join(actions) + sp + "<h2>Recent actions</h2>"
+        body = (self._values(info) + own + token + "".join(actions) + off_form + sp + "<h2>Recent actions</h2>"
                 + self._events(events, me))
         return self.layout(req, m["name"], body, actions=(f'<a class="btn" href="/me/settings">Settings</a>'
                                                           if mid == me["id"] else ""))
 
+    def _switch_off_form(self, m, verb: str, label: str, note: str = "") -> str:
+        """The off switch. For a person who sponsors agents or services it lists each one, what stops with it, and
+        asks what becomes of it: handed to a new sponsor, or stopped. There is no default: someone chooses."""
+        hub, mid = self.hub, m["id"]
+        deps = hub.dependents(mid)
+        reason = (f'<label>Why{"" if deps else " (for the track)"}<input name="reason" placeholder="reason" '
+                  f'required></label>')
+        if not deps:
+            return (f'<form method="post" action="/team/{e(mid)}/{verb}" class="inline">'
+                    f'<input name="reason" placeholder="reason" required aria-label="Why"><button class="danger">'
+                    f'{e(label)}</button></form>' + (f'<p class="muted">{e(note)}</p>' if note else ""))
+        people = [p for p in hub.members("person") if p["status"] == "active" and p["id"] != mid]
+        rnames = {r["id"]: r["name"] for r in hub.roles()}
+        rows = []
+        for d in deps:
+            opts = ('<option value="">Choose…</option>'
+                    + "".join(f'<option value="hand:{e(p["id"])}">Hand over to {e(p["name"])}</option>' for p in people)
+                    + '<option value="stop">Let it stop (its credentials end for good)</option>')
+            stops = [f'{d["credentials"]} live credential{"s" if d["credentials"] != 1 else ""}' if d["credentials"]
+                     else "", ("the only one switched on in " + ", ".join(e(rnames.get(r, r)) for r in d["only_holder_of"]))
+                     if d["only_holder_of"] else ""]
+            what = " · ".join(x for x in stops if x)
+            rows.append(f'<tr><td>{self.who(d["id"])}<div class="muted">{e(d["kind"].capitalize())}'
+                        f'{" · " + what if what else ""}</div></td><td><label class="visually-hidden" for="fate-{e(d["id"])}">'
+                        f'What becomes of {e(d["name"])}</label><select id="fate-{e(d["id"])}" name="fate:{e(d["id"])}" '
+                        f'required>{opts}</select></td></tr>')
+        return (f'<h2 id="switch-off">{e(label)}</h2><form method="post" action="/team/{e(mid)}/{verb}" class="card stack">'
+                f'<p>{e(m["name"])} sponsors {len(deps)} agent{"s" if len(deps) != 1 else ""} or service'
+                f'{"s" if len(deps) != 1 else ""} that would stop with them. Choose a new sponsor for each, or say '
+                f'that it stops: nothing stops without someone choosing it.</p>'
+                f'<div class="tablewrap"><table class="fates"><thead><tr><th scope="col">Depends on {e(m["name"])}</th>'
+                f'<th scope="col">What becomes of it</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+                f'{reason}' + (f'<p class="muted">{e(note)}</p>' if note else "")
+                + f'<div class="filters"><button class="danger">{e(label)}</button></div></form>')
+
+    def _fates(self, f: dict) -> tuple[dict, list]:
+        """The switch-off form's choices: fate:<agent> = hand:<person> | stop."""
+        hand, stop = {}, []
+        for k, v in f.items():
+            if k.startswith("fate:") and isinstance(v, str):
+                if v.startswith("hand:"):
+                    hand[k[5:]] = v[5:]
+                elif v == "stop":
+                    stop.append(k[5:])
+        return hand, stop
+
+    def _off_request_card(self, me, m) -> list[str]:
+        hub, mid = self.hub, m["id"]
+        req = hub.off_request(mid)
+        if not req or m["status"] != "active":
+            return []
+        what = [f'{self.member_name(a)} goes to {self.member_name(p)}' for a, p in req["hand_over"].items()]
+        what += [f'{self.member_name(a)} stops' for a in req["stop"]]
+        btns = ""
+        if hub.is_policy_owner(me) and me["kind"] == "person" and me["id"] not in (req["by"], mid):
+            btns += (f'<form method="post" action="/team/{e(mid)}/approve-disable" class="inline">'
+                     f'<button class="danger">Approve: switch {e(m["name"])} off</button></form>')
+        if me["id"] == req["by"] or hub.is_policy_owner(me):
+            btns += (f'<form method="post" action="/team/{e(mid)}/withdraw-disable" class="inline">'
+                     f'<button class="secondary">{"Withdraw" if me["id"] == req["by"] else "Decline"}</button></form>')
+        return [f'<div class="card"><p><b>Waiting for a second policy owner:</b> {self.member_name(req["by"])} asked '
+                f'to switch {e(m["name"])} off: {e(req["reason"])}.' + (f' {e("; ".join(what))}.' if what else "")
+                + f'</p>{btns}</div>']
+
+    def _profile_forms(self, me, m) -> list[str]:
+        """An agent's profile: the version in force, a proposed one waiting for a second person, the history."""
+        hub, mid, out = self.hub, m["id"], []
+        admin = hub.can(me, "member_admin", "practice:main")
+        prof = {"max_risk": "low", "skills": [], **m["profile"]}
+        prop = hub.agent_profile_proposal(mid)
+        if prop:
+            new = prop["profile"]
+            rows = []
+            if new.get("model", "") != prof.get("model", ""):
+                rows.append(("Model", e(prof.get("model", "") or "—"), e(new.get("model", "") or "—")))
+            if new.get("max_risk") != prof.get("max_risk"):
+                rows.append(("Highest risk", e(prof["max_risk"].capitalize()), e(new["max_risk"].capitalize())))
+            if sorted(new.get("skills", [])) != sorted(prof["skills"]):
+                def skills(xs, other):  # the whole list, with what the change adds or takes away marked
+                    return ", ".join(f'<b>{e(self.human(x))}</b>' if x not in other else e(self.human(x))
+                                     for x in xs) or "none"
+                rows.append(("Skills", skills(prof["skills"], new.get("skills", [])),
+                             skills(new.get("skills", []), prof["skills"])))
+            table = "".join(f'<tr><th scope="row">{k}</th><td>{a}</td><td>{b}</td></tr>' for k, a, b in rows)
+            btns = ""
+            if hub.is_policy_owner(me) and me["kind"] == "person" and me["id"] != prop["author"]:
+                btns += (f'<form method="post" action="/team/{e(mid)}/approve-profile" class="inline"><input '
+                         f'type="hidden" name="version" value="{prop["version"]}"><button>Approve version '
+                         f'{prop["version"]}</button></form>')
+            if me["id"] == prop["author"] or hub.is_policy_owner(me):
+                btns += (f'<form method="post" action="/team/{e(mid)}/withdraw-profile" class="inline"><input '
+                         f'type="hidden" name="version" value="{prop["version"]}"><button class="secondary">'
+                         f'{"Withdraw" if me["id"] == prop["author"] else "Decline"}</button></form>')
+            out.append(f'<div class="card" id="proposed-profile"><p><b>Waiting for a second policy owner:</b> '
+                       f'{self.member_name(prop["author"])} proposed version {prop["version"]} of what {e(m["name"])} '
+                       f'may do{": " + e(prop["note"]) if prop["note"] else ""}. Nothing changes until it is approved.'
+                       f'</p><div class="tablewrap"><table><thead><tr><th scope="col"></th><th scope="col">In force'
+                       f'</th><th scope="col">Proposed</th></tr></thead><tbody>{table}</tbody></table></div>'
+                       f'<div class="actions">{btns}</div></div>')
+        if admin or m["sponsor"] == me["id"]:
+            risks = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="max_risk" value="{r}"'
+                            f'{" checked" if prof.get("max_risk", "low") == r else ""}> {r.capitalize()}</label>'
+                            for r in ("low", "medium", "high"))
+            skills = sorted(set(hub.pack.all_skills()) if hub.pack else set())
+            boxes = "".join(f'<label class="radio multi"><input type="checkbox" class="opt-input" name="skills" value="{e(k)}"'
+                            f'{" checked" if k in prof.get("skills", []) else ""}> {e(self.human(k))}</label>'
+                            for k in skills)
+            out.append(f'<h2>What it may do</h2><form method="post" action="/team/{e(mid)}/profile" class="card">'
+                       f'<p class="muted">A change is proposed, not made: it takes effect when a policy owner other '
+                       f'than you approves it, and every version is kept.</p>'
+                       f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
+                       f'<fieldset class="choices options"><legend>Highest risk it may take</legend>{risks}</fieldset>'
+                       f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset>'
+                       f'<label>Why (for the reviewer)<input name="note" placeholder="what the change is for"></label>'
+                       f'<button>Propose the change</button></form>')
+        versions = hub.agent_profile_versions(mid)
+        if versions:
+            rows = "".join(
+                f'<tr><td>v{v["version"]}</td><td><span class="badge {e(v["status"])}">{e(v["status"])}</span></td>'
+                f'<td>{e(v["profile"].get("model", ""))} · {e(v["profile"].get("max_risk", "low"))} · '
+                f'{e(", ".join(self.human(x) for x in v["profile"].get("skills", [])))}</td>'
+                f'<td>{self.who(v["author"]) if hub.db.members.get(v["author"]) else e(v["note"])}</td>'
+                f'<td>{self.who(v["approved_by"]) if v["approved_by"] else ""}</td></tr>' for v in versions)
+            out.append(f'<details><summary>Profile versions ({len(versions)})</summary><div class="tablewrap"><table>'
+                       f'<thead><tr><th scope="col"></th><th scope="col">Status</th><th scope="col">Profile</th>'
+                       f'<th scope="col">Proposed by</th><th scope="col">Approved by</th></tr></thead><tbody>{rows}'
+                       f'</tbody></table></div></details>')
+        return out
+
     def _member_admin_forms(self, me, m) -> list[str]:
         hub, mid, out = self.hub, m["id"], []
         admin = hub.can(me, "member_admin", "practice:main")
+        owner_path = not admin and me["kind"] == "person" and hub.is_policy_owner(me)  # two policy owners together
         pending = hub.role_request(mid)
         if pending:
             names = {r["id"]: r["name"] for r in hub.roles()}
             asked = ", ".join(e(names.get(r, r)) for r in pending["roles"]) or "no roles"
-            if pending.get("max_risk"):
-                asked += f', and take work up to {e(pending["max_risk"])} risk'
             btns = ""
             if hub.is_policy_owner(me) and me["id"] not in {pending["by"], mid, *pending.get("asked_by", [])}:
                 btns += (f'<form method="post" action="/team/{e(mid)}/approve-roles" class="inline">'
                          f'<button>Approve these roles</button></form>')
-            if admin:
+            if admin or hub.is_policy_owner(me):
                 btns += (f'<form method="post" action="/team/{e(mid)}/withdraw-roles" class="inline">'
                          f'<button class="secondary">Withdraw the request</button></form>')
             out.append(f'<div class="card"><p><b>Waiting for a second policy owner:</b> {self.member_name(pending["by"])} '
                        f'asked that {e(m["name"])} hold {asked}.</p>{btns}</div>')
-        if admin and mid != me["id"] and m["status"] == "active":
-            out.append(f'<h2>Roles</h2><form method="post" action="/team/{e(mid)}/roles" class="card">'
+        if (admin or owner_path) and mid != me["id"] and m["status"] == "active":
+            note = ('<p class="muted">You do not manage members, so any change you ask for waits for a second policy '
+                    'owner: two policy owners together can give someone a role that manages members.</p>'
+                    if owner_path else "")
+            out.append(f'<h2>Roles</h2><form method="post" action="/team/{e(mid)}/roles" class="card">{note}'
                        f'<fieldset class="choices options"><legend>Roles {e(m["name"])} holds</legend>'
                        f'{self._role_boxes(m["roles"], pending["roles"] if pending else ())}</fieldset>'
-                       f'<button>Save roles</button></form>')
+                       f'<button>{"Ask for these roles" if owner_path else "Save roles"}</button></form>')
         if admin and m["kind"] == "person" and mid != me["id"] and m["status"] == "active":
             has = hub.has_passphrase(mid)
             out.append(f'<h2>Passphrase</h2><form method="post" action="/team/{e(mid)}/setup-code" class="card">'
@@ -2590,22 +2764,8 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
                        f'{self._person_options(m["sponsor"])}</select></label>'
                        f'<small>Their open approvals and notices about this agent move to the new sponsor.</small>'
                        f'<button>Change the sponsor</button></form>')
-        if admin and m["kind"] == "agent":
-            prof = m["profile"]
-            risks = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="max_risk" value="{r}"'
-                            f'{" checked" if prof.get("max_risk", "low") == r else ""}> {r.capitalize()}</label>'
-                            for r in ("low", "medium", "high"))
-            skills = sorted(set(hub.pack.all_skills()) if hub.pack else set())
-            boxes = "".join(f'<label class="radio multi"><input type="checkbox" class="opt-input" name="skills" value="{e(k)}"'
-                            f'{" checked" if k in prof.get("skills", []) else ""}> {e(self.human(k))}</label>'
-                            for k in skills)
-            out.append(f'<h2>What it may do</h2><form method="post" action="/team/{e(mid)}/profile" class="card">'
-                       f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
-                       f'<div class="field"><fieldset class="choices options" aria-describedby="max-risk-help">'
-                       f'<legend>Highest risk it may take</legend>{risks}</fieldset><small id="max-risk-help" '
-                       f'class="help">Raising it waits for a second policy owner, as roles that reach restricted data '
-                       f'do.</small></div>'
-                       f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset><button>Save</button></form>')
+        if m["kind"] == "agent":
+            out += self._profile_forms(me, m)
         try:
             creds = hub.tokens(me, mid)
         except Denied:
@@ -2629,7 +2789,8 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
             return self.page_member(req, mid, new_token=tok)
         if verb == "setup-code":
             return self.page_member(req, mid, setup=hub.issue_setup_code(me, mid))
-        if verb in ("roles", "approve-roles", "withdraw-roles", "sponsor", "profile", "revoke"):
+        if verb in ("roles", "approve-roles", "withdraw-roles", "sponsor", "profile", "approve-profile",
+                    "withdraw-profile", "ask-disable", "withdraw-disable", "revoke"):
             many = lambda k: f.get(k, []) if isinstance(f.get(k), list) else ([f[k]] if f.get(k) else [])
             if verb == "roles":
                 hub.set_roles(me, mid, many("roles"))
@@ -2640,12 +2801,26 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
             elif verb == "sponsor":
                 hub.set_sponsor(me, mid, str(f.get("sponsor", "")))
             elif verb == "profile":
-                hub.update_agent_profile(me, mid, {"model": str(f.get("model", "")), "max_risk": f.get("max_risk"),
-                                                   "skills": many("skills")})
+                hub.propose_agent_profile(me, mid, {"model": str(f.get("model", "")), "max_risk": f.get("max_risk"),
+                                                    "skills": many("skills")}, str(f.get("note", "")))
+            elif verb == "approve-profile":
+                hub.approve_agent_profile(me, mid, int(f.get("version") or 0))
+            elif verb == "withdraw-profile":
+                hub.withdraw_agent_profile(me, mid, int(f.get("version") or 0), str(f.get("reason", "")))
+            elif verb == "ask-disable":
+                hand, stop = self._fates(f)
+                hub.request_switch_off(me, mid, str(f.get("reason", "")), hand_over=hand, stop=stop)
+            elif verb == "withdraw-disable":
+                hub.withdraw_switch_off(me, mid)
             else:
                 hub.revoke_token(me, mid, str(f.get("credential", "")))
             raise Redirect(f"/team/{mid}")
-        out = hub.set_status(me, mid, "active" if verb == "enable" else "disabled", f.get("reason", ""))
+        if verb == "approve-disable":
+            out = hub.approve_switch_off(me, mid)
+        else:
+            hand, stop = self._fates(f)
+            out = hub.set_status(me, mid, "active" if verb == "enable" else "disabled", f.get("reason", ""),
+                                 hand_over=hand, stop=stop)
         if out.get("roles_left_empty"):
             return self.page_member(req, mid, empty=out["roles_left_empty"])
         raise Redirect(f"/team/{mid}")
