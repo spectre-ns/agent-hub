@@ -1,0 +1,117 @@
+# A person outside the practice: someone at an organisation it works with, or on their own. A FHIR R4 Person (not a
+# RelatedPerson: they are not related to a client of the practice). Their own fields go out as extensions.
+# Consent to commercial messages (CASL) is recorded here, and the hub checks it before any commercial message goes.
+# Business data only: no health information.
+id = "Person"
+label = "Contact"
+plural = "Contacts"
+data_class = "directory"
+strict = true
+standard = "fhir-r4"
+flag = "consent_flag"
+order = 20
+title = "{name}[ · {job_title}]"
+summary = "A person outside the practice: their role, how to reach them, and their consent to commercial messages."
+
+[[field]]
+name = "name"
+label = "Name"
+path = "name.0.text"
+required = true
+match = true
+
+[[field]]
+name = "works_at"
+label = "Organisation"
+type = "reference"
+target = ["Organization"]
+rel = "works at"
+
+[[field]]
+name = "job_title"
+label = "Role or title"
+
+[[field]]
+name = "phone"
+label = "Phone"
+path = "telecom.0.value"
+with = { system = "phone" }
+
+[[field]]
+name = "email"
+label = "Email"
+path = "telecom.1.value"
+with = { system = "email" }
+
+[[field]]
+name = "street"
+label = "Street"
+path = "address.0.line.0"
+advanced = true
+
+[[field]]
+name = "city"
+label = "City"
+path = "address.0.city"
+advanced = true
+
+[[field]]
+name = "province"
+label = "Province"
+path = "address.0.state"
+advanced = true
+
+[[field]]
+name = "postal_code"
+label = "Postal code"
+path = "address.0.postalCode"
+advanced = true
+
+[[field]]
+name = "account_owner"
+label = "Owner"
+type = "member"
+help = "the member who looks after this contact"
+
+[[field]]
+name = "consent"
+label = "Consent to commercial messages"
+type = "choice"
+choices = ["express", "implied", "none"]
+help = "express: they said yes (lasts until withdrawn); implied: an existing business relationship (lasts two years)"
+
+[[field]]
+name = "consent_date"
+label = "Consent given on"
+type = "date"
+
+[[field]]
+name = "consent_source"
+label = "How consent was given"
+help = "e.g. signed form, email reply, contract of 2026-03-01"
+
+[[field]]
+name = "consent_withdrawn"
+label = "Consent withdrawn on"
+type = "date"
+help = "once withdrawn, no commercial message goes, whatever the consent above"
+
+[[field]]
+name = "consent_flag"
+label = "Consent"
+by = "workflow"
+show = true
+
+[[field]]
+name = "consent_flagged"
+label = "Lapse flagged for"
+type = "date"
+by = "workflow"
+advanced = true
+
+[consent]
+kind = "consent"
+date = "consent_date"
+source = "consent_source"
+withdrawn = "consent_withdrawn"
+lasts = { express = "", implied = "2y" }

@@ -9,6 +9,12 @@ A message still undelivered past its channel's deadline is escalated by the cloc
 urgent channel (a page) a person is also given the work of delivering it by hand ("Phone the physician"), as they are
 whenever a connector reports a failure. A person who reads the message may mark it delivered by hand, with a note.
 
+A message says its ``purpose``. A *commercial* one (Canada's anti-spam law, CASL) goes only to a record whose type
+declares ``[consent]`` and whose recorded consent holds on the day: express until withdrawn, implied for as long as the
+type says (two years), with its date and source on record, and not withdrawn. ``Hub.consent_problem`` is the rule; it
+is checked when the message is queued and again when it is delivered, so a withdrawal in between stops it (the
+message is *refused*). A message to a record that declares consent must say its purpose; nothing is assumed.
+
 Deadlines and who delivers by hand come from the practice's ``[practice.outbox.<channel>]`` settings:
 ``deadline_minutes``, ``urgent``, ``deliver_role``, ``task`` (the work's wording; ``{to}`` is the recipient).
 """
@@ -26,6 +32,7 @@ DEFAULTS = {
 }
 LEASE = timedelta(minutes=10)  # a claim not finished in this time may be claimed again
 OPEN = ("queued", "sending", "failed")  # not delivered yet
+PURPOSES = ("commercial", "transactional")  # commercial: consent is checked; transactional: what they asked for, or owe
 
 
 def _parse(stamp: str) -> datetime:
@@ -38,6 +45,71 @@ def _stamp(t: datetime) -> str:
 
 class OutboxMixin:
     """The outbox's rules, mixed into the Hub."""
+
+    # ------------------------------------------------------------------ consent (CASL)
+    def consent_problem(self, recipient: str, purpose: str | None, today: str | None = None) -> str | None:
+        """Why a message for ``purpose`` may not go to ``recipient`` today, or None when it may. A commercial message
+        needs the recipient's consent, recorded and holding; a message to a record whose type declares consent must
+        say its purpose."""
+        from datetime import date
+        from .expr import shift_date
+        from . import schema
+        today = today or self.engine.now().date().isoformat()
+        rtype, _, rid = str(recipient or "").partition("/")
+        rt = self.record_type(rtype) if rid else None
+        if purpose not in (None, "", *PURPOSES):
+            return f"a message's purpose is {' or '.join(PURPOSES)}, not {purpose!r}"
+        if not purpose:
+            return (f"say whether a message to {rt.label.lower()} {rid} is commercial or transactional: "
+                    f"its consent to commercial messages is on record") if rt and rt.consent else None
+        if purpose != "commercial":
+            return None
+        if not rt or not rt.consent:
+            return (f"a commercial message goes only to someone whose consent is on record; {recipient or 'nobody'} "
+                    f"is not a record that holds consent")
+        rec = self.records.read(rtype, rid)
+        if rec is None:
+            return f"there is no {rt.label.lower()} {rid}"
+        c = rt.consent
+        name = self.title(rec) or f"{rt.label} {rid}"
+        kind, given = schema.first(rec, c["kind"]), str(schema.first(rec, c["date"]) or "")[:10]
+        source, withdrawn = schema.first(rec, c["source"]), str(schema.first(rec, c["withdrawn"]) or "")[:10]
+        if not kind:
+            return f"{name} has no consent to commercial messages on record"
+        if kind not in c["lasts"]:
+            return f"{name}'s consent is {kind!r}, which does not permit commercial messages"
+        if not given or not str(source or "").strip():
+            return f"{name}'s {kind} consent has no {'date' if not given else 'source'} on record"
+        try:
+            date.fromisoformat(given)
+        except ValueError:
+            return f"{name}'s consent date {given!r} is not a date"
+        if given > today:
+            return f"{name}'s consent is dated {given}, after today"
+        if withdrawn and withdrawn <= today:
+            return f"{name} withdrew consent on {withdrawn}"
+        lasts = c["lasts"][kind]
+        if lasts:
+            ends = shift_date(given, "+", int(lasts[:-1]), lasts[-1])
+            if ends <= today:
+                return f"{name}'s {kind} consent (given {given}) lapsed on {ends}"
+        return None
+
+    def _refuse_if_no_consent(self, member: dict, row: dict) -> None:
+        """At delivery, a commercial message whose consent no longer holds is refused, not delivered."""
+        from .hub import Invalid
+        if row.get("purpose") != "commercial":
+            return
+        why = self.consent_problem(row["recipient"], "commercial")
+        if not why:
+            return
+        with self.db:
+            self.db.outbox.set(row["id"], {"status": "refused", "done_at": utcnow(), "done_by": member["id"],
+                                           "note": why[:2000]})
+            row = self._message(row["id"])
+            seq = self._outbox_event(member, "outbox.refused", row, reason=why[:2000])
+            self._close_delivery_work(row, member, seq)
+        raise Invalid(f"message {row['id']} is refused: {why}")
 
     # ------------------------------------------------------------------ configuration
     def channel_settings(self, channel: str) -> dict:
@@ -135,6 +207,8 @@ class OutboxMixin:
                               data={"what": "claim a message it may not read", "classes": missing})
             raise Denied(f"{member['name']} may not deliver this message: it holds {', '.join(missing)} information "
                          f"it does not read")
+        if row["status"] in OPEN:
+            self._refuse_if_no_consent(member, row)
         now = datetime.now(timezone.utc)
         stale = _stamp(now - LEASE)
         with self.db:
@@ -195,6 +269,7 @@ class OutboxMixin:
         note = str(note or "").strip()
         if not note:
             raise Invalid("say how it was delivered (who you reached, and when)")
+        self._refuse_if_no_consent(member, row)
         with self.db:
             self.db.outbox.set(row["id"], {"status": "delivered", "done_at": utcnow(), "done_by": member["id"],
                                            "note": note[:2000]})

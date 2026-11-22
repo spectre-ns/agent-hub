@@ -1,0 +1,83 @@
+# An organisation the practice works with. A FHIR R4 Organization: its own fields (owner, status) go out as
+# extensions. Business data only: no health information.
+id = "Organization"
+label = "Organisation"
+plural = "Organisations"
+data_class = "directory"
+strict = true
+standard = "fhir-r4"
+flag = "crm_status"
+order = 10
+title = "{name}"
+summary = "An organisation the practice works with: who they are, how to reach them, and who here looks after them."
+
+[[field]]
+name = "name"
+label = "Name"
+required = true
+match = true
+
+[[field]]
+name = "kind"
+label = "Kind"
+path = "type.0.text"
+type = "choice"
+choices = ["referrer", "partner", "supplier", "insurer", "community-agency", "other"]
+required = true
+
+[[field]]
+name = "phone"
+label = "Phone"
+path = "telecom.0.value"
+with = { system = "phone" }
+
+[[field]]
+name = "email"
+label = "Email"
+path = "telecom.1.value"
+with = { system = "email" }
+
+[[field]]
+name = "website"
+label = "Website"
+path = "telecom.2.value"
+with = { system = "url" }
+
+[[field]]
+name = "street"
+label = "Street"
+path = "address.0.line.0"
+
+[[field]]
+name = "city"
+label = "City"
+path = "address.0.city"
+
+[[field]]
+name = "province"
+label = "Province"
+path = "address.0.state"
+
+[[field]]
+name = "postal_code"
+label = "Postal code"
+path = "address.0.postalCode"
+
+[[field]]
+name = "account_owner"
+label = "Owner"
+type = "member"
+help = "the member who looks after this organisation"
+
+[[field]]
+name = "crm_status"
+label = "Status"
+type = "choice"
+choices = ["prospect", "active", "inactive"]
+required = true
+
+[[field]]
+name = "crm_notes"
+label = "Notes"
+type = "text"
+help = "business notes only: never health information about anyone"

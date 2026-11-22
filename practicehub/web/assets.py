@@ -429,8 +429,8 @@ border-radius:3px;background:var(--danger-on);color:var(--danger);font-weight:70
 .chart-section>header .btn{flex:none}
 .count-badge{display:inline-block;vertical-align:middle;margin-left:4px;font-size:12px;line-height:16px;font-weight:600;
 padding:0 8px;border-radius:8px;background:var(--neutral);color:var(--fg)}
-table.parts{table-layout:fixed;width:100%}table.parts td.t>a{font-weight:500}
-table.parts th:nth-child(2){width:150px}table.parts th:nth-child(3){width:130px}table.parts th:nth-child(4){width:110px}
+table.parts{width:100%}table.parts td.t>a{font-weight:500}
+table.parts td.t{width:100%;overflow-wrap:anywhere}table.parts th:not(:first-child){white-space:nowrap}
 .chart-section.empty-part>header{border-bottom:0}.chart-section>header .none{flex:none;font-size:14px}
 @media (max-width:600px){table.parts,table.parts tbody{display:block}table.parts tr:first-child{display:none}
 table.parts tr{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}

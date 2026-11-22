@@ -1,0 +1,25 @@
+id = "crm-follow-ups"
+title = "Follow-ups due"
+summary = "Interactions whose follow-up date has come and not been followed up, and those due this week."
+roles = ["relationship-manager"]
+
+[[widget]]
+kind = "table"
+title = "Due now"
+type = "Interaction"
+where = "record.follow_up != null and record.follow_up <= today and record.follow_up_done != record.follow_up"
+columns = ["follow_up", "with", "contact", "kind", "summary", "logged_by"]
+
+[[widget]]
+kind = "table"
+title = "Due in the next 7 days"
+type = "Interaction"
+where = "record.follow_up != null and record.follow_up > today and record.follow_up <= today + 7d"
+columns = ["follow_up", "with", "contact", "kind", "summary", "logged_by"]
+
+[[widget]]
+kind = "table"
+source = "items"
+title = "Follow-ups waiting for a person"
+workflow = "crm-follow-up"
+status = ["open", "claimed"]

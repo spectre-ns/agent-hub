@@ -1,0 +1,17 @@
+id = "crm-follow-up-draft"
+title = "Draft a follow-up message"
+instructions = """
+Draft a short, courteous follow-up message to the contact about what the interaction's summary says was discussed or
+agreed. Business only: never mention anyone's health or circumstances. Do not promise anything the summary does not
+say. A person reads, edits and sends it; you do not send anything.
+"""
+
+[[output]]
+name = "subject"
+type = "string"
+required = true
+
+[[output]]
+name = "body"
+type = "text"
+required = true

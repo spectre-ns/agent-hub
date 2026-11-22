@@ -175,10 +175,21 @@ def fhir_resource(hub, rt, rec: dict) -> dict:
             if parts[0] in out:
                 out = _walk(out, parts, lambda v, fn=fn: [fn(x) for x in v] if isinstance(v, list) else fn(v))
     if own:  # the practice's own fields (plan_code): FHIR keeps them as extensions, never as unknown elements
-        ext = [{"url": f"urn:practicehub:{rt.id}:{k}", "valueString": v if isinstance(v, str)
-                else json.dumps(v, ensure_ascii=False)} for k in own for v in [out.pop(k)]]
+        ext = [{"url": f"urn:practicehub:{rt.id}:{k}", **_extension_value(out.pop(k))} for k in own]
         out["extension"] = list(out.get("extension") or []) + ext
     return out
+
+
+def _extension_value(v) -> dict:
+    """An extension's value, typed as FHIR types it: a reference (an owner) as a Reference, a yes/no as a boolean, a
+    number as a decimal, anything else as text."""
+    if isinstance(v, dict) and set(v) <= {"reference", "display"} and v.get("reference"):
+        return {"valueReference": v}
+    if isinstance(v, bool):
+        return {"valueBoolean": v}
+    if isinstance(v, (int, float)):
+        return {"valueDecimal": v}
+    return {"valueString": v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}
 
 
 def plain_json(rec: dict) -> dict:

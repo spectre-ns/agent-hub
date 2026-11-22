@@ -1,0 +1,72 @@
+# A call, meeting, email, letter or visit with a contact or an organisation. Part of the one it was with, so it is
+# added from, and shows on, that record's page. Business data only: the summary is of the business conversation,
+# never health information about anyone.
+id = "Interaction"
+label = "Interaction"
+plural = "Interactions"
+data_class = "relationships"
+part_of = "with"
+date = "at"
+order = 30
+title = "{kind}: {summary}"
+summary = "A call, meeting, email, letter or visit: who, when, what was said, and when to follow up."
+
+[[field]]
+name = "with"
+label = "With"
+type = "reference"
+target = ["Person", "Organization"]
+required = true
+
+[[field]]
+name = "kind"
+label = "Kind"
+type = "choice"
+choices = ["call", "meeting", "email", "letter", "visit"]
+required = true
+
+[[field]]
+name = "at"
+label = "When"
+type = "datetime"
+required = true
+
+[[field]]
+name = "contact"
+label = "Spoke with"
+type = "reference"
+target = ["Person"]
+rel = "spoke with"
+help = "for an interaction with an organisation: the person there"
+
+[[field]]
+name = "summary"
+label = "Summary"
+type = "text"
+required = true
+help = "what was discussed and agreed: business only, never health information"
+
+[[field]]
+name = "follow_up"
+label = "Follow up on"
+type = "date"
+
+[[field]]
+name = "logged_by"
+label = "Logged by"
+type = "member"
+by = "workflow"
+
+[[field]]
+name = "follow_up_asked"
+label = "Follow-up asked for"
+type = "date"
+by = "workflow"
+advanced = true
+
+[[field]]
+name = "follow_up_done"
+label = "Followed up for"
+type = "date"
+by = "workflow"
+advanced = true

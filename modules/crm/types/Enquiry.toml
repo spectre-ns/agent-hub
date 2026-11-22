@@ -1,0 +1,103 @@
+# An enquiry: someone asking about the practice's services, worked from new to won or lost. A won enquiry may point at
+# the record it became, whatever type the practice keeps for that (a generic reference). Not a FHIR resource.
+# Business data only: what they asked about, never health information about anyone.
+id = "Enquiry"
+label = "Enquiry"
+plural = "Enquiries"
+data_class = "relationships"
+date = "received"
+flag = "status"
+order = 40
+title = "{title}"
+summary = "Someone asking about the practice's services: new, contacted, qualified, then won or lost."
+
+[[field]]
+name = "title"
+label = "Enquiry"
+required = true
+
+[[field]]
+name = "from"
+label = "From"
+type = "reference"
+target = ["Person", "Organization"]
+rel = "enquiry from"
+
+[[field]]
+name = "received"
+label = "Received"
+type = "date"
+
+[[field]]
+name = "owner"
+label = "Owner"
+type = "member"
+
+[[field]]
+name = "service"
+label = "What they asked about"
+type = "text"
+help = "the service they asked about, in business terms: never health information"
+
+[[field]]
+name = "value"
+label = "Estimated value"
+type = "number"
+min = 0
+
+[[field]]
+name = "status"
+label = "Stage"
+type = "choice"
+choices = ["new", "contacted", "qualified", "won", "lost"]
+
+[[field]]
+name = "lost_reason"
+label = "Why it was lost"
+type = "text"
+show = true
+
+[[field]]
+name = "became"
+label = "Became"
+type = "reference"
+target = ["*"]
+rel = "became"
+show = true
+help = "the record this enquiry became (a client, an engagement), as Type/id"
+
+[lifecycle]
+field = "status"
+initial = "new"
+locked = ["won", "lost"]
+
+[[lifecycle.transition]]
+from = ["new"]
+to = "contacted"
+label = "Contacted"
+
+[[lifecycle.transition]]
+from = ["contacted"]
+to = "qualified"
+label = "Qualified"
+
+[[lifecycle.transition]]
+from = ["qualified"]
+to = "won"
+label = "Won"
+screen = "won"
+
+[[lifecycle.transition]]
+from = ["new", "contacted", "qualified"]
+to = "lost"
+label = "Lost"
+screen = "lost"
+require = ["lost_reason"]
+
+[[screen]]
+id = "won"
+fields = ["became"]
+
+[[screen]]
+id = "lost"
+fields = ["lost_reason"]

@@ -1,0 +1,80 @@
+id = "crm-consent-expiry"
+title = "Implied consent lapsing"
+summary = """A contact whose implied consent to commercial messages lapses within 30 days is flagged, and their owner
+is asked to get express consent, note a new dealing that renews it, or let it lapse. Once it lapses, the hub refuses
+commercial messages to them."""
+record = "Person"
+
+[trigger]
+schedule = "daily 07:00"
+for_each = "Person"
+where = """record.consent == 'implied' and record.consent_date != null and record.consent_withdrawn == null
+and record.consent_date + 2y > run.today and record.consent_date + 2y <= run.today + 30d
+and record.consent_flagged != record.consent_date"""
+
+[[steps]]
+id = "flag"
+title = "Flag the contact"
+kind = "automation"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+consent_flagged = "{{record.consent_date}}"
+consent_flag = "implied consent lapses {{record.consent_date + 2y}}"
+
+[[steps]]
+id = "renew"
+title = "Renew consent, or let it lapse"
+kind = "task"
+role = "relationship-manager"
+assign_to = "{{record.account_owner}}"
+after = ["flag"]
+persons_only = true
+due = "30d"
+escalate_to = "relationship-manager"
+context = ["record:directory"]
+instructions = """This contact's implied consent to commercial messages lapses in under 30 days, two years after it
+was given. Ask them for express consent and record how they gave it, or note a new business dealing that implies it
+afresh (its date and what it was), or let it lapse: after that, the hub sends them no commercial message."""
+[[steps.fields]]
+name = "outcome"
+type = "choice"
+choices = ["express", "implied", "lapse"]
+required = true
+help = "express: they said yes; implied: a new dealing renews it; lapse: let it lapse"
+[[steps.fields]]
+name = "date"
+label = "Given on"
+type = "date"
+[[steps.fields]]
+name = "source"
+label = "How it was given"
+type = "string"
+
+[[steps]]
+id = "record-consent"
+title = "Record the consent"
+kind = "automation"
+after = ["renew"]
+when = "renew.outcome in ['express', 'implied'] and renew.date != null and renew.source != null"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+consent = "{{renew.outcome}}"
+consent_date = "{{renew.date}}"
+consent_source = "{{renew.source}}"
+consent_flag = ""
+
+[[steps]]
+id = "lapse"
+title = "Note that it will lapse"
+kind = "automation"
+after = ["renew"]
+when = "renew.outcome == 'lapse'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+consent_flag = "implied consent lapses {{record.consent_date + 2y}}: not renewed"

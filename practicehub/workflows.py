@@ -53,6 +53,7 @@ import tomllib
 from dataclasses import dataclass, field
 
 from . import expr
+from .expr import shift_date  # noqa: F401 - date arithmetic in {{...}}, as in conditions
 from .fields import check_spec, normalize
 
 RISKS = ("low", "medium", "high")
@@ -348,25 +349,6 @@ def parse(source: str, catalog=None) -> Workflow:
 
 
 TEMPLATE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_\-\.]*)\s*(?:([+-])\s*(\d{1,4})\s*([dwmy]))?\s*\}\}")
-
-
-def shift_date(value, sign: str, n: int, unit: str):
-    """A date (``YYYY-MM-DD``, or the date of a time) moved by n days, weeks, months or years. A month or year from
-    the 31st, or from 29 February, lands on the last day of the shorter month. Anything else is None."""
-    import calendar
-    from datetime import date, timedelta
-    try:
-        d = date.fromisoformat(str(value)[:10])
-    except (TypeError, ValueError):
-        return None
-    k = n if sign == "+" else -n
-    if unit in ("d", "w"):
-        return (d + timedelta(days=k * (7 if unit == "w" else 1))).isoformat()
-    months = d.year * 12 + d.month - 1 + (k * 12 if unit == "y" else k)
-    y, m = divmod(months, 12)
-    if not 1 <= y <= 9999:
-        return None
-    return date(y, m + 1, min(d.day, calendar.monthrange(y, m + 1)[1])).isoformat()
 
 
 def _fill(m, ctx: dict):

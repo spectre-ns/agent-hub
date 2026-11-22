@@ -1,0 +1,18 @@
+id = "crm-interaction-logged"
+title = "Note who logged an interaction"
+summary = "An interaction is marked with the member who logged it."
+record = "Interaction"
+
+[trigger]
+event = "record.created:Interaction"
+when = "record.logged_by == null"
+
+[[steps]]
+id = "logged"
+title = "Note who logged it"
+kind = "automation"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+logged_by = "{{run.started_by}}"

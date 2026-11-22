@@ -3041,3 +3041,64 @@ def test_an_agents_proposed_decision_waits_for_its_sponsor_whatever_the_risk(hub
     assert hub.engine.item(iid)["status"] == "held"
     hold = hub.db.items.find_one({"run_id": run["id"], "kind": "hold"})
     assert hold["assignee"] == agent["sponsor"] and "(high risk)" not in hold["title"]
+
+
+# ------------------------------------------------------------------------------------------- consent (CASL)
+def test_a_commercial_message_goes_only_with_consent_that_holds_checked_when_queued_and_when_delivered(monkeypatch):
+    """Canada's anti-spam law: a commercial message goes only to someone whose consent is recorded: express (until
+    withdrawn) or implied (for two years), with its date and source, and not withdrawn. The hub refuses it, whatever
+    a page or an agent does: when the message is queued, and again when it is delivered."""
+    from practicehub.expr import shift_date
+    from practicehub.hub import Hub
+    from practicehub import schema
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    pack = str(Path(__file__).parent / "packs" / "accounting")   # a practice that is not a clinic, with the CRM
+    h = Hub(None, pack=pack)
+    h.install(pack)
+    h.install_module({"id": "installer", "kind": "installer", "name": "Installer", "status": "active"}, "crm")
+    from practicehub.hub import member_ref
+    h.authz.write([("role:relationship-manager", "assignee", member_ref("lee")),
+                   ("data_class:messages", "reader", member_ref("lee"))])  # the firm names no message class
+    lee = h.member("lee")
+    today = h.engine.now().date().isoformat()
+
+    def contact(**kw):
+        rec = schema.set_in({}, ["name", "0", "text"], "Someone")
+        return f"Person/{h.create_record(lee, 'Person', {**rec, **kw})['id']}"
+
+    ok = contact(consent="express", consent_date=shift_date(today, "-", 5, "y"), consent_source="Signed form")
+    assert h.consent_problem(ok, "commercial") is None                       # express: until withdrawn
+    implied = dict(consent="implied", consent_source="Contract")
+    assert h.consent_problem(contact(**implied, consent_date=shift_date(today, "-", 23, "m")), "commercial") is None
+    assert "lapsed" in h.consent_problem(contact(**implied, consent_date=shift_date(today, "-", 2, "y")),
+                                         "commercial")                      # implied: two years, then no more
+    assert "no consent" in h.consent_problem(contact(), "commercial")
+    assert "does not permit" in h.consent_problem(contact(consent="none", consent_date=today, consent_source="x"),
+                                                  "commercial")
+    assert "no source" in h.consent_problem(contact(consent="express", consent_date=today), "commercial")
+    assert "no date" in h.consent_problem(contact(consent="express", consent_source="Form"), "commercial")
+    assert "after today" in h.consent_problem(
+        contact(consent="express", consent_source="Form", consent_date=shift_date(today, "+", 1, "d")), "commercial")
+    assert "withdrew" in h.consent_problem(
+        contact(consent="express", consent_source="Form", consent_date=today, consent_withdrawn=today), "commercial")
+    assert "not a record that holds consent" in h.consent_problem("someone@example.com", "commercial")
+    assert "commercial or transactional" in h.consent_problem(ok, None)  # a message to such a record says why
+    assert h.consent_problem(ok, "transactional") is None and h.consent_problem("x@example.com", None) is None
+    assert "purpose" in h.consent_problem(ok, "newsletter")
+
+    # queued: refused by message.send itself, so no workflow, page or agent gets around it
+    from practicehub.engine import act_message_send
+    run = {"id": "run-x", "workflow_id": "crm-follow-up", "version": 1}
+    step = h.workflow("crm-follow-up", 1)[0].step("email")
+    with pytest.raises(ValueError, match="refused"):
+        act_message_send(h.engine, run, step, {"to": contact(), "purpose": "commercial", "body": "Hi"}, lee)
+    with pytest.raises(ValueError, match="refused"):
+        act_message_send(h.engine, run, step, {"to": ok, "body": "Hi"}, lee)  # no purpose said
+    sent = act_message_send(h.engine, run, step, {"to": ok, "purpose": "commercial", "body": "Hi"}, lee)
+    # withdrawn before it goes: delivering it, by hand or by a connector, refuses it instead
+    h.update_record(lee, ok, {"consent_withdrawn": today})
+    with pytest.raises(Invalid, match="withdrew"):
+        h.outbox_delivered_by_hand(lee, sent["message_id"], "Emailed it myself")
+    row = h.db.outbox.get(sent["message_id"])
+    assert row["status"] == "refused" and "withdrew" in row["note"]
+    assert any(ev["action"] == "outbox.refused" for ev in h.track.list(limit=200))

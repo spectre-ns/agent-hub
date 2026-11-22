@@ -18,7 +18,8 @@
     kind = "table"
     source = "records"
     type = "Observation"
-    where = "record.status == 'final'"     # a condition over ``record`` (records) or ``row`` (items and runs)
+    where = "record.status == 'final'"     # a condition over ``record`` (records) or ``row`` (items and runs), and
+                                           # ``today`` (the practice's date: ``record.due <= today + 7d``)
     columns = [{ label = "Test", path = "code.text" }, { label = "Value", path = "valueQuantity.value" }]
     group_by = "status"            # board and chart: one column or bar per value
     limit = 25
@@ -129,6 +130,40 @@ def _value(row: dict, path: str):
     return v
 
 
+def _words_value(hub, member: dict, rtype: str | None):
+    """A records widget's cell: a reference by its record's title (when the member may read it), a member by name;
+    any other value as ``_value`` gives it."""
+    rt = hub.record_type(rtype) if rtype else None
+
+    def value(row: dict, path: str):
+        f = rt.field(path) if rt else None
+        if f is None and rt:
+            f = next((g for g in rt.fields if g["path"] == path), None)
+        if f is None or f["type"] not in ("reference", "member"):
+            return _value(row, f["path"] if f else path)
+        raw = schema.first(row, f["path"])
+        if raw in (None, ""):
+            return None
+        if f["type"] == "member":
+            mid = str(raw).removeprefix("member:")
+            try:
+                return hub.member(mid)["name"]
+            except Exception:  # noqa: BLE001 - gone: its id
+                return mid
+        ref = schema.ref_of(raw)
+        if not ref or "/" not in ref:
+            return _value(row, f["path"])
+        t, _, rid = ref.partition("/")
+        if t in hub.member_types():
+            try:
+                return hub.member(rid)["name"]
+            except Exception:  # noqa: BLE001
+                return ref
+        rec = hub.records.read(t, rid) if hub.record_type(t) and hub.may_read(member, t) else None
+        return hub.title(rec) if rec else ref
+    return value
+
+
 def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
     """The widget's rows for this member, and a note when some were not shown."""
     note = None
@@ -136,7 +171,8 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
         if not hub.may_read(member, w["type"]):
             return [], f"needs access to {hub.class_of(w['type'])} records"
         rows = hub.records.search(w["type"], limit=None)
-        rows = [r for r in rows if not w["where"] or expr.holds(w["where"], {"record": r, "row": r})]
+        today = hub.engine.now().date().isoformat()
+        rows = [r for r in rows if not w["where"] or expr.holds(w["where"], {"record": r, "row": r, "today": today})]
         rt = hub.record_type(w["type"])
         rows.sort(key=lambda r: schema.record_date(rt, r), reverse=True)
         return rows, note
@@ -152,7 +188,7 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
             if w["role"] and it["role"] != w["role"]:
                 continue
             row = {**it, "workflow": run["workflow_id"], "run_title": hub.run_title(member, run), "record": run["record"]}
-            if w["where"] and not expr.holds(w["where"], {"row": row}):
+            if w["where"] and not expr.holds(w["where"], {"row": row, "today": hub.engine.now().date().isoformat()}):
                 continue
             rows.append(row)
         return rows, note
@@ -161,7 +197,8 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
             and (not w["workflow"] or r["workflow_id"] == w["workflow"])]
     rows = [{**{k: r[k] for k in ("id", "workflow_id", "version", "record", "status", "started_by", "created_at")},
              "title": hub.run_title(member, r)} for r in runs]
-    rows = [r for r in rows if not w["where"] or expr.holds(w["where"], {"row": r})]
+    today = hub.engine.now().date().isoformat()
+    rows = [r for r in rows if not w["where"] or expr.holds(w["where"], {"row": r, "today": today})]
     return rows, note
 
 
@@ -182,6 +219,6 @@ def compute(hub, member: dict, view: View) -> list[dict]:
             d["counts"] = {k: len(v) for k, v in sorted(groups.items())}
         else:
             d["rows"] = rows[: w["limit"]]
-        d["value"] = _value
+        d["value"] = _words_value(hub, member, w["type"]) if w["source"] == "records" else _value
         out.append(d)
     return out

@@ -49,13 +49,18 @@ def act_message_send(engine, run, step, params, actor):
     if not to:
         raise ValueError("message.send: no recipient")
     hub = engine.hub
+    purpose = params.get("purpose") or None
+    why = hub.consent_problem(str(to), purpose)  # the CASL rule: a commercial message needs consent that holds
+    if why:
+        raise ValueError(f"message.send refused: {why}")
     classes = message_classes(hub, run, step)
     oid = hub.db.next_seq("outbox")
     hub.db.outbox.insert({"_id": oid, "id": oid, "at": utcnow(), "channel": params.get("channel", "message"),
                           "recipient": str(to), "subject": str(params.get("subject", "")),
                           "body": str(params.get("body", "")), "run_id": run["id"], "sent_by": actor["id"],
                           "status": "queued", "classes": ",".join(sorted(classes)), "claimed_by": None,
-                          "claimed_at": None, "done_at": None, "done_by": None, "note": "", "escalated": 0})
+                          "claimed_at": None, "done_at": None, "done_by": None, "note": "", "escalated": 0,
+                          "purpose": purpose})
     return {"message_id": oid, "to": to}
 
 

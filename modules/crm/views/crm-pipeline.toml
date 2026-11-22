@@ -1,0 +1,17 @@
+id = "crm-pipeline"
+title = "Pipeline"
+summary = "Enquiries by stage: drag one to the next stage (a lost enquiry asks why)."
+roles = ["relationship-manager"]
+
+[[widget]]
+kind = "board"
+title = "Enquiries by stage"
+type = "Enquiry"
+group_by = "status"
+columns = ["title", "from", "owner", "value"]
+
+[[widget]]
+kind = "count"
+title = "Open enquiries"
+type = "Enquiry"
+where = "record.status in ['new', 'contacted', 'qualified']"

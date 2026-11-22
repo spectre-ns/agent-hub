@@ -23,6 +23,12 @@ answer that becomes a record, an engine calling the API.
     tops = "Spaces"               #   what the records at the top of the tree are called
     hide = ["archived"]           #   lifecycle states left out of it (a record in one still shows when it is open)
     standard = "fhir-r4"          # its records are resources of a standard (FHIR R4): exported as such (practicehub/export.py)
+    [consent]                     # a commercial message (Canada's CASL) goes to a record of it only while its recorded
+    kind = "consent"              #   consent holds (``Hub.consent_problem``): a choice field, the kind of consent;
+    date = "consent_date"         #   the date field it was given on (none, or later than today: it does not hold);
+    source = "consent_source"     #   where it came from (empty: it was never recorded, so it does not hold);
+    withdrawn = "consent_withdrawn"   # a date field: withdrawn on or before today, it no longer holds;
+    lasts = { express = "", implied = "2y" }   # the kinds that count, and how long each lasts ("": until withdrawn)
     layout = "page"               # "record" (the default) or "page": its formatted text is the page, read first, with
                                   #   the other fields and the controls in a bar above it, and edited in place
     alert = false                 # show active records of this type in a banner on the subject's page
@@ -128,6 +134,7 @@ class RecordType:
     navigator: dict | None = None  # {"tops": words, "hide": [states]}: a second navigation column for the tree
     layout: str = "record"   # "page": its formatted text is the page, with its fields and controls in a bar above
     standard: str | None = None  # "fhir-r4": its records are FHIR R4 resources (exported as FHIR); None: its own shape
+    consent: dict | None = None  # {"kind", "date", "source", "withdrawn": paths, "lasts": {kind: "2y" or ""}}
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -166,7 +173,7 @@ KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "screen", "parent",
          "part_of",
-         "navigator", "layout", "standard"},
+         "navigator", "layout", "standard", "consent"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
@@ -175,6 +182,7 @@ KEYS = {
     "screen": {"id", "on", "tab", "fields", "label"},
     "tab": {"label", "fields"},
     "navigator": {"tops", "hide"},
+    "consent": {"kind", "date", "source", "withdrawn", "lasts"},
 }
 FIELD_BOOLS = ("required", "list", "show", "advanced", "fact", "match", "live")
 
@@ -559,6 +567,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         problems.append("layout: a page is formatted text; give the type a field of type markdown")
     else:
         rt.layout = layout
+    if doc.get("consent") is not None:
+        problems += _check_consent(rt, doc["consent"])
     std = doc.get("standard")
     if std is not None:
         problems += _check_standard(rt, std)
@@ -572,6 +582,39 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
     if problems:
         raise DefinitionError(problems)
     return rt
+
+
+LASTS = re.compile(r"(\d{1,4})([dwmy])")
+
+
+def _check_consent(rt: RecordType, c) -> list[str]:
+    """``[consent]``: which fields hold a record's consent to commercial messages. Sets ``rt.consent`` when sound."""
+    if not isinstance(c, dict):
+        return ["consent: a table naming its fields (kind, date, source, withdrawn) and lasts"]
+    out = _unknown("consent", c, "consent")
+    want = {"kind": ("choice",), "date": ("date", "datetime"), "source": ("string", "text", "choice"),
+            "withdrawn": ("date", "datetime")}
+    paths = {}
+    for k, types in want.items():
+        f = rt.field(str(c.get(k) or ""))
+        if not f or f["type"] not in types or f.get("list") or "*" in f["path"]:
+            out.append(f"consent.{k}: name its {'/'.join(types)} field ({c.get(k)!r} is not one)")
+        else:
+            paths[k] = f["path"]
+    lasts = c.get("lasts")
+    if not isinstance(lasts, dict) or not lasts:
+        out.append('consent.lasts: a table of the kinds that count and how long each lasts, e.g. '
+                   '{ express = "", implied = "2y" }')
+        lasts = {}
+    kf = rt.field(str(c.get("kind") or ""))
+    for kind, how in lasts.items():
+        if kf and kind not in (kf.get("choices") or []):
+            out.append(f"consent.lasts: {kind!r} is not one of {kf['name']}'s choices")
+        if not isinstance(how, str) or (how and not LASTS.fullmatch(how)):
+            out.append(f"consent.lasts.{kind}: how long it lasts, like \"2y\" or \"6m\" (\"\" for until withdrawn)")
+    if not out:
+        rt.consent = {**paths, "lasts": dict(lasts)}
+    return out
 
 
 STANDARDS = {"fhir-r4": "FHIR R4"}   # what ``standard`` may say: the standard its records are resources of

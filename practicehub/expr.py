@@ -5,16 +5,23 @@
     review.outcome in ['approve', 'approve-with-changes']
     not sign.outcome == 'decline'
 
+    record.review_by <= run.today + 30d
+
 Paths are dotted lookups into the run context; a missing path is null. Literals: numbers, 'strings' or "strings",
-true, false, null, [lists]. Operators: == != < <= > >= in, and, or, not, parentheses.
+true, false, null, [lists]. Operators: == != < <= > >= in, and, or, not, parentheses. A date (``YYYY-MM-DD``, or the
+date of a time) may be moved on or back by days, weeks, months or years: ``+ 30d``, ``- 2w``, ``+ 6m``, ``+ 2y``; what
+is not a date moves to null, which compares as false.
 """
 
 from __future__ import annotations
 
 import re
 
-TOKEN = re.compile(r"""\s*(?:(?P<num>-?\d+(?:\.\d+)?)|(?P<str>'[^']*'|"[^"]*")|(?P<op>==|!=|<=|>=|<|>|\(|\)|\[|\]|,)"""
+TOKEN = re.compile(r"""\s*(?:(?P<shift>[+-]\s*\d{1,4}\s*[dwmy](?![A-Za-z0-9_]))|(?P<num>-?\d+(?:\.\d+)?)|(?P<str>'[^']*'|"[^"]*")|(?P<op>==|!=|<=|>=|<|>|\(|\)|\[|\]|,)"""
                    r"""|(?P<word>[A-Za-z_][A-Za-z0-9_\-\.]*))""")
+
+
+SHIFT = re.compile(r"([+-])\s*(\d{1,4})\s*([dwmy])")
 
 
 class ExprError(ValueError):
@@ -78,15 +85,23 @@ class Parser:
         return self.cmp()
 
     def cmp(self):
-        left = self.atom()
+        left = self.shifted()
         kind, val = self.peek()
         if kind == "op" and val in ("==", "!=", "<", "<=", ">", ">="):
             self.take()
-            return ("cmp", val, left, self.atom())
+            return ("cmp", val, left, self.shifted())
         if (kind, val) == ("word", "in"):
             self.take()
-            return ("cmp", "in", left, self.atom())
+            return ("cmp", "in", left, self.shifted())
         return ("truthy", left)
+
+    def shifted(self):
+        """An atom, and any date shifts after it (``run.today + 30d``)."""
+        node = self.atom()
+        while self.peek()[0] == "shift":
+            m = SHIFT.fullmatch(self.take()[1])
+            node = ("shift", node, m.group(1), int(m.group(2)), m.group(3))
+        return node
 
     def atom(self):
         kind, val = self.peek()
@@ -138,6 +153,8 @@ def evaluate(node, ctx: dict):
         return [evaluate(n, ctx) for n in node[1]]
     if op == "path":
         return lookup(ctx, node[1])
+    if op == "shift":
+        return shift_date(evaluate(node[1], ctx), node[2], node[3], node[4])
     if op == "truthy":
         return bool(evaluate(node[1], ctx))
     if op == "not":
@@ -162,6 +179,25 @@ def evaluate(node, ctx: dict):
         except TypeError:
             return False
     raise ExprError(f"unknown node {op}")
+
+
+def shift_date(value, sign: str, n: int, unit: str):
+    """A date (``YYYY-MM-DD``, or the date of a time) moved by n days, weeks, months or years. A month or year from
+    the 31st, or from 29 February, lands on the last day of the shorter month. Anything else is None."""
+    import calendar
+    from datetime import date, timedelta
+    try:
+        d = date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+    k = n if sign == "+" else -n
+    if unit in ("d", "w"):
+        return (d + timedelta(days=k * (7 if unit == "w" else 1))).isoformat()
+    months = d.year * 12 + d.month - 1 + (k * 12 if unit == "y" else k)
+    y, m = divmod(months, 12)
+    if not 1 <= y <= 9999:
+        return None
+    return date(y, m + 1, min(d.day, calendar.monthrange(y, m + 1)[1])).isoformat()
 
 
 def check(src: str) -> None:

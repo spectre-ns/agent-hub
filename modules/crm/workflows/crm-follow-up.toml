@@ -1,0 +1,93 @@
+id = "crm-follow-up"
+title = "Follow up an interaction"
+summary = """An interaction whose follow-up date has come goes to its owner (the contact's or organisation's, else who
+logged it). An agent may draft the message; a person reads it and sends it, or follows up another way. A commercial
+message goes only to a contact whose consent to it holds (CASL): the hub refuses it otherwise."""
+record = "Interaction"
+
+[trigger]
+schedule = "daily 07:00"
+for_each = "Interaction"
+where = "record.follow_up != null and record.follow_up <= run.today and record.follow_up_asked != record.follow_up"
+
+[[steps]]
+id = "asked"
+title = "Note that the follow-up was asked for"
+kind = "automation"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+follow_up_asked = "{{record.follow_up}}"
+
+[[steps]]
+id = "who"
+title = "Find the owner and whom to write to"
+kind = "automation"
+after = ["asked"]
+action = "crm.follow-up-who"
+
+[[steps]]
+id = "draft"
+title = "Draft the follow-up"
+kind = "task"
+role = "follow-up-drafter"
+after = ["who"]
+skill = "crm-follow-up-draft"
+risk = "low"
+due = "1d"
+escalate_to = "relationship-manager"
+context = ["record:relationships", "who"]
+
+[[steps]]
+id = "send"
+title = "Send the follow-up"
+kind = "task"
+role = "relationship-manager"
+assign_to = "{{who.owner}}"
+after = ["draft"]
+review_of = "draft"
+persons_only = true
+due = "2d"
+escalate_to = "relationship-manager"
+context = ["record:relationships", "who", "draft"]
+instructions = """Read the draft, change what needs changing, and choose how it went: send it by email (only to a
+contact whose consent to commercial messages holds: the hub checks), or say you followed up another way (a call, a
+visit), or that no follow-up is needed."""
+[[steps.fields]]
+name = "how"
+label = "How"
+type = "choice"
+choices = ["send", "another-way", "not-needed"]
+required = true
+[[steps.fields]]
+name = "subject"
+type = "string"
+[[steps.fields]]
+name = "body"
+type = "text"
+
+[[steps]]
+id = "email"
+title = "Email the contact"
+kind = "automation"
+after = ["send"]
+when = "send.how == 'send'"
+action = "message.send"
+[steps.params]
+channel = "email"
+purpose = "commercial"
+to = "{{who.to}}"
+subject = "{{send.subject}}"
+body = "{{send.body}}"
+
+[[steps]]
+id = "done"
+title = "Mark it followed up"
+kind = "automation"
+after = ["send", "email"]
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+follow_up_done = "{{record.follow_up}}"

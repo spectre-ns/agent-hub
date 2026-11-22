@@ -1,0 +1,51 @@
+# Relationships (CRM): the organisations and people outside the practice that it works with (referrers, partners,
+# suppliers, insurers, community agencies), what passed between them and the practice, and the enquiries that may
+# become work. Interactions are part of the contact or organisation they were with, and show on its page.
+#
+# Business data only. NO PERSONAL HEALTH INFORMATION: no field here holds clinical or health information about anyone,
+# and none may be added to hold it; an interaction's summary records the business conversation, never the
+# circumstances of a client or subject of the practice's work. Work about a client stays in the practice's own records.
+#
+# A commercial message to a contact goes only with recorded consent (Canada's anti-spam law, CASL): express, or
+# implied for two years, with its date and source, and not withdrawn. The hub enforces it (``Hub.consent_problem``),
+# when the message is queued and again when it is delivered. Agents may draft a follow-up; a person sends it.
+# It knows nothing about any one practice.
+
+[module]
+requires_core = "1.0"
+id = "crm"
+name = "Relationships"
+version = "1"
+summary = "Organisations, contacts, their interactions and enquiries, with consent to commercial messages (CASL)."
+requires = []
+shortcuts = ["Organization", "Person", "Enquiry"]
+
+[[roles]]
+id = "relationship-manager"
+name = "Relationship manager"
+description = "Keeps the practice's organisations and contacts, logs interactions, works enquiries and follows up."
+
+[[roles]]
+id = "follow-up-drafter"
+name = "Follow-up drafter"
+description = "Drafts follow-up messages for a relationship manager to read and send. Reads; writes nothing, sends nothing. An agent may hold it."
+
+[[data_classes]]
+id = "directory"
+name = "Business directory"
+description = "Organisations and contacts outside the practice, and their consent to commercial messages. Business data; no health information."
+
+[[data_classes]]
+id = "relationships"
+name = "Relationships"
+description = "Interactions with organisations and contacts, and enquiries. Business data; no health information."
+
+[grants.everyone]   # who to call, and at what number: everyone who works here may look it up
+read = ["directory"]
+
+[grants.follow-up-drafter]   # reads what it drafts from; holds no write, so an agent with it changes no record
+read = ["directory", "relationships"]
+
+[grants.relationship-manager]
+read = ["directory", "relationships"]
+write = ["directory", "relationships"]

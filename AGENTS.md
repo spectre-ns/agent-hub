@@ -29,6 +29,7 @@ Notes for anyone, human or agent, changing this code.
 | Blocks: parsing, who may propose (agents: prompt blocks only), workflow checks, version pinning | `practicehub/blocks.py`, `Hub.propose_block`, `Hub._block_problems`, `Engine.start` |
 | What Python block code may do | `practicehub/sandbox.py` (static check and the child's audit hook) |
 | Which engine runs a block, and what it is sent | `practicehub/backends.py` |
+| Consent to commercial messages (CASL: express, implied for 2 years, withdrawn), checked at queue and at delivery | `Hub.consent_problem` in `practicehub/outbox.py`, a type's `[consent]` (`practicehub/schema.py`) |
 
 If you change one of these, add or update a test in `tests/test_rules.py` that states the rule.
 
