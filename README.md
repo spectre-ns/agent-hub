@@ -239,6 +239,16 @@ The hub checks the workflow as you edit it and lists every problem, in words. Sa
 owner approves it, after seeing the diff and what agents may now do. Runs that have already started finish on the
 version they started with.
 
+- **BPMN 2.0.** **Download as BPMN** on a workflow's page (or `practicehub workflow export-bpmn <id>`) gives a file
+  Camunda Modeler, bpmn.io and other BPMN tools open: a lane per role, user tasks for tasks and decisions, service
+  tasks for automations, catch events for waits, conditions on the flows, gateways where branches split or join, due
+  times as timers, and a diagram. What BPMN has no place for (fields, params, blocks, outcomes, inputs) travels in a
+  `ph:` extension, so a file exported and read back gives the same workflow; what you change in the BPMN tool (names,
+  flows, conditions, lanes, timers) wins. **Import BPMN** on the Workflows page (or `practicehub workflow import-bpmn
+  <file>`, which prints the TOML, or proposes it with `--propose --as <member>`) opens the result in the editor and
+  lists, in words, what could not be brought across from another tool (sub-processes, message flows, compensation,
+  loops, scripts, signals...). An import is never installed: you review it and propose it, and a policy owner who did
+  not write it approves it. Files with a DOCTYPE or entities, or over 2 MB, are refused.
 - **Blocks** in the sidebar lists the blocks and the engines under the hub; create or change one there.
 - `docs/workflows.md` is the reference.
 - `docs/packs.md` explains how to set up another kind of practice: its roles, data classes, subject (Patient, Client,

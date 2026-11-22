@@ -31,6 +31,7 @@ from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..store import Transient
 from ..visibility import Viewer, workflow_classes as visibility_classes
 from .assets import CSS, ICONS, JS
+from .bpmn_pages import BpmnPages
 from .dashboard_pages import DashboardPages
 from .definitions_pages import DefinitionPages
 from .calendar_pages import CalendarPages
@@ -72,7 +73,8 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages):
+class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages,
+          BpmnPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -184,6 +186,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         self.definition_routes(R)
         self.office_routes(R)
         self.mcp_routes(R)
+        self.bpmn_routes(R)
 
     def route(self, method, pattern, fn, auth=True):
         self.routes.append((method, re.compile(pattern + r"/?$"), fn, auth))
@@ -1702,7 +1705,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'<th>Version</th><th>Steps</th><th>Agent steps</th><th>Started by</th><th></th></tr>{"".join(rows)}</table>'
                 f'<h2>Skills agents can be given</h2>{skills}')
         return self.layout(req, "Workflows", body, crumbs=[("/", "Practice"), ("", "Workflows")],
-                           actions='<a class="btn" href="/workflows/new">Create workflow</a>')
+                           actions='<a class="btn" href="/workflows/new">Create workflow</a>' + self.bpmn_import_form())
 
     def _propose_form(self, source, note="", problems=None) -> str:
         probs = ("<div class='error'><ul>" + "".join(f"<li>{e(p)}</li>" for p in problems) + "</ul></div>") if problems else ""
@@ -1871,7 +1874,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>") if dl else "<div></div>"
         return self.layout(req, wf.title if wf else wid, f'<div class="issue"><div>{"".join(main)}</div>{details}</div>',
                            crumbs=[("/workflows", "Workflows")],
-                           actions=f'<a class="btn" href="/workflows/{e(wid)}/edit">Edit workflow</a>')
+                           actions=f'<a class="btn" href="/workflows/{e(wid)}/edit">Edit workflow</a>'
+                                   + (self.bpmn_download_link(wid) if wf else ""))
 
     def error_page(self, req, exc, problems) -> str:
         items = "".join(f"<li>{e(str(p))}</li>" for p in problems if str(p) != str(exc))
