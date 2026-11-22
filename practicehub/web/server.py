@@ -30,6 +30,7 @@ from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..store import Transient
 from ..visibility import Viewer, workflow_classes as visibility_classes
+from .analytics_pages import AnalyticsPages
 from .assets import CSS, ICONS, JS
 from .dashboard_pages import DashboardPages
 from .definitions_pages import DefinitionPages
@@ -72,7 +73,8 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages):
+class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages,
+          AnalyticsPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -184,6 +186,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         self.definition_routes(R)
         self.office_routes(R)
         self.mcp_routes(R)
+        self.analytics_routes(R)
 
     def route(self, method, pattern, fn, auth=True):
         self.routes.append((method, re.compile(pattern + r"/?$"), fn, auth))
@@ -606,7 +609,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                  ("/define/skills", "Skills", "what agents know how to do", "skill"),
                  ("/settings/connections", "Connections (MCP)", "servers agents and tools connect to", "module")]
         audit = ([("/track", "Track", "everything that happened, signed and chained", "track"),
-                  ("/access", "Access report", "who may read and write what", "access")] if owner else [])
+                  ("/access", "Access report", "who may read and write what", "access"),
+                  ("/settings/analytics", "Process analytics", "where time goes in each workflow", "board")]
+                 if owner else [])
         if me and (owner or self.hub.can(me, "reader", "data_class:correspondence")):
             audit.append(("/outbox", "Outbox", "messages waiting to go and those sent", "outbox"))
         return [g for g in (("Set up", setup), ("Audit", audit)) if g[1]]
