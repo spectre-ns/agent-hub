@@ -168,3 +168,20 @@ def test_the_hub_folds_open_runs_when_it_opens(hub, monkeypatch):
     again = Hub(None, pack="general-practice")
     assert again.engine.run(run["id"])["item"] == "item-old1"
     assert again.db.items.get("item-old2")["status"] == "folded"
+
+
+def test_a_run_at_a_step_its_version_no_longer_has_still_folds_and_a_failure_is_tried_again(hub, monkeypatch):
+    """Found on the demo hub: open runs sat at a step their workflow version does not define, and the fold stopped
+    on it. The item keeps its own title; a run whose fold did fail is folded at the next start."""
+    wid = _install(hub, "walk-gone", _task("a", "Write it") + _task("b", "Check it", ["a"]))
+    run = _legacy(hub, wid)
+    hub.db.items.set("item-old2", {"step_id": "gone", "title": "A step since removed"})
+    real = hub.engine._fold
+    monkeypatch.setattr(hub.engine, "_fold", lambda r: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert hub.engine.fold_run_items() == []
+    assert hub.engine.run(run["id"])["item"] is None and hub.engine.run(run["id"])["fold_failed"]
+    monkeypatch.setattr(hub.engine, "_fold", real)
+    assert hub.engine.fold_run_items() == [run["id"]]
+    folded = hub.engine.run(run["id"])
+    assert folded["item"] == "item-old1" and "fold_failed" not in folded
+    assert [h["title"] for h in _item(hub, "item-old1")["history"]][-1] == "A step since removed"

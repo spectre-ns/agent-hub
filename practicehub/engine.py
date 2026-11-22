@@ -1981,14 +1981,17 @@ class Engine:
         that has been looked at carries ``item`` (None when its workflow has no step for a person or a wait)."""
         hub = self.hub
         done = []
-        for r in hub.db.runs.find({"status": "running", "item": {"$exists": False}}, sort=[("created_at", 1)]):
+        for r in hub.db.runs.find({"status": "running", "$or": [{"item": {"$exists": False}}, {"fold_failed": True}]},
+                                  sort=[("created_at", 1)]):
             run = _plain(r)
             try:
                 with hub.db:
                     self._fold(run)
+                    if run.get("fold_failed"):
+                        hub.db.runs.update({"_id": run["id"]}, {"$unset": {"fold_failed": ""}})
                 done.append(run["id"])
             except Exception as exc:  # noqa: BLE001 - one run that cannot be folded never stops the hub opening
-                hub.db.runs.set(run["id"], {"item": None})
+                hub.db.runs.set(run["id"], {"item": None, "fold_failed": True})  # tried again at the next start
                 hub.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "run.fold_failed",
                                  run["id"], run_id=run["id"], data={"error": str(exc)})
         return done
@@ -2016,9 +2019,10 @@ class Engine:
             kind = x["kind"]
             try:
                 st = wf.step(x["step_id"]) if wf else None
-                title, kind = st.title, st.kind
             except KeyError:
-                pass
+                st = None
+            if st is not None:  # a step its version no longer has keeps the item's own title and kind
+                title, kind = st.title, st.kind
             return {"step": x["step_id"], "title": title, "kind": kind, "role": x.get("role"),
                     "assignee": x.get("assignee"), "started_at": x["created_at"], "taken_at": None,
                     "done_at": x["updated_at"] if closed else None, "by": x.get("claimed_by") if closed else None,
