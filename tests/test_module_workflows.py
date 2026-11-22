@@ -192,3 +192,110 @@ def test_upgrading_dms_proposes_the_type_and_workflow_and_work_under_way_goes_on
     # a record filed before is walked from its next move
     hub.update_record(rana, f"Document/{d2['id']}", {"status": "in-review"})
     assert item_for(hub, open_run(hub, "dms-review", f"Document/{d2['id']}"), "approve")
+
+
+def approve_all(hub, proposed, by):
+    for (kind, did), version in proposed.items():
+        if kind == "workflow":
+            hub.approve_workflow(by, did, version)
+        else:
+            hub.approve(by, kind, did, version)
+
+
+# ------------------------------------------------------------------------------------------- qms: CAPA
+def _approve_docs(hub, refs, by):
+    for ref in refs:
+        if hub.records.read(*ref.split("/"))["status"] == "draft":
+            hub.update_record(M(hub, "rana"), ref, {"status": "in-review"})
+        i = item_for(hub, open_run(hub, "dms-review", ref), "approve")
+        hub.engine.claim(by, i)
+        hub.engine.decide(by, i, "approve")
+
+
+def test_a_capa_is_walked_by_its_workflow_and_a_pass_found_not_effective_is_walked_again(docs):
+    from practicehub.hub import member_ref
+    hub = docs
+    hub.authz.write([("role:quality-manager", "assignee", member_ref("dr-liam")),
+                     ("role:document-controller", "assignee", member_ref("dr-liam"))])
+    rana, amara, liam = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam")
+    dref = f"Document/{hub.records.search('Document')[0]['id']}"
+    capa = hub.create_record(rana, "CAPA", {"title": "Missed callback", "kind": "corrective",
+                                            "problem": "A critical result was not called", "documents": [dref]})
+    ref = f"CAPA/{capa['id']}"
+    run = open_run(hub, "qms-capa", ref)
+    i = item_for(hub, run, "investigate")
+    # starting the investigation on its page is a move the open step lets people make; the step stays open
+    hub.update_record(rana, ref, {"status": "investigating", "owner": "rana"})
+    assert step_state(hub, run, "investigate") == "active"
+    hub.engine.claim(rana, i)
+    hub.engine.complete(rana, i, {"root_cause": "No cover named", "plan": "Name cover in the SOP"})
+    assert hub.records.read("CAPA", capa["id"])["status"] == "actions"
+    # the CAPA's run moved the document through a move its own workflow waited on; that workflow walks the revision
+    assert hub.records.read(*dref.split("/"))["status"] == "draft"
+    assert step_state(hub, open_run(hub, "dms-review", dref), "revise") == "waiting"
+    _approve_docs(hub, [dref], amara)
+    v = item_for(hub, run, "verify")
+    with pytest.raises(Denied):
+        hub.engine.claim(rana, v)
+    hub.engine.claim(amara, v)
+    hub.engine.decide(amara, v, "not-effective", "Still missed on weekends")
+    assert hub.records.read("CAPA", capa["id"])["status"] == "actions"
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    again = open_run(hub, "qms-capa", ref)  # the next pass
+    assert again["ctx"]["run"]["previous"] == run["id"]
+    a = item_for(hub, again, "act")
+    hub.engine.claim(amara, a)
+    hub.engine.complete(amara, a, {"plan": "Name weekend cover too"})
+    _approve_docs(hub, [dref], liam)
+    v = item_for(hub, again, "verify")
+    for who in (rana, amara):  # rana investigated (the pass before), amara took the further action
+        with pytest.raises(Denied):
+            hub.engine.claim(who, v)
+    hub.engine.claim(liam, v)
+    hub.engine.decide(liam, v, "effective")
+    assert hub.records.read("CAPA", capa["id"])["status"] == "closed"
+    assert not runs(hub, "qms-capa", ref, "running")
+
+
+def test_cancelling_a_capa_on_its_page_stops_its_work_and_actions_under_way_are_its_workflows(docs):
+    hub = docs
+    rana = M(hub, "rana")
+    capa = hub.create_record(rana, "CAPA", {"title": "Duplicate", "kind": "preventive", "problem": "P"})
+    ref = f"CAPA/{capa['id']}"
+    run = open_run(hub, "qms-capa", ref)
+    hub.update_record(rana, ref, {"status": "cancelled", "cancel_reason": "A duplicate"})
+    assert hub.engine.run(run["id"])["status"] == "cancelled"
+    assert hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
+    assert not [i for i in items_of(hub, run) if i["status"] in ("open", "claimed", "waiting")]
+    c2 = hub.create_record(rana, "CAPA", {"title": "T", "kind": "preventive", "problem": "P"})
+    i = item_for(hub, open_run(hub, "qms-capa", f"CAPA/{c2['id']}"), "investigate")
+    hub.engine.claim(rana, i)
+    hub.engine.complete(rana, i, {"root_cause": "R", "plan": "P"})
+    assert hub.records.read("CAPA", c2["id"])["status"] == "verification"  # no documents: straight on
+    with pytest.raises(Denied):
+        hub.update_record(rana, f"CAPA/{c2['id']}", {"status": "closed"})
+
+
+def test_upgrading_qms_hands_a_capa_under_way_on_to_the_new_version(hub, old_modules):
+    install(hub, "dms")
+    install(hub, "qms")
+    demo(hub, "dms")
+    demo(hub, "qms")
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    capa = hub.create_record(rana, "CAPA", {"title": "Old", "kind": "preventive", "problem": "P"})
+    ref = f"CAPA/{capa['id']}"
+    old = open_run(hub, "qms-capa", ref)  # version 1, started by its event
+    approve_all(hub, old_modules(hub, "dms"), amara)
+    proposed = old_modules(hub, "qms")
+    assert ("type", "CAPA") in proposed and ("workflow", "qms-capa") in proposed
+    approve_all(hub, proposed, amara)
+    i = item_for(hub, old, "investigate")
+    hub.engine.claim(rana, i)
+    hub.engine.complete(rana, i, {"root_cause": "R", "plan": "P"})
+    assert hub.engine.run(old["id"])["version"] == old["version"]  # pinned
+    assert hub.records.read("CAPA", capa["id"])["status"] == "verification"
+    v = item_for(hub, old, "verify")
+    hub.engine.claim(amara, v)
+    hub.engine.decide(amara, v, "not-effective")
+    new = open_run(hub, "qms-capa", ref)  # version 1 ended in actions with nothing to walk it; now handed on
+    assert new["version"] > old["version"] and item_for(hub, new, "act")

@@ -5,7 +5,7 @@
 requires_core = "1.0"
 id = "qms"
 name = "Quality"
-version = "1"
+version = "2"
 summary = "Corrective and preventive actions, linked to the controlled documents they change."
 shortcuts = ["CAPA"]
 requires = ["dms"]
