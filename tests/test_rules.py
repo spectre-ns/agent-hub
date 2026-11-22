@@ -75,7 +75,9 @@ def test_only_a_sponsor_or_admin_may_switch_an_agent_off(hub):
 def test_the_scheduling_agent_never_reads_clinical_records(worked):
     hub = worked
     agent = M(hub, "scheduling-agent")
-    note = hub.records.search("MedicationRequest")[0]
+    # a patient with visits (search order varies; Nadia, whose care is withheld, has none)
+    visited = {e["subject"]["reference"] for e in hub.records.search("Encounter", limit=None) if e.get("subject")}
+    note = next(n for n in hub.records.search("MedicationRequest", limit=None) if n["subject"]["reference"] in visited)
     with pytest.raises(Denied):
         hub.read_record(agent, f"MedicationRequest/{note['id']}")
     chart = hub.chart(agent, note["subject"]["reference"])
