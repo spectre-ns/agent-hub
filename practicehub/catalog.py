@@ -449,7 +449,7 @@ class CatalogMixin:
             if broken:
                 raise Invalid(f"approving this {noun} would break workflows the practice runs", broken)
         if kind == "type":  # a pack upgrade that waited for this type (records of a merged type become this one)
-            self.run_pack_upgrades(actor)
+            self._upgrades_after(actor)
         return {f"{kind}_id": did, "version": version}
 
     def withdraw(self, actor: dict, kind: str, did: str, version: int, reason: str = "") -> None:

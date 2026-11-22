@@ -68,3 +68,121 @@ def test_files_round_trip_through_gridfs(store):
     data, meta = store.get_file("abc")
     assert len(data) == 300_000 and meta["content_type"] == "application/pdf"
     assert store.get_file("nope") is None
+
+
+# ------------------------------------------------------------------------------------------- two writers at once
+def _track(store):
+    from practicehub.track import Track
+    return Track(store, "test-secret")
+
+
+def test_two_stores_on_one_database_both_write_and_the_track_never_forks(store):
+    """A CLI export (store A, a transaction appending reads) and the server (store B, a booking) at once: B waits for
+    A's transaction instead of failing on the track's next number, both commit, and the chain verifies."""
+    import threading
+    import time
+    from practicehub.store import Store
+    other = Store(store.uri, store.name)
+    a, b = _track(store), _track(other)
+    a.append({"id": "rana", "kind": "person"}, "start", "x")
+    done, errors = threading.Event(), []
+
+    def server():
+        try:
+            with other:
+                other.bookings.insert({"_id": "v1"})
+                b.append({"id": "jo", "kind": "person"}, "record.created", "Encounter/v1")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        done.set()
+    with store:  # the export's batch, open while the server writes
+        for i in range(5):
+            a.append({"id": "rana", "kind": "person"}, "record.viewed", f"Patient/{i}")
+        t = threading.Thread(target=server)
+        t.start()
+        time.sleep(0.3)
+        assert not done.is_set()  # it waits for the lease, it does not fail
+    t.join(10)
+    assert not errors and other.bookings.get("v1")
+    assert [e["seq"] for e in store.events.find(sort="seq")] == list(range(1, 8))
+    assert store.events.find_one(sort=[("seq", -1)])["action"] == "record.created"
+    assert a.verify()["ok"]
+
+
+def test_two_processes_append_at_once_and_every_event_is_kept(store, tmp_path):
+    """A second process (a CLI command) appends in batched transactions while this one appends one at a time."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = tmp_path / "writer.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})\n"
+        "from practicehub.store import Store\nfrom practicehub.track import Track\n"
+        "s = Store(sys.argv[1], sys.argv[2]); t = Track(s, 'test-secret')\n"
+        "def batch(i):\n"
+        "    for j in range(20):\n"
+        "        t.append({'id': 'cli', 'kind': 'person'}, 'record.viewed', f'P/{i}-{j}')\n"
+        "for i in range(10):\n"
+        "    s.atomic(batch, i)\n")
+    proc = subprocess.Popen([sys.executable, str(script), store.uri, store.name])
+    t = _track(store)
+    mine = 0
+    while proc.poll() is None or mine < 30:
+        t.append({"id": "jo", "kind": "person"}, "record.created", f"Encounter/{mine}")
+        mine += 1
+    assert proc.wait(60) == 0
+    events = store.events.find(sort="seq")
+    assert len([e for e in events if e["actor"] == "cli"]) == 200
+    assert len([e for e in events if e["actor"] == "jo"]) == mine
+    assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
+    assert t.verify()["ok"]
+
+
+def test_a_lost_transaction_is_run_again_and_a_swallowed_loss_still_fails(store):
+    """A writer outside the hub (no lease) takes the track's next number in a transaction of its own: the hub's
+    append conflicts with it, and atomic() runs it again once that writer commits. A block that catches the loss and
+    goes on is not committed as if nothing happened."""
+    import threading
+    import time
+    from practicehub.store import Transient
+    t = _track(store)
+    t.append({"id": "rana", "kind": "person"}, "start", "x")
+    raw = store.client.start_session()
+    raw.start_transaction()
+    store.db["events"].insert_one({"_id": 2, "seq": 2, "hash": "outside"}, session=raw)
+    threading.Timer(0.15, raw.commit_transaction).start()
+    seq = t.append({"id": "jo", "kind": "person"}, "record.created", "Encounter/v1")
+    assert seq == 3
+    time.sleep(0.05)
+    raw.end_session()
+
+    raw = store.client.start_session()
+    raw.start_transaction()
+    store.db["events"].insert_one({"_id": 4, "seq": 4, "hash": "outside again"}, session=raw)
+    with pytest.raises(Transient):
+        with store:
+            store.items.insert({"_id": "kept?"})
+            try:
+                t.append({"id": "jo", "kind": "person"}, "record.updated", "Encounter/v1")
+            except Transient:
+                pass  # swallowed: the block goes on as if the event were written
+    raw.abort_transaction()
+    raw.end_session()
+    assert store.items.get("kept?") is None
+
+
+def test_a_lease_left_by_a_process_that_died_is_taken_at_once(store):
+    import socket
+    import subprocess
+    import time
+    from datetime import datetime, timedelta
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    store.db["locks"].replace_one({"_id": "writer"}, {"_id": "writer", "owner": "gone", "host": socket.gethostname(),
+                                                       "pid": dead.pid, "until": datetime.now() + timedelta(hours=1)},
+                                  upsert=True)
+    start = time.monotonic()
+    with store:
+        store.items.insert({"_id": "x"})
+    assert time.monotonic() - start < 2 and store.items.get("x")

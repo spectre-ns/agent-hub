@@ -28,6 +28,7 @@ from .. import workflows as wfmod
 from ..backends import engines
 from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, HubError, Invalid, NotFound, member_ref
+from ..store import Transient
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
@@ -192,6 +193,12 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             if path.startswith("/mcp/"):  # MCP servers, with a member's token (mcp_pages, mcp.py)
                 return self.handle_mcp(method, raw_path, headers, body)
             return self._dispatch(method, path, query, is_api, req, headers)
+        except Transient:  # the database stayed busy past every retry: nothing of this transaction was saved
+            msg = "The hub is busy with other work; try again in a moment."
+            h = {"Retry-After": "2"}
+            if is_api:
+                return 503, {**h, "Content-Type": "application/json"}, _json({"error": msg})
+            return 503, {**h, "Content-Type": "text/plain; charset=utf-8"}, msg.encode()
         except Exception:  # a bug is a 500 with no detail to the client; the traceback goes to stderr
             import traceback
             traceback.print_exc()

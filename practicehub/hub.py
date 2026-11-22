@@ -109,6 +109,25 @@ def _refs_in(value) -> list[str]:
     return sorted(out)
 
 
+def _counted(got: dict) -> dict:
+    """A batch's result for the track: a list by its length (each record it names has an event of its own)."""
+    return {k: len(v) if isinstance(v, (list, tuple)) else v for k, v in got.items()}
+
+
+def _merge_upgrade_results(so_far: dict, got: dict) -> dict:
+    """What an upgrade's batches did, together: numbers (and lists, by their length) add up, a yes stays yes."""
+    out = dict(so_far)
+    for k, v in _counted(got).items():
+        old = out.get(k)
+        if isinstance(v, bool) or isinstance(old, bool):
+            out[k] = bool(old) or bool(v)
+        elif isinstance(v, (int, float)) and isinstance(old, (int, float)):
+            out[k] = old + v
+        else:
+            out[k] = v
+    return out
+
+
 def _how(data: dict) -> str:
     """How a record was seen, for an access report: 'export (csv)' when it went out in a file."""
     how = data.get("how", "")
@@ -151,12 +170,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.engine = Engine(self)
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
         if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:
-            try:  # an upgrade whose definitions were approved before this pack.py was running
-                self.run_pack_upgrades()
-            except Exception as exc:  # noqa: BLE001 - the hub still opens; the track says what did not happen
-                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
-                                  f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
-                                  data={"error": str(exc)[:500]})
+            # an upgrade whose definitions were approved before this pack.py was running, or one a restart stopped
+            # part way: the hub still opens if it fails, and the track says what did not happen
+            self._upgrades_after(None)
 
     # ------------------------------------------------------------------ the practice pack, under change control
     PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants")
@@ -305,47 +321,101 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     proposed.append({"kind": kind, "id": did, **self._propose(
                         kind, actor, did, src, f"The practice pack {p.version} changes this", module=None)})
             self._defs_reset()
-            self.run_pack_upgrades(actor)  # what this process's pack.py can do now (the new one runs after the restart)
+        # what this process's pack.py can do now (the new one runs after the restart), in batches of their own: the
+        # upgrade stands whether or not they finish here, and what they did not finish goes on at the next start
+        self._upgrades_after(actor)
         return {"pack": p.id, "version": p.version, "restart": True, "added": added_defs, "proposed": proposed}
+
+    UPGRADE_BATCH = 200       # records a pack upgrade converts in one transaction
+    upgrade_state: dict = {}  # the running upgrade's own place, kept with each batch (run_pack_upgrades)
+
+    def _upgrades_after(self, actor: dict | None) -> None:
+        if self.db.in_transaction():
+            return  # never inside another transaction: they run on their own, at the next call or the next start
+        try:
+            self.run_pack_upgrades(actor)
+        except Exception as exc:  # noqa: BLE001 - what was approved stands; the upgrade goes on at the next start
+            self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
+                              f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                              data={"error": str(exc)[:500]})
+
+    UPGRADE_PROGRESS = "pack_upgrade_progress"  # setting: {upgrade id: {"batches": n, "state": {...}, "done": {...}}}
 
     def run_pack_upgrades(self, actor: dict | None = None) -> list[dict]:
         """Run what the practice pack's ``UPGRADES`` (pack.py) do to records an older version left: each once, when it
         can (a function returns None while what it needs is not in force yet, such as a record type still proposed),
-        in one transaction, written to the track. Called when a pack is upgraded, when a definition is approved, and
-        when the hub opens, so the upgrade happens whichever of these comes last."""
+        written to the track. Called when a pack is upgraded, when a definition is approved, and when the hub opens,
+        so the upgrade happens whichever of these comes last.
+
+        An upgrade works in batches: a function that returns ``{"more": True, ...}`` did one batch and is called
+        again. Each call is a transaction of its own (run again if another writer got in first), and with it the hub
+        keeps where the upgrade is (``pack_upgrade_progress``: the batches done, what they did so far, and
+        ``hub.upgrade_state``, a dict the function keeps its own place in), so an upgrade stopped part way (a restart, a
+        failure) goes on from the last batch that was written, and never runs as one transaction of unbounded size.
+        Every batch is an event on the track (``practice.upgrade_progress``); the last is ``practice.upgrade_applied``
+        with what all the batches did. A function must leave every record whole after each batch: a record is
+        converted, or not yet, never half."""
         ups = dict(self.pack.upgrades) if self.pack else {}
         if not ups:
             return []
+        if self.db.in_transaction():
+            raise RuntimeError("pack upgrades run in batches, each its own transaction: call this outside one")
         # the hub writes what the upgrade changes (the approver may not write every record it touches); the track says
         # whose approval or upgrade set it off
         by = (actor or {}).get("id")
         actor = {"id": "hub", "kind": "automation", "name": "Practice Hub"}
-        done, out = list(self.db.get_setting("pack_upgrades_done") or []), []
+        practice = f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}"
+        out = []
         for uid, fn in ups.items():
-            if uid in done:
-                continue
-            self._upgrading = True
-            try:
-                with self.db:
+            while True:
+                def batch():
+                    if uid in (self.db.get_setting("pack_upgrades_done") or []):
+                        return "done"
+                    progress = dict((self.db.get_setting(self.UPGRADE_PROGRESS) or {}).get(uid) or {})
+                    self.upgrade_state = dict(progress.get("state") or {})
                     got = fn(self, actor)
                     if got is None:
-                        continue
-                    done.append(uid)
-                    self.db.set_setting("pack_upgrades_done", done)
-                    self.track.append(actor, "practice.upgrade_applied",
-                                      f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
-                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by, **dict(got)})
-                    out.append({"upgrade": uid, **dict(got)})
-            finally:
-                self._upgrading = False
-                self._defs_reset()
+                        return None
+                    got = dict(got)
+                    more = bool(got.pop("more", False))
+                    so_far = _merge_upgrade_results(progress.get("done") or {}, got)
+                    n = int(progress.get("batches") or 0) + 1
+                    every = dict(self.db.get_setting(self.UPGRADE_PROGRESS) or {})
+                    if more:
+                        every[uid] = {"batches": n, "state": self.upgrade_state, "done": so_far}
+                        self.db.set_setting(self.UPGRADE_PROGRESS, every)
+                        self.track.append(actor, "practice.upgrade_progress", practice,
+                                          data={"upgrade": uid, "batch": n, "pack_version": self.pack.version,
+                                                "after": by, **_counted(got)})
+                        return "more"
+                    every.pop(uid, None)
+                    self.db.set_setting(self.UPGRADE_PROGRESS, every)
+                    self.db.set_setting("pack_upgrades_done", [*(self.db.get_setting("pack_upgrades_done") or []),
+                                                               uid])
+                    self.track.append(actor, "practice.upgrade_applied", practice,
+                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by,
+                                            "batches": n, **so_far})
+                    out.append({"upgrade": uid, **so_far})
+                    return "done"
+                self._upgrading = True
+                try:
+                    step = self.db.atomic(batch)
+                finally:
+                    self._upgrading = False
+                    self.upgrade_state = {}
+                    self._defs_reset()
+                if step != "more":
+                    break
         return out
 
-    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None) -> dict:
+    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None,
+                       repoint: bool = True) -> dict:
         """Turn a record into one of another type (a pack upgrade that merges two types): a new record with the same
         id, or, with ``into``, the existing record of ``rtype`` it already stood for, rewritten as ``data``. The record
         written is checked as any other, every record that pointed at the old one points at it instead, and the old one
-        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere."""
+        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere: open workflow
+        runs, work items and queued messages that name it name the new record (``repoint_work``; ``repoint=False``
+        leaves that to a caller converting many records, which repoints them all at once)."""
         old_type, rid = ref.split("/", 1)
         rt = self._type(rtype)
         new_id = into.split("/", 1)[1] if into else rid
@@ -385,9 +455,40 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.db.records.delete({"_id": ref})
             self.db.links.delete({"from_ref": ref})
             self.db.titles.delete({"_id": ref})
+            if repoint:
+                self.repoint_work({ref: new_ref})
             self.track.append(actor, "record.converted", new_ref,
                               data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec)})
         return rec
+
+    REPOINT = (("runs", {"status": "running"}),
+               ("items", {"status": {"$in": ["open", "claimed", "held"]}}),
+               ("outbox", {"status": {"$in": ["queued", "sending"]}}))
+
+    def repoint_work(self, refs: dict[str, str]) -> int:
+        """Work still under way that names a record by a ref in ``refs`` (a run's record and context, an item's
+        output, a queued message) names its new ref instead: after a conversion, a run goes on with the new record
+        rather than failing on one that is gone. Finished work keeps what it named, as the track does."""
+        if not refs:
+            return 0
+
+        def swap(v):
+            if isinstance(v, str):
+                return refs.get(v, v)
+            if isinstance(v, dict):
+                return {k: swap(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [swap(x) for x in v]
+            return v
+        n = 0
+        with self.db:
+            for coll, flt in self.REPOINT:
+                for row in self.db[coll].find(flt):
+                    fixed = swap(row)
+                    if fixed != row:
+                        self.db[coll].replace(fixed)
+                        n += 1
+        return n
 
     # ------------------------------------------------------------------ modules
     def installed_modules(self) -> list[str]:

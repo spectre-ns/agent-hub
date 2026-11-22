@@ -2814,10 +2814,9 @@ def test_a_member_is_never_booked_twice(hub):
     hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:00"))  # the cancelled time is free
 
 
-def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, monkeypatch):
-    """A practice on version 1 (Appointment and Visit apart) upgrades: each appointment becomes a visit (the visit
-    filed for it, or a new one with its id), whatever pointed at it points at the visit, none is left behind, and the
-    Appointment type is retired."""
+def _practice_on_version_1(tmp_path, monkeypatch):
+    """A practice installed on version 1 (Appointment and Visit apart), with appointments, a visit filed for one and
+    work under way about one; then version 2's files on disk, reviewed and upgraded to. Returns (state, made)."""
     import shutil
     from practicehub import pack as packmod
     from practicehub.hub import Hub
@@ -2837,29 +2836,44 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     appt = lambda status, start, why: hub.records.create("Appointment", {
         "status": status, "start": start, "minutesDuration": 15, "description": why,
         "participant": [{"actor": {"reference": pat}}, {"actor": {"reference": "Practitioner/dr-liam"}}]})
-    booked = appt("booked", "2027-03-02T09:00", "Flu shot")
+    made = {"booked": appt("booked", "2027-03-02T09:00", "Flu shot")}
     gone = appt("cancelled", "2027-03-02T09:00", "Annual physical")
-    gone = hub.records.update("Appointment", gone["id"], {**gone, "cancelationReason": {"text": "Patient sick"}})
-    seen = appt("fulfilled", "2026-11-02T10:00", "Sore throat")
-    filed = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
-                                             "appointment": [{"reference": f"Appointment/{seen['id']}"}],
-                                             "period": {"start": "2026-11-02T10:05"}})
-    note = hub.records.create("Composition", {"status": "final", "subject": {"reference": pat}, "title": "Note",
-                                              "encounter": {"reference": f"Encounter/{filed['id']}"}})
-    walk_in = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
-                                               "period": {"start": "2026-11-03T11:00", "end": "2026-11-03T11:20"}})
-
+    made["gone"] = hub.records.update("Appointment", gone["id"], {**gone, "cancelationReason": {"text": "Patient sick"}})
+    made["seen"] = seen = appt("fulfilled", "2026-11-02T10:00", "Sore throat")
+    made["filed"] = filed = hub.records.create("Encounter", {
+        "status": "finished", "subject": {"reference": pat}, "appointment": [{"reference": f"Appointment/{seen['id']}"}],
+        "period": {"start": "2026-11-02T10:05"}})
+    made["note"] = hub.records.create("Composition", {"status": "final", "subject": {"reference": pat}, "title": "Note",
+                                                      "encounter": {"reference": f"Encounter/{filed['id']}"}})
+    made["walk_in"] = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
+                                                       "period": {"start": "2026-11-03T11:00", "end": "2026-11-03T11:20"}})
+    booked = f"Appointment/{made['booked']['id']}"  # a reminder run under way about a booking, and its work
+    hub.db.runs.insert({"_id": "r-remind", "id": "r-remind", "status": "running", "record": booked,
+                        "ctx": {"run": {"record": booked}, "input": {"visit": {"reference": booked}}}, "steps": {}})
+    hub.db.items.insert({"_id": "i-remind", "id": "i-remind", "run_id": "r-remind", "status": "open",
+                         "output": {"about": booked}})
+    hub.db.outbox.insert({"_id": 9001, "id": 9001, "status": "queued", "run_id": "r-remind", "about": booked})
+    hub.db.runs.insert({"_id": "r-old", "id": "r-old", "status": "completed", "record": booked, "ctx": {}, "steps": {}})
     for name in ("Appointment.toml", "Encounter.toml"):  # version 2 arrives
         (copy / "types" / name).unlink()
     shutil.copy(src / "types" / "Encounter.toml", copy / "types" / "Encounter.toml")
     hub = Hub(state)
     hub.review_pack(M(hub, "rana"))
     hub.upgrade_pack(M(hub, "dr-amara"))
+    return state, made
+
+
+def _approve_the_new_visit(state):
+    from practicehub.hub import Hub
     hub = Hub(state)
     for row in hub.db.type_versions.find({"type_id": "Encounter", "status": "proposed"}):  # its second owner
         hub.approve(M(hub, "rana"), "type", "Encounter", row["version"])
-    hub = Hub(state)
 
+
+def _converted_as_version_2_says(state, made):
+    from practicehub.hub import Hub
+    hub = Hub(state)
+    booked, gone, seen, filed, walk_in = (made[k] for k in ("booked", "gone", "seen", "filed", "walk_in"))
     assert hub.records.search("Appointment", limit=None) == []
     assert hub.record_type("Appointment") is None and hub.of_base("Booking") == ["Encounter"]
     visits = {v["id"]: v for v in hub.records.search("Encounter", limit=None)}
@@ -2872,12 +2886,68 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     assert seen["id"] not in visits  # the appointment a visit was filed for is that visit
     assert visits[filed["id"]]["plannedStartDate"] == "2026-11-02T10:00"
     assert visits[filed["id"]]["period"]["start"] == "2026-11-02T10:05" and "appointment" not in visits[filed["id"]]
+    assert visits[filed["id"]]["reasonCode"][0]["text"] == "Sore throat"  # the visit said no reason: the booking's
     assert visits[walk_in["id"]]["plannedStartDate"] == "2026-11-03T11:00"
-    assert hub.records.read("Composition", note["id"])["encounter"]["reference"] == f"Encounter/{filed['id']}"
+    assert hub.records.read("Composition", made["note"]["id"])["encounter"]["reference"] == f"Encounter/{filed['id']}"
     assert all(v.get("plannedStartDate") for v in visits.values())
+    # work under way names the visit now; finished work keeps what it named
+    now = f"Encounter/{booked['id']}"
+    run = hub.db.runs.get("r-remind")
+    assert run["record"] == now and run["ctx"]["run"]["record"] == now and run["ctx"]["input"]["visit"]["reference"] == now
+    assert hub.db.items.get("i-remind")["output"]["about"] == now and hub.db.outbox.get(9001)["about"] == now
+    assert hub.db.runs.get("r-old")["record"] == f"Appointment/{booked['id']}"
     assert hub.track.verify()["ok"]
     from practicehub.engine import bookings
     assert {b["record"]["id"] for b in bookings(hub)} == {booked["id"], filed["id"], walk_in["id"]}  # not cancelled
+    assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")
+    assert not hub.db.get_setting("pack_upgrade_progress")
+    return hub
+
+
+def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, monkeypatch):
+    """A practice on version 1 (Appointment and Visit apart) upgrades: each appointment becomes a visit (the visit
+    filed for it, or a new one with its id), whatever pointed at it points at the visit (open runs, items and queued
+    messages too), the booking's reason is kept on a visit that had none, none is left behind, and the Appointment
+    type is retired."""
+    state, made = _practice_on_version_1(tmp_path, monkeypatch)
+    _approve_the_new_visit(state)
+    hub = _converted_as_version_2_says(state, made)
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    assert done["data"]["appointments_now_visits"] == 2 and done["data"]["appointments_merged_into_their_visit"] == 1
+
+
+def test_the_appointment_upgrade_runs_in_batches_and_a_stopped_one_goes_on_where_it_stopped(tmp_path, monkeypatch):
+    """Each batch is a transaction of its own, written with the upgrade's place. An upgrade that stops part way (here
+    the third conversion fails, as a crash would) leaves what it did whole, and what it did not do as it was (no
+    appointment is lost or half converted); the next start goes on from there and finishes."""
+    from practicehub.hub import Hub
+    monkeypatch.setattr(Hub, "UPGRADE_BATCH", 1)
+    state, made = _practice_on_version_1(tmp_path, monkeypatch)
+    real, calls = Hub.convert_record, []
+
+    def crashes(self, *a, **k):
+        calls.append(a[1])
+        if len(calls) >= 3:  # the third and every one after, until the server is mended
+            raise RuntimeError("the server stopped")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Hub, "convert_record", crashes)
+    _approve_the_new_visit(state)
+    hub = Hub(state, pack=None)
+    assert hub.db.events.exists({"action": "practice.upgrade_failed"})
+    progress = hub.db.get_setting("pack_upgrade_progress")["2-appointments-are-visits"]
+    assert progress["batches"] == 2  # one appointment a batch: two written, the third undone whole
+    left = {a["id"] for a in hub.records.search("Appointment", limit=None)}
+    visits = {v["id"] for v in hub.records.search("Encounter", limit=None)}
+    assert len(left) == 1 and all(f"Appointment/{i}" not in calls[:2] for i in left)
+    for k in ("booked", "gone", "seen"):  # each appointment is an appointment still, or converted: never gone
+        assert made[k]["id"] in left or made[k]["id"] in visits or made[k]["id"] == made["seen"]["id"]
+    assert made["seen"]["id"] in left or made["filed"]["id"] in visits
+    assert len(hub.db.events.find({"action": "practice.upgrade_progress"})) == 2
+    monkeypatch.setattr(Hub, "convert_record", real)  # the next start
+    hub = _converted_as_version_2_says(state, made)
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    assert done["data"]["appointments_now_visits"] + done["data"]["appointments_merged_into_their_visit"] == 3
+    assert done["data"]["batches"] >= 5
 
 
 # ------------------------------------------------------------------------------------------- live co-editing and SOPs
@@ -3125,6 +3195,44 @@ def test_only_a_policy_owner_makes_a_bulk_export(hub):
     assert "manifest.json" in files and manifest["output"]
     # the owner reads no clinical records: those are counted, not exported
     assert manifest["left_out"] and not any(o["type"] == "MedicationRequest" for o in manifest["output"])
+
+
+def test_a_bulk_export_records_every_read_in_batches_each_its_own_transaction(hub, monkeypatch):
+    """The whole hub is never one transaction: the reads go on the track a batch at a time, each batch lost to
+    another writer is run again (not doubled), and every record exported is a read, then the export itself."""
+    from practicehub import export
+    from practicehub.store import Store, Transient
+    monkeypatch.setattr(export, "LOG_BATCH", 3)
+    opened, real_enter = [], Store.__enter__
+
+    def counting(self):
+        if not self.in_transaction():
+            opened.append(1)
+        return real_enter(self)
+    monkeypatch.setattr(Store, "__enter__", counting)
+    real_append, lost = type(hub.track).append, []
+
+    def loses_once(self, member, action, subject, *a, **k):  # the second batch is lost part way, once
+        if action == "record.viewed" and len(lost) == 0 and self.db.in_transaction() and \
+                len(_export_reads(hub)) == 3 + 1:
+            lost.append(subject)
+            self.db._lost()
+            raise Transient("write conflict")
+        return real_append(self, member, action, subject, *a, **k)
+    monkeypatch.setattr(type(hub.track), "append", loses_once)
+    rana = M(hub, "rana")
+    opened.clear()
+    files, manifest = export.everything(hub, rana)
+    rows = sum(len(body.decode().splitlines()) for name, body in files.items() if name.endswith(".ndjson"))
+    reads = [e["subject"] for e in _export_reads(hub)]
+    assert lost and lost[0] in reads and rows > 6
+    assert len(reads) == len(set(reads)) == rows  # each record once: the lost batch was run again whole, not doubled
+    refs = reads
+    batches = -(-len(refs) // 3)
+    assert len(opened) >= batches + 1  # one transaction a batch (and one more for the lost one), not one for all
+    (ev,) = hub.db.events.find({"action": "records.exported"})
+    assert ev["data"]["count"] == len(refs) and ev["seq"] > max(e["seq"] for e in _export_reads(hub))
+    assert hub.track.verify()["ok"]
 
 
 def test_a_type_that_is_not_a_fhir_resource_offers_no_fhir_format(quality):
