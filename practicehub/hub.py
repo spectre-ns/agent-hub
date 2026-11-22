@@ -204,7 +204,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self._upgrades_after(None)
 
     # ------------------------------------------------------------------ the practice pack, under change control
-    PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants")
+    PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants",
+                   "portal")
 
     @classmethod
     def _pack_config(cls, p: packmod.Pack) -> dict:
@@ -243,8 +244,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                      "into force: a policy owner reviews them and another upgrades")
         else:
             new_keys = [k for k in self.PACK_CONFIG if k not in cfg]
-            if new_keys:  # settings put under change control by a newer hub: what is in force now is pinned
-                cfg = {**cfg, **{k: self._pack_config(p)[k] for k in new_keys}}
+            if new_keys:  # settings put under change control by a newer hub
+                disk = self._pack_config(p)
+                if trusted and p.digest == trusted.get("digest") and not self.pack_problem:
+                    pinned = {k: disk[k] for k in new_keys}  # exactly the files signed into force: as they are
+                else:
+                    # files that differ from those put into force (or no record of them): the new setting starts
+                    # empty, and what the files say of it waits for review and upgrade like any other change
+                    pinned = {k: type(disk[k])() if isinstance(disk[k], (dict, list)) else None for k in new_keys}
+                cfg = {**cfg, **pinned}
                 self.db.set_setting("pack_config", cfg)
             changed = sorted(k for k in self.PACK_CONFIG if k in cfg and cfg[k] != self._pack_config(p)[k])
             for k in self.PACK_CONFIG:
@@ -2421,9 +2429,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         them); an agent's or service's only from its sponsor, who answers for what is done with it (a member admin
         who could mint one could act through the agent as a puppet). ``scope="mcp"`` makes one that opens only the
         MCP servers named, for one named client (``practicehub.mcp.issue_token`` checks those first); an MCP token
-        is refused everywhere else, and any other token by the MCP servers."""
-        if scope not in ("api", "mcp"):
-            raise Invalid("a token is for the API or for MCP")
+        is refused everywhere else, and any other token by the MCP servers. ``scope="portal"`` is a service's token
+        for the hub's ``/api/portal/`` only (the portal's own process holds it; it opens nothing else)."""
+        if scope not in ("api", "mcp", "portal"):
+            raise Invalid("a token is for the API, for MCP or for the portal")
         target = self.member(mid)
         if target["kind"] == "person":
             allowed = actor["id"] == mid or actor.get("kind") == "installer"
@@ -2440,6 +2449,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                             ": only its sponsor issues them"))
         if target["status"] != "active":
             raise Invalid(f"{target['name']} is switched off")
+        if scope == "portal" and target["kind"] != "service":
+            raise Invalid("a portal token is a service's (the practice's [portal] member)")
         token = "ph_" + secrets.token_urlsafe(32)
         th = self._hash_token(token)
         row = {"_id": th, "token_hash": th, "member": mid, "label": label, "created_at": utcnow(), "revoked": 0,

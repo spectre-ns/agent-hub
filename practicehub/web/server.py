@@ -228,6 +228,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 return self.handle_wopi(method, raw_path, headers, body)
             if path.startswith("/mcp/"):  # MCP servers, with a member's token (mcp_pages, mcp.py)
                 return self.handle_mcp(method, raw_path, headers, body)
+            if path.startswith("/api/portal/"):  # the portal's own process, with its portal-scoped token
+                from . import portal_api
+                return portal_api.handle(self, method, path, headers, body)
             return self._dispatch(method, path, query, is_api, req, headers)
         except Transient:  # the database stayed busy past every retry: nothing of this transaction was saved
             msg = "The hub is busy with other work; try again in a moment."
@@ -3736,10 +3739,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         return about
 
     OUTBOX_STATUS = {"queued": "Waiting for the connector", "sending": "Being sent", "sent": "Sent",
-                     "failed": "Failed", "delivered": "Delivered by hand"}
+                     "failed": "Failed", "delivered": "Delivered by hand",
+                     "withdrawn": "Withdrawn (a sign-in code, used or expired)"}
 
     def _message_status(self, r) -> str:
-        cls = {"sent": "done", "delivered": "done", "failed": "overdue"}.get(r["status"], "due")
+        cls = {"sent": "done", "delivered": "done", "withdrawn": "done", "failed": "overdue"}.get(r["status"], "due")
         out = f'<span class="badge {cls}">{e(self.OUTBOX_STATUS.get(r["status"], r["status"]))}</span>'
         if r["status"] in ("queued", "sending") and r.get("escalated"):
             out += ' <span class="badge overdue">Late</span>'
@@ -3937,10 +3941,17 @@ meaning = "I approve this"
 
 
 # ================================================================================================== server
-def make_handler(app: App, only: str | None = None):
-    """``only``: a path prefix this listener serves, and nothing else (the WOPI listener Collabora reaches)."""
+def make_handler(app, only: str | None = None, *, max_body: int = MAX_BODY, timeout: float | None = 60,
+                 client=client_address):
+    """``only``: a path prefix this listener serves, and nothing else (the WOPI listener Collabora reaches).
+    ``max_body``: the largest request, refused before it is read. ``timeout``: seconds a connection may sit idle (a
+    slow client holds no thread for ever). ``client``: where a request came from, from its peer and headers."""
     class Handler(BaseHTTPRequestHandler):
         server_version = "PracticeHub"
+
+        def setup(self):
+            self.timeout = timeout
+            super().setup()
 
         def _chunked(self) -> bytes | None:
             out = b""
@@ -3954,7 +3965,7 @@ def make_handler(app: App, only: str | None = None):
                     while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
                         pass
                     return out
-                if len(out) + size > MAX_BODY:
+                if len(out) + size > max_body:
                     return None
                 out += self.rfile.read(size)
                 self.rfile.readline(4)
@@ -3972,8 +3983,8 @@ def make_handler(app: App, only: str | None = None):
             chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
             body = self._chunked() if chunked else None
             if chunked and body is None:
-                n = MAX_BODY + 1
-            if n < 0 or n > MAX_BODY:  # refused before it is read: a request is never larger than a file and a form
+                n = max_body + 1
+            if n < 0 or n > max_body:  # refused before it is read: a request is never larger than a file and a form
                 self.send_response(413 if n > 0 else 400)
                 self.send_header("Content-Length", "0")
                 self.send_header("Connection", "close")
@@ -3983,7 +3994,7 @@ def make_handler(app: App, only: str | None = None):
             if not chunked:
                 body = self.rfile.read(n) if n else b""
             headers = {k.lower(): v for k, v in self.headers.items()}
-            headers[CLIENT_HEADER] = client_address(self.client_address[0], headers)  # set here, never by the client
+            headers[CLIENT_HEADER] = client(self.client_address[0], headers)  # set here, never by the client
             status, h, payload = app.handle(self.command, self.path, headers, body)
             self.send_response(status)
             for k, v in h.items():

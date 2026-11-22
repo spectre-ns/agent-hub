@@ -46,7 +46,14 @@ outbox              id                                     id at channel recipie
 passphrases         member                                 member hash set_at set_by
 setup_codes         code_hash                              code_hash member issued_by created_at expires_at used_at
 sessions            session_hash                           session_hash member created_at expires_at revoked
-signin_failures     member                                 member count first_at locked_until
+signin_failures     member                                 member count first_at locked_until (the portal's
+                                                           keys too: "portal client <address>", "portal id <hash>")
+portal_codes        hash of the sign-in's token            record code_hash identifier outbox attempts created_at
+                                                           expires_at used_at (``portal``: one-time codes, hashed)
+portal_sessions     hash of the session's token            record created_at expires_at revoked form
+portal_counts       key and window                         key n expires_at     (the portal's caps and ceilings)
+portal_submits      hash of the person and the form token  done record what state result created_at expires_at
+                                                           (a form sent twice gets one answer, its ``done`` page)
 counters            sequence name                          n
 
 ``records.words`` is every word of the record's values, folded (a search matches the start of one, by index);
@@ -90,6 +97,10 @@ INDEXES = {
     "outbox": ["status", "channel"],
     "sessions": ["member"],
     "setup_codes": ["member"],
+    "portal_codes": ["expires_at"],
+    "portal_sessions": ["record", "expires_at"],
+    "portal_counts": ["expires_at"],
+    "portal_submits": ["done", "expires_at"],
 }
 
 

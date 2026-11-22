@@ -120,6 +120,14 @@ def test_a_module_reference_to_subject_takes_the_practices_subjects(firm):
     assert firm.concrete(["Subject", "TaxSlip"]) == ["Client", "TaxSlip"]
 
 
+def test_a_practice_without_a_portal_has_none(firm):
+    """``[portal]`` is a pack's choice: a firm that sets none loads, and has no portal to serve."""
+    from practicehub.portal import Portal, check_config
+    assert firm.pack.portal == {} and check_config(firm.pack) == []
+    with pytest.raises(ValueError, match="no \\[portal\\]"):
+        Portal(firm)
+
+
 def test_the_core_names_no_pack_type():
     """The core reads a pack's records through its base types; its code names none of a pack's types. (Words in
     comments and docstrings may give examples; the Medplum store is a FHIR adapter, so it names FHIR's.)"""

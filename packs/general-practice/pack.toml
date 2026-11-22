@@ -214,7 +214,8 @@ read = ["clinical", "visits", "demographics", "privacy"]
 policy_owner = true              # a second policy owner: approvals never wait on one person
 
 [grants.patient-portal]
-write = ["demographics", "intake", "correspondence"]
+# visits: written, never read, and only by a move the visit's own workflow waits on (a patient cancelling online)
+write = ["demographics", "intake", "correspondence", "visits"]
 
 [grants.lab-interface]
 write = ["clinical"]
@@ -230,6 +231,76 @@ slot_stride = 2
 lookahead_days = 5
 max_slots = 16
 hours = { mon = ["09:00", "17:00"], tue = ["09:00", "17:00"], wed = ["09:00", "17:00"], thu = ["09:00", "19:00"], fri = ["09:00", "13:00"] }
+
+# ----------------------------------------------------------------------------------------------------------- portal
+# The online booking portal (practicehub portal serve; docs/portal.md): what patients may book from the internet. It
+# acts as the portal member (patient-portal: it writes contact details, intake and messages, and starts the workflows
+# that name it as a starter), never reads the chart, and books only by starting a workflow. The portal's pages are a
+# process of their own with a portal-scoped token of that member; this hub keeps the codes, sessions and the track.
+# Like every setting here, a change to [portal] on an existing hub waits for two policy owners (practicehub upgrade).
+[portal]
+member = "portal"
+title = "Harbourview Family Medicine: book online"
+welcome = "Book a visit about forms or paperwork, or ask to be seen about something new. In an emergency, call 911."
+privacy = "What you give here is used only to arrange your care at Harbourview Family Medicine, under Nova Scotia's PHIA, and it stays in Canada."
+contact_line = "To change anything else, call the front desk."
+intake_workflow = "new-patient-intake"
+
+[portal.wording]
+booking = "Visit"
+requested = "We have your request. A member of our team reads it and contacts you, usually within one working day."
+
+[portal.identity]
+born = "birthDate"            # with the health card ([base] identifier) and a code sent to the phone ([base] contact)
+inputmode = "numeric"         # a health card number: the phone shows digits
+
+[portal.code]
+channel = "sms"               # no SMS provider is connected yet: the code waits on the outbox (see docs/portal.md)
+minutes = 10
+length = 6
+
+[portal.register]
+fields = ["given", "family", "birthDate", "health_card", "phone"]
+pending = { active = false }  # a request to join: no sign-in, no booking, until the intake accepts the patient
+
+# A new concern goes in as a request: the appointment request screens the reason for red flags (and says at once
+# what to do in an emergency), and a nurse reads anything not plainly routine before a slot is booked.
+[portal.kinds.new-concern]
+label = "A new concern"
+description = "Something new you would like to see a physician about. Tell us what it is; a nurse reads it first."
+mode = "request"
+workflow = "appointment-request"
+roles = ["physician"]
+minutes = 15
+horizon_days = 14
+slot = "optional"             # choose a time, or say what suits you
+inputs = { kind = "new-concern" }
+questions = [{ input = "reason", label = "What would you like to be seen about?", help = "As much as you want to say. A nurse reads it." }, { input = "urgency", label = "How soon do you need to be seen?", choices = { routine = "In the next few weeks", soon = "In the next few days", urgent = "Today or tomorrow" } }]
+screen = "screen"             # the reason is read for red flags before anyone books
+max_upcoming = 2
+advice = "screen.advice"
+alarm = "screen == null or screen.red_flag == true or screen.unsure == true or input.urgency == 'urgent'"
+booking_kind = "new-concern"
+
+# Forms and paperwork are booked straight away, and may be cancelled online up to a day before.
+[portal.kinds.forms]
+label = "Forms or paperwork"
+description = "A short visit for a form, a note or other paperwork."
+mode = "book"
+workflow = "appointment-request"   # the visit asked for with the time chosen: booked at once only if screened routine
+roles = ["physician"]
+minutes = 15
+horizon_days = 21
+inputs = { kind = "forms", urgency = "routine" }
+questions = [{ input = "reason", label = "Which form or paperwork?", help = "For example: a driver's medical, a sick note." }]
+screen = "screen"             # read for red flags too: anything not plainly paperwork goes to a nurse, not the calendar
+advice = "screen.advice"
+alarm = "screen == null or screen.red_flag == true or screen.unsure == true"
+booked = "book-chosen"
+booking_kind = "forms"
+max_upcoming = 2
+cancel_to = "cancelled"       # a move the visit's workflow waits on while it is booked
+cancel_before_hours = 24
 
 # The same labels as the record types (types/*.toml), for anything that reads labels from here.
 [record_labels]
