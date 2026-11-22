@@ -879,6 +879,27 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
         tag = f' <span class="badge {m["kind"]}">{m["kind"]}</span>' if m["kind"] != "person" else ""
         return f'<span class="who">{self._av(m)}<a href="/team/{e(m["id"])}">{e(m["name"])}</a>{tag}</span>'
 
+    def mention_text(self, text: str) -> str:
+        """Text someone wrote (a comment, a reply), escaped, with each ``@id`` of a member shown as that member: avatar,
+        name (a link to their page) and the agent badge. The stored text keeps the id; an ``@`` of nobody stays as written."""
+        cache: dict = {}
+
+        def one(m):
+            mid = m.group(1)
+            if mid not in cache:
+                try:
+                    cache[mid] = self.hub.member(mid)
+                except NotFound:
+                    cache[mid] = None
+            mem = cache[mid]
+            if mem is None:
+                return m.group(0)
+            tag = f' <span class="badge {e(mem["kind"])}">{e(mem["kind"])}</span>' if mem["kind"] != "person" else ""
+            return (f'<span class="at who" data-member="{e(mid)}">{self._av(mem)}'
+                    f'<a href="/team/{e(mid)}">{e(mem["name"])}</a>{tag}</span>')
+        out = e(text or "").replace("\n", "<br>")
+        return re.sub(r"(?<![\w@/&#;])@([a-z0-9][a-z0-9_.-]*[a-z0-9])", one, out)
+
     def _at(self, ts: str) -> str:
         """A time as pages show it: in the practice's time zone (``clock.shown``; the track keeps instants in UTC)."""
         from .. import clock
@@ -1050,7 +1071,7 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
             colhtml = []
             for cid, label, cls in cols:
                 tiles = [self._tile(i, self._item_moves(me, i), back) for i in its if column(i) == cid]
-                colhtml.append(f'<section class="col" data-col="{cid}" aria-label="{e(label)}"><header><span class="loz {cls}">{e(label)}'
+                colhtml.append(f'<section class="col" data-col="{cid}" aria-label="{e(label)}"><header><span class="col-name">{e(label)}'
                                f'</span><span class="n">{len(tiles)}</span></header>{"".join(tiles)}</section>')
             out.append(f'<div class="board">{"".join(colhtml)}</div>')
         if not items:
@@ -2188,9 +2209,9 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
         if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
             parts.insert(2, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
         extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))]
-        return self.layout(req, self.hub.title(p), "".join(parts), heading=False,
-                           crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.title(p))],
-                           subnav=self.owner_rail(self.hub.title(p), rail, extra, label=self.subj["label"]))
+        return self.layout(req, self.hub.short_title(p), "".join(parts), heading=False,
+                           crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.short_title(p))],
+                           subnav=self.owner_rail(self.hub.short_title(p), rail, extra, label=self.subj["label"]))
 
     # ------------------------------------------------------------------------------------------ runs
     def post_retry(self, req, rid, sid):
@@ -2920,7 +2941,7 @@ class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePag
             whose = self.hub.records.read(*subject.split("/", 1)) if "/" in subject else None
         except Exception:  # noqa: BLE001
             whose = None
-        head = f"<h2>{e(self.hub.title(whose))}</h2>" if whose else ""
+        head = f"<h2>{e(self.hub.short_title(whose))}</h2>" if whose else ""
         return self.layout(req, "Access report", form + head + dl + table,
                            crumbs=[("/track", "Track"), (None, "Access report")])
 

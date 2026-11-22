@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 # how a visit's status reads in its one-line label (planned is FHIR's word for booked)
 STATUS_WORDS = {"planned": "booked", "in-progress": "in progress", "onleave": "on leave", "noshow": "no-show",
                 "entered-in-error": "entered in error"}
+SETTING_WORDS = {"AMB": "in clinic", "VR": "virtual", "HH": "home visit"}   # the visit's class (v3-ActCode)
 FEES = {"minor-assessment": 35, "complete-assessment": 65, "counselling": 55, "renewal-no-visit": 15}
 SEVERITY = {"normal": 0, "abnormal": 1, "critical": 2}
 
@@ -47,6 +48,19 @@ def _text(cc) -> str:
 
 def _day(v) -> str:
     return str(v or "")[:10]
+
+
+def _date_words(v, time: bool = True) -> str:
+    """A date or date-time in words: Mon Nov 23, 09:00 (a booking), Nov 23, 2026 (a day); else as written."""
+    from datetime import datetime as _dt
+    v = str(v or "")
+    try:
+        d = _dt.fromisoformat(v[:16] if "T" in v else v[:10])
+    except ValueError:
+        return v[:16].replace("T", " ")
+    if time and "T" in v:
+        return f"{d:%a %b} {d.day}, {d:%H:%M}"
+    return f"{d:%b} {d.day}, {d.year}"
 
 
 def _quantity(q) -> str:
@@ -131,14 +145,15 @@ def summarize(rec: dict) -> str:
         return f"{med}{f', {dose}' if dose else ''} (taking: {rec.get('status', 'unknown')})"
     if t == "Encounter":
         booked = str(rec.get("plannedStartDate") or "")
-        when = _day((rec.get("period") or {}).get("start")) or booked[:10]
+        when = _date_words((rec.get("period") or {}).get("start") or booked, time=False)
         if rec.get("status") in ("planned", "arrived", "triaged", "in-progress", "onleave") and booked:
-            when = booked[:16].replace("T", " ")  # a booking is known by its time
+            when = _date_words(booked)  # a booking is known by its time: Mon Nov 23, 09:00
         reason = _text(rec.get("reasonCode"))  # clinical: a title (read by every reader) is made without it
-        cls = _text(rec.get("class"))
+        code = (rec.get("class") or {}).get("code") if isinstance(rec.get("class"), dict) else None
+        cls = SETTING_WORDS.get(code or "") or _text(rec.get("class"))
         kind = _text(rec.get("type"))
         status = rec.get("status") if rec.get("status") not in ("finished", None) else ""
-        return _join(f"Visit {when}".strip(), reason, " ".join(x for x in (kind, cls) if x),
+        return _join(f"Visit {when}".strip(), reason, ", ".join(x for x in (kind, cls) if x),
                      status and STATUS_WORDS.get(status, status))
     if t == "Composition":
         when = _day(rec.get("date"))

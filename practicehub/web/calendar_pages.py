@@ -74,12 +74,13 @@ class CalendarPages:
                "name": "Busy", "reason": "", "state": ""}
         if sees:
             rec = self.hub.redact(me, self.hub.records.read(*subj.split("/", 1))) if subj else None
-            full = self.hub.title(rec) if rec else (subj or self.hub.record_type(b["type"]).label)
+            full = self.hub.short_title(rec) if rec else (subj or self.hub.record_type(b["type"]).label)
             out["name"] = re.split(r" \(| · ", full, maxsplit=1)[0].strip() or full  # its name part: the grid is narrow
             out["full"] = full
             out["reason"] = str(b.get("reason") or "")
             rt = self.hub.record_type(b["type"])
-            out["state"] = str(schema.first(b["record"], rt.lifecycle["path"]) or "") if rt and rt.lifecycle else ""
+            st = str(schema.first(b["record"], rt.lifecycle["path"]) or "") if rt and rt.lifecycle else ""
+            out["state"] = self._state_words(rt, st).lower() if st else ""  # in words: in progress, not in-progress
         return out
 
     def _block(self, x: dict, *, row0: datetime | None = None, slot: int = 15) -> str:
@@ -402,7 +403,7 @@ class CalendarPages:
                    + (f'<ul>{"".join(f"<li>{e(p)}</li>" for p in probs)}</ul>' if probs else "") + "</div>")
         url = f"/records/{e(rtype)}/{e(rid)}/reschedule"
         body = (f'<div data-modal-body>{err}<form method="post" action="{url}" class="card stack" id="reschedule">'
-                f'<p class="muted">{e(self.hub.title(rec))}: {mins} min'
+                f'<p class="muted">{e(self.hub.short_title(rec))}: {mins} min'
                 + (f', now {span[0]:%A %B} {span[0].day} at {span[0]:%H:%M}' if span else "") + '.</p>'
                 f'<input type="hidden" name="_from" value="{e(held[0] if held else "")}">'
                 f'<input type="hidden" name="_version" value="{e(str((rec.get("meta") or {}).get("versionId", "")))}">'
@@ -413,7 +414,7 @@ class CalendarPages:
                   f'<a class="btn secondary" href="{e(self.record_href(f"{rtype}/{rid}"))}" data-modal-close>Cancel</a>'
                   f'</div></form></div>')
         return self.layout(req, f"Move {a_an_label(rt.label).lower()}", body,
-                           crumbs=[("/schedule", "Schedule"), (self.record_href(f"{rtype}/{rid}"), self.hub.title(rec)),
+                           crumbs=[("/schedule", "Schedule"), (self.record_href(f"{rtype}/{rid}"), self.hub.short_title(rec)),
                                    (None, "Move")])
 
     def post_reschedule(self, req, rtype, rid):

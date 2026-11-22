@@ -285,7 +285,7 @@ border-radius:0;clip-path:polygon(50% 0,100% 100%,0 100%);padding-top:4px}
 nav.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid var(--border);margin:0 0 16px}nav.tabs a{padding:6px 10px;color:var(--subtle);text-decoration:none;margin-bottom:-2px;border-bottom:2px solid transparent}nav.tabs a:hover{color:var(--fg)}nav.tabs a[aria-current]{color:var(--selected-fg);border-bottom-color:currentColor;font-weight:600}.issue-side h2{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--subtle);margin:16px 0 4px}.sign{font-size:14px}
 
 /* ---- tables (wrap wide ones in <div class="tablewrap">) */
-.tablewrap{overflow-x:auto;max-width:100%;margin:0 0 16px}
+.tablewrap{overflow-x:auto;position:relative;max-width:100%;margin:0 0 16px}
 .tablewrap>table{margin:0}
 table{width:100%;border-collapse:collapse;border:0;background:transparent;margin:0 0 16px}
 th,td{text-align:left;padding:8px;vertical-align:top}
@@ -597,10 +597,11 @@ color:var(--subtle);background:var(--neutral)}
 /* ---- board */
 .stat{font-size:32px;line-height:40px;font-weight:600;margin:0}
 table.chart th{width:30%;font-weight:400}.bar{display:inline-block;height:12px;border-radius:2px;background:var(--brand);vertical-align:middle}
-.board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(272px,1fr);gap:8px;overflow-x:auto;padding-bottom:8px}
+.board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(208px,1fr);gap:8px;overflow-x:auto;padding-bottom:8px;position:relative;min-width:0}
 .col{background:var(--sunken);border-radius:3px;padding:8px;min-height:200px}
 .col>header{display:flex;align-items:center;gap:8px;padding:4px 4px 12px;font-size:12px;line-height:16px;font-weight:600;
-color:var(--subtle);text-transform:uppercase}.col>header .n{font-weight:600}
+color:var(--subtle)}.col>header .col-name{font-size:14px;line-height:20px;color:var(--fg)}
+.col>header .n{font-weight:600;min-width:20px;padding:0 6px;border-radius:10px;background:var(--neutral);text-align:center}
 .lane{margin:16px 0 8px;font-weight:600;display:flex;align-items:center;gap:8px}
 .tile{display:block;background:var(--raised);border-radius:3px;box-shadow:var(--shadow-raised);padding:12px;margin-bottom:8px;color:var(--fg)}
 .tile:hover{background:var(--raised-hover);color:var(--fg);text-decoration:none}
@@ -724,7 +725,7 @@ fieldset.fb-chips{margin:0}fieldset.fb-chips[aria-invalid=true]{outline:2px soli
 .cal-who select{width:auto;margin:0}.cal-who label{margin:0}
 .cal-title{font-size:16px;line-height:20px;margin:0 0 0 8px}
 .cal-views .btn.selected{background:var(--selected-bg);color:var(--selected-fg)}
-.cal-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+.cal-wrap{overflow-x:auto;position:relative;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
 .cal{display:grid;grid-template-columns:52px repeat(var(--cols),minmax(132px,1fr));min-width:min-content}
 .cal-corner{border-bottom:1px solid var(--border);background:var(--surface)}
 .cal-day{text-align:center;font-weight:600;font-size:13px;padding:6px 4px;border-left:1px solid var(--border);
@@ -764,7 +765,7 @@ a.cal-ev:hover{background:var(--selected-bg);text-decoration:none}
 .booking-when{font-size:14px;margin:0}
 @media (max-width:600px){.cal-wrap{display:none}.cal-list{display:block}.cal-title{margin:0;flex-basis:100%}}
 @media (max-width:480px){
-  main table:not(.kv){display:block;overflow-x:auto;white-space:nowrap}
+  main table:not(.kv){display:block;overflow-x:auto;white-space:nowrap;position:relative}
   .top{gap:4px;padding:0 8px}
   .logo span:not(.mark){display:none}
   .board{grid-auto-columns:minmax(240px,85vw)}
@@ -1006,8 +1007,10 @@ document.querySelectorAll("textarea[data-check]").forEach((t) => {
     try {
       const r = await fetch(t.dataset.check, { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: t.value }) });
+      if (r.status === 401) { s.textContent = "Sign in again to check this."; return; }
       const j = await r.json();
       s.textContent = "";
+      if (!r.ok && !(j.problems && j.problems.length)) { s.textContent = "The hub could not check this: " + (j.error || r.status); return; }
       if (!j.problems || !j.problems.length) {
         const ok = document.createElement("span"); ok.className = "loz done"; ok.textContent = "ready";
         s.append(ok, " The hub accepts this."); return;
@@ -1020,7 +1023,7 @@ document.querySelectorAll("textarea[data-check]").forEach((t) => {
     } catch (e) { s.textContent = "Could not reach the hub to check."; }
   }
   t.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(check, 500); });
-  if (t.value.trim()) check();
+  if (t.value.trim() && !s.dataset.checked) check();
 });
 // The record type builder: a field's choices and its target show for the types that use them.
 document.querySelectorAll("select[data-fb-type]").forEach((sel) => {
@@ -3021,7 +3024,7 @@ ul.threads{display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
 .thread .replies{margin:6px 0 0 12px;padding-left:8px;border-left:1px solid var(--border)}
 .thread details.c-reply summary{cursor:pointer;color:var(--link);font-size:12px}
 .thread form.inline{display:inline}
-.at{color:var(--link);font-weight:600}
+.at{font-weight:600;gap:4px}.at .av{width:18px;height:18px;font-size:9px}.at .badge{font-size:10px}
 mark.c-mark{background:var(--warning-bg);color:inherit;border-bottom:2px solid var(--warning-icon);cursor:pointer}
 .page-comments{max-width:780px;margin-top:32px;padding-top:16px;border-top:1px solid var(--border)}
 .c-pop{position:absolute;z-index:30;box-shadow:var(--shadow-overlay)}

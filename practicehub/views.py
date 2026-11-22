@@ -486,6 +486,13 @@ def _words_value(hub, member: dict, rtype: str | None):
         f = rt.field(path) if rt else None
         if f is None and rt:
             f = next((g for g in rt.fields if g["path"] == path), None)
+        if f is not None and f["type"] == "choice":  # a code in words (AMB: "In clinic")
+            v = _value(row, f["path"])
+            if v in (None, ""):
+                return v
+            if rt.lifecycle and f["path"] == rt.lifecycle["path"] and hasattr(rt, "state_label"):
+                return rt.state_label(v)  # a state in the lifecycle's words
+            return schema.choice_words(f, v)
         if f is None or f["type"] not in ("reference", "member"):
             return _value(row, f["path"] if f else path)
         raw = schema.first(row, f["path"])
@@ -507,7 +514,7 @@ def _words_value(hub, member: dict, rtype: str | None):
             except Exception:  # noqa: BLE001
                 return ref
         rec = hub.records.read(t, rid) if hub.record_type(t) and hub.may_read(member, t) else None
-        return hub.title(rec) if rec else ref
+        return hub.short_title(rec) if rec else ref
     return value
 
 

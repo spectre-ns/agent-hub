@@ -273,7 +273,7 @@ class OfficePages:
         if write and any(s["current"] for s in hub.signatures(me, ref)):
             notes.append("This version is signed. Saving a change makes a new version, which is not signed.")
         theme = f' data-theme="{e(prefs["theme"])}"' if prefs.get("theme") in ("light", "dark") else ""
-        title = hub.title(rec)
+        title = hub.short_title(rec)
         rt = hub.record_type(rtype)
         a = self.wopi.attachment(rec, field, blob) or {"blob": blob, "name": sess["name"]}
         here = req.get("path") or f"{back}/office/{field}/{blob}"

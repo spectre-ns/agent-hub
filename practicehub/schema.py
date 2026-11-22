@@ -14,6 +14,8 @@ answer that becomes a record, an engine calling the API.
     date = "effectiveDateTime"    # the path that dates a record (charts and lists sort by it, newest first)
     flag = "interpretation.0.text"  # a path whose value is shown as a flag (abnormal, high, overdue...)
     title = "{name}[ (born {birthDate})]"   # how a record is named: field (or base field) values; [...] is optional
+    short_title = "{name}"        # how it is named where a name travels on screen (tab title, breadcrumbs, headings,
+                                  #   tooltips, notices): leave out an identifier that belongs only on the record itself
     parent = "parent"             # a reference field to the same type: its records form a tree (pages under pages, folders)
     part_of = "subject"           # a reference field (or base field) naming the one record that owns it: an allergy is
                                   #   part of its patient, a visit note part of its visit. It is reached only through its
@@ -39,6 +41,7 @@ answer that becomes a record, an engine calling the API.
     name = "status"               # the key in the record, unless ``path`` says where (``code.text``, ``name.0.family``)
     type = "choice"               # string text markdown number boolean date datetime choice member reference attachment json object list
     choices = ["preliminary", "final", "amended"]
+    # labels = { amended = "Corrected" }   # a choice's words where its code is not words (AMB = "In clinic")
     required = true
 
     [[field]]
@@ -131,6 +134,7 @@ class RecordType:
     extends: str | None = None   # the core base type it extends
     base_map: dict = field(default_factory=dict)   # base field -> {"fields": [own field names]} or {"when": expr}
     title: str | None = None  # how a record of it is named: "{name}", "{start}[ {reason}]"
+    short_title: str | None = None  # how it is named in navigation (tab title, crumbs, headings, tooltips); else title
     screens: dict = field(default_factory=dict)  # id -> {"id", "on": [ops], "tabs": [{"label", "fields": [names]}]}
     parent: str | None = None  # the path of a reference to its own type: its records form a tree
     part_of: dict | None = None  # {"field", "path", "target"}: the reference to the one record that owns it
@@ -183,10 +187,10 @@ class RecordType:
 # Every key each table of a record type may hold: anything else is a typo, said so rather than quietly ignored.
 KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
-         "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "screen", "parent",
+         "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
          "part_of",
          "navigator", "layout", "standard", "consent"},
-    "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "max_length", "min",
+    "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
@@ -257,6 +261,15 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
             problems.append(f"{where}: choices lists {next(c for c in choices if choices.count(c) > 1)!r} twice")
     if typ == "choice" and not choices:
         problems.append(f"{where}: a choice needs choices")
+    labels = raw.get("labels")
+    if labels is not None:
+        if not isinstance(labels, dict) or not all(isinstance(v, str) and v.strip() for v in labels.values()):
+            problems.append(f"{where}: labels is a table of choice = its words, e.g. {{ AMB = \"In clinic\" }}")
+        elif not choices:
+            problems.append(f"{where}: labels are the words of its choices; it has none")
+        else:
+            problems += [f"{where}: labels: {k!r} is not one of its choices" for k in labels
+                         if k not in [str(c) for c in choices]]
     target = raw.get("target")
     if target is not None and not (isinstance(target, str) or _strings(target)):
         problems.append(f"{where}: target is a record type, or a list of them")
@@ -283,7 +296,7 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
     f = {"name": name, "path": path, "type": typ, "label": raw.get("label") or default_label(name),
          "required": raw.get("required", False), "help": raw.get("help", ""),
          "target": [target] if isinstance(target, str) else list(target), "rel": raw.get("rel") or None,
-         "choices": list(choices or []), "max_length": ml, "min": raw.get("min"), "max": raw.get("max"),
+         "choices": list(choices or []), "labels": dict(labels or {}), "max_length": ml, "min": raw.get("min"), "max": raw.get("max"),
          "list": raw.get("list", False), "show": raw.get("show", True),
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
@@ -337,7 +350,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
     for k in ("subject", "strict", "alert", "abstract"):
         if k in doc and not isinstance(doc[k], bool):
             problems.append(f"{k}: true or false, not {doc[k]!r}")
-    for k in ("label", "plural", "summary", "data_class", "title", "active", "date", "flag", "parent", "extends",
+    for k in ("label", "plural", "summary", "data_class", "title", "short_title", "active", "date", "flag", "parent", "extends",
               "part_of"):
         if k in doc and not isinstance(doc[k], str):
             problems.append(f"{k}: text, not {doc[k]!r}")
@@ -527,17 +540,20 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                     alert=doc.get("alert") is True, active=active, order=order,
                     lifecycle=lc, summary=str(doc.get("summary", "")), source=source, signatures=sigs,
                     abstract=abstract, extends=base.id if base else None, base_map=base_map,
-                    title=doc.get("title"), screens=screens)
+                    title=doc.get("title"), short_title=doc.get("short_title"), screens=screens)
     if base is not None:
         rt.date = rt.date or base.date
         rt.subject = doc.get("subject", base.id == "Subject") is True
-    if rt.title:
-        problems += [f"title: {p}" for p in _check_title(rt.title)]
+    for key in ("title", "short_title"):
+        tmpl = getattr(rt, key)
+        if not tmpl:
+            continue
+        problems += [f"{key}: {p}" for p in _check_title(tmpl)]
         known = {f["name"] for f in fields if "*" not in f["path"]} | set(base_map)
-        for n in TITLE_PART.findall(rt.title):
+        for n in TITLE_PART.findall(tmpl):
             if n not in known:
                 near = difflib.get_close_matches(n, sorted(known), n=1)
-                problems.append(f"title: {{{n}}} is not one of its fields" + (f" (did you mean {{{near[0]}}}?)"
+                problems.append(f"{key}: {{{n}}} is not one of its fields" + (f" (did you mean {{{near[0]}}}?)"
                                                                            if near else ""))
     if doc.get("parent"):
         pf = rt.field(str(doc["parent"]))
@@ -845,6 +861,13 @@ def bases() -> dict[str, RecordType]:
             out[rt.id] = rt
         _BASES = out
     return _BASES
+
+
+def choice_words(f: dict | None, v) -> str:
+    """A field's value in words: a choice's label when the field gives one (AMB: "In clinic"), else the value."""
+    if v is None:
+        return ""
+    return str(((f or {}).get("labels") or {}).get(str(v)) or v)
 
 
 def words(v) -> str:
@@ -1214,10 +1237,14 @@ def form_fields(rt: RecordType) -> list[dict]:
 
 
 def list_columns(rt: RecordType) -> list[dict]:
-    """The fields a list of a type's records shows beside its title and status: for a part, its owner first; then a
-    few short values. A list's export has the same columns."""
+    """The fields a list of a type's records shows beside its title and status: for a part, its owner first; else the
+    one subject it is about (a visit's patient: whose it is); then a few short values. A list's export has the same
+    columns."""
     heads = [f for f in form_fields(rt) if f["type"] in ("string", "choice", "date", "member", "number")][:3]
     owner = rt.field(rt.part_of["field"]) if rt.part_of else None
+    if owner is None:
+        owner = next((f for f in rt.fields if f["type"] == "reference" and f.get("rel") == "subject"
+                      and not f.get("list") and "*" not in f["path"] and f.get("show", True) is not False), None)
     if owner:
         heads = [owner] + [f for f in heads if f is not owner][:2]
     return heads

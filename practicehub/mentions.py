@@ -139,7 +139,7 @@ the file in ``field`` it is about, when it is about a file rather than the field
         mid = "mn-" + secrets.token_hex(6)
         rtype, rid = ref.split("/", 1)
         rec = hub.records.read(rtype, rid)
-        title = hub.title(rec) if rec else ref
+        title = hub.short_title(rec) if rec else ref
         with self.db:
             seq = hub.track.append(author, "mention.created", ref, cause=cause,
                                    data={"mention": mid, "who": m["id"], "kind": m["kind"], "anchor": anchor,

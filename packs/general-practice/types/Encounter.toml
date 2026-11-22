@@ -7,6 +7,7 @@ id = "Encounter"
 label = "Visit"
 plural = "Visits"
 data_class = "visits"
+standard = "fhir-r4"
 extends = "Booking"
 strict = true
 date = "plannedStartDate"
@@ -56,6 +57,7 @@ label = "Setting"
 path = "class.code"
 type = "choice"
 choices = ["AMB", "VR", "HH"]
+labels = { AMB = "In clinic", VR = "Virtual", HH = "Home visit" }
 with = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode" }
 help = "AMB in the clinic, VR virtual, HH at home"
 
