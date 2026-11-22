@@ -195,8 +195,11 @@ class Workflow:
 NOT_BY_PEOPLE = ("run", "record.editors")
 
 
-def parse(source: str, catalog=None) -> Workflow:
-    """Parse and validate a workflow. ``catalog`` (a Pack) checks roles, skills, actions and record types."""
+def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
+    """Parse and validate a workflow. ``catalog`` (a Pack) checks roles, skills, actions and record types.
+    ``stored``: a version already approved and kept. Rules added since it was approved are not applied to it, so it
+    reads and runs as it was approved (a hub on new code must not lose a version it has in force); new versions,
+    proposed or installed, get every rule."""
     try:
         doc = tomllib.loads(source)
     except tomllib.TOMLDecodeError as exc:
@@ -286,7 +289,7 @@ def parse(source: str, catalog=None) -> Workflow:
             until=raw.get("until") or None, wait_for=raw.get("for") or None, at=raw.get("at") or None,
             timeout=raw.get("timeout") or None)
         hidden = sorted(set(step.params) & {"when", "after", "until", "due", "escalate_to", "timeout", "for_each"})
-        if hidden:  # written after [steps.params] in TOML, a step setting silently becomes a parameter
+        if hidden and not stored:  # written after [steps.params] in TOML, a step setting silently becomes a parameter
             problems.append(f"{where}: {', '.join(hidden)} is a step setting, not a parameter: put it above "
                             f"[steps.params], with the step's other settings")
         if step.for_each and kind not in ("automation", "wait", "task"):

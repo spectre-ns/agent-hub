@@ -3566,7 +3566,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise NotFound(f"there is no workflow {wid!r}" + (f" version {version}" if version else ""))
         if row["status"] in ("active", "retired"):
             self._require_sealed("workflow", row)
-        return wfmod.parse(row["source"], None), row
+        return wfmod.parse(row["source"], None, stored=True), row
 
     def workflows(self) -> list[dict]:
         rows = self.db.workflow_versions.find({"status": "active"}, sort=[("workflow_id", ASC)])
@@ -3576,7 +3576,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self._require_sealed("workflow", r)
             except Invalid:
                 continue  # shown nowhere and started by nobody until restored; 'verify' names it
-            wf = wfmod.parse(r["source"], None)
+            try:
+                wf = wfmod.parse(r["source"], None, stored=True)
+            except wfmod.DefinitionError as exc:  # one unreadable version must not take every page down with it
+                print(f"workflow {r['workflow_id']} v{r.get('version')} cannot be read and is skipped: {exc}", flush=True)
+                continue
             pending = self.db.workflow_versions.count({"workflow_id": r["workflow_id"], "status": "proposed"})
             out.append({"workflow": wf, "row": r, "proposed": pending})
         return out

@@ -1290,6 +1290,22 @@ def test_a_step_setting_cannot_hide_among_its_parameters(hub):
         parse(src)
 
 
+def test_a_version_approved_before_a_new_rule_still_reads_and_runs_as_approved(hub):
+    """A new check applies to new versions, never to ones already approved and stored: a hub updated onto new code
+    keeps every page and its clock working (the demo hub went down on a stored version with when under its params)."""
+    src = hub.db.workflow_versions.find_one({"workflow_id": "appointment-request", "status": "active"})["source"]
+    bad = src.replace('[steps.params]\nchannel', '[steps.params]\nwhen = "input.urgency == \'never\'"\nchannel', 1)
+    assert bad != src
+    hub.db.workflow_versions.update({"workflow_id": "appointment-request", "status": "active"}, {"$set": {"source": bad}})
+    hub._require_sealed = lambda *a, **k: None  # the edit above stands in for a version sealed before the rule
+    wf, _ = hub.workflow("appointment-request")
+    assert any("when" in s.params for s in wf.steps)  # read as it was approved: a parameter, as it ran
+    assert "appointment-request" in [w["workflow"].id for w in hub.workflows()]
+    from practicehub.workflows import DefinitionError, parse
+    with pytest.raises(DefinitionError, match="step setting, not a parameter"):
+        parse(bad)  # proposed or installed anew, it is refused
+
+
 def test_only_the_authors_of_this_revision_may_not_approve_it(quality):
     """Who wrote an earlier, approved revision may approve the next one; otherwise two controllers lock each other out."""
     hub = quality
