@@ -14,6 +14,8 @@
     practicehub export --as rana --all --out /exports/2026-11-21    the whole hub: one .ndjson per type and a manifest
     practicehub owners recover --grant dr-amara         the server holder grants policy_owner when too few are left
     practicehub owners approve-switch-off --member rana the server holder approves a switch-off nobody else can
+    practicehub workflow export-bpmn referral > referral.bpmn   a workflow as BPMN 2.0, for BPMN tools
+    practicehub workflow import-bpmn referral.bpmn --propose --as rana   a BPMN file as a proposed workflow change
     practicehub openfga init --url http://localhost:8081
     practicehub keycloak realm > realm.json
 
@@ -721,6 +723,43 @@ def cmd_analytics(args):
     print(json.dumps(rep, indent=1) if args.json else "\n".join(analytics.lines(rep)))
 
 
+def cmd_workflow_export_bpmn(args):
+    """The workflow in force as BPMN 2.0 XML (with a diagram), for Camunda Modeler, bpmn.io and other BPMN tools."""
+    from . import bpmn
+    hub = build_hub(args)
+    wf, _ = hub.workflow(args.id)
+    xml = bpmn.export_bpmn(wf)
+    if args.out:
+        Path(args.out).write_text(xml, encoding="utf-8")
+        print(f"wrote {args.id} as BPMN to {args.out}")
+    else:
+        sys.stdout.write(xml)
+
+
+def cmd_workflow_import_bpmn(args):
+    """A BPMN file as workflow TOML on stdout (what could not be mapped on stderr); with --propose, proposed as a
+    change for a policy owner who did not write it to approve. Nothing is installed directly."""
+    from . import bpmn
+    path = Path(args.file)
+    if path.stat().st_size > bpmn.MAX_BYTES:
+        raise SystemExit(f"error: {path} is too large for a workflow")
+    hub = build_hub(args) if args.propose else None
+    try:
+        out = bpmn.import_bpmn(path.read_bytes(), hub.pack if hub else None)
+    except bpmn.BpmnError as exc:
+        raise SystemExit("error: " + "; ".join(exc.problems)) from None
+    for p in out.problems:
+        print(f"note: {p}", file=sys.stderr)
+    if not args.propose:
+        sys.stdout.write(out.source)
+        return
+    if not args.as_member:
+        raise SystemExit("error: --propose needs --as <member>, who proposes it")
+    res = hub.propose_workflow(_person(hub, args.as_member), out.source, args.note or f"Imported from {path.name}")
+    print(f"proposed {res['workflow_id']} v{res['version']}: a policy owner other than {args.as_member} approves it "
+          f"before it is used")
+
+
 def cmd_openfga_init(args):
     import urllib.request
     from .authz import OpenFGAAuthorizer, model_json
@@ -976,6 +1015,18 @@ def main(argv=None):
     p.add_argument("--days", type=int, choices=[7, 30, 90], default=30, help="the period (default 30 days)")
     p.add_argument("--json", action="store_true", help="print JSON, as /api/analytics gives it")
     p.set_defaults(fn=cmd_analytics)
+
+    wk = sub.add_parser("workflow", help="workflows: BPMN export and import").add_subparsers(dest="sub", required=True)
+    p = wk.add_parser("export-bpmn", help="print the workflow in force as BPMN 2.0 XML")
+    p.add_argument("id")
+    p.add_argument("--out", help="write to this file instead of stdout")
+    p.set_defaults(fn=cmd_workflow_export_bpmn)
+    p = wk.add_parser("import-bpmn", help="read a BPMN file as workflow TOML (stdout), or propose it with --propose")
+    p.add_argument("file")
+    p.add_argument("--propose", action="store_true", help="propose it as a workflow change (never installs it)")
+    p.add_argument("--as", dest="as_member", help="the member who proposes it")
+    p.add_argument("--note", help="what changes, and why")
+    p.set_defaults(fn=cmd_workflow_import_bpmn)
 
     fg = sub.add_parser("openfga", help="OpenFGA").add_subparsers(dest="sub", required=True)
     p = fg.add_parser("init", help="create a store and model, copy the hub's tuples into it")
