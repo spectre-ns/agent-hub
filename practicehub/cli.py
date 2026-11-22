@@ -12,6 +12,7 @@
     practicehub export --as rana --type Patient --format csv --out patients.csv   every record of a type (a policy owner)
     practicehub export --as rana --all --out /exports/2026-11-21    the whole hub: one .ndjson per type and a manifest
     practicehub owners recover --grant dr-amara         the server holder grants policy_owner when too few are left
+    practicehub owners approve-switch-off --member rana the server holder approves a switch-off nobody else can
     practicehub openfga init --url http://localhost:8081
     practicehub keycloak realm > realm.json
 
@@ -534,6 +535,17 @@ def cmd_owners_recover(args):
     print(f"{out['name']} is a policy owner again (role {out['role']}); the track records that the server holder did it")
 
 
+def cmd_owners_approve_switch_off(args):
+    sd = state_dir(args)
+    if not os.environ.get("PRACTICEHUB_SECRET") and not (sd / ".secret").exists():
+        raise SystemExit("approving as the server holder needs the secret that sealed the track: set PRACTICEHUB_SECRET")
+    hub = build_hub(args)
+    out = hub.holder_approves_switch_off(args.member)
+    print(f"{out['name']} is switched off; the track records that the server holder approved it"
+          + ("" if hub.policy_owner_count() >= hub.MIN_POLICY_OWNERS
+             else "; fewer than two policy owners are left: practicehub owners recover --grant <person>"))
+
+
 def cmd_module_list(args):
     from . import pack as packmod
     hub = build_hub(args)
@@ -882,6 +894,10 @@ def main(argv=None):
     p.add_argument("--grant", required=True, help="the person to make a policy owner")
     p.add_argument("--reason")
     p.set_defaults(fn=cmd_owners_recover)
+    p = ow.add_parser("approve-switch-off", help="the server holder approves a policy owner's request to switch "
+                                                 "someone off, when no other policy owner can (needs the secret)")
+    p.add_argument("--member", required=True, help="the member a policy owner asked to switch off")
+    p.set_defaults(fn=cmd_owners_approve_switch_off)
 
     pk = sub.add_parser("pack", help="the practice pack: its code and settings, under change control"
                         ).add_subparsers(dest="sub", required=True)

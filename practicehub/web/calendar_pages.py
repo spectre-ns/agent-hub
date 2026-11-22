@@ -492,6 +492,24 @@ class CalendarPages:
             raise Rendered(422, self.page_booking_new({**req, "query": {}}, kept=f, error=exc)) from None
         raise self._redirect(f"/schedule?date={start.date().isoformat()}#cal")
 
+    def tell_the_caller(self, run_id: str, waiting: list[dict] | None = None) -> str:
+        """The member may still be talking to the caller: what a run's checks say to tell them now (a step output's
+        ``advice``, e.g. to call 911) comes first, in the open, above what was sent on, never only by message.
+        Whatever way the request was taken (a calendar slot, a start form), the member who took it is told."""
+        if waiting is None:
+            waiting = self.hub.db.items.find({"run_id": run_id, "status": {"$in": ["open", "claimed"]}})
+        ctx = (self.hub.db.runs.get(run_id) or {}).get("ctx") or {}
+        outs = [o for o in ctx.values() if isinstance(o, dict)]
+        advice = list(dict.fromkeys(str(o["advice"]) for o in outs if isinstance(o.get("advice"), str) and o["advice"]))
+        if not advice:
+            return ""
+        urgent = any(it.get("priority") == "urgent" for it in waiting)
+        flagged = [str(x) for o in outs if o.get("red_flag") for x in (o.get("flags") or [])]
+        return (f'<div class="flash {"error" if urgent else "warning"}" role="alert"><p><b>Tell the caller now:</b> '
+                + " ".join(e(a) for a in advice) + "</p>"
+                + (f'<p>They mentioned {e(", ".join(dict.fromkeys(flagged)))}. Stay on the line until they know '
+                   "what to do; the request is marked urgent.</p>" if flagged else "") + "</div>")
+
     def _book_by_request(self, req, me, rt, wf, rec: dict, subject: str, start: datetime, who: str, f: dict):
         """Book through the type's request workflow: the time must be free now; the workflow is given the slot and
         what the member typed, and books it, or sends it on to someone first. The page says which."""
@@ -507,19 +525,7 @@ class CalendarPages:
         waiting = [it for it in self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})]
         roles = sorted({it.get("role") or "" for it in waiting} - {""})
         names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r)) or "someone"
-        # The member is still talking to the caller: what the run's checks say to tell them now (a step output's
-        # ``advice``, e.g. to call 911) comes first, in the open, above what was sent on, never only by message.
-        ctx = (self.hub.db.runs.get(run["id"]) or {}).get("ctx") or {}
-        outs = [o for o in ctx.values() if isinstance(o, dict)]
-        advice = list(dict.fromkeys(str(o["advice"]) for o in outs if isinstance(o.get("advice"), str) and o["advice"]))
-        urgent = any(it.get("priority") == "urgent" for it in waiting)
-        flagged = [str(x) for o in outs if o.get("red_flag") for x in (o.get("flags") or [])]
-        tell = ""
-        if advice:
-            tell = (f'<div class="flash {"error" if urgent else "warning"}" role="alert"><p><b>Tell the caller now:</b> '
-                    + " ".join(e(a) for a in advice) + "</p>"
-                    + (f'<p>They mentioned {e(", ".join(dict.fromkeys(flagged)))}. Stay on the line until they know '
-                       "what to do; the request is marked urgent.</p>" if flagged else "") + "</div>")
+        tell = self.tell_the_caller(run["id"], waiting)
         body = (f'<div data-modal-body>{tell}<div class="flash warning" role="status"><p><b>Not booked yet.</b> '
                 f'{e(self.member_name(who))}, {start:%A %B} {start.day} at {start:%H:%M} is still free: the reason '
                 f'went to {e(names)} first.</p></div><div class="card stack"><ul>'

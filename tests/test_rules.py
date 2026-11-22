@@ -1778,10 +1778,11 @@ def test_an_overdue_item_whose_escalation_role_is_empty_reaches_someone(hub):
 
 def test_a_practice_takes_on_and_replaces_people_without_code(hub):
     """A member admin adds a member, gives roles and re-sponsors agents; a role that approves changes or manages
-    members waits for a second policy owner."""
+    members, or reaches what the member admin does not (a physician's, for a practice manager), waits for a second
+    policy owner."""
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
     new = hub.add_member(rana, {"id": "dr-chen", "name": "Dr. Wei Chen", "roles": ["physician", "medical-director"]})
-    assert "physician" in new["roles"] and "medical-director" not in new["roles"]
+    assert "physician" not in new["roles"] and "medical-director" not in new["roles"]
     assert hub.role_request("dr-chen")["roles"] == ["medical-director", "physician"]
     with pytest.raises(Denied):
         hub.approve_roles(rana, "dr-chen")            # the one who asked does not approve
@@ -2429,8 +2430,11 @@ def test_a_member_admin_issues_a_one_time_setup_code(hub):
         hub.issue_setup_code(rana, "rana")  # not for themselves
     with pytest.raises(Invalid):
         hub.issue_setup_code(rana, "scribe-agent")  # agents use tokens
-    first = hub.issue_setup_code(rana, "dr-liam")
-    second = hub.issue_setup_code(rana, "dr-liam")
+    with pytest.raises(Denied):
+        hub.issue_setup_code(rana, "dr-liam")  # he reaches what she does not: a policy owner who does issues it
+    amara = M(hub, "dr-amara")
+    first = hub.issue_setup_code(amara, "dr-liam")
+    second = hub.issue_setup_code(amara, "dr-liam")
     issued = hub.db.events.find({"action": "credential.setup_issued", "subject": "member:dr-liam"})
     assert len(issued) == 2 and all(second["code"] not in json.dumps(r["data"]) for r in issued)
     assert second["code"] not in json.dumps(hub.db.setup_codes.find(), default=str)  # kept as a hash only
@@ -2487,7 +2491,7 @@ def _critical_page(hub):
 
 def _connector(hub, mid="pager", channels=("page",), reads=("clinical", "correspondence")):
     rana = M(hub, "rana")
-    hub.add_member(rana, {"id": mid, "kind": "service", "name": mid.capitalize(), "sponsor": "rana", "roles": []})
+    hub.add_member(rana, {"id": mid, "kind": "service", "name": mid.capitalize(), "sponsor": "dr-amara", "roles": []})
     hub.authz.write([(f"data_class:{c}", "reader", f"member:{mid}") for c in reads])
     for c in channels:
         hub.grant_channel(rana, mid, c)
@@ -3928,10 +3932,13 @@ def test_breaking_the_glass_needs_the_grant_and_a_reason_and_the_privacy_officer
     assert hub.withheld(noor, ref)["override"]["reason"].startswith("Patient collapsed")
     ev = hub.db.events.find_one({"seq": got["seq"]})
     assert ev["action"] == "record.viewed" and ev["data"]["how"] == "override" and ev["actor"] == "noor"
-    review = hub.db.items.find_one({"run_id": got["run"], "kind": "notice"})
-    owners = {m["id"] for m in hub.members("person") if hub.can(m, "policy_owner", "practice:main")}
-    assert review and review["assignee"] in owners and review["priority"] == "urgent"
-    assert "Patient collapsed" in review["title"]
+    # reviewed by the privacy officer (who records directives), never by a clinician the directive excludes (the
+    # medical director, here): the reason is on the notice, not in its title
+    reviews = hub.db.items.find({"run_id": got["run"], "kind": "notice"})
+    assert {r["assignee"] for r in reviews} == {"rana"} and set(got["told"]) == {"rana"}
+    review = reviews[0]
+    assert review["priority"] == "urgent" and "Patient collapsed" not in review["title"]
+    assert review["output"]["reason"].startswith("Patient collapsed")
     report = hub.access_report(M(hub, "rana"), ref)
     assert any(r.get("how") == "override" or (r.get("data") or {}).get("how") == "override" for r in report)
     assert "valueQuantity" not in hub.read_record(M(hub, "dr-liam"), obs), "only for the one who broke the glass"
@@ -4198,6 +4205,7 @@ def test_a_visit_a_directive_withholds_still_holds_its_time_on_the_calendar(hub)
                 if b["record"]["id"] == v["id"]]
         assert len(mine) == 1 and mine[0]["start"].startswith("2031-05-05T10:00"), who
         assert mine[0]["with"] and mine[0]["withheld"] == (not sees), who
+        assert (mine[0]["subject"] == {"reference": ref} or mine[0]["subject"] == ref) == sees, who
 
 
 def test_the_access_report_listing_check_uses_an_index_not_a_scan_of_the_track(hub):
@@ -4206,3 +4214,50 @@ def test_the_access_report_listing_check_uses_an_index_not_a_scan_of_the_track(h
          "at": {"$gte": "2026-01-01"}}
     plan = hub.db.events.c.find(q).sort([("_id", 1)]).limit(1).explain()["queryPlanner"]["winningPlan"]
     assert "refs_sha256" in json.dumps(plan) and "COLLSCAN" not in json.dumps(plan)
+
+
+def test_a_departing_practice_manager_is_switched_off_with_the_packs_own_staffing(hub):
+    """Two policy owners, one of them the only member admin, who leaves: the other asks; nobody else can approve,
+    so the server holder does. Then the server holder makes a second policy owner, and two give out the role."""
+    amara, rana = M(hub, "dr-amara"), M(hub, "rana")
+    assert [m["id"] for m in hub.member_admins()] == ["rana"] and hub.policy_owner_count() == 2
+    hub.request_switch_off(amara, "rana", "left the practice; not answering", stop="all")
+    with pytest.raises(Denied):
+        hub.approve_switch_off(amara, "rana")  # not the one who asked
+    out = hub.holder_approves_switch_off("rana")
+    assert out["status"] == "disabled" and not hub.member_admins()
+    ev = hub.db.events.find_one({"action": "member.disabled", "subject": "member:rana"}, sort=[("seq", -1)])
+    assert ev["actor"] == "server-holder" and ev["data"]["asked_by"] == "dr-amara"
+    hub.recover_policy_owner("dr-liam", "the practice manager left")
+    hub.set_roles(amara, "noor", ["nurse", "practice-manager"])  # two policy owners: one asks, the other approves
+    hub.approve_roles(M(hub, "dr-liam"), "noor")
+    assert [m["id"] for m in hub.member_admins()] == ["noor"]
+
+
+def test_the_server_holder_approves_a_switch_off_only_when_no_policy_owner_can(hub):
+    _a_third_policy_owner(hub)
+    hub.request_switch_off(M(hub, "dr-amara"), "rana", "left the practice", stop="all")
+    with pytest.raises(Denied, match="Deputy"):
+        hub.holder_approves_switch_off("rana")
+    with pytest.raises(Invalid):
+        hub.holder_approves_switch_off("jo")  # nobody asked
+
+
+def test_a_member_admin_gives_nobody_more_than_they_reach_on_their_own(hub):
+    """The practice manager reads no clinical information: giving anyone (a person too) a clinical role, or one that
+    may break the glass, waits for a second policy owner; so does a setup code for a clinician's account."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    hub.set_roles(rana, "jo", ["front-desk", "physician"])
+    assert "physician" not in M(hub, "jo")["roles"] and "physician" in hub.role_request("jo")["roles"]
+    hub.add_member(rana, {"id": "locum", "name": "Dr. Locum", "roles": ["physician"]})
+    assert M(hub, "locum")["roles"] == [] and hub.role_request("locum")
+    with pytest.raises(Denied, match="policy owner who does"):
+        hub.issue_setup_code(rana, "dr-liam")
+    assert hub.issue_setup_code(rana, "locum")["code"]  # no role yet: reaches nothing she does not
+    with pytest.raises(Denied):
+        hub.issue_setup_code(rana, "jo")  # the front desk reads intake and messages, which she does not
+    assert hub.issue_setup_code(amara, "dr-liam")["code"]  # a policy owner who reads what he reads
+    with pytest.raises(Denied):
+        hub.issue_setup_code(amara, "rana")  # never into the account that manages members
+    hub.approve_roles(amara, "locum")
+    assert M(hub, "locum")["roles"] == ["physician"]

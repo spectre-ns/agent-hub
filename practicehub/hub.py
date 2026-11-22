@@ -1454,8 +1454,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         """A new member. A role that approves changes or manages members is only requested: another policy owner
         gives it (``approve_roles``)."""
         self.require(actor, "member_admin", "practice:main", "add members")
+        if m.get("kind", "person") != "person" and m.get("sponsor") == actor["id"]:
+            raise Denied(f"{actor['name']} may not add an agent or service sponsored by themselves: its sponsor issues "
+                         "its credentials, so another person sponsors it")
         roles = list(m.get("roles", []) or [])
-        held_back = self.privileged_roles() | (self.data_roles() if m.get("kind", "person") != "person" else set())
+        held_back = self.held_back_roles(actor, m.get("kind", "person"))
         plain = [r for r in roles if r not in held_back]
         asked = dict(m.get("profile") or {}) if m.get("kind") == "agent" else {}
         if asked:  # a new agent may do nothing yet: the skills and risk it asks for are proposed, like any change
@@ -1492,6 +1495,29 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 for dc in self.restricted_classes() for rel in ("reader", "writer")
                 for t in self.authz.read(obj=f"data_class:{dc}", relation=rel) if t[2].startswith("role:")}
 
+    def beyond_roles(self, actor: dict) -> set[str]:
+        """Roles that reach further than the actor does themselves: reading or writing a restricted data class they
+        may not, or opening what a patient asked to withhold. Giving one to anyone waits for a second policy owner,
+        so a member admin never reaches a patient's file through an account they hand out (a person's included)."""
+        out = set()
+        rclasses = self.restricted_classes()
+        for obj, rel, sub in self.authz.read():
+            if not (sub.startswith("role:") and sub.endswith("#assignee")):
+                continue
+            role = sub.removeprefix("role:").removesuffix("#assignee")
+            if role in out:
+                continue
+            if ((rel in ("reader", "writer") and obj.startswith("data_class:")
+                 and obj.removeprefix("data_class:") in rclasses) or (rel == "break_glass" and obj == "practice:main")):
+                if not self.can(actor, rel, obj):
+                    out.add(role)
+        return out
+
+    def held_back_roles(self, actor: dict, kind: str = "person") -> set[str]:
+        """Roles the actor's say alone does not give a member of this kind: a second policy owner approves them."""
+        return (self.privileged_roles() | self.beyond_roles(actor)
+                | (self.data_roles() if kind != "person" else set()))
+
     def _request_for(self, actor: dict, mid: str, **change) -> dict:
         """Put a change into the member's waiting role request, keeping everyone who asked: none of them approves
         it."""
@@ -1525,8 +1551,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         raised = (wanted - before) & self.privileged_roles()
         if raised and target["kind"] != "person":
             raise Invalid("only a person may hold a role that approves changes or manages members")
-        if target["kind"] != "person":  # an agent or service reaching restricted data: a second policy owner approves
-            raised = (wanted - before) & self.data_roles()
+        # an agent or service reaching restricted data, or anyone reaching further than the one asking: a second
+        # policy owner approves
+        raised = (wanted - before) & self.held_back_roles(actor, target["kind"])
         if not admin:  # two policy owners together: all of it waits for the second
             raised = wanted ^ before
             if not raised:
@@ -1640,9 +1667,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         """What to tell a practice that has only one person (or nobody) who manages members."""
         admins = self.member_admins()
         if len(admins) == 1:
-            return (f"{admins[0]['name']} is the only person who manages members. If they leave, nobody can switch "
-                    f"them off or add anyone, except two policy owners together. Give a second person a role that "
-                    f"manages members.")
+            return (f"{admins[0]['name']} is the only person who manages members. If they leave, another policy owner "
+                    f"asks to switch them off, and a second one approves (or, with no second one, whoever holds the "
+                    f"server: practicehub owners approve-switch-off); two policy owners together then give the role to "
+                    f"someone else. Give a second person a role that manages members.")
         if not admins:
             return ("Nobody switched on manages members. Two policy owners together can give someone a role that "
                     "does: one asks, the other approves.")
@@ -1724,27 +1752,27 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         return self._switch(actor, target, status, reason, plan)
 
     def _switch(self, actor: dict, target: dict, status: str, reason: str, plan: dict | None,
-                asked_by: str | None = None) -> dict:
+                asked_by: str | None = None, keep: bool = True) -> dict:
         mid = target["id"]
         # the roles held by whoever goes off: this member, and the agents that stop with them
         going = [target] + [self.member(a) for a in (plan or {}).get("stop", [])]
         had = [r for r in dict.fromkeys(r for m in going for r in m["roles"]) if self.active_holders(r)]
         with self.db:
-            released = self._set_status(actor, target, status, reason, plan, asked_by)
+            released = self._set_status(actor, target, status, reason, plan, asked_by, keep)
         out = self.member(mid)
         out["roles_left_empty"] = [r for r in had if not self.active_holders(r)] if status == "disabled" else []
         out["released"] = released or []
         return out
 
     def _set_status(self, actor: dict, target: dict, status: str, reason: str, plan: dict | None = None,
-                    asked_by: str | None = None) -> list[str]:
+                    asked_by: str | None = None, keep: bool = True) -> list[str]:
         mid = target["id"]
         plan = plan or {"hand_over": {}, "stop": []}
         owners, admins = self.policy_owner_count(), len(self.member_admins())
         for aid, sp in plan["hand_over"].items():  # handed over while their sponsor is still on: they never stop
             self._move_sponsor(actor, aid, sp, f"handed over when {target['name']} was switched off")
         self.db.members.set(mid, {"status": status})
-        if status == "disabled" and target["kind"] == "person":
+        if status == "disabled" and target["kind"] == "person" and keep:
             self._keep_a_policy_owner(owners)
             self._keep_a_member_admin(admins)
         data = {"reason": reason}
@@ -1817,6 +1845,30 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         with self.db:
             self.db.del_setting(f"off_request:{mid}")
             return self._switch(actor, target, "disabled", req["reason"], plan, asked_by=req["by"])
+
+    def holder_approves_switch_off(self, mid: str) -> dict:
+        """When a policy owner has asked to switch someone off and nobody else could approve it (the practice's
+        other policy owner is the one leaving): whoever holds the server and the track's secret approves instead.
+        The member goes off even if that leaves one policy owner or no member admin: the server holder then makes a
+        second policy owner (``recover_policy_owner``), and two policy owners together give out the roles."""
+        if not self.track.holds_secret():
+            raise Denied("this server does not hold the secret that sealed the track: set PRACTICEHUB_SECRET to it")
+        req = self.off_request(mid)
+        if not req:
+            raise Invalid("nobody has asked to switch them off: a policy owner asks first, with the reason")
+        target = self.member(mid)
+        if target["status"] != "active":
+            raise Invalid(f"{target['name']} is already switched off")
+        others = [m for m in self.members("person") if m["status"] == "active" and self.is_policy_owner(m)
+                  and m["id"] not in (req["by"], mid)]
+        if others:
+            raise Denied(f"{', '.join(m['name'] for m in others)} can approve it: the server holder approves only "
+                         "when no other policy owner can")
+        holder = {"id": "server-holder", "kind": "installer", "name": "the server holder"}
+        plan = self._dependents_plan(target, req["hand_over"], req["stop"])
+        with self.db:
+            self.db.del_setting(f"off_request:{mid}")
+            return self._switch(holder, target, "disabled", req["reason"], plan, asked_by=req["by"], keep=False)
 
     def withdraw_switch_off(self, actor: dict, mid: str) -> None:
         req = self.off_request(mid)

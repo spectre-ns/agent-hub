@@ -13,8 +13,10 @@ def test_the_sponsor_approves_from_the_page(hub):
     amara, jo = {"cookie": "ph_as=dr-amara"}, {"cookie": "ph_as=jo"}
     code, _, body = app.handle("GET", f"/items/{hold}", amara, b"")
     assert code == 200 and b"waits for you" in body and b"approve" in body
+    code, _, body = app.handle("GET", f"/items/{hold}", {"cookie": "ph_as=dr-liam"}, b"")
+    assert b"You cannot decide this" in body  # another physician sees it, and may not decide it
     code, _, body = app.handle("GET", f"/items/{hold}", jo, b"")
-    assert b"You cannot decide this" in body
+    assert code == 404 and b"renew" not in body.lower()  # the front desk may not see a prescription step at all
     code, _, body = app.handle("GET", f"/items/{hold}", amara, b"")
     seen = re.search(rb'name="seen" value="([0-9a-f]{64})"', body).group(1)
     form = {**amara, "content-type": "application/x-www-form-urlencoded"}

@@ -312,9 +312,27 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         return out
 
     def _item_for(self, me, iid):
+        """An item and its run, for a member who may see it: a notice only by whom (or whose role) it is for; a step
+        only by who may see that step on its run's page; neither past a patient's directive. Others are told only
+        that there is no such item (an item's title can name a patient and why)."""
         item = self.hub.engine.item(iid)
         run = self.hub.engine.run(item["run_id"])
+        if not self.may_see_item(me, item, run):
+            self.hub.track.append(me, "access.denied", f"item:{iid}", data={"relation": "reader", "what": "an item"})
+            raise NotFound(f"there is no item {iid}")
         return item, run
+
+    def may_see_item(self, me, item: dict, run: dict) -> bool:
+        from ..visibility import Viewer
+        if item["kind"] == "notice":
+            ok = item.get("assignee") == me.get("id") or (item.get("role") or None) in (me.get("roles") or [])
+        else:
+            viewer = Viewer(self.hub, me)
+            wf = viewer.workflow_of_run(run["id"])
+            ok = item.get("assignee") == me.get("id") or (bool(wf) and viewer.step_visible(wf, item["step_id"])[0])
+        if item["kind"] == "notice" and item.get("assignee") == me.get("id"):
+            return True  # told by name (a break-glass review goes to the privacy officer the directive excludes)
+        return ok and not self.hub.restrictions.withholds_from(me, run.get("record"))
 
     # ================================================================================================ API
     def api_me(self, req):
@@ -1366,7 +1384,19 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             rt = self.hub.record_type(wf.record)
             raise Invalid(f"choose {a_an((rt.label if rt else wf.record).lower())} to start this about")
         run = self.hub.engine.start(req["me"], wid, record=rec, inputs=f)
-        raise Redirect(f"/runs/{run['id']}")
+        tell = self.tell_the_caller(run["id"])
+        if not tell:
+            raise Redirect(f"/runs/{run['id']}")
+        # what the checks say to tell the caller is the page itself, not a link on a run page that may show nothing
+        waiting = self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})
+        roles = sorted({it.get("role") or "" for it in waiting} - {""})
+        names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r))
+        sent = (f'<div class="flash warning" role="status"><p><b>Sent on to {e(names)}.</b> Nothing is booked '
+                f'yet.</p></div>' if names else "")
+        body = (f'{tell}{sent}<div class="filters"><a class="btn primary" href="/runs/{e(run["id"])}">See the '
+                f'request</a></div>')
+        raise Rendered(200, self.layout(req, f"{wf.title}: started", body,
+                                        crumbs=[("/start", "Start"), (None, wf.title)]))
 
     # ------------------------------------------------------------------------------------------ items
     def page_item(self, req, iid, kept: dict | None = None, error: Exception | None = None):
@@ -2570,11 +2600,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         if not self.hub.can(req["me"], "member_admin", "practice:main"):
             raise Denied(f"{req['me']['name']} may not add members")
         err = f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>' if error else ""
-        return self.layout(req, "Add people", f'<div data-modal-body>{err}{self._add_member_form(kept or {})}</div>',
+        return self.layout(req, "Add people", f'<div data-modal-body>{err}{self._add_member_form(kept or {}, req["me"])}</div>',
                            crumbs=[("/team", "Team"), (None, "Add people")])
 
-    def _role_boxes(self, have=(), pending=()) -> str:
-        priv = self.hub.privileged_roles()
+    def _role_boxes(self, have=(), pending=(), held: set[str] | None = None) -> str:
+        priv = self.hub.privileged_roles() if held is None else held
         return "".join(
             f'<label class="radio multi"><input type="checkbox" class="opt-input" name="roles" value="{e(r["id"])}"'
             f'{" checked" if r["id"] in have or r["id"] in pending else ""}> {e(r["name"])}'
@@ -2586,7 +2616,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         return "".join(f'<option value="{e(m["id"])}"{" selected" if m["id"] == selected else ""}>{e(m["name"])}</option>'
                        for m in self.hub.members("person") if m["status"] == "active")
 
-    def _add_member_form(self, kept: dict) -> str:
+    def _add_member_form(self, kept: dict, me: dict | None = None) -> str:
         k = lambda n: e(str(kept.get(n, "") or ""))
         kinds = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="kind" value="{v}"'
                         f'{" checked" if kept.get("kind", "person") == v else ""}> {t}</label>'
@@ -2611,7 +2641,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'services)</span><span class="req" aria-hidden="true" hidden> *</span><select name="sponsor"{sids}>'
                 f'<option value=""></option>{self._person_options(kept.get("sponsor"))}</select></label>'
                 f'<small id="{sid}-help" class="help">The person accountable for it.</small></div>'
-                f'<fieldset class="choices options"><legend>Roles</legend>{self._role_boxes(roles)}</fieldset>'
+                f'<fieldset class="choices options"><legend>Roles</legend>{self._role_boxes(roles, held=self.hub.held_back_roles(me) if me else None)}</fieldset>'
                 '<div class="filters"><button class="primary">Add</button>'
                 '<a class="btn secondary" href="/team" data-modal-close>Cancel</a></div></form>')
 
@@ -2846,15 +2876,21 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                     if owner_path else "")
             out.append(f'<h2>Roles</h2><form method="post" action="/team/{e(mid)}/roles" class="card">{note}'
                        f'<fieldset class="choices options"><legend>Roles {e(m["name"])} holds</legend>'
-                       f'{self._role_boxes(m["roles"], pending["roles"] if pending else ())}</fieldset>'
+                       f'{self._role_boxes(m["roles"], pending["roles"] if pending else (), held=self.hub.held_back_roles(me, m["kind"]))}</fieldset>'
                        f'<button>{"Ask for these roles" if owner_path else "Save roles"}</button></form>')
-        if admin and m["kind"] == "person" and mid != me["id"] and m["status"] == "active":
+        owner = me.get("kind") == "person" and hub.is_policy_owner(me)
+        if (admin or owner) and m["kind"] == "person" and mid != me["id"] and m["status"] == "active":
             has = hub.has_passphrase(mid)
-            out.append(f'<h2>Passphrase</h2><form method="post" action="/team/{e(mid)}/setup-code" class="card">'
-                       f'<p>{e(m["name"])} {"has set a passphrase" if has else "has no passphrase yet"}. A one-time '
-                       f'setup code lets them set {"a new" if has else "one"}{" (if they forgot it)" if has else ""}; '
-                       f'an earlier unused code stops working.</p>'
-                       f'<button class="secondary">Issue a setup code</button></form>')
+            beyond = set(m["roles"]) & hub.beyond_roles(me)
+            said = (f'<p>{e(m["name"])} {"has set a passphrase" if has else "has no passphrase yet"}. A one-time '
+                    f'setup code lets them set {"a new" if has else "one"}{" (if they forgot it)" if has else ""}; '
+                    f'an earlier unused code stops working.</p>')
+            if beyond:  # whoever issues it can sign in as them: someone who reaches as far issues it
+                out.append(f'<h2>Passphrase</h2><div class="card">{said}<p class="muted">{e(m["name"])} reaches '
+                           f'information you do not, so a policy owner who does issues their setup code.</p></div>')
+            elif admin or not set(m["roles"]) & hub.privileged_roles():
+                out.append(f'<h2>Passphrase</h2><form method="post" action="/team/{e(mid)}/setup-code" class="card">'
+                           f'{said}<button class="secondary">Issue a setup code</button></form>')
         if admin and m["kind"] == "service":
             chans = hub.channels_of(m)
             out.append(f'<h2>Delivers on</h2><div class="card"><p>{e(", ".join(chans) or "No outbox channel")}. A '

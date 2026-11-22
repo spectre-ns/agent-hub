@@ -727,9 +727,12 @@ def test_the_team_page_adds_members_and_changes_roles_and_sponsors(hub):
     assert 'name="name"' in app.page_team_new({"me": rana, "query": {}, "path": "/team/new"})
     with pytest.raises(Redirect):
         app.post_team_add(req("kind=person&id=dr-chen&name=Dr.+Wei+Chen&roles=physician"))
-    assert hub.member("dr-chen")["roles"]
+    assert not hub.member("dr-chen")["roles"] and hub.role_request("dr-chen")  # beyond her reach: it waits
+    assert "a second policy owner approves" in app.page_member({"me": rana, "query": {}, "path": "/team/dr-chen"},
+                                                               "dr-chen")
     with pytest.raises(Redirect):
         app.post_member(req("roles=physician&roles=nurse"), "dr-chen", "roles")
+    hub.approve_roles(M(hub, "dr-amara"), "dr-chen")
     assert set(hub.member("dr-chen")["roles"]) >= {"physician", "nurse"}
     page = app.post_member(req("label=interface"), "lab-feed", "token")
     assert "shown once" in page
@@ -811,8 +814,10 @@ def test_screens_arrange_the_forms_and_a_move_asks_what_it_needs(hub, server):
 
 # ------------------------------------------------------------------------------------------- passphrases on the pages
 def test_a_person_sets_a_passphrase_with_a_setup_code_from_a_member_admin(hub, server):
-    rana = token(hub, "rana")
+    rana = token(hub, "dr-amara")  # a policy owner who reads what he reads (the practice manager does not)
     assert call(server, "POST", "/team/dr-liam/setup-code", token(hub, "jo"))[0] == 403  # not a member admin
+    assert call(server, "POST", "/team/dr-liam/setup-code", token(hub, "rana"))[0] == 403  # beyond her reach
+    assert "a policy owner who does issues" in call(server, "GET", "/team/dr-liam", token(hub, "rana"))[1]
     page = call(server, "GET", "/team/dr-liam", rana)[1]
     assert "Issue a setup code" in page and "has no passphrase yet" in page
     code, page = call(server, "POST", "/team/dr-liam/setup-code", rana)
@@ -855,10 +860,10 @@ def _page_message(hub):
 def test_a_connector_delivers_the_outbox_over_the_api(hub, server):
     run, msg = _page_message(hub)
     rana = M(hub, "rana")
-    hub.add_member(rana, {"id": "pager", "kind": "service", "name": "Pager", "sponsor": "rana", "roles": []})
+    hub.add_member(rana, {"id": "pager", "kind": "service", "name": "Pager", "sponsor": "dr-amara", "roles": []})
     hub.authz.write([("data_class:clinical", "reader", "member:pager"),
                      ("data_class:correspondence", "reader", "member:pager")])
-    pager = token(hub, "pager", by="rana")
+    pager = token(hub, "pager", by="dr-amara")
     assert call(server, "GET", "/api/outbox", pager)[0] == 403  # no channel yet
     hub.grant_channel(rana, "pager", "page")
     code, body = call(server, "GET", "/api/outbox", pager)
@@ -1464,9 +1469,9 @@ def test_the_calendar_today_and_now_are_the_practices(hub, server):
 
 def test_pages_show_times_in_the_practices_zone(hub, server):
     """Work items and the track keep instants in UTC; a page shows them in the practice's zone (Halifax, -4)."""
-    it = hub.db.items.find_one({"assignee": "jo", "status": "open"}) or hub.db.items.find_one({"status": "open"})
-    hub.db.items.set(it["id"], {"created_at": "2026-11-23T00:30:00Z"})
-    page = call(server, "GET", f"/items/{it['id']}", token(hub, it["assignee"] or "rana"))[1]
+    it = hub.db.items.find_one({"status": "open", "kind": "notice"}) or hub.db.items.find_one({"status": "open"})
+    hub.db.items.set(it["id"], {"created_at": "2026-11-23T00:30:00Z", "assignee": "jo"})
+    page = call(server, "GET", f"/items/{it['id']}", token(hub, "jo"))[1]
     assert "2026-11-22 20:30" in page and "2026-11-23 00:30" not in page
 
 
@@ -1553,6 +1558,33 @@ def test_the_front_desk_red_flag_goes_to_a_nurse_not_the_calendar(hub, server):
     assert not [v for v in hub.records.search("Encounter", limit=None)
                 if v.get("plannedStartDate") == f"{DAY}T11:00"]
 
+
+
+def test_the_front_desk_red_flag_from_the_start_form_tells_the_caller_too(hub, server):
+    """The quick-start request (no slot picked) runs the same screen: the desk is told what to say, not sent to a
+    run page that shows them nothing."""
+    status, page = call(server, "POST", "/start", token(hub, "jo"), form={
+        "_workflow": "appointment-request", "_record": _ellen(hub), "reason": "chest pain and short of breath",
+        "kind": "new-concern", "urgency": "routine"})
+    assert status == 200, page[:400]
+    tell = page.index("Tell the caller now:")
+    assert "call 911" in page[tell:tell + 300] and 'role="alert"' in page and "Nothing is booked" in page
+
+
+def test_an_item_page_is_for_who_may_see_it(hub, server):
+    """A break-glass review is opened by the reviewer it is for; anyone else is told there is no such item."""
+    ellen = _ellen(hub)
+    obs = next(r for r in hub.records.search("Observation", subject=ellen) if r.get("status") == "final")
+    hub.create_record(hub.member("rana"), "Consent", {
+        "patient": {"reference": ellen}, "status": "active", "received": "2026-11-01",
+        "request": "Keep my results private.", "withhold_classes": ["clinical"]})
+    got = hub.break_glass(hub.member("noor"), f"Observation/{obs['id']}", "Collapsed at the desk; need her results")
+    (review,) = hub.db.items.find({"run_id": got["run"], "kind": "notice"})
+    status, page = call(server, "GET", f"/items/{review['id']}", token(hub, "rana"))
+    assert status == 200 and "Collapsed at the desk" in page
+    for who in ("jo", "dr-amara", "dr-liam"):
+        status, page = call(server, "GET", f"/items/{review['id']}", token(hub, who))
+        assert status == 404 and "Collapsed" not in page and "emergency" not in page.lower(), who
 
 def test_moving_a_visit(hub, server):
     _book(server, hub)
@@ -2089,7 +2121,7 @@ def test_breaking_the_glass_from_the_page_opens_it_under_a_banner(hub, server):
     page = html.unescape(call(server, "GET", f"/records/{cond}", noor)[1])
     assert "Emergency access" in page and "Depressive disorder" in page and "privacy officer reviews it" in page
     rana = html.unescape(call(server, "GET", "/", token(hub, "rana"))[1])
-    assert "Review: Noor Siddiqui opened information" in rana
+    assert "Review: Noor Siddiqui used emergency access to" in rana and "Unresponsive" not in rana
 
 
 def test_a_withheld_export_says_it_is_incomplete(hub, server):

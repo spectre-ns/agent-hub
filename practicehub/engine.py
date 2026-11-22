@@ -203,8 +203,11 @@ def bookings(hub, *, active_only: bool = True, since: str | None = None, until: 
             seen = schema.project(rt, rec, hub.member_types())
             hidden = bool((visibility.withheld(rec) or {}).get("whole"))
             # the time is held whoever may read what it is for: when and with whom come from the booking itself, so a
-            # visit a directive withholds still holds its slot (shown as Busy), never shows as free time
+            # visit a directive withholds still holds its slot (shown as Busy), never shows as free time; whose visit
+            # it is, and why, stay withheld (never on the patient's own list of what is coming)
             seen.update({k: raw.get(k) for k in ("start", "end", "with", "cancelled")})
+            if hidden:
+                seen.update(subject=None, reason="", kind="", priority="", overbooked="")
             start = str(seen.get("start") or "")
             if not ranged and ((since and start < since) or (until and start >= until)):
                 continue

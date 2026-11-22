@@ -191,10 +191,26 @@ class CredentialsMixin:
         from .hub import Denied, Invalid
         target = self.member(mid)
         if actor.get("kind") != "installer":
-            self.require(actor, "member_admin", "practice:main", "issue a passphrase setup code")
             if actor["id"] == mid:
                 raise Denied("a member admin does not issue a setup code to themselves: another member admin does, "
                              "or change your passphrase with your current one")
+            # whoever issues it can sign in as the member: they must reach as far as the member does. A member admin
+            # does for most; for a clinician's account, a policy owner who reads what they read issues it instead
+            beyond = sorted(set(target["roles"]) & self.beyond_roles(actor)) if target["kind"] == "person" else []
+            if beyond:
+                if not self.can(actor, "member_admin", "practice:main") and not self.is_policy_owner(actor):
+                    self.require(actor, "member_admin", "practice:main", "issue a passphrase setup code")
+                self.track.append(actor, "access.denied", f"member:{mid}",
+                                  data={"relation": "member_admin", "what": "issue a setup code"})
+                who = [m["name"] for m in self.members("person") if m["status"] == "active" and m["id"] != mid
+                       and self.is_policy_owner(m) and not set(target["roles"]) & self.beyond_roles(m)]
+                raise Denied(f"{target['name']} reaches information {actor['name']} does not (as "
+                             f"{', '.join(self.role(r)['name'] for r in beyond)}): a policy owner who does issues their "
+                             f"setup code" + (f" ({', '.join(who)})" if who else ""))
+            if not self.can(actor, "member_admin", "practice:main") and not (
+                    self.is_policy_owner(actor) and target["kind"] == "person"
+                    and not set(target["roles"]) & self.privileged_roles()):
+                self.require(actor, "member_admin", "practice:main", "issue a passphrase setup code")
         if target["kind"] != "person":
             raise Invalid(f"{target['name']} is not a person: agents and services use tokens")
         if target["status"] != "active":

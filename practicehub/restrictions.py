@@ -145,12 +145,21 @@ class Restrictions:
         in force): copies of that file's content made elsewhere (a step's output, a draft) are then not shown."""
         if not subject or (member or {}).get("kind") == "automation":
             return False
+        if not self._load():  # no directive anywhere: nothing is withheld
+            return False
+        if subject.split("/", 1)[0] not in self._subjects:
+            rec = self.hub.records.read(*subject.split("/", 1)) if "/" in subject else None
+            subject = self.subject_of(rec) if rec else None  # a record about a subject: that subject's file
+            if not subject:
+                return False
         ds = [d for d in self.of_subject(subject) if not self._allowed(member, d)]
         return bool(ds) and not self.override(member, subject)
 
     def override(self, member: dict | None, subject: str) -> dict | None:
         """The member's emergency access to the subject's file still in force: the track's event, or None."""
         if not member or member.get("kind") != "person" or not subject:
+            return None
+        if not self.may_override(member):  # a role that lost break_glass loses the access it opened, at once
             return None
         key = (member["id"], subject)
         got = self._over.get(key)
@@ -291,6 +300,25 @@ class Restrictions:
     def may_override(self, member: dict | None) -> bool:
         return bool(member) and member.get("kind") == "person" and self.hub.can(member, "break_glass", "practice:main")
 
+    def _reviewers(self, member: dict, ds: list[dict], rtype: str) -> list[dict]:
+        """Who reviews an emergency access: the people who record directives (the privacy role), else the policy
+        owners; never the member who used it, and never a reader the directive itself excludes (the review would
+        tell them what the patient asked to keep from them). Someone is always told."""
+        hub = self.hub
+        people = [m for m in hub.members("person") if m["status"] == "active" and m["id"] != member["id"]]
+        classes = {hub.class_of(t) for t in (hub.of_base(BASE) if BASE in schema.bases() else [])} - {None, ""}
+        reads = f"data_class:{hub.class_of(rtype)}"
+
+        def excluded(m):
+            return hub.can(m, "reader", reads) and not all(self._allowed(m, d) for d in ds)
+        for pool in ([m for m in people if any(hub.can(m, "writer", f"data_class:{c}") for c in classes)],
+                     [m for m in people if hub.is_policy_owner(m)]):
+            fit = [m for m in pool if not excluded(m)]
+            if fit:
+                return fit
+        return [m for m in people if hub.is_policy_owner(m)] or [m for m in hub.members("person")
+                                                                if m["status"] == "active" and hub.is_policy_owner(m)]
+
     def break_glass(self, member: dict, ref: str, reason: str) -> dict:
         """Open what restrictions withhold of ``ref``'s file from the member, in an emergency: on the track with the
         reason, a notice to each policy owner on duty to review it, in force for ``OVERRIDE_WINDOW``."""
@@ -328,15 +356,15 @@ class Restrictions:
                                 "ctx": {"override": seq}, "steps": {"review": {"state": "skipped"}},
                                 "started_by": member["id"], "root_event": seq, "created_at": utcnow(),
                                 "updated_at": utcnow()})
-            owners = [m for m in hub.members("person") if m["status"] == "active" and hub.is_policy_owner(m)
-                      and m["id"] != member["id"]] or [m for m in hub.members("person") if m["status"] == "active"
-                                                       and hub.is_policy_owner(m)]
+            owners = self._reviewers(member, ds, rtype)
             for o in owners:
+                # the notice names the file, never why it was opened (that can be the very thing withheld): the
+                # reason is on the item's page, which only the reviewer it is for may open
                 hub.db.items.insert(_item_doc(
                     hub, id=_new_id("item"), run_id=run_id, step_id="review", kind="notice", role=None,
                     assignee=o["id"], persons_only=1, status="open", cause=seq, priority="urgent",
-                    title=f"Review: {member['name']} opened information {title} asked to have withheld. "
-                          f"Reason given: “{reason}”", output={"about": subject}))
+                    title=f"Review: {member['name']} used emergency access to {title}'s withheld information",
+                    output={"about": subject, "record": ref, "reason": reason}))
         self._over.pop((member["id"], subject), None)
         return {"seq": seq, "subject": subject, "run": run_id, "until": _iso(_now() + OVERRIDE_WINDOW),
                 "told": [o["id"] for o in owners]}

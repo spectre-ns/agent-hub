@@ -246,6 +246,7 @@ def test_the_tool_list_is_made_once_per_message(hub, server, monkeypatch):
 def test_every_installed_module_has_a_server_with_tools_from_its_definitions(hub):
     install_dms(hub)
     hub.set_roles(M(hub, "rana"), "jo", M(hub, "jo")["roles"] + ["document-author"])
+    hub.approve_roles(M(hub, "dr-amara"), "jo")  # documents are beyond the practice manager's own reach
     assert [s["id"] for s in mcp.servers(hub)] == ["core", "practice", "dms"]
     jo = {t["name"]: t for t in mcp.tools(hub, "dms", M(hub, "jo"))}
     assert {"search_document", "read_document", "create_document", "update_document", "move_document",
@@ -304,6 +305,7 @@ def test_an_approved_definition_change_changes_the_tools(hub, server):
 def test_create_search_and_move_go_through_the_hub_and_are_logged(hub, server):
     install_dms(hub)
     hub.set_roles(M(hub, "rana"), "jo", M(hub, "jo")["roles"] + ["document-author"])
+    hub.approve_roles(M(hub, "dr-amara"), "jo")  # documents are beyond the practice manager's own reach
     out = call(hub, "dms", "jo", "create_document", {"title": "Hand hygiene", "number": "SOP-001"})
     assert not out["isError"], out
     ref = out["structuredContent"]["ref"]
@@ -366,6 +368,7 @@ def test_resources_are_types_and_documents_in_force(hub):
 def test_an_agent_cannot_sign_or_approve(hub):
     install_dms(hub)
     hub.set_roles(M(hub, "rana"), "jo", M(hub, "jo")["roles"] + ["document-author"])
+    hub.approve_roles(M(hub, "dr-amara"), "jo")  # documents are beyond the practice manager's own reach
     for m in ("intake-agent", "scheduling-agent", "clinical-admin-agent"):
         for sid in ("core", "practice", "dms"):
             assert not [n for n in names(hub, sid, m) if n.startswith(("sign", "approve", "decide"))]
