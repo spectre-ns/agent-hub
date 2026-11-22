@@ -763,6 +763,8 @@ class Engine:
             f = rt.field(name)
             if f is None:
                 raise ValueError(f"new_record: {rt.label} has no field {name!r}")
+            if f["type"] == "member" and isinstance(val, str) and not hub.db.members.get(val):
+                continue  # started by another workflow, not a person: no one to name (its cause says which run)
             if f["type"] == "reference" and isinstance(val, str):
                 val = {"reference": val}
             rec = schema.place(rec, f, val)

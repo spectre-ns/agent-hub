@@ -56,6 +56,20 @@ def test_starting_a_request_makes_the_requested_visit_on_the_chart(hub):
     assert ref.split("/", 1)[1] in page and "Requested" in page
 
 
+def test_a_request_another_workflow_starts_makes_its_visit_with_no_one_named_as_asking(hub):
+    """Intake accepting a new patient starts their first-visit request: a workflow, not a person, so the visit names
+    no one as having asked for it (a workflow is not a member) and is still made."""
+    pat = _pat(hub, "MacLeod")
+    actor = {"id": "workflow:new-patient-intake@v1", "kind": "automation", "name": "New patient intake",
+             "status": "active"}
+    run = hub.engine.start(actor, "appointment-request", record=pat,
+                           inputs={"reason": "First visit (new patient)", "urgency": "routine"}, via_automation=True)
+    run = hub.engine.run(run["id"])
+    assert run["record"].startswith("Encounter/")
+    visit = hub.records.read(*run["record"].split("/", 1))
+    assert visit["status"] == "requested" and "requested_by" not in visit
+
+
 def test_a_routine_request_from_a_slot_books_the_same_visit(hub):
     jo = M(hub, "jo")
     pat = _pat(hub, "MacLeod")
