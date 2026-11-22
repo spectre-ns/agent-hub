@@ -4501,3 +4501,25 @@ def test_the_signed_meaning_is_the_one_for_whoever_did_the_step(hub, writer, sig
     hub.engine.decide(me, sign, "sign", "", seen=hub.engine.shown_digest(me, sign))
     signed = [e for e in hub.track.list(run_id=run["id"]) if e["action"] == "gate.decided"]
     assert signed[0]["data"]["signed"]["meaning"] == meaning and hub.track.verify_signature(signed[0])
+
+
+def test_an_outcome_with_its_own_meaning_says_it_even_for_the_author(hub):
+    """The author who returns (or discards) the note does not sign "I wrote this note and it is accurate"."""
+    wid = "note-return"
+    src = SIGNED.format(wid=wid, extra=AUTHOR + 'meanings = { return = "I return this note" }\n')
+    hub.approve_workflow(M(hub, "rana"), wid, hub.propose_workflow(M(hub, "jo"), src, "return")["version"])
+    run = hub.engine.start(M(hub, "jo"), wid)
+    iid = item_for(hub, run, "write")
+    hub.engine.complete(M(hub, "dr-amara"), iid, {"done": True})
+    me = M(hub, "dr-amara")
+    shown = hub.engine.context(me, iid)["step"]["meanings"]
+    assert shown == {"sign": "I wrote this note and it is accurate", "return": "I return this note"}
+
+
+def test_the_visit_note_says_author_for_its_editor_and_reviewed_for_anyone_else():
+    from practicehub import workflows as wfmod
+    from pathlib import Path
+    wf = wfmod.parse(Path("packs/general-practice/workflows/visit-documentation.toml").read_text())
+    s = wf.step("sign")
+    assert s.meaning == "I reviewed this note and it is accurate"
+    assert s.meanings_if_did == {"edit": "I am the author of this note and it is accurate"}

@@ -1740,7 +1740,9 @@ class Engine:
     def meaning_for(self, member: dict, run: dict, step, outcome: str | None = None) -> str:
         """What signing this gate says for this member: a ``meanings_if_did`` meaning when they did that earlier
         step (by the run's step history, so a reassignment or take-over does not change it), else the outcome's
-        own meaning, else the step's."""
+        own meaning, else the step's. An outcome with its own meaning (e.g. discard) says that, whoever signs."""
+        if outcome and outcome in step.meanings:
+            return step.meanings[outcome]
         for sid, text in (getattr(step, "meanings_if_did", None) or {}).items():
             if self._did(run, sid, member["id"]):
                 return text

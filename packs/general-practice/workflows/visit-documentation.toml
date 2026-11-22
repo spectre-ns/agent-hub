@@ -103,7 +103,8 @@ escalate_to = "medical-director"
 after = ["edit"]
 signer = "person"
 outcomes = ["sign", "discard"]
-meaning = "I am the author of this note and it is accurate"
+meaning = "I reviewed this note and it is accurate"
+meanings_if_did = { edit = "I am the author of this note and it is accurate" }
 meanings = { discard = "I discard this draft note" }
 context = ["edit"]
 
