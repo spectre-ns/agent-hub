@@ -360,3 +360,87 @@ def test_more_ways_of_saying_an_emergency_are_red_flags(text):
     ("my dad seems a bit off today, can you call?", False), ("I have no chest pain but I cough", False)])
 def test_only_plain_paperwork_may_get_an_agents_draft(text, routine):
     assert _screen()({"question": text})["routine"] is routine
+
+
+MISSED_AT_THE_DESK = [
+    "I took 20 tylenol", "took a lot of advil", "I think I overdosed", "overdose", "my chest is killing me",
+    "SOB and CP", "cp", "sob since last night", "angina again", "numb face", "my face feels numb",
+    "stabbing pain in my belly", "heavy period soaking a pad an hour", "ectopic", "worried about a miscarriage",
+    "SI", "having SI again", "suicidal", "feeling suicidal lately", "douleur thoracique",
+    "j'ai mal à la poitrine", "j'ai du mal à respirer", "je saigne beaucoup"]
+
+
+@pytest.mark.parametrize("text", MISSED_AT_THE_DESK)
+def test_the_screen_flags_what_a_desk_booking_let_through(text):
+    assert _screen()({"question": text})["red_flag"], text
+
+
+@pytest.mark.parametrize("text,routine", [
+    ("a sick note form for work", True), ("can you fax my records to the pharmacy", True),
+    ("I want to move my appt", True), ("please copy my results", True), ("my insurance form", True),
+    ("Si vous pouvez m'appeler demain", False), ("took 10 minutes to log in to the portal", False),
+    ("I sobbed when I heard", False), ("my copay for the visit", False)])
+def test_short_words_flag_only_as_words(text, routine):
+    r = _screen()({"question": text})
+    assert r["red_flag"] is False and r["unsure"] is False and r["routine"] is routine, (text, r)
+
+
+def _visits_at(hub, at):
+    return [v for v in hub.records.search("Encounter", limit=None) if v.get("plannedStartDate") == at]
+
+
+def test_a_desk_booking_is_booked_at_once_only_for_a_plainly_routine_reason(hub):
+    """From a calendar slot, a reason the screen does not flag but that is not plainly paperwork is read by a nurse
+    first: an ordinary slot is fine (the desk's slot is booked), or sooner (the scheduler proposes one)."""
+    jo, noor = M(hub, "jo"), M(hub, "noor")
+    pat = _pat(hub)
+    run = hub.engine.start(jo, "appointment-request", record=pat, inputs={
+        "reason": "my knee hurts when I run", "kind": "new-concern", "slot": "2027-03-09T09:00|dr-liam"})
+    assert not _visits_at(hub, "2027-03-09T09:00")  # not booked before a nurse read it
+    triage = hub.engine.item(item_for(hub, run, "triage"))
+    assert triage["role"] == "nurse" and hub.engine.run(run["id"])["steps"]["book-chosen"]["state"] == "pending"
+    hub.engine.complete(noor, triage["id"], {"decision": "book-a-slot"})
+    (v,) = _visits_at(hub, "2027-03-09T09:00")
+    assert v["subject"]["reference"] == pat
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["propose"]["state"] == "skipped" and run["steps"]["confirm-chosen"]["state"] == "done"
+    # sooner: the desk's slot is not booked, the scheduler proposes another
+    run = hub.engine.start(jo, "appointment-request", record=pat, inputs={
+        "reason": "a rash on my arm", "kind": "new-concern", "slot": "2027-03-09T10:00|dr-liam"})
+    hub.engine.complete(noor, item_for(hub, run, "triage"), {"decision": "book-it-soon"})
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["book-chosen"]["state"] == "skipped" and run["steps"]["propose"]["state"] == "active"
+    assert not _visits_at(hub, "2027-03-09T10:00")
+
+
+def test_a_screen_that_fails_still_reaches_a_nurse(hub, monkeypatch):
+    """Fail closed: if the red-flag screen cannot run, nothing is booked and a nurse calls the patient back."""
+    real = type(hub.engine)._run_block
+
+    def broken(self, run, step, params):
+        if step.id == "screen":
+            raise RuntimeError("the screen ran out of time")
+        return real(self, run, step, params)
+    monkeypatch.setattr(type(hub.engine), "_run_block", broken)
+    for inputs in ({"reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-liam"},
+                   {"reason": "a form for work"}):
+        run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub),
+                                              inputs=inputs)["id"])
+        assert run["steps"]["screen"]["state"] == "failed"
+        nurse = hub.engine.item(item_for(hub, run, "nurse-call"))
+        assert nurse["role"] == "nurse" and nurse["priority"] == "urgent"
+        assert run["steps"]["book-chosen"]["state"] == "pending" and not _visits_at(hub, "2027-03-09T11:00")
+    # a screen that runs: no nurse call for plain paperwork
+    monkeypatch.setattr(type(hub.engine), "_run_block", real)
+    run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub),
+                                          inputs={"reason": "a form for work"})["id"])
+    assert run["steps"]["nurse-call"]["state"] == "skipped"
+
+
+def test_the_request_form_does_not_ask_for_the_machine_slot(hub):
+    from practicehub.web.server import App
+    wf = hub.workflow("appointment-request")[0]
+    assert next(i for i in wf.inputs if i["name"] == "slot").get("hidden") is True
+    urgency = next(i for i in wf.inputs if i["name"] == "urgency")
+    page = App(hub, dev=False)._field(urgency, [{"value": c, "label": c} for c in urgency["choices"]], None)
+    assert "<span>None</span>" not in page and 'value="routine" required checked' in page

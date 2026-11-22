@@ -12,8 +12,10 @@ never the chart.
 
 The front desk books from the calendar through this workflow too: they pick the slot and what the visit is for, and
 ask the patient why they are coming. The same screen runs first. A red flag, an unclear reason or a request marked
-urgent is not booked: it goes to a nurse to call back, with the slot the desk had picked. Anything else is booked in
-the slot they picked, at once.
+urgent is not booked: it goes to a nurse to call back, with the slot the desk had picked. Only a plainly routine
+reason (paperwork, a check-up) is booked in the slot they picked at once; any other reason is read by a nurse first,
+who books that slot, asks for a sooner one, or calls the patient. If the screen itself cannot run, a nurse calls the
+patient back: no reason goes unread because the screen failed.
 """
 
 [trigger]
@@ -25,7 +27,7 @@ name = "reason"
 label = "Why the patient is coming"
 type = "string"
 required = true
-help = "in the patient's words, as much as they want to say; a nurse reads it if it may be urgent"
+help = "in the patient's words, as much as they want to say; a nurse reads it first unless it is plainly paperwork or a check-up"
 
 [[input]]
 name = "kind"
@@ -38,13 +40,16 @@ help = "what the visit is for, as everyone who books may see it (the reason stay
 [[input]]
 name = "slot"
 type = "string"
-help = "the slot the front desk picked on the calendar (YYYY-MM-DDTHH:MM|member): booked at once unless the screen flags it"
+hidden = true   # filled by the calendar when the front desk picks a slot, never typed
+help = "the slot the front desk picked on the calendar: booked at once only for a plainly routine reason"
 
 [[input]]
 name = "urgency"
+label = "How soon"
 type = "choice"
 choices = ["routine", "soon", "urgent"]
 default = "routine"
+required = true
 
 [[input]]
 name = "preferences"
@@ -80,11 +85,13 @@ role = "nurse"
 priority = "urgent"
 due = "1h"
 escalate_to = "physician"
-after = ["screen"]
-when = "input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true"
+# not after the screen, so that a screen that fails (screen is empty) still reaches a nurse; the screen, the first
+# step, has always run or failed by the time this is reached
+when = "screen == null or input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true"
 persons_only = true
 context = ["input.reason", "input.kind", "input.slot", "screen", "record:demographics", "record:clinical"]
-instructions = """The patient's request was marked urgent, or their words may describe an emergency (see the screen).
+instructions = """The patient's request was marked urgent, or their words may describe an emergency (see the screen),
+or the red-flag screen could not run (no screen is shown): read the reason yourself.
 Call them now. Advise 911 or the emergency department if needed, or book them in today yourself: no slot is
 proposed automatically for a request that comes to you, and a slot the front desk picked (input.slot) was not
 booked. If you cannot reach them,
@@ -129,12 +136,13 @@ role = "nurse"
 due = "4h"
 escalate_to = "physician"
 after = ["screen"]
-when = "input.slot == null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine != true"
+when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine != true"
 persons_only = true
-context = ["input.reason", "input.urgency", "screen", "record:demographics", "record:clinical"]
-instructions = """The patient's reason mentions something that sounds like a symptom, so no slot is booked until a
-nurse has read it. Decide: an ordinary slot is fine (one is proposed and booked), or they need to be seen sooner or
-spoken to first, in which case call them and book them yourself."""
+context = ["input.reason", "input.urgency", "input.slot", "screen", "record:demographics", "record:clinical"]
+instructions = """The patient's reason is not plainly paperwork or a check-up, so no slot is booked until a nurse has
+read it. Decide: an ordinary slot is fine (the slot the front desk picked, if it picked one, is booked; otherwise one
+is proposed and booked), or they need to be seen sooner (the scheduler proposes a sooner slot), or spoken to first,
+in which case call them and book them yourself."""
 [[steps.fields]]
 name = "decision"
 type = "choice"
@@ -154,7 +162,7 @@ due = "1d"
 escalate_to = "front-desk"
 skill = "slot-proposal"
 after = ["screen", "triage"]
-when = "input.slot == null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and (screen.routine == true or triage.decision == 'book-a-slot' or triage.decision == 'book-it-soon')"
+when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and ((input.slot == null and (screen.routine == true or triage.decision == 'book-a-slot')) or triage.decision == 'book-it-soon')"
 context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "screen.admin_reason",
            "triage.decision", "triage.note_for_scheduler"]
 
@@ -176,8 +184,9 @@ defaults = { status = "planned", class = { system = "http://terminology.hl7.org/
 id = "book-chosen"
 title = "Book the slot the front desk picked"
 kind = "automation"
-after = ["screen"]
-when = "input.slot != null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false"
+after = ["screen", "triage"]
+# at once only for a plainly routine reason; any other reason once a nurse has read it and said an ordinary slot is fine
+when = "input.slot != null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and (screen.routine == true or triage.decision == 'book-a-slot')"
 action = "booking.book"
 [steps.params]
 slot = "{{input.slot}}"
@@ -192,7 +201,6 @@ id = "confirm"
 title = "Confirm with the patient"
 kind = "automation"
 after = ["book"]
-when = "input.slot == null"
 action = "message.send"
 [steps.params]
 channel = "patient-portal"

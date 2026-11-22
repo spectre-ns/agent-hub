@@ -280,11 +280,26 @@ def find(name_or_path: str, kind: str = "practice") -> Path:
     raise FileNotFoundError(f"no {kind} {'pack' if kind == 'practice' else ''} at {name_or_path}".replace("  ", " "))
 
 
-def load_module(name_or_path: str, expect_sha256: str | None = None, *, run_code: bool = True) -> Pack:
+def load_module(name_or_path: str, expect_sha256: str | None = None, *, run_code: bool = True,
+                expect_digest: str | None = None) -> Pack:
     """An overlay module (document control, quality, product lifecycle...): a pack with ``[module]`` instead of
     ``[practice]``. ``expect_sha256``: the pack.py that was installed; other code is refused before it runs.
-    ``run_code=False`` reads its definitions only (to list or plan it), without running its pack.py."""
-    return load(name_or_path, kind="module", expect_sha256=expect_sha256, run_code=run_code)
+    ``expect_digest``: every file as it was reviewed and installed (code and definitions); a module whose files differ
+    is refused before its code runs. ``run_code=False`` reads its definitions only (to list or plan it), without
+    running its pack.py."""
+    if expect_digest:
+        pack_dir = find(name_or_path, "module")
+        now = digest(pack_dir)
+        if now != expect_digest:
+            load(name_or_path, kind="module", run_code=False)  # a file that does not read is named as such first
+            raise ModuleChanged(f"the files of the {pack_dir.name} module are not the ones that were reviewed and "
+                                f"installed (it was {expect_digest[:12]}, it is {now[:12]} now): it is not run until a "
+                                f"policy owner reviews and upgrades it")
+    m = load(name_or_path, kind="module", expect_sha256=expect_sha256, run_code=run_code)
+    if expect_digest and m.digest != expect_digest:  # changed between the check and the read
+        raise ModuleChanged(f"the files of the {m.id} module changed while it was being loaded: it is not run until "
+                            f"a policy owner reviews and upgrades it")
+    return m
 
 
 def digest(pack_dir: Path) -> str:
@@ -403,8 +418,19 @@ def add_module(pack: Pack, m: Pack) -> None:
         getattr(pack, what).update(getattr(m, what))
 
 
+def forked(pack: Pack) -> Pack:
+    """A copy of the practice whose module list and code tables are its own: changed off to the side and then put in
+    place with one assignment, so a request running in another thread sees the old modules or the new, never half."""
+    import copy
+    new = copy.copy(pack)
+    new.modules = list(pack.modules)
+    for what in ("actions", "providers", "standins", "guards"):
+        setattr(new, what, dict(getattr(pack, what)))
+    return new
+
+
 def remove_module(pack: Pack, m: Pack) -> None:
-    """Undo ``add_module`` (an install that failed part way)."""
+    """Undo ``add_module`` (an install that failed part way, or a module taken out)."""
     if m in pack.modules:
         pack.modules.remove(m)
     for what in ("actions", "providers", "standins", "guards"):

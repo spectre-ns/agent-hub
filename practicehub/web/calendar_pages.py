@@ -429,8 +429,9 @@ class CalendarPages:
                                     [{"value": c, "label": c} for c in i["choices"]] if i.get("choices") else None,
                                     q.get(f"req_{i['name']}") or None))
         if request:
-            rows.append(f'<p class="muted help">Booked through {e(request[0].title.lower())}: if the reason may be '
-                        f'urgent it goes to the clinical team first, and is not booked until they have seen it.</p>')
+            rows.append(f'<p class="muted help">Booked through {e(request[0].title.lower())}: only a reason that is '
+                        f'plainly paperwork or a check-up is booked at once. Any other reason goes to the clinical team '
+                        f'first, and is not booked until they have seen it.</p>')
         rows.append(self._overbook_rows(me, rt, q))
         if len(self.booking_kinds(me, write=True)) > 1 or q.get("type"):
             rows.append(f'<input type="hidden" name="type" value="{e(rtype)}">')
