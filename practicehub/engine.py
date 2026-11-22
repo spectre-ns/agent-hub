@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from . import blocks as blockmod
+from . import clock
 from . import expr
 from . import schema
 from . import workflows as wfmod
@@ -326,10 +327,31 @@ class Engine:
     def __init__(self, hub):
         self.hub = hub
         self._now = None
+        self._zone = None  # (until, the practice's ZoneInfo): ``zone`` reads the setting at most every 2 seconds
         self._advancing: set = set()  # runs advancing now (a record change inside one does not re-enter it)
 
+    def zone(self):
+        """The practice's time zone (``[practice] timezone``, as its policy owners last set it). Raises
+        ``clock.ZoneError`` for a name the tz database does not know, or when this machine has no tz data."""
+        import time
+        got = self._zone
+        if got and got[0] > time.monotonic():
+            return got[1]
+        hub = self.hub
+        name = hub.practice.get("timezone") or ((hub.pack.practice or {}).get("timezone") if hub.pack else None)
+        tz = clock.zone(name)
+        self._zone = (time.monotonic() + 2, tz)  # a page shows many times: read the setting once, not per time
+        return tz
+
     def now(self) -> datetime:
-        return self._now or datetime.now()
+        """The practice's wall time now, without an offset: what its calendar shows, the date its notes carry and
+        the ``today`` its rules compare with (``clock``). Never the server's clock, which is often UTC."""
+        tz = self.zone()
+        return clock.local(self._now, tz) if self._now else clock.now(tz)
+
+    def utc(self, t: datetime) -> str:
+        """A time as the track writes it (UTC, ISO, Z). A naive time is the practice's wall time."""
+        return clock.stamp(t, self.zone())
 
     # ------------------------------------------------------------------ runs
     def run(self, run_id: str) -> dict:
@@ -808,7 +830,8 @@ class Engine:
         due_at = None
         if step.due:
             secs = wfmod.duration_seconds(step.due)
-            due_at = _utc(self.now() + timedelta(seconds=secs))
+            tz = self.zone()  # counted in real time, from the instant: a due time across a clock change is not off
+            due_at = clock.stamp(clock.utc(self.now(), tz) + timedelta(seconds=secs), tz)
         assignee = None
         if step.assign_to:  # offered to that member only if they hold the step's role and are active
             who = wfmod.render(step.assign_to, self._live_ctx(run))
@@ -1271,7 +1294,8 @@ class Engine:
                       {"name": "comment", "label": "Comment", "type": "text", "required": False, "help": ""}]
         return {
             "item": item, "run": {"id": run["id"], "title": self.hub.run_title(member, run), "record": run["record"],
-                                  "workflow": wf.id, "version": run["version"]},
+                                  "workflow": wf.id, "version": run["version"],
+                                  "today": self.now().date().isoformat(), "time_zone": self.zone().key},
             "step": {"id": step.id, "title": step.title, "kind": step.kind, "risk": step.risk, "role": step.role,
                      "instructions": instructions, "outcomes": step.outcomes, "meaning": step.meaning,
                      "meanings": {o: step.meanings.get(o, step.meaning) for o in step.outcomes},
@@ -1351,10 +1375,16 @@ class Engine:
 
     def decide(self, member: dict, item_id: str, outcome: str, comment: str = "", *, seen: str | None = None,
                propose: bool = False) -> dict:
-        """Decide a gate. The decision is an electronic signature with the step's meaning, by this signer, over the
-        hash of what they were shown (``seen``: the hash the page showed them; refused if it no longer matches).
-        ``propose``: an agent's decision is only proposed, whatever the step's risk: it waits, unapplied, for its
-        sponsor to approve it (how an agent decides over MCP, where it never signs on its own)."""
+        """Decide a gate. A person's decision is an electronic signature with the step's meaning, by this signer, over
+        the hash of what they were shown (``seen``: the hash the page showed them; refused if it no longer matches).
+
+        Agents never sign, whichever way they call (the API, the agent runner, MCP): the engine itself makes an
+        agent's decision one of two things, and neither carries a signature.
+        - A *proposal*, when the step is high risk or ``propose`` is set (MCP always sets it): it waits, unapplied,
+          for its sponsor, whose approval is the person's signature.
+        - An *attestation*, for the routine decisions a workflow lets agents make (``signer = "any"`` within the
+          gate's ``agent_criteria``, at low or medium risk): the agent's own recorded action, with the same fields a
+          signature would cover, shown as "decided by <agent> (an agent)", never in a record's signatures."""
         from .hub import Invalid
         hub = self.hub
         with hub.db:
@@ -1370,20 +1400,24 @@ class Engine:
             if outcome not in step.outcomes:
                 raise Invalid(f"the decision is one of: {', '.join(step.outcomes)}")
             values = {"outcome": outcome, "comment": comment or ""}
-            signed = {"run": run["id"], "step": step.id, "outcome": outcome, "meaning": step.meanings.get(outcome, step.meaning),
-                      "record": run["record"], "workflow": f"{wf.id}@v{run['version']}", "signer": member["id"],
-                      "shown_sha256": self._check_shown(member, item_id, seen), "comment": comment or ""}
+            what = {"run": run["id"], "step": step.id, "outcome": outcome, "meaning": step.meanings.get(outcome, step.meaning),
+                    "record": run["record"], "workflow": f"{wf.id}@v{run['version']}",
+                    "shown_sha256": self._check_shown(member, item_id, seen), "comment": comment or ""}
             if run["record"] and "/" in run["record"]:  # the decision is also a signature on the record it is about
                 rec = hub.records.read(*run["record"].split("/", 1))
                 if rec is not None:
-                    signed.update(version=hub.record_version(run["record"]), record_sha256=hub._record_digest(rec))
-            if member["kind"] == "agent" and (step.risk == "high" or propose):
-                return self._hold(member, item, run, step, values, action="gate.decided", signed=signed)
-            return self._finish(member, item, run, step, values, action="gate.decided", signed=signed)
+                    what.update(version=hub.record_version(run["record"]), record_sha256=hub._record_digest(rec))
+            if member["kind"] != "person":
+                attested = {**what, "agent": member["id"], "kind": "agent attestation"}
+                if step.risk == "high" or propose:
+                    return self._hold(member, item, run, step, values, action="gate.decided", attested=attested)
+                return self._finish(member, item, run, step, values, action="gate.decided", attested=attested)
+            return self._finish(member, item, run, step, values, action="gate.decided",
+                                signed={**what, "signer": member["id"]})
 
     # ------------------------------------------------------------------ high risk: held for the sponsor
-    def _hold(self, agent, item, run, step, values, *, action, signed=None) -> dict:
-        """An agent's high-risk answer waits, unapplied, until its sponsor approves it."""
+    def _hold(self, agent, item, run, step, values, *, action, attested=None) -> dict:
+        """An agent's high-risk answer (or its proposed decision) waits, unapplied, until its sponsor approves it."""
         hub = self.hub
         hub.db.items.set(item["id"], {"status": "held", "claimed_by": agent["id"], "output": values,
                                       "updated_at": utcnow()})
@@ -1393,7 +1427,7 @@ class Engine:
         hub.db.items.insert(_item_doc(
             hub, id=hold_id, run_id=run["id"], step_id=step.id, kind="hold",
             title=f"Approve {agent['name']}'s '{step.title}'" + (" (high risk)" if step.risk == "high" else ""), role=None, assignee=agent["sponsor"],
-            persons_only=1, status="open", output={"holds": item["id"], "action": action, "signed": signed}, cause=seq))
+            persons_only=1, status="open", output={"holds": item["id"], "action": action, "attested": attested}, cause=seq))
         sp = hub.db.members.find_one({"_id": agent["sponsor"]}, fields=["status"])
         if not sp or sp["status"] != "active":
             self._pass_on(self.item(hold_id), agent, "the agent's sponsor is not active")
@@ -1410,16 +1444,27 @@ class Engine:
         agent = hub.member(held["claimed_by"])
         if outcome == "approve" and agent["status"] != "active":
             raise Invalid(f"{agent['name']} has been switched off since; reject its work instead")
+        attested = hold["output"].get("attested")
         meaning = f"I approve {agent['name']}'s work on '{step.title}'" if outcome == "approve" else ""
+        signed = None
+        if outcome == "approve":
+            signed = {"run": run["id"], "step": step.id, "outcome": outcome, "meaning": meaning,
+                      "item": held["id"], "signer": member["id"], "shown_sha256": shown}
+            if attested:  # approving an agent's proposed decision: the person signs that decision, on the record
+                signed["meaning"] = (f"I approve {agent['name']}'s decision on '{step.title}': "
+                                     f"{attested.get('meaning') or attested.get('outcome')}")
+                signed["decision"] = attested.get("outcome")
+                ref = attested.get("record")
+                rec = hub.records.read(*ref.split("/", 1)) if ref and "/" in ref else None
+                if rec is not None:
+                    signed.update(record=ref, version=hub.record_version(ref), record_sha256=hub._record_digest(rec))
         seq = hub.track.append(member, "hold.decided", f"item:{hold['id']}", run_id=run["id"], cause=hold["cause"],
                                data={"step": step.id, "outcome": outcome, "comment": comment or "", "agent": agent["id"]},
-                               signed={"run": run["id"], "step": step.id, "outcome": outcome, "meaning": meaning,
-                                       "item": held["id"], "signer": member["id"], "shown_sha256": shown}
-                               if outcome == "approve" else None)
+                               signed=signed)
         hub.db.items.set(hold["id"], {"status": "done", "claimed_by": member["id"], "updated_at": utcnow()})
         if outcome == "approve":
             self._finish(agent, held, run, step, held["output"], action=hold["output"]["action"],
-                         signed=hold["output"]["signed"], cause=seq, approved_by=member["id"])
+                         attested=attested, cause=seq, approved_by=member["id"], signature=seq)
         else:  # back to people, with the sponsor's reason
             role, assignee = self._to_people(held)
             hub.db.items.set(held["id"], {
@@ -1428,15 +1473,25 @@ class Engine:
                 "role": role, "assignee": assignee, "updated_at": utcnow()})
         return self.item(hold["id"])
 
-    def _finish(self, member, item, run, step, values, *, action, signed=None, cause=None, approved_by=None) -> dict:
+    def _finish(self, member, item, run, step, values, *, action, signed=None, attested=None, cause=None,
+                approved_by=None, signature=None) -> dict:
+        """Apply a step's answer. ``signed``: a person's signature on it. ``attested``: an agent's decision, recorded
+        as the agent's own attested action and never as a signature (``signature``: the event of the person who
+        signed their approval of it, if any). The engine refuses a signature by anyone but a person, whatever the
+        caller passes."""
+        from .hub import Denied
         hub = self.hub
+        if signed is not None and member.get("kind") != "person":
+            raise Denied("only a person signs: agents never sign")
         hub.db.items.set(item["id"], {"status": "done", "claimed_by": member["id"], "output": values,
                                       "updated_at": utcnow()})
-        data = {"step": step.id, "output": values, **({"approved_by": approved_by} if approved_by else {})}
+        data = {"step": step.id, "output": values, **({"approved_by": approved_by} if approved_by else {}),
+                **({"attested": attested} if attested else {})}
         seq = hub.track.append(member, action, f"item:{item['id']}", run_id=run["id"], cause=cause or item["cause"],
                                data=data, signed=signed)
         run = self.run(run["id"])
-        run["ctx"][step.id] = {**values, "by": member["id"], "by_kind": member["kind"], "event": seq}
+        run["ctx"][step.id] = {**values, "by": member["id"], "by_kind": member["kind"], "event": seq,
+                               **({"signature": seq} if signed else {"signature": signature} if signature else {})}
         run["steps"][step.id] = {"state": "done", "item": item["id"], "by": member["id"]}
         self._save(run)
         if member["kind"] == "agent" and RISK_ORDER[step.risk] == 1:
@@ -1536,7 +1591,11 @@ class Engine:
         """Run what time makes due: scheduled workflows (once per slot, remembered in settings) and overdue items
         (flagged, and escalated to the step's ``escalate_to`` role). Safe to call as often as you like."""
         hub = self.hub
-        now = now or self.now()
+        tz = self.zone()
+        # schedules fire by the practice's wall clock (a daily 08:00 is 08:00 in the practice, whatever the server's
+        # zone); an aware ``now`` (an instant) is turned into it, a naive one already is it
+        now = clock.local(now, tz) if now else self.now()
+        now_utc = clock.utc(now, tz)
         stamp = now.strftime("%Y-%m-%dT%H:%M")
         started, overdue = [], []
         last = hub.db.get_setting("schedule_last", {}) or {}
@@ -1565,12 +1624,12 @@ class Engine:
                 except Exception as exc:  # noqa: BLE001
                     hub.track.append(actor, "trigger.failed", f"workflow:{wf.id}", cause=seq,
                                      data={"error": str(exc)})
-        for item in hub.db.items.find({"status": {"$in": ["open", "claimed"]}, "due_at": {"$ne": None, "$lt": _utc(now)},
+        for item in hub.db.items.find({"status": {"$in": ["open", "claimed"]},
+                                       "due_at": {"$ne": None, "$lt": clock.stamp(now_utc, tz)},
                                        "kind": {"$ne": "notice"}}, sort="n"):
             # escalation repeats until the work is done: once per the step's own time allowed (at least 15 minutes),
             # first to the step's escalation role, then also to the practice's escalation role and its owners
             level = int(item["escalated"] or 0)
-            now_utc = now.astimezone(timezone.utc)
             if item.get("escalate_next") and now_utc < _parse(item["escalate_next"]):
                 continue
             due = _parse(item["due_at"])
@@ -1580,7 +1639,8 @@ class Engine:
             step = wf.step(item["step_id"])
             late = item["claimed_by"] or item["assignee"]
             with hub.db:
-                hub.db.items.set(item["id"], {"escalated": level + 1, "escalate_next": _utc(now_utc + allowed),
+                hub.db.items.set(item["id"], {"escalated": level + 1,
+                                              "escalate_next": clock.stamp(now_utc + allowed, tz),
                                               "updated_at": utcnow()})
                 seq = hub.track.append(self.automation_actor(run), "item.overdue", f"item:{item['id']}",
                                        run_id=run["id"], cause=item["cause"],
@@ -1595,9 +1655,9 @@ class Engine:
                                priority="urgent", besides=late, owners_too=True)
             overdue.append(item["id"])
         checked = hub.db.get_setting("waits_checked", "") or ""
-        if (_utc(now - timedelta(minutes=15)) >= checked
+        if (clock.stamp(now_utc - timedelta(minutes=15), tz) >= checked
                 and hub.db.runs.exists({"status": "running", **_WAITING})):
-            hub.db.set_setting("waits_checked", _utc(now))
+            hub.db.set_setting("waits_checked", clock.stamp(now_utc, tz))
             tick_seq = hub.track.append({"id": "clock", "kind": "automation"}, "clock.ticked", "", data={"at": stamp})
             self.recheck_waits(tick_seq)  # a wait on something time changes (or that changed outside the hub)
         return {"started": started, "overdue": overdue, "at": stamp}
@@ -1606,11 +1666,6 @@ class Engine:
 def _parse(stamp: str) -> datetime:
     """A track time (UTC, ISO, Z) as an aware datetime."""
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-
-
-def _utc(t: datetime) -> str:
-    """A time as the track writes it (UTC, ISO, Z). A naive time is the practice's local time."""
-    return t.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")

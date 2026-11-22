@@ -109,6 +109,25 @@ def _refs_in(value) -> list[str]:
     return sorted(out)
 
 
+def _counted(got: dict) -> dict:
+    """A batch's result for the track: a list by its length (each record it names has an event of its own)."""
+    return {k: len(v) if isinstance(v, (list, tuple)) else v for k, v in got.items()}
+
+
+def _merge_upgrade_results(so_far: dict, got: dict) -> dict:
+    """What an upgrade's batches did, together: numbers (and lists, by their length) add up, a yes stays yes."""
+    out = dict(so_far)
+    for k, v in _counted(got).items():
+        old = out.get(k)
+        if isinstance(v, bool) or isinstance(old, bool):
+            out[k] = bool(old) or bool(v)
+        elif isinstance(v, (int, float)) and isinstance(old, (int, float)):
+            out[k] = old + v
+        else:
+            out[k] = v
+    return out
+
+
 def _how(data: dict) -> str:
     """How a record was seen, for an access report: 'export (csv)' when it went out in a file."""
     how = data.get("how", "")
@@ -145,18 +164,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self._subjects()
         if self.pack and pack is None:
             self._everyone_holds_everyone()
+            self._search_ready(self.db.records.distinct("type"))  # records written before their words were kept
         from .models import ModelGateway
         self.models = models or ModelGateway(self)
         from .engine import Engine
         self.engine = Engine(self)
+        self.engine.zone()  # an unknown time zone, or no tz data on this machine, fails here: never wrong dates later
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
         if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:
-            try:  # an upgrade whose definitions were approved before this pack.py was running
-                self.run_pack_upgrades()
-            except Exception as exc:  # noqa: BLE001 - the hub still opens; the track says what did not happen
-                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
-                                  f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
-                                  data={"error": str(exc)[:500]})
+            # an upgrade whose definitions were approved before this pack.py was running, or one a restart stopped
+            # part way: the hub still opens if it fails, and the track says what did not happen
+            self._upgrades_after(None)
 
     # ------------------------------------------------------------------ the practice pack, under change control
     PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants")
@@ -305,47 +323,101 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     proposed.append({"kind": kind, "id": did, **self._propose(
                         kind, actor, did, src, f"The practice pack {p.version} changes this", module=None)})
             self._defs_reset()
-            self.run_pack_upgrades(actor)  # what this process's pack.py can do now (the new one runs after the restart)
+        # what this process's pack.py can do now (the new one runs after the restart), in batches of their own: the
+        # upgrade stands whether or not they finish here, and what they did not finish goes on at the next start
+        self._upgrades_after(actor)
         return {"pack": p.id, "version": p.version, "restart": True, "added": added_defs, "proposed": proposed}
+
+    UPGRADE_BATCH = 200       # records a pack upgrade converts in one transaction
+    upgrade_state: dict = {}  # the running upgrade's own place, kept with each batch (run_pack_upgrades)
+
+    def _upgrades_after(self, actor: dict | None) -> None:
+        if self.db.in_transaction():
+            return  # never inside another transaction: they run on their own, at the next call or the next start
+        try:
+            self.run_pack_upgrades(actor)
+        except Exception as exc:  # noqa: BLE001 - what was approved stands; the upgrade goes on at the next start
+            self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
+                              f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                              data={"error": str(exc)[:500]})
+
+    UPGRADE_PROGRESS = "pack_upgrade_progress"  # setting: {upgrade id: {"batches": n, "state": {...}, "done": {...}}}
 
     def run_pack_upgrades(self, actor: dict | None = None) -> list[dict]:
         """Run what the practice pack's ``UPGRADES`` (pack.py) do to records an older version left: each once, when it
         can (a function returns None while what it needs is not in force yet, such as a record type still proposed),
-        in one transaction, written to the track. Called when a pack is upgraded, when a definition is approved, and
-        when the hub opens, so the upgrade happens whichever of these comes last."""
+        written to the track. Called when a pack is upgraded, when a definition is approved, and when the hub opens,
+        so the upgrade happens whichever of these comes last.
+
+        An upgrade works in batches: a function that returns ``{"more": True, ...}`` did one batch and is called
+        again. Each call is a transaction of its own (run again if another writer got in first), and with it the hub
+        keeps where the upgrade is (``pack_upgrade_progress``: the batches done, what they did so far, and
+        ``hub.upgrade_state``, a dict the function keeps its own place in), so an upgrade stopped part way (a restart, a
+        failure) goes on from the last batch that was written, and never runs as one transaction of unbounded size.
+        Every batch is an event on the track (``practice.upgrade_progress``); the last is ``practice.upgrade_applied``
+        with what all the batches did. A function must leave every record whole after each batch: a record is
+        converted, or not yet, never half."""
         ups = dict(self.pack.upgrades) if self.pack else {}
         if not ups:
             return []
+        if self.db.in_transaction():
+            raise RuntimeError("pack upgrades run in batches, each its own transaction: call this outside one")
         # the hub writes what the upgrade changes (the approver may not write every record it touches); the track says
         # whose approval or upgrade set it off
         by = (actor or {}).get("id")
         actor = {"id": "hub", "kind": "automation", "name": "Practice Hub"}
-        done, out = list(self.db.get_setting("pack_upgrades_done") or []), []
+        practice = f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}"
+        out = []
         for uid, fn in ups.items():
-            if uid in done:
-                continue
-            self._upgrading = True
-            try:
-                with self.db:
+            while True:
+                def batch():
+                    if uid in (self.db.get_setting("pack_upgrades_done") or []):
+                        return "done"
+                    progress = dict((self.db.get_setting(self.UPGRADE_PROGRESS) or {}).get(uid) or {})
+                    self.upgrade_state = dict(progress.get("state") or {})
                     got = fn(self, actor)
                     if got is None:
-                        continue
-                    done.append(uid)
-                    self.db.set_setting("pack_upgrades_done", done)
-                    self.track.append(actor, "practice.upgrade_applied",
-                                      f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
-                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by, **dict(got)})
-                    out.append({"upgrade": uid, **dict(got)})
-            finally:
-                self._upgrading = False
-                self._defs_reset()
+                        return None
+                    got = dict(got)
+                    more = bool(got.pop("more", False))
+                    so_far = _merge_upgrade_results(progress.get("done") or {}, got)
+                    n = int(progress.get("batches") or 0) + 1
+                    every = dict(self.db.get_setting(self.UPGRADE_PROGRESS) or {})
+                    if more:
+                        every[uid] = {"batches": n, "state": self.upgrade_state, "done": so_far}
+                        self.db.set_setting(self.UPGRADE_PROGRESS, every)
+                        self.track.append(actor, "practice.upgrade_progress", practice,
+                                          data={"upgrade": uid, "batch": n, "pack_version": self.pack.version,
+                                                "after": by, **_counted(got)})
+                        return "more"
+                    every.pop(uid, None)
+                    self.db.set_setting(self.UPGRADE_PROGRESS, every)
+                    self.db.set_setting("pack_upgrades_done", [*(self.db.get_setting("pack_upgrades_done") or []),
+                                                               uid])
+                    self.track.append(actor, "practice.upgrade_applied", practice,
+                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by,
+                                            "batches": n, **so_far})
+                    out.append({"upgrade": uid, **so_far})
+                    return "done"
+                self._upgrading = True
+                try:
+                    step = self.db.atomic(batch)
+                finally:
+                    self._upgrading = False
+                    self.upgrade_state = {}
+                    self._defs_reset()
+                if step != "more":
+                    break
         return out
 
-    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None) -> dict:
+    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None,
+                       repoint: bool = True) -> dict:
         """Turn a record into one of another type (a pack upgrade that merges two types): a new record with the same
         id, or, with ``into``, the existing record of ``rtype`` it already stood for, rewritten as ``data``. The record
         written is checked as any other, every record that pointed at the old one points at it instead, and the old one
-        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere."""
+        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere: open workflow
+        runs, work items and queued messages that name it name the new record (``repoint_work``; ``repoint=False``
+        leaves that to a caller converting many records, which repoints them all at once)."""
         old_type, rid = ref.split("/", 1)
         rt = self._type(rtype)
         new_id = into.split("/", 1)[1] if into else rid
@@ -385,9 +457,40 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.db.records.delete({"_id": ref})
             self.db.links.delete({"from_ref": ref})
             self.db.titles.delete({"_id": ref})
+            if repoint:
+                self.repoint_work({ref: new_ref})
             self.track.append(actor, "record.converted", new_ref,
                               data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec)})
         return rec
+
+    REPOINT = (("runs", {"status": "running"}),
+               ("items", {"status": {"$in": ["open", "claimed", "held"]}}),
+               ("outbox", {"status": {"$in": ["queued", "sending"]}}))
+
+    def repoint_work(self, refs: dict[str, str]) -> int:
+        """Work still under way that names a record by a ref in ``refs`` (a run's record and context, an item's
+        output, a queued message) names its new ref instead: after a conversion, a run goes on with the new record
+        rather than failing on one that is gone. Finished work keeps what it named, as the track does."""
+        if not refs:
+            return 0
+
+        def swap(v):
+            if isinstance(v, str):
+                return refs.get(v, v)
+            if isinstance(v, dict):
+                return {k: swap(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [swap(x) for x in v]
+            return v
+        n = 0
+        with self.db:
+            for coll, flt in self.REPOINT:
+                for row in self.db[coll].find(flt):
+                    fixed = swap(row)
+                    if fixed != row:
+                        self.db[coll].replace(fixed)
+                        n += 1
+        return n
 
     # ------------------------------------------------------------------ modules
     def installed_modules(self) -> list[str]:
@@ -453,6 +556,39 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.pack.types_fn = self.type_ids
         if hasattr(self.records, "subject_fn"):
             self.records.subject_fn = self.subject_of
+        if hasattr(self.records, "parts_fn"):
+            self.records.parts_fn = self._search_parts
+        self._indexed_types: dict[str, str] = {}
+
+    SEARCH_INDEX = "w1"  # bump when the words a record is found by are built differently: every record is redone
+
+    def _search_stamp(self, rt) -> str:
+        """What a record's search words were built from: the index's version and its type's classed fields."""
+        import hashlib
+        classed = sorted((f["path"], f["data_class"]) for f in (rt.classed_fields if rt is not None else []))
+        return self.SEARCH_INDEX + ":" + (hashlib.sha1(json.dumps(classed).encode()).hexdigest()[:12] if classed else "")
+
+    def _search_parts(self, rec: dict):
+        """A record as each reader sees it, for its search words (``LocalRecordStore.parts_fn``)."""
+        rt = self.record_type_for_reading(rec.get("resourceType") or "")
+        classed = rt.classed_fields if rt is not None else []
+        if not classed:
+            return [], self._search_stamp(rt)
+        parts = [("_", visibility.strip(rec, classed))]
+        for dc in sorted({f["data_class"] for f in classed}):
+            parts.append((dc, visibility.strip(rec, [f for f in classed if f["data_class"] != dc])))
+        return parts, self._search_stamp(rt)
+
+    def _search_ready(self, types) -> None:
+        """Before a search: the records of these types are indexed by their type as it is now (a type whose fields'
+        classes changed since has its records' words rewritten, once)."""
+        if not hasattr(self.records, "reindex"):
+            return
+        for t in types:
+            stamp = self._search_stamp(self.record_type_for_reading(t))
+            if self._indexed_types.get(t) != stamp:
+                self.records.reindex(t, stamp)
+                self._indexed_types[t] = stamp
 
     def install(self, pack_name: str, *, demo: bool = False) -> None:
         """Install a practice pack into an empty hub: roles, data classes, grants, members, and the first version of
@@ -1006,10 +1142,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if k == "code" and v and not re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", v):
                 raise Invalid("code: 2 to 6 capital letters or digits, starting with a letter (it begins every work "
                               "item's key, like HFM-12)")
-            if k == "timezone" and v:
-                import zoneinfo
-                if v not in zoneinfo.available_timezones():
-                    raise Invalid(f"timezone: {v!r} is not a time zone name like America/Halifax")
+            if k == "timezone":  # it decides the practice's "now" and "today" (``clock``): never left empty
+                if not v:
+                    raise Invalid("timezone: the practice needs a time zone (a name like America/Halifax)")
+                from .clock import ZoneError, zone
+                try:
+                    zone(v)
+                except ZoneError as exc:
+                    raise Invalid(f"timezone: {exc}") from None
             if k == "email" and v and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", v):
                 raise Invalid("email: that is not an email address")
             if k == "website" and v and not re.fullmatch(r"https://\S+", v):
@@ -1022,6 +1162,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             local = {**(self.db.get_setting("practice_local", {}) or {}), **clean}
             with self.db:
                 self.db.set_setting("practice_local", local)
+                self.engine._zone = None  # its time zone may have changed: read it afresh
                 self.track.append(actor, "practice.changed", f"practice:{now.get('id', 'main')}",
                                   data={"changed": {k: {"from": now.get(k), "to": v} for k, v in clean.items()}})
         return self.practice
@@ -1172,6 +1313,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.track.append(actor, "member.added", member_ref(m["id"]), cause=cause,
                               data={"kind": kind, "name": m["name"], "roles": roles, "sponsor": sponsor,
                                     "profile": profile})
+            if kind == "agent":  # its profile is a versioned record from the start: version 1 is what it was added with
+                self._record_profile(actor, m["id"], profile, "added with the agent")
         return self.member(m["id"])
 
     def add_member(self, actor: dict, m: dict) -> dict:
@@ -1181,10 +1324,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         roles = list(m.get("roles", []) or [])
         held_back = self.privileged_roles() | (self.data_roles() if m.get("kind", "person") != "person" else set())
         plain = [r for r in roles if r not in held_back]
+        asked = dict(m.get("profile") or {}) if m.get("kind") == "agent" else {}
+        if asked:  # a new agent may do nothing yet: the skills and risk it asks for are proposed, like any change
+            asked = self._check_profile({"max_risk": "low", "skills": [], **asked})
+            m = {**m, "profile": {**({"model": asked["model"]} if asked.get("model") else {}),
+                                  "max_risk": "low", "skills": []}}
         with self.db:
             out = self._create_member(actor, {**m, "roles": plain})
             if len(plain) != len(roles):
                 self.set_roles(actor, out["id"], roles)
+            if asked and asked != self.member(out["id"])["profile"]:
+                self.propose_agent_profile(actor, out["id"], asked, "what it was added to do")
         return self.member(out["id"])
 
     def privileged_roles(self) -> set[str]:
@@ -1210,8 +1360,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 for t in self.authz.read(obj=f"data_class:{dc}", relation=rel) if t[2].startswith("role:")}
 
     def _request_for(self, actor: dict, mid: str, **change) -> dict:
-        """Put a change into the member's waiting request (roles, an agent's max_risk), keeping what it already asks
-        for and everyone who asked: none of them approves it."""
+        """Put a change into the member's waiting role request, keeping everyone who asked: none of them approves
+        it."""
         req = self.role_request(mid) or {}
         asked = list(dict.fromkeys([*req.get("asked_by", [req["by"]] if req.get("by") else []), actor["id"]]))
         req = {**req, **change, "by": actor["id"], "asked_by": asked, "at": utcnow()}
@@ -1222,8 +1372,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def set_roles(self, actor: dict, mid: str, roles: list[str]) -> dict:
         """Change a member's roles. Taking roles away, or giving ordinary ones, applies now; giving a role that
-        approves changes or manages members waits for a second policy owner (two people for every change)."""
-        self.require(actor, "member_admin", "practice:main", "change roles")
+        approves changes or manages members waits for a second policy owner (two people for every change).
+
+        A policy owner who does not manage members may ask too: then the whole change waits for a second policy
+        owner. Two policy owners together are the practice's way back when its only member admin is gone."""
+        admin = self.can(actor, "member_admin", "practice:main")
+        if not admin and not (actor.get("kind") == "person" and self.is_policy_owner(actor)):
+            self.require(actor, "member_admin", "practice:main", "change roles")
         target = self.member(mid)
         if target["id"] == actor["id"]:
             raise Denied("nobody changes their own roles")
@@ -1239,22 +1394,26 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid("only a person may hold a role that approves changes or manages members")
         if target["kind"] != "person":  # an agent or service reaching restricted data: a second policy owner approves
             raised = (wanted - before) & self.data_roles()
+        if not admin:  # two policy owners together: all of it waits for the second
+            raised = wanted ^ before
+            if not raised:
+                return target
         with self.db:
-            pending = self.role_request(mid) or {}
             if raised:
                 self._request_for(actor, mid, roles=sorted(wanted))
                 self.track.append(actor, "member.roles_requested", member_ref(mid),
-                                  data={"roles": sorted(wanted), "needs_approval": sorted(raised)})
+                                  data={"roles": sorted(wanted), "needs_approval": sorted(raised),
+                                        **({} if admin else {"by_policy_owners": True})})
+                if not admin:
+                    return self.member(mid)
                 wanted -= raised  # the rest applies now
-            elif pending.get("max_risk"):  # the roles are settled; a raised max_risk still waits
-                self._request_for(actor, mid, roles=sorted(wanted))
             else:
                 self.db.del_setting(f"role_request:{mid}")
             self._apply_roles(actor, mid, before, wanted)
         return self.member(mid)
 
     def approve_roles(self, actor: dict, mid: str) -> dict:
-        """A second policy owner gives the roles another member admin asked for."""
+        """A second policy owner gives the roles another member admin (or policy owner) asked for."""
         self.require(actor, "policy_owner", "practice:main", "approve a role change")
         req = self.role_request(mid)
         if not req:
@@ -1268,15 +1427,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         with self.db:
             self.db.del_setting(f"role_request:{mid}")
             self._apply_roles(actor, mid, set(target["roles"]), set(req["roles"]), approved_from=req["by"])
-            if req.get("max_risk") and target["kind"] == "agent":
-                profile = {**target["profile"], "max_risk": req["max_risk"]}
-                self.db.members.set(mid, {"profile": profile})
-                self.track.append(actor, "member.profile_changed", member_ref(mid),
-                                  data={"before": target["profile"], "after": profile, "asked_by": req["by"]})
         return self.member(mid)
 
     def withdraw_roles(self, actor: dict, mid: str) -> None:
-        self.require(actor, "member_admin", "practice:main", "withdraw a role change")
+        if not self.is_policy_owner(actor):
+            self.require(actor, "member_admin", "practice:main", "withdraw a role change")
         with self.db:
             if self.role_request(mid):
                 self.db.del_setting(f"role_request:{mid}")
@@ -1286,10 +1441,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if before == after:
             return
         with self.db:
-            owners = self.policy_owner_count()
+            owners, admins = self.policy_owner_count(), len(self.member_admins())
             self.authz.delete([(f"role:{r}", "assignee", member_ref(mid)) for r in before - after])
             self.authz.write([(f"role:{r}", "assignee", member_ref(mid)) for r in after - before])
             self._keep_a_policy_owner(owners)
+            self._keep_a_member_admin(admins)
             self.track.append(actor, "member.roles_changed", member_ref(mid),
                               data={"added": sorted(after - before), "removed": sorted(before - after),
                                     **({"asked_by": approved_from} if approved_from else {})})
@@ -1342,55 +1498,210 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                     "policy_owners_before": self.policy_owner_count() - 1})
         return {**self.member(mid), "role": role or "policy_owner"}
 
-    def set_status(self, actor: dict, mid: str, status: str, reason: str = "") -> dict:
+    # ------------------------------------------------------------------ someone to manage members
+    def member_admins(self) -> list[dict]:
+        """Switched-on people who manage members (add people, change roles, switch someone off)."""
+        return [m for m in self.members("person") if m["status"] == "active" and self.can(m, "member_admin", "practice:main")]
+
+    def member_admin_warning(self) -> str | None:
+        """What to tell a practice that has only one person (or nobody) who manages members."""
+        admins = self.member_admins()
+        if len(admins) == 1:
+            return (f"{admins[0]['name']} is the only person who manages members. If they leave, nobody can switch "
+                    f"them off or add anyone, except two policy owners together. Give a second person a role that "
+                    f"manages members.")
+        if not admins:
+            return ("Nobody switched on manages members. Two policy owners together can give someone a role that "
+                    "does: one asks, the other approves.")
+        return None
+
+    def _keep_a_member_admin(self, before: int) -> None:
+        """Refuse whatever leaves the practice with nobody who manages members (it had someone before)."""
+        if before and not self.member_admins():
+            raise Invalid("that would leave nobody who manages members (adds people, changes roles, switches someone "
+                          "off): give another person a role that manages members first")
+
+    # ------------------------------------------------------------------ the off switch
+    def dependents(self, mid: str) -> list[dict]:
+        """The switched-on agents and services a person sponsors. They stop with their sponsor, and their credentials
+        end for good, unless each is handed to a new sponsor first: what the switch-off form shows and asks about."""
+        target = self.member(mid)
+        if target["kind"] != "person":
+            return []
+        rows = [self.member(r["id"]) for r in self.db.members.find({"sponsor": mid, "status": "active"},
+                                                                   sort=[("name", ASC)], fields=["id"])]
+        going = {mid} | {m["id"] for m in rows}
+        out = []
+        for m in rows:
+            out.append({"id": m["id"], "name": m["name"], "kind": m["kind"], "roles": m["roles"],
+                        "credentials": self.db.tokens.count({"member": m["id"], "revoked": 0}),
+                        "only_holder_of": [r for r in m["roles"]
+                                           if not [h for h in self.active_holders(r) if h["id"] not in going]]})
+        return out
+
+    def _dependents_plan(self, target: dict, hand_over: dict | None, stop) -> dict:
+        """What becomes of each agent or service the target sponsors: handed to a new sponsor, or stopped, each one
+        chosen. Nothing stops without someone saying so."""
+        deps = self.dependents(target["id"])
+        hand_over = {str(k): str(v) for k, v in (hand_over or {}).items() if v}
+        ids = {d["id"] for d in deps}
+        if stop is True or stop == "all":
+            stop = [d["id"] for d in deps if d["id"] not in hand_over]
+        stop = [str(x) for x in (stop or [])]
+        problems = [f"{x} is not an agent or service {target['name']} sponsors" for x in [*hand_over, *stop]
+                    if x not in ids]
+        problems += [f"{x} is both handed over and stopped" for x in set(hand_over) & set(stop)]
+        for aid, sp in hand_over.items():
+            new = self.db.members.get(sp)
+            if not new or new["kind"] != "person" or new["status"] != "active" or sp == target["id"]:
+                problems.append(f"{aid}: a new sponsor is a switched-on person other than {target['name']}")
+        undecided = [d for d in deps if d["id"] not in hand_over and d["id"] not in stop]
+        for d in undecided:
+            what = [f"{d['credentials']} live credential{'s' if d['credentials'] != 1 else ''} end for good"
+                    if d["credentials"] else "", f"nobody else holds {', '.join(d['only_holder_of'])}"
+                    if d["only_holder_of"] else ""]
+            problems.append(f"{d['name']} stops" + (f" ({'; '.join(w for w in what if w)})" if any(what) else "")
+                            + ": hand it to a new sponsor, or say that it may stop")
+        if problems:
+            names = ", ".join(d["name"] for d in deps)
+            raise Invalid(f"{target['name']} sponsors {names}: choose a new sponsor for each, or say that it stops",
+                          problems)
+        return {"hand_over": hand_over, "stop": stop}
+
+    def set_status(self, actor: dict, mid: str, status: str, reason: str = "", *, hand_over: dict | None = None,
+                   stop=None) -> dict:
         """Disable (the off switch) or re-enable a member. An agent's sponsor may switch it off; turning anyone on,
-        or off a person, takes a member admin."""
+        or off a person, takes a member admin (or two policy owners: ``request_switch_off``).
+
+        A person who sponsors agents or services is switched off only once each of them is handed to a new sponsor
+        (``hand_over``: agent -> person) or stops by choice (``stop``: their ids, or ``"all"``)."""
         target = self.member(mid)
         if status not in ("active", "disabled"):
             raise Invalid("status is active or disabled")
         is_sponsor = target["sponsor"] == actor["id"]
         if not (self.can(actor, "member_admin", "practice:main") or (is_sponsor and status == "disabled")):
-            raise Denied(f"{actor['name']} may not {'disable' if status == 'disabled' else 'enable'} {target['name']}")
+            raise Denied(f"{actor['name']} may not {'disable' if status == 'disabled' else 'enable'} {target['name']}"
+                         + (": two policy owners together may (one asks, the other approves)"
+                            if status == "disabled" and self.is_policy_owner(actor) else ""))
         if status == "active" and target["kind"] != "person":
             sp = self.member(target["sponsor"])
             if sp["status"] != "active":
                 raise Invalid(f"{target['name']}'s sponsor {sp['name']} is not active: give it a new sponsor first")
-        # the roles held by whoever goes off: this member, and a person's agents, which stop with them
-        going = [target] + ([self.member(a["id"]) for a in self.db.members.find(
-            {"sponsor": mid, "status": "active"}, fields=["id"])]
-            if target["kind"] == "person" and status == "disabled" else [])
+        plan = self._dependents_plan(target, hand_over, stop) if status == "disabled" else None
+        return self._switch(actor, target, status, reason, plan)
+
+    def _switch(self, actor: dict, target: dict, status: str, reason: str, plan: dict | None,
+                asked_by: str | None = None) -> dict:
+        mid = target["id"]
+        # the roles held by whoever goes off: this member, and the agents that stop with them
+        going = [target] + [self.member(a) for a in (plan or {}).get("stop", [])]
         had = [r for r in dict.fromkeys(r for m in going for r in m["roles"]) if self.active_holders(r)]
         with self.db:
-            released = self._set_status(actor, target, status, reason)
+            released = self._set_status(actor, target, status, reason, plan, asked_by)
         out = self.member(mid)
         out["roles_left_empty"] = [r for r in had if not self.active_holders(r)] if status == "disabled" else []
         out["released"] = released or []
         return out
 
-    def _set_status(self, actor: dict, target: dict, status: str, reason: str) -> list[str]:
+    def _set_status(self, actor: dict, target: dict, status: str, reason: str, plan: dict | None = None,
+                    asked_by: str | None = None) -> list[str]:
         mid = target["id"]
-        owners = self.policy_owner_count()
+        plan = plan or {"hand_over": {}, "stop": []}
+        owners, admins = self.policy_owner_count(), len(self.member_admins())
+        for aid, sp in plan["hand_over"].items():  # handed over while their sponsor is still on: they never stop
+            self._move_sponsor(actor, aid, sp, f"handed over when {target['name']} was switched off")
         self.db.members.set(mid, {"status": status})
         if status == "disabled" and target["kind"] == "person":
             self._keep_a_policy_owner(owners)
+            self._keep_a_member_admin(admins)
+        data = {"reason": reason}
+        if status == "disabled" and target["kind"] == "person" and (plan["hand_over"] or plan["stop"]):
+            data.update(handed_over=plan["hand_over"], stopped=plan["stop"])
+        if asked_by:
+            data["asked_by"] = asked_by
         self.track.append(actor, "member.disabled" if status == "disabled" else "member.enabled", member_ref(mid),
-                          data={"reason": reason})
+                          data=data)
         released: list[str] = []
         if status == "disabled":
             # switching someone off ends their credentials for good: switching them on again does not revive them
             self._revoke_all(actor, mid, "switched off")
-            if target["kind"] == "person":  # agents sponsored by a person who leaves stop until re-sponsored
+            if target["kind"] == "person":  # the agents chosen to stop with their sponsor stop until re-sponsored
                 for agent in self.db.members.find({"sponsor": mid, "status": "active"}, fields=["id"]):
+                    if agent["id"] not in plan["stop"]:  # nothing stops that nobody chose to stop
+                        raise Invalid(f"{agent['id']} is sponsored by {target['name']}: hand it over or say it stops")
                     self.db.members.set(agent["id"], {"status": "disabled"})
-                    self._revoke_all(actor, agent["id"], "its sponsor was switched off")
+                    self._revoke_all(actor, agent["id"], f"its sponsor {target['name']} was switched off and "
+                                                         f"{actor['name']} chose that it stops")
                     self.track.append(actor, "member.disabled", member_ref(agent["id"]),
-                                      data={"reason": f"its sponsor {target['name']} was disabled"})
+                                      data={"reason": f"its sponsor {target['name']} was disabled; "
+                                                      f"{actor['name']} chose that it stops"})
                     released += self.engine.release_claims_of(agent["id"], actor, "its sponsor was disabled")
             released += self.engine.release_claims_of(mid, actor, reason or "disabled")
         return released
 
+    # ------------------------------------------------------------------ two policy owners switch someone off
+    def off_request(self, mid: str) -> dict | None:
+        """A policy owner's request to switch a member off, waiting for a second policy owner."""
+        return self.db.get_setting(f"off_request:{mid}")
+
+    def request_switch_off(self, actor: dict, mid: str, reason: str, *, hand_over: dict | None = None,
+                           stop=None) -> dict:
+        """Two policy owners together switch a member off, for when no member admin can (the only one is away, or
+        is the one leaving): one asks, with the reason and what becomes of their agents; another approves."""
+        if actor.get("kind") != "person":
+            raise Denied("a person asks to switch someone off")
+        self.require(actor, "policy_owner", "practice:main", "ask to switch someone off")
+        target = self.member(mid)
+        if mid == actor["id"]:
+            raise Denied("nobody asks to switch themselves off")
+        if target["status"] != "active":
+            raise Invalid(f"{target['name']} is already switched off")
+        if not (reason or "").strip():
+            raise Invalid("say why they are being switched off")
+        plan = self._dependents_plan(target, hand_over, stop)
+        req = {"by": actor["id"], "reason": reason.strip(), **plan, "at": utcnow()}
+        with self.db:
+            self.db.set_setting(f"off_request:{mid}", req)
+            self.track.append(actor, "member.off_requested", member_ref(mid),
+                              data={"reason": req["reason"], "handed_over": plan["hand_over"], "stopped": plan["stop"]})
+        return req
+
+    def approve_switch_off(self, actor: dict, mid: str) -> dict:
+        """A second policy owner, not the one who asked and not the member, switches them off as asked."""
+        if actor.get("kind") != "person":
+            raise Denied("a person approves switching someone off")
+        self.require(actor, "policy_owner", "practice:main", "approve switching someone off")
+        req = self.off_request(mid)
+        if not req:
+            raise Invalid("nobody has asked to switch them off")
+        if actor["id"] in (req["by"], mid):
+            raise Denied("switching someone off is approved by a policy owner other than the one who asked, and not "
+                         "by the member it is for")
+        target = self.member(mid)
+        if target["status"] != "active":
+            raise Invalid(f"{target['name']} is already switched off")
+        plan = self._dependents_plan(target, req["hand_over"], req["stop"])  # their agents may have changed since
+        with self.db:
+            self.db.del_setting(f"off_request:{mid}")
+            return self._switch(actor, target, "disabled", req["reason"], plan, asked_by=req["by"])
+
+    def withdraw_switch_off(self, actor: dict, mid: str) -> None:
+        req = self.off_request(mid)
+        if not req:
+            raise Invalid("nobody has asked to switch them off")
+        if actor["id"] != req["by"]:
+            self.require(actor, "policy_owner", "practice:main", "withdraw a request to switch someone off")
+        with self.db:
+            self.db.del_setting(f"off_request:{mid}")
+            self.track.append(actor, "member.off_withdrawn", member_ref(mid))
+
     def set_sponsor(self, actor: dict, mid: str, sponsor: str) -> dict:
         self.require(actor, "member_admin", "practice:main", "change a sponsor")
+        with self.db:
+            self._move_sponsor(actor, mid, sponsor)
+        return self.member(mid)
+
+    def _move_sponsor(self, actor: dict, mid: str, sponsor: str, why: str = "") -> None:
         target, sp = self.member(mid), self.member(sponsor)
         if target["kind"] == "person":
             raise Invalid("people do not have sponsors")
@@ -1401,46 +1712,146 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.authz.write([(member_ref(mid), "sponsor", member_ref(sponsor))])
         self.db.members.set(mid, {"sponsor": sponsor})
         self.track.append(actor, "member.sponsor_changed", member_ref(mid),
-                          data={"from": target["sponsor"], "to": sponsor})
+                          data={"from": target["sponsor"], "to": sponsor, **({"reason": why} if why else {})})
         self.engine.move_sponsor_work(mid, sponsor, actor)
-        return self.member(mid)
 
-    def update_agent_profile(self, actor: dict, mid: str, changes: dict) -> dict:
-        self.require(actor, "member_admin", "practice:main", "change an agent's profile")
+    # ------------------------------------------------------------------ an agent's profile: a controlled record
+    # What an agent may do (its model, the skills and prompt blocks it takes, the highest risk) is a versioned record
+    # under the same change control as a definition: proposed, approved by a second person who is a policy owner,
+    # then in force. Nothing changes an agent's behaviour at once, and every version is kept.
+    PROFILE_KEYS = ("model", "max_risk", "skills")
+
+    def _check_profile(self, profile: dict) -> dict:
+        extra = sorted(set(profile) - set(self.PROFILE_KEYS))
+        if extra:
+            raise Invalid(f"an agent's profile holds {', '.join(self.PROFILE_KEYS)}, not {', '.join(extra)}")
+        out = {k: profile[k] for k in self.PROFILE_KEYS if k in profile}
+        if out.get("max_risk") not in RISK_ORDER:
+            raise Invalid("max_risk is low, medium or high")
+        if "model" in out:
+            out["model"] = str(out["model"] or "").strip()
+            if not out["model"]:
+                out.pop("model")
+        skills = out.get("skills", [])
+        if not isinstance(skills, list) or not all(isinstance(x, str) for x in skills):
+            raise Invalid("skills is a list of skill or prompt block ids")
+        out["skills"] = list(dict.fromkeys(skills))
+        prompts = set(self.db.block_versions.distinct("block_id", {"status": "active"}))
+        unknown = [x for x in out["skills"] if self.pack and x not in self.pack.skills and x not in prompts]
+        if unknown:
+            raise Invalid(f"there is no skill or prompt block {', '.join(unknown)}")
+        return out
+
+    @staticmethod
+    def _profile_source(profile: dict) -> str:
+        return json.dumps(profile, sort_keys=True, separators=(",", ":"))
+
+    def _record_profile(self, actor: dict, mid: str, profile: dict, note: str) -> dict:
+        """Put a profile in force without a second person: an agent's first version (added, or installed with a
+        pack or module, which were reviewed themselves), or the one it had before profiles were versioned."""
+        version = (self.db.agent_profile_versions.max("version", {"agent_id": mid}) or 0) + 1
+        source = self._profile_source(profile)
+        row = {"_id": f"{mid}@{version}", "agent_id": mid, "version": version, "status": "active",
+               "profile": profile, "source": source, "author": actor["id"], "note": note, "created_at": utcnow(),
+               "approved_by": None, "approved_at": None, "based_on": None}
+        self.db.agent_profile_versions.insert(row)
+        self.track.append(actor, "agent.profile_recorded", member_ref(mid),
+                          data={"version": version, "note": note,
+                                "source_sha256": hashlib.sha256(source.encode()).hexdigest()})
+        return row
+
+    def agent_profile_versions(self, mid: str) -> list[dict]:
+        return self.db.agent_profile_versions.find({"agent_id": mid}, sort=[("version", DESC)])
+
+    def agent_profile_proposal(self, mid: str) -> dict | None:
+        return self.db.agent_profile_versions.find_one({"agent_id": mid, "status": "proposed"},
+                                                       sort=[("version", DESC)])
+
+    def _profile_in_force(self, actor: dict, target: dict) -> dict:
+        row = self.db.agent_profile_versions.find_one({"agent_id": target["id"], "status": "active"})
+        return row or self._record_profile(actor, target["id"], target["profile"],
+                                           "the profile it had before profiles were versioned")
+
+    def propose_agent_profile(self, actor: dict, mid: str, changes: dict, note: str = "") -> dict:
+        """Propose a new version of an agent's profile (a member admin, or its sponsor). It is in force only once a
+        policy owner other than whoever proposed it approves it. A newer proposal replaces one still waiting."""
         target = self.member(mid)
         if target["kind"] != "agent":
             raise Invalid("only agents have a profile")
-        profile = {**target["profile"]}
-        for k in ("model", "max_risk", "skills"):
-            if k in changes:
-                profile[k] = changes[k]
-        if profile.get("max_risk") not in RISK_ORDER:
-            raise Invalid("max_risk is low, medium or high")
-        prompts = set(self.db.block_versions.distinct("block_id", {"status": "active"}))
-        unknown = [s for s in profile.get("skills", []) if self.pack and s not in self.pack.skills and s not in prompts]
-        if unknown:
-            raise Invalid(f"there is no skill or prompt block {', '.join(unknown)}")
-        old_risk = target["profile"].get("max_risk", "low")
+        if not (self.can(actor, "member_admin", "practice:main") or target["sponsor"] == actor["id"]):
+            self.require(actor, "member_admin", "practice:main", "propose a change to an agent's profile")
+        extra = sorted(set(changes) - set(self.PROFILE_KEYS))
+        if extra:
+            raise Invalid(f"an agent's profile holds {', '.join(self.PROFILE_KEYS)}, not {', '.join(extra)}")
+        now = {"max_risk": "low", "skills": [], **target["profile"]}
+        profile = self._check_profile({**now, **{k: v for k, v in changes.items() if v is not None}})
+        if profile == self._check_profile(now):
+            raise Invalid("that is the profile in force: there is nothing to propose")
         with self.db:
-            if RISK_ORDER[profile["max_risk"]] > RISK_ORDER.get(old_risk, 0):
-                # letting an agent take riskier work waits for a second policy owner; the rest applies now
-                self._request_for(actor, mid, max_risk=profile["max_risk"])
-                self.track.append(actor, "member.risk_requested", member_ref(mid),
-                                  data={"from": old_risk, "to": profile["max_risk"]})
-                profile["max_risk"] = old_risk
-            else:
-                pending = self.role_request(mid)
-                if pending and pending.get("max_risk"):  # lowered or kept: an earlier request to raise it lapses
-                    pending.pop("max_risk")
-                    if sorted(pending["roles"]) == sorted(target["roles"]):
-                        self.db.del_setting(f"role_request:{mid}")
-                    else:
-                        self.db.set_setting(f"role_request:{mid}", pending)
-            if profile != target["profile"]:
-                self.db.members.set(mid, {"profile": profile})
-                self.track.append(actor, "member.profile_changed", member_ref(mid),
-                                  data={"before": target["profile"], "after": profile})
+            base = self._profile_in_force(actor, target)
+            for old in self.db.agent_profile_versions.find({"agent_id": mid, "status": "proposed"}):
+                self.db.agent_profile_versions.set(old["_id"], {"status": "withdrawn"})
+                self.track.append(actor, "agent.profile_withdrawn", member_ref(mid),
+                                  data={"version": old["version"], "reason": "a newer proposal replaces it"})
+            version = (self.db.agent_profile_versions.max("version", {"agent_id": mid}) or 0) + 1
+            source = self._profile_source(profile)
+            self.db.agent_profile_versions.insert({
+                "_id": f"{mid}@{version}", "agent_id": mid, "version": version, "status": "proposed",
+                "profile": profile, "source": source, "author": actor["id"], "note": note, "created_at": utcnow(),
+                "approved_by": None, "approved_at": None, "based_on": base["version"]})
+            self.track.append(actor, "agent.profile_proposed", member_ref(mid),
+                              data={"version": version, "note": note, "before": base["profile"], "after": profile})
+        return {"agent_id": mid, "version": version, "profile": profile, "status": "proposed"}
+
+    def approve_agent_profile(self, actor: dict, mid: str, version: int, meaning: str = "") -> dict:
+        """A policy owner who did not propose it puts a proposed profile in force, signing its text."""
+        row = self.db.agent_profile_versions.find_one({"agent_id": mid, "version": int(version)})
+        if not row or row["status"] != "proposed":
+            raise Invalid("only a proposed profile can be approved")
+        if actor.get("kind") != "person":
+            raise Denied("an agent's profile is approved by a person, never an agent")
+        self.require(actor, "policy_owner", "practice:main", "approve a change to an agent's profile")
+        if row["author"] == actor["id"]:
+            raise Denied("whoever proposed a change does not approve it")
+        target = self.member(mid)
+        base = self.db.agent_profile_versions.find_one({"agent_id": mid, "status": "active"})
+        if base and row["based_on"] != base["version"]:
+            raise Invalid(f"version {base['version']} came into force after this was proposed: propose it again")
+        try:
+            profile = self._check_profile(row["profile"])
+        except Invalid as exc:
+            raise Invalid(f"this profile no longer checks: {exc}") from None
+        digest = hashlib.sha256(row["source"].encode()).hexdigest()
+        meaning = meaning or f"I approve version {row['version']} of {target['name']}'s profile"
+        with self.db:
+            self.db.agent_profile_versions.update({"agent_id": mid, "status": "active"},
+                                                  {"$set": {"status": "retired"}}, many=True)
+            n = self.db.agent_profile_versions.update(
+                {"agent_id": mid, "version": row["version"], "status": "proposed"},
+                {"$set": {"status": "active", "approved_by": actor["id"], "approved_at": utcnow()}})
+            if n != 1:
+                raise Invalid(f"version {row['version']} is no longer proposed")
+            self.db.members.set(mid, {"profile": profile})
+            self.track.append(actor, "agent.profile_approved", member_ref(mid),
+                              data={"version": row["version"], "source_sha256": digest, "asked_by": row["author"]},
+                              signed={"agent": mid, "version": row["version"], "meaning": meaning,
+                                      "source_sha256": digest})
+            self.track.append(actor, "member.profile_changed", member_ref(mid),
+                              data={"before": target["profile"], "after": profile, "asked_by": row["author"],
+                                    "version": row["version"]})
         return self.member(mid)
+
+    def withdraw_agent_profile(self, actor: dict, mid: str, version: int, reason: str = "") -> None:
+        """Its author withdraws a proposed profile, or a policy owner declines it."""
+        with self.db:
+            row = self.db.agent_profile_versions.find_one({"agent_id": mid, "version": int(version)})
+            if not row or row["status"] != "proposed":
+                raise Invalid("only a proposed profile can be withdrawn or declined")
+            if row["author"] != actor["id"] and not self.is_policy_owner(actor):
+                raise Denied("only its author or a policy owner may withdraw a proposed profile")
+            self.db.agent_profile_versions.set(row["_id"], {"status": "withdrawn"})
+            self.track.append(actor, "agent.profile_withdrawn", member_ref(mid),
+                              data={"version": row["version"], "reason": reason})
 
     # ------------------------------------------------------------------ credentials
     @staticmethod
@@ -1554,23 +1965,40 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def search_records(self, member: dict, rtype: str | None = None, *, text: str | None = None,
                        limit: int | None = 200, subject: str | None = None, field: str | None = None,
-                       since: str | None = None, until: str | None = None) -> list[dict]:
-        """Records as the member may see them (the store's search, then ``redact``). A search by words matches only
-        what the member sees of each record; a range over a field they may not read is refused."""
+                       since: str | None = None, until: str | None = None, offset: int = 0) -> list[dict]:
+        """Records as the member may see them (the store's search, then ``redact``), a page of them (``limit`` from
+        ``offset``), counted in the database. A search by words matches only what the member may read of each
+        record: the database looks for each word in the parts of the record whose data classes they read, so a
+        hidden field's value never matches and nothing is read into the hub to be filtered. A range over a field
+        they may not read is refused."""
         if field and rtype and visibility.hides_path(self, member, rtype, field):
             raise Denied(f"{member.get('name', '')} may not search {rtype} records by {field}")
-        types = [rtype] if rtype else None
-        guarded = bool(text) and (
-            any(visibility.hidden_fields(self, member, self.record_type_for_reading(t)) for t in types)
-            if types else any(visibility.hidden_fields(self, member, rt) for rt in self.record_types().values()))
-        recs = self.records.search(rtype, subject=subject, limit=None if guarded else limit, text=text or None,
-                                   field=field, since=since, until=until)
-        recs = self.redact_all(member, recs)
-        if guarded:
+        if not text:
+            return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, field=field,
+                                                               since=since, until=until, offset=offset))
+        types = {rtype: self.record_type_for_reading(rtype)} if rtype else self.record_types()
+        guarded = {t for t, rt in types.items() if visibility.hidden_fields(self, member, rt)}
+        if guarded and hasattr(self.records, "reindex"):
+            self._search_ready(guarded)
+            classes = {f["data_class"] for rt in types.values() if rt is not None for f in rt.classed_fields}
+            visible = {dc for dc in classes if member and self.can(member, "reader", f"data_class:{dc}")}
+            plain = [t for t, rt in types.items() if rt is None or not rt.classed_fields]
+            recs = self.records.search(rtype, subject=subject, limit=limit, text=text, field=field, since=since,
+                                       until=until, offset=offset, visible=visible, plain=plain)
+            return self.redact_all(member, recs)
+        if guarded:  # a store that cannot look in parts (a FHIR server): match what the member sees, here
             from .records import search_text, words_of
             words = words_of(text)
-            recs = [r for r in recs if all(w in search_text(r) for w in words)][:limit]
-        return recs
+            recs = self.redact_all(member, self.records.search(rtype, subject=subject, limit=None, text=text,
+                                                               field=field, since=since, until=until))
+            recs = [r for r in recs if all(w in search_text(r) for w in words)]
+            return recs[offset:][:limit] if limit is not None else recs[offset:]
+        if hasattr(self.records, "reindex"):
+            self._search_ready(types)
+            return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, text=text,
+                                                               field=field, since=since, until=until, offset=offset))
+        return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, text=text,
+                                                           field=field, since=since, until=until))
 
     VIEW_WINDOW = timedelta(minutes=15)
 
@@ -1587,6 +2015,35 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if last and last["at"] >= (datetime.now(timezone.utc) - self.VIEW_WINDOW).replace(microsecond=0).isoformat().replace("+00:00", "Z"):
             return
         self.track.append(member, "record.viewed", ref, data={"how": how})
+
+    def note_list(self, member: dict | None, recs, *, how: str = "list", what: str = "",
+                  text: str | None = None) -> int | None:
+        """Write down that a member was shown a list of records (a list page, a search, a dashboard widget, an MCP
+        search): one ``records.listed`` event naming every record shown that is about a subject (a patient's), so
+        the access report for each of them names this list. A list is what its rows show (titles, a name and birth
+        date); opening one is a ``record.viewed`` of its own, and an export records each record it holds. The same
+        member shown the same records again within ``VIEW_WINDOW`` is one listing. Returns the event, if written."""
+        if not member or member.get("kind") not in ("person", "agent", "service"):
+            return None
+        subjects = self.subject_types()
+        refs = []
+        for r in recs or []:
+            if not isinstance(r, dict) or not r.get("id") or not r.get("resourceType"):
+                continue
+            ref = f"{r['resourceType']}/{r['id']}"
+            if r["resourceType"] in subjects or self.subject_of(r):
+                refs.append(ref)
+        if not refs:
+            return None
+        refs = list(dict.fromkeys(refs))
+        digest = hashlib.sha256("\n".join(sorted(refs)).encode()).hexdigest()
+        since = (datetime.now(timezone.utc) - self.VIEW_WINDOW).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        if self.db.events.find_one({"action": "records.listed", "actor": member["id"], "data.refs_sha256": digest,
+                                    "data.how": how, "at": {"$gte": since}}, fields=["seq"]):
+            return None
+        return self.track.append(member, "records.listed", what or "records",
+                                 data={"how": how, "count": len(refs), "refs": refs, "refs_sha256": digest,
+                                       **({"search": text} if text else {})})
 
     # ------------------------------------------------------------------ files (attachments), in GridFS
     MAX_FILE = 25 * 1024 * 1024
@@ -1640,7 +2097,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 for r in self.db.events.find({"subject": ref, "action": "record.viewed"}, sort=[("seq", DESC)],
                                              limit=limit)]
 
-    ACCESS_ACTIONS = ("record.viewed", "records.exported", "record.created", "record.updated", "record.transitioned", "record.signed")
+    ACCESS_ACTIONS = ("record.viewed", "records.exported", "record.created", "record.updated", "record.transitioned",
+                      "record.signed")
+    LISTED = "records.listed"  # a list or search that showed the record among others: found by data.refs
 
     def access_report(self, member: dict, subject: str) -> list[dict]:
         """Everyone (people, agents, services) who saw or changed anything in a subject's file, oldest first: what
@@ -1653,13 +2112,28 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         # and every record that was ever about the subject, even if it is about someone else now
         refs |= {f"{r['type']}/{r['id']}" for r in self.db.record_versions.find({"refs": subject},
                                                                                 fields=["type", "id"])}
-        rows = self.db.events.find({"subject": {"$in": sorted(refs)}, "action": {"$in": list(self.ACCESS_ACTIONS)}},
-                                   sort=[("seq", ASC)])
+        ordered = sorted(refs)
+        rows = self.db.events.find({"$or": [{"subject": {"$in": ordered}, "action": {"$in": list(self.ACCESS_ACTIONS)}},
+                                            {"action": self.LISTED, "data.refs": {"$in": ordered}}]},
+                                   sort=[("seq", ASC)], fields=["seq", "at", "actor", "actor_kind", "action", "subject",
+                                                                "data.how", "data.format", "data.refs", "data.search"])
         names = {m["id"]: m["name"] for m in self.db.members.find({}, fields=["id", "name"])}
         self.track.append(member, "access.reported", subject, data={"events": len(rows)})
+
+        def record_of(r):
+            if r["action"] != self.LISTED:
+                return r["subject"]
+            shown = [x for x in (r.get("data") or {}).get("refs", []) if x in refs]
+            return subject if subject in shown else (shown[0] if shown else r["subject"])
+
+        def how_of(r):
+            d = r.get("data") or {}
+            if r["action"] == self.LISTED:
+                return f"in a list ({d.get('how', 'list')}" + (f", search {d['search']!r}" if d.get("search") else "") + ")"
+            return _how(d)
         return [{"seq": r["seq"], "at": r["at"], "who": r["actor"], "name": names.get(r["actor"], r["actor"]),
-                 "kind": r["actor_kind"], "action": r["action"].split(".", 1)[1], "record": r["subject"],
-                 "how": _how(r.get("data") or {})} for r in rows]
+                 "kind": r["actor_kind"], "action": r["action"].split(".", 1)[1], "record": record_of(r),
+                 "how": how_of(r)} for r in rows]
 
     def record_history(self, member: dict, ref: str) -> list[dict]:
         rtype, rid = ref.split("/", 1)
@@ -2315,10 +2789,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def attest(self, actor: dict, ref: str, run: dict, step_id: str) -> int:
         """Record that ``ref``, as filed now, is what a signing gate earlier in the run signed: the physician signed
-        the draft, and this is the note filed from it. The signature stays the signer's own event; this links it."""
+        the draft, and this is the note filed from it. The signature stays the signer's own event; this links it.
+        An agent's decision is not a signature: it counts here only when a person signed their approval of it."""
         got = (run.get("ctx") or {}).get(step_id) or {}
-        ev = self.db.events.find_one({"_id": got.get("event"), "action": "gate.decided", "run_id": run["id"]}) \
-            if got.get("event") else None
+        sig = got.get("signature") or got.get("event")
+        ev = self.db.events.find_one({"_id": sig, "action": {"$in": ["gate.decided", "hold.decided"]},
+                                      "run_id": run["id"]}) if sig else None
         if not ev or not ev["signature"]:
             raise Invalid(f"attest: the step {step_id} is not a signed decision in this run")
         rec = self.records.read(*ref.split("/", 1))
@@ -2335,15 +2811,18 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         now = self._record_digest(rec)
         out = []
         rows = self.db.events.find({"$or": [{"action": "record.signed", "subject": ref},
-                                            {"action": "gate.decided", "data.signed.record": ref}]},
+                                            {"action": {"$in": ["gate.decided", "hold.decided"]},
+                                             "data.signed.record": ref}]},
                                    sort=[("seq", DESC)])
         for e in rows:
             d = e["data"]
             sg = d.get("signed", {})
-            if sg.get("record") != ref:
+            if sg.get("record") != ref or not e.get("signature"):  # an agent's attested decision is not a signature
                 continue
             who = self.db.members.get(e["actor"])
-            gate = e["action"] == "gate.decided"
+            if not who or who.get("kind") != "person":
+                continue
+            gate = e["action"] in ("gate.decided", "hold.decided")
             current = bool(sg.get("record_sha256")) and sg.get("record_sha256") == now
             if gate and not current and sg.get("record_sha256") and sg.get("version"):
                 # A decision's own run carries it out (publishes, dates it): it covers the record while every change
@@ -2353,7 +2832,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 current = bool(later) and all(v["run_id"] == sg.get("run") for v in later)
             out.append({"seq": e["seq"], "at": e["at"], "by": e["actor"], "name": who["name"] if who else e["actor"],
                         "meaning": sg.get("meaning"), "version": sg.get("version"), "comment": d.get("comment", ""),
-                        "outcome": sg.get("outcome") if gate else None, "run": sg.get("run") if gate else None,
+                        "outcome": (sg.get("decision") or sg.get("outcome")) if gate else None,
+                        "run": sg.get("run") if gate else None,
                         "current": current,
                         "valid": self.track.verify_signature({**e, "data": d})})
         for a in self.db.events.find({"action": "record.attested", "subject": ref}, sort=[("seq", DESC)]):
@@ -2490,6 +2970,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         last = self.db.get_setting("track_verified") if not full else None
         if last and not hmac_ok(self.track, last):
             last = None  # a result not sealed by this hub is not one to build on
+        if last and not last["problems"]:
+            newest = self.db.events.find_one({}, sort=[("seq", DESC)], fields=["seq", "hash"])
+            if newest and newest["seq"] == last["head"]["seq"] and newest["hash"] == last["head"]["hash"]:
+                # nothing since the last check: its sealed result stands, and nothing is recomputed or rewritten
+                # (anchors are checked whenever there are new events, and by 'practicehub verify')
+                v = {"ok": True, "events": last["events"], "problems": [], "head": last["head"],
+                     "from": last["head"]["seq"], "at": last["at"], "full": False}
+                defs = self.definitions_problems()
+                return {**v, "ok": False, "problems": defs} if defs else v
         if last:
             v = self.track.verify(since=last["head"])
             v = {**v, "events": last["events"] + v["events"], "from": last["head"]["seq"],

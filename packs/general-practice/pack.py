@@ -196,9 +196,10 @@ def _contact(c: dict) -> str:
     return f"{who}{f' ({rel})' if rel else ''}{f', {phone}' if phone else ''}"
 
 
-def facts(rec: dict) -> dict:
+def facts(rec: dict, today: date | None = None) -> dict:
+    """``today`` is the practice's date (the hub passes it), so an age turns over at the practice's midnight."""
     gp = ((rec.get("generalPractitioner") or [{}])[0].get("reference") or "").split("/")[-1]
-    years = age(rec.get("birthDate"))
+    years = age(rec.get("birthDate"), today)
     return {"born": rec.get("birthDate"), "age": years, "gender": rec.get("gender"),
             "contact": ", ".join(t.get("value", "") for t in rec.get("telecom", []) or []),
             "address": "; ".join(_address(a) for a in rec.get("address", []) or []),
@@ -466,7 +467,8 @@ def standin_renewal_prep(ctx):
     if len(meds) > 1:
         concerns.append(f"{len(meds)} active prescriptions match \"{asked}\"; renewing the newest")
     last_rx = (m.get("authoredOn") or "")[:10] or None
-    due = not last_visit or (date.today() - date.fromisoformat(last_visit)).days > 365
+    today = date.fromisoformat(ctx["run"]["today"]) if (ctx.get("run") or {}).get("today") else date.today()
+    due = not last_visit or (today - date.fromisoformat(last_visit)).days > 365
     if asked.lower() != _med_text(m).lower():
         concerns.append(f"Requested \"{asked}\", chart has \"{_med_text(m)}\"")
     disp = m.get("dispenseRequest") or {}
@@ -593,8 +595,8 @@ def _order(subj, text, dosage, qty, unit, repeats, days, authored, gp="dr-amara"
 def demo(hub):
     """Fictional patients and some work in progress, so every inbox has something in it."""
     jo, amara, portal, lab = (hub.member(m) for m in ("jo", "dr-amara", "portal", "lab-feed"))
-    today = date.today()
-    now = datetime.now().replace(second=0, microsecond=0)
+    now = hub.engine.now().replace(second=0, microsecond=0)  # the practice's wall time, as its calendar keeps it
+    today = now.date()
 
     def ago(days):
         return (today - timedelta(days=days)).isoformat()
@@ -757,13 +759,16 @@ def visit_from_appointment(appt: dict, visit: dict | None = None) -> dict:
     out["plannedStartDate"] = start
     if end:
         out["plannedEndDate"] = end
+    reasons = list(appt.get("reasonCode") or [])
+    if appt.get("description"):
+        reasons = [{**(reasons[0] if reasons else {}), "text": appt["description"]}] + reasons[1:]
+    if visit is not None and reasons and not any(
+            isinstance(r, dict) and (r.get("text") or r.get("coding")) for r in out.get("reasonCode") or []):
+        out["reasonCode"] = reasons  # the visit says nothing of why: the booking's reason is kept, never lost
     if visit is None:
         out["status"] = APPOINTMENT_STATUS.get(appt.get("status") or "", "planned")
         out["subject"] = {"reference": patient}
         out["participant"] = [{"individual": {"reference": r}} for r in staff]
-        reasons = list(appt.get("reasonCode") or [])
-        if appt.get("description"):
-            reasons = [{**(reasons[0] if reasons else {}), "text": appt["description"]}] + reasons[1:]
         if reasons:
             out["reasonCode"] = reasons
         if appt.get("serviceType"):
@@ -783,46 +788,74 @@ def visit_from_appointment(appt: dict, visit: dict | None = None) -> dict:
     return out
 
 
+def _first_appointment(hub, v: dict) -> str | None:
+    """The appointment a visit was filed for: the first one it names that is still there."""
+    return next((a.get("reference") for a in v.get("appointment", []) or [] if isinstance(a, dict)
+                 and str(a.get("reference") or "").startswith("Appointment/")
+                 and hub.records.read("Appointment", a["reference"].split("/", 1)[1])), None)
+
+
 def upgrade_appointments_to_visits(hub, actor):
-    """Version 2 merges Appointment into Visit. Once the Visit that is a Booking is in force: every visit gets its
-    booked time; an appointment a visit was filed for becomes that visit (whatever pointed at the appointment points
-    at it); any other appointment becomes a visit with the same id; the Appointment type is retired. None until the
-    new Visit is approved."""
+    """Version 2 merges Appointment into Visit. Once the Visit that is a Booking is in force: an appointment a visit
+    was filed for becomes that visit (whatever pointed at the appointment points at it, open work included); any other
+    appointment becomes a visit with the same id; then every visit gets its booked time; the Appointment type is
+    retired. None until the new Visit is approved.
+
+    It works in batches of ``hub.UPGRADE_BATCH`` (each a transaction the hub writes with the upgrade's place): the
+    appointments still there first (each batch converts some, so the next finds the rest), then the visits to date, in
+    id order from where the last batch stopped (``hub.upgrade_state``). A batch converts or dates each record whole, so
+    stopping between batches loses nothing: an appointment not converted yet is still an appointment."""
     rt = hub.record_type("Encounter")
     if rt is None or not rt.is_a("Booking") or rt.field("plannedStartDate") is None:
         return None
-    filed, undated = {}, []  # Appointment/<id> -> the visit filed for it (its first); visits to date from their period
-    for v in hub.records.search("Encounter", limit=None):
-        ref = next((a.get("reference") for a in v.get("appointment", []) or [] if isinstance(a, dict)
-                    and str(a.get("reference") or "").startswith("Appointment/")
-                    and hub.records.read("Appointment", a["reference"].split("/", 1)[1])), None)
-        if ref and ref not in filed:
-            filed[ref] = v
-        elif not v.get("plannedStartDate") or "appointment" in v:
-            undated.append(v)
-    for v in undated:
+    size = max(1, int(getattr(hub, "UPGRADE_BATCH", 200) or 200))
+    state = hub.upgrade_state
+    appts = hub.records.search("Appointment", limit=size)
+    if appts:
+        refs = {f"Appointment/{a['id']}" for a in appts}
+        filed: dict = {}  # Appointment/<id> -> the visit filed for it (the newest that names it first)
+        for row in hub.db.records.find({"type": "Encounter", "data.appointment.reference": {"$in": sorted(refs)}},
+                                       sort=[("updated_at", -1)], fields=["data"]):
+            ref = _first_appointment(hub, row["data"])
+            if ref in refs and ref not in filed:
+                filed[ref] = row["data"]
+        merged, made, moved = [], [], {}
+        for a in appts:
+            ref = f"Appointment/{a['id']}"
+            visit = filed.get(ref)
+            if visit is not None:
+                hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a, visit),
+                                   into=f"Encounter/{visit['id']}", repoint=False)
+                merged.append(ref)
+                moved[ref] = f"Encounter/{visit['id']}"
+            else:
+                hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a), repoint=False)
+                made.append(ref)
+                moved[ref] = f"Encounter/{a['id']}"
+        hub.repoint_work(moved)  # runs, items and messages under way, once for the batch
+        return {"more": True, "visits_dated": 0, "appointments_merged_into_their_visit": merged,
+                "appointments_now_visits": made, "appointment_type_retired": False}
+    after = state.get("dated_after") or ""
+    rows = hub.db.records.find({"type": "Encounter", "_id": {"$gt": after}, "$or": [
+        {"data.plannedStartDate": {"$in": [None, ""]}}, {"data.appointment": {"$exists": True}}]},
+        sort="_id", limit=size, fields=["data"])
+    for row in rows:
+        v = row["data"]
         period = v.get("period") or {}
         hub.update_record(actor, f"Encounter/{v['id']}", {
             "plannedStartDate": v.get("plannedStartDate") or period.get("start")
             or (v.get("meta") or {}).get("lastUpdated", "")[:16],
             "plannedEndDate": v.get("plannedEndDate") or period.get("end"), "appointment": None})
-    merged, made = [], []
-    for a in hub.records.search("Appointment", limit=None):
-        ref = f"Appointment/{a['id']}"
-        visit = filed.get(ref)
-        if visit is not None:
-            hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a, visit),
-                               into=f"Encounter/{visit['id']}")
-            merged.append(ref)
-        else:
-            hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a))
-            made.append(ref)
+        state["dated_after"] = row["_id"]
+    if len(rows) == size:
+        return {"more": True, "visits_dated": len(rows), "appointments_merged_into_their_visit": [],
+                "appointments_now_visits": [], "appointment_type_retired": False}
     retired = False
     if hub._active_row("type", "Appointment") is not None:
         hub._retire_now(actor, "type", "Appointment", "merged into Visit (pack version 2)")
         retired = True
-    return {"visits_dated": len(undated), "appointments_merged_into_their_visit": merged,
-            "appointments_now_visits": made, "appointment_type_retired": retired}
+    return {"visits_dated": len(rows), "appointments_merged_into_their_visit": [], "appointments_now_visits": [],
+            "appointment_type_retired": retired}
 
 
 def upgrade_diagnosis_apart_from_reason(hub, actor):

@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from conftest import item_for, quiet
+from conftest import item_for, quiet, snapshot_hub
 from practicehub import export, mcp, schema
 from practicehub import views as viewmod
 from practicehub.agents.runner import run_all_local
 from practicehub.expr import shift_date
-from practicehub.hub import Denied, Hub, Invalid, member_ref
+from practicehub.hub import Denied, Invalid, member_ref
 
 ROOT = Path(__file__).parent.parent
 PACK = str(Path(__file__).parent / "packs" / "accounting")
@@ -20,11 +20,12 @@ INSTALLER = {"id": "installer", "kind": "installer", "name": "Installer", "statu
 @pytest.fixture
 def firm(monkeypatch):
     monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
-    h = Hub(None, pack=PACK)
-    h.install(PACK)
-    h.install_module(INSTALLER, "crm")
-    h.authz.write([("role:relationship-manager", "assignee", member_ref("lee"))])
-    return h
+
+    def build(h):
+        h.install(PACK)
+        h.install_module(INSTALLER, "crm")
+        h.authz.write([("role:relationship-manager", "assignee", member_ref("lee"))])
+    return snapshot_hub("crm:firm", PACK, build, modules=["crm"])
 
 
 def make(h, actor, rtype, values):

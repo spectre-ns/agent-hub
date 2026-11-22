@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from conftest import M
+from conftest import M, snapshot_onto
 from practicehub.integrations import collabora as cool
 from practicehub.integrations.wopi import EDITED_BY, Wopi
 from practicehub.web.server import App, make_handler
@@ -58,15 +58,18 @@ def mock_cool():
 @pytest.fixture
 def docs(hub):
     """Document control installed, and a draft document holding a blank text document."""
-    hub.approve_module_code(M(hub, "dr-amara"), "dms")
-    hub.install_module(M(hub, "rana"), "dms")
-    for m in hub.pack.modules:
-        m.module.demo(hub)
-    rana = M(hub, "rana")
-    att = hub.add_file(rana, "Document", cool.blank_document("odt"), "Visitors.odt", cool.mime_of("odt"))
-    rec = hub.create_record(rana, "Document", {"title": "Visitors", "number": "SOP-021", "status": "draft",
-                                               "file": att})
-    return hub, f"Document/{rec['id']}", att["blob"]
+    def build(hub):
+        hub.approve_module_code(M(hub, "dr-amara"), "dms")
+        hub.install_module(M(hub, "rana"), "dms")
+        for m in hub.pack.modules:
+            m.module.demo(hub)
+        rana = M(hub, "rana")
+        att = hub.add_file(rana, "Document", cool.blank_document("odt"), "Visitors.odt", cool.mime_of("odt"))
+        rec = hub.create_record(rana, "Document", {"title": "Visitors", "number": "SOP-021", "status": "draft",
+                                                   "file": att})
+        return f"Document/{rec['id']}", att["blob"]
+    ref, blob = snapshot_onto(hub, "office:docs", build, modules=["dms"])
+    return hub, ref, blob
 
 
 @pytest.fixture
