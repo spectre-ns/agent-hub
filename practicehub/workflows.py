@@ -19,8 +19,12 @@ Steps run when every step in ``after`` has finished, and only if ``when`` holds;
 
 A workflow starts by hand (``trigger.starters``), on an event (``trigger.event``, e.g. ``record.created:Observation``
 or one from the practice's event catalogue) when ``trigger.when`` holds, or on a schedule (``trigger.schedule``,
-``"daily 07:00"``, ``"weekly mon 08:00"``, ``"hourly"``), once per record of ``trigger.for_each`` matching
-``trigger.where``.
+``"hourly"``, ``"every 15m"`` / ``"every 2h"`` (15 minutes to 24 hours), ``"daily 07:00"``, ``"weekdays 07:00"``,
+``"weekly mon 08:00"`` / ``"weekly mon,wed,fri 08:00"``, ``"monthly 1 09:00"`` / ``"monthly last 17:00"``; each fires
+once per slot), once per record of ``trigger.for_each`` matching ``trigger.where``.
+
+A ``[deadline]`` table (``within = "5d"``, ``escalate_to = "<role>"``) gives every run a time to be done by: a run still
+open after it is flagged once (``run.deadline_missed``, a notice to that role) and keeps ``deadline_missed_at``.
 
 Steps read the run's context: ``run`` (``run.record`` is the reference of the run's record), ``input``, each finished
 step's output by its id, and ``record``, the run's record as it is when the step runs (``record.documents``).
@@ -34,7 +38,10 @@ including records another module owns, without code.
 A ``wait`` step does nothing until ``until`` holds, checked again whenever a record changes. With ``for_each`` it
 waits until ``until`` holds for every item (over ``each`` and ``each_record``), e.g. until every document a CAPA
 revised is approved again. Its ``role``, if given, gets a notice saying what the work waits for. Its output is
-``waited_for``: the items it waited on.
+``waited_for``: the items it waited on. ``timeout = "2d"`` ends a wait on ``until`` anyway after that long; its output's
+``timed_out`` says which way it ended (``when = "chase.timed_out"``). A wait may instead wait for a time: ``for = "3d"``,
+or ``at = "{{input.appointment}} - 1d"`` (one placeholder giving a date, a wall time or an instant, optionally moved
+by ``+``/``-`` a duration); the clock's tick ends it then, in the practice's time zone.
 
 A task or gate may have a deadline (``due = "2d"``, ``"4h"``, ``"30m"``); when it passes, the item is flagged overdue
 ``not_by`` lists earlier steps whose doer may not also do this one, and may name ``run`` (whoever started the run)
@@ -61,7 +68,27 @@ KINDS = ("task", "gate", "automation", "wait")
 ID = re.compile(r"[a-z][a-z0-9\-]*")
 RESERVED_IDS = {"new"}
 DURATION = re.compile(r"(\d+)([mhdw])")
-SCHEDULE = re.compile(r"(hourly|daily (\d{2}):(\d{2})|weekly (mon|tue|wed|thu|fri|sat|sun) (\d{2}):(\d{2}))")
+_HM = r"([01]\d|2[0-3]):([0-5]\d)"
+_DAY = r"(?:mon|tue|wed|thu|fri|sat|sun)"
+SCHEDULE = re.compile(rf"(hourly|every (\d+)([mh])|daily {_HM}|weekdays {_HM}|weekly ({_DAY}(?:,{_DAY})*) {_HM}"
+                      rf"|monthly ([1-9]|1\d|2[0-8]|last) {_HM})")
+SCHEDULE_HELP = ("trigger.schedule: say 'hourly', 'every 15m' or 'every 2h' (from 15 minutes to 24 hours), "
+                 "'daily 07:00', 'weekdays 07:00', 'weekly mon 08:00' or 'weekly mon,wed,fri 08:00', or "
+                 "'monthly 1 09:00' (a day from 1 to 28, or 'last' for the last day of the month)")
+# a wait's ``at``: one placeholder giving a date or a time, optionally moved by a duration: "{{input.when}} - 1d"
+AT = re.compile(r"\s*(\{\{[^{}]*\}\})\s*(?:([+-])\s*(\d+[mhdw]))?\s*")
+
+
+def schedule_problem(text) -> str | None:
+    """What is wrong with a ``trigger.schedule``, in words; None when it is one the clock knows."""
+    m = SCHEDULE.fullmatch(str(text).strip())
+    if not m:
+        return SCHEDULE_HELP
+    if m.group(2):
+        minutes = int(m.group(2)) * (60 if m.group(3) == "h" else 1)
+        if not 15 <= minutes <= 1440:
+            return SCHEDULE_HELP
+    return None
 
 
 def duration_seconds(text: str) -> int | None:
@@ -109,6 +136,9 @@ class Step:
     for_each: str | None = None      # an automation runs its action once per item of this list
     where: str | None = None         # ... for the items where this holds (over ``each`` and ``each_record``)
     until: str | None = None         # a wait step: done when this holds (for every item of for_each, if given)
+    wait_for: str | None = None      # a wait step: done after this long (``for = "3d"``)
+    at: str | None = None            # a wait step: done at this moment (``at = "{{input.appointment}} - 1d"``)
+    timeout: str | None = None       # a wait with until: done anyway, as timed out, after this long
 
     @property
     def agents_may(self) -> bool:
@@ -130,6 +160,8 @@ class Workflow:
     schedule: str | None = None
     for_each: str | None = None      # a record type: one run per matching record when the schedule fires
     where: str | None = None         # trigger.where: a condition over ``record`` for for_each
+    deadline: str | None = None      # [deadline] within: a run still open this long after it started is late
+    deadline_escalate_to: str | None = None  # [deadline] escalate_to: the role told when it is
 
     def step(self, sid: str) -> Step:
         for s in self.steps:
@@ -175,8 +207,18 @@ def parse(source: str, catalog=None) -> Workflow:
                 expr.check(trig[key])
             except expr.ExprError as exc:
                 problems.append(f"trigger.{key}: {exc}")
-    if trig.get("schedule") and not SCHEDULE.fullmatch(str(trig["schedule"])):
-        problems.append("trigger.schedule: say 'hourly', 'daily 07:00' or 'weekly mon 08:00'")
+    if trig.get("schedule") and schedule_problem(trig["schedule"]):
+        problems.append(schedule_problem(trig["schedule"]))
+    deadline = doc.get("deadline") or {}
+    if not isinstance(deadline, dict):
+        problems.append("deadline: a table with within = \"5d\" and, if you like, escalate_to = \"<role>\"")
+        deadline = {}
+    if deadline:
+        if set(deadline) - {"within", "escalate_to"}:
+            problems.append("deadline: takes within (how long a run may take) and escalate_to (the role told when "
+                            "it takes longer)")
+        if duration_seconds(deadline.get("within", "")) is None:
+            problems.append("deadline: within is how long a run may take, a duration like '4h', '5d' or '2w'")
     if trig.get("for_each") and not trig.get("schedule"):
         problems.append("trigger.for_each: needs a schedule (one run per record each time it fires)")
     if trig.get("where") and not trig.get("for_each"):
@@ -219,19 +261,40 @@ def parse(source: str, catalog=None) -> Workflow:
             persons_only=bool(raw.get("persons_only", False)), block=raw.get("block") or None,
             due=raw.get("due"), escalate_to=raw.get("escalate_to"), priority=raw.get("priority", "normal"), assign_to=raw.get("assign_to"),
             people_role=raw.get("people_role") or None, for_each=raw.get("for_each") or None, where=raw.get("where") or None,
-            until=raw.get("until") or None)
+            until=raw.get("until") or None, wait_for=raw.get("for") or None, at=raw.get("at") or None,
+            timeout=raw.get("timeout") or None)
         if step.for_each and kind not in ("automation", "wait"):
             problems.append(f"{where}: for_each is for automations and waits")
         if step.where and kind != "automation":
             problems.append(f"{where}: where is for automations")
-        if kind == "wait" and not step.until:
+        timed = [k for k, v in (("until", step.until), ("for", step.wait_for), ("at", step.at)) if v]
+        if kind == "wait" and not timed:
             problems.append(f"{where}: a wait needs until, the condition it waits for, e.g. "
-                            f"\"each_record.status == 'approved'\"")
-        if step.until and kind != "wait":
-            problems.append(f"{where}: until is for wait steps")
+                            f"\"each_record.status == 'approved'\"; or for, how long it waits, e.g. \"3d\"; or at, "
+                            f"when it ends, e.g. \"{{{{input.appointment}}}} - 1d\"")
+        if len(timed) > 1:
+            problems.append(f"{where}: a wait waits for one of until, for or at; it has {' and '.join(timed)}")
+        for k, v in (("until", step.until), ("for", step.wait_for), ("at", step.at), ("timeout", step.timeout)):
+            if v and kind != "wait":
+                problems.append(f"{where}: {k} is for wait steps")
+        if kind == "wait" and step.wait_for and duration_seconds(step.wait_for) is None:
+            problems.append(f"{where}: for is how long it waits, a duration like '30m', '4h', '3d' or '1w'")
+        if kind == "wait" and step.timeout:
+            if duration_seconds(step.timeout) is None:
+                problems.append(f"{where}: timeout is how long it waits at most, a duration like '4h', '2d' or '1w'")
+            if not step.until:
+                problems.append(f"{where}: timeout ends a wait on until that takes too long; a wait with for or at "
+                                f"already ends on time")
+        if kind == "wait" and step.at:
+            m = AT.fullmatch(str(step.at))
+            if not m or not TEMPLATE.fullmatch(m.group(1)):
+                problems.append(f"{where}: at is one placeholder giving a date or a time, optionally moved by a "
+                                f"duration, e.g. \"{{{{input.appointment}}}} - 1d\" or \"{{{{record.due}}}} + 2h\"")
+        if kind == "wait" and step.for_each and not step.until:
+            problems.append(f"{where}: for_each is for a wait on until (over each item)")
         if kind == "wait" and (step.action or step.block or step.fields or step.skill):
-            problems.append(f"{where}: a wait does nothing but wait; it takes after, when, until, for_each, and a "
-                            f"role to tell what it waits for")
+            problems.append(f"{where}: a wait does nothing but wait; it takes after, when, until (with timeout), for "
+                            f"or at, for_each, and a role to tell what it waits for")
         if step.for_each and not TEMPLATE.fullmatch(str(step.for_each).strip()):
             problems.append(f"{where}: for_each is one placeholder naming a list, e.g. '{{{{record.documents}}}}'")
         if step.where and not step.for_each:
@@ -337,7 +400,8 @@ def parse(source: str, catalog=None) -> Workflow:
     wf = Workflow(id=wid, title=str(doc.get("title", "")), summary=str(doc.get("summary", "")).strip(),
                   record=doc.get("record"), starters=list(trig.get("starters", []) or []), event=trig.get("event"),
                   inputs=inputs, steps=steps, source=source, when=trig.get("when"), schedule=trig.get("schedule"),
-                  for_each=trig.get("for_each"), where=trig.get("where"))
+                  for_each=trig.get("for_each"), where=trig.get("where"),
+                  deadline=deadline.get("within") or None, deadline_escalate_to=deadline.get("escalate_to") or None)
     if catalog is not None:  # report every problem at once, so an author fixes them in one go
         try:
             problems += [p for p in catalog.check_workflow(wf) if p not in problems]

@@ -239,6 +239,23 @@ The hub checks the workflow as you edit it and lists every problem, in words. Sa
 owner approves it, after seeing the diff and what agents may now do. Runs that have already started finish on the
 version they started with.
 
+Time is the practice's (its time zone), and the clock's tick (`practicehub tick`, or every minute while serving)
+acts on it:
+
+- a **wait** step waits until a condition holds (`until`), for a while (`for = "3d"`), or until a moment
+  (`at = "{{input.appointment}} - 1d"`: one placeholder giving a date or a time, optionally moved by `+`/`-` a
+  duration; a date alone means its midnight). A wait on `until` may give up: `timeout = "2d"` ends it as timed out,
+  and later steps branch on it with `when = "chase.timed_out"` (or `not chase.timed_out`);
+- a **deadline** for the whole run: `[deadline]` with `within = "5d"` and `escalate_to = "<role>"`. A run still open
+  after it is flagged once (`run.deadline_missed` on the track, a notice to that role, else the practice's
+  escalation role) and keeps `deadline_at` and `deadline_missed_at`, so late runs can be counted;
+- a **schedule** (`trigger.schedule`): `hourly`, `every 15m` / `every 2h` (15 minutes to 24 hours), `daily 07:00`,
+  `weekdays 07:00`, `weekly mon 08:00` / `weekly mon,wed,fri 08:00`, `monthly 1 09:00` (day 1 to 28) or
+  `monthly last 17:00`. Each fires once per slot.
+
+The diagram editor's step panel sets a wait's condition, duration, moment and timeout; the workflow panel its
+schedule and deadline. The workflow's page says them in words.
+
 To see where a workflow loses time, a policy owner opens **Settings → Process analytics** (`/settings/analytics`;
 `/api/analytics?days=30` as JSON; `practicehub analytics --as <policy owner> --days 30` on the command line). For
 the last 7, 30 or 90 days it shows, per workflow: runs started, finished, cancelled and still open; how long

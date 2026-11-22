@@ -1625,7 +1625,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                               {"title": s.title, "kind": s.kind, "role": s.role, "action": s.action,
                                "when": None if viewer and run and viewer.step_state(wf, run, s.id) == "if-needed"
                                and not viewer.full(wf) else s.when,
-                               "agents_may": s.agents_may and s.kind != "automation"})}
+                               "agents_may": s.agents_may and s.kind != "automation", "timing": step_timing(s)})}
                           for s in wf.steps]}
         if run:
             states = viewer.run_steps(wf, run) if viewer else run["steps"]
@@ -1862,6 +1862,13 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             dl = [("Active", f"v{active['version']}"), ("About", e(wf.record or "nothing in particular")),
                   ("Started by", e(", ".join(wf.starters) or "—")), ("On event", e(wf.event or "—")),
                   ("Steps", str(len(wf.steps))), ("Agents may do", e(", ".join(agents) or "nothing"))]
+            if wf.schedule:
+                dl.insert(4, ("On schedule", e(schedule_text(wf.schedule))))
+            if getattr(wf, "deadline", None):
+                names = {r["id"]: r["name"] for r in hub.roles()}
+                who = wf.deadline_escalate_to or hub.practice.get("escalation_role")
+                dl.append(("Deadline", e(f"done within {duration_text(wf.deadline)}"
+                                         + (f"; if not, {names.get(who, who)} is told" if who else ""))))
         rows = []
         for v in versions:
             extra = ""
@@ -3670,3 +3677,55 @@ def serve(hub, host: str = "127.0.0.1", port: int = 8200, *, dev: bool = False, 
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+# ------------------------------------------------------------------------------------------ time, in words
+_UNITS = {"m": "minute", "h": "hour", "d": "day", "w": "week"}
+_DAY_NAMES = {"mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday", "fri": "Friday",
+              "sat": "Saturday", "sun": "Sunday"}
+
+
+def duration_text(d: str | None) -> str:
+    """``3d`` as "3 days"."""
+    m = wfmod.DURATION.fullmatch(str(d or "").strip())
+    if not m:
+        return str(d or "")
+    n, unit = int(m.group(1)), _UNITS[m.group(2)]
+    return f"{n} {unit}{'' if n == 1 else 's'}"
+
+
+def schedule_text(sch: str) -> str:
+    """A trigger.schedule as a person says it: "every Monday, Wednesday and Friday at 08:00"."""
+    parts = str(sch).split()
+    if parts == ["hourly"]:
+        return "every hour"
+    if parts[0] == "every" and len(parts) == 2:
+        return f"every {duration_text(parts[1])}"
+    at = parts[-1]
+    if parts[0] == "daily":
+        return f"every day at {at}"
+    if parts[0] == "weekdays":
+        return f"Monday to Friday at {at}"
+    if parts[0] == "weekly" and len(parts) == 3:
+        days = [_DAY_NAMES.get(d, d) for d in parts[1].split(",")]
+        listed = days[0] if len(days) == 1 else ", ".join(days[:-1]) + " and " + days[-1]
+        return f"every {listed} at {at}"
+    if parts[0] == "monthly" and len(parts) == 3:
+        day = "the last day" if parts[1] == "last" else f"day {parts[1]}"
+        return f"on {day} of each month at {at}"
+    return str(sch)
+
+
+def step_timing(s) -> str:
+    """A step's time settings in a few words, for the diagram: how long a wait waits, when it gives up, when work
+    is due."""
+    out = []
+    if getattr(s, "wait_for", None):
+        out.append(f"waits {duration_text(s.wait_for)}")
+    if getattr(s, "at", None):
+        out.append("waits until a set time")
+    if getattr(s, "timeout", None):
+        out.append(f"gives up after {duration_text(s.timeout)}")
+    if getattr(s, "due", None):
+        out.append(f"due in {duration_text(s.due)}")
+    return "; ".join(out)

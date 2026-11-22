@@ -427,6 +427,11 @@ class Engine:
         tz = self.zone()
         return clock.local(self._now, tz) if self._now else clock.now(tz)
 
+    def instant(self) -> datetime:
+        """Now as an aware UTC instant: the tick's own time while a tick runs (``tick(now)``), else the clock's.
+        Timers and deadlines count from and to instants, so a clock change never moves them."""
+        return getattr(self, "_tick_at", None) or clock.utc(self.now(), self.zone())
+
     def utc(self, t: datetime) -> str:
         """A time as the track writes it (UTC, ISO, Z). A naive time is the practice's wall time."""
         return clock.stamp(t, self.zone())
@@ -560,6 +565,8 @@ class Engine:
                                    data={"workflow": wid, "version": row["version"], "title": title, "input": values,
                                          "parent": parent})
             hub.db.runs.set(run_id, {"root_event": seq})
+            if getattr(wf, "deadline", None):  # [deadline] within: when the run is to be done by
+                hub.db.runs.set(run_id, {"deadline_at": self._deadline_at(wf), "deadline_missed_at": None})
             self.advance(run_id, seq)
         return self.run(run_id)
 
@@ -643,7 +650,8 @@ class Engine:
                     self._save(run)
                     hub.track.append(self.automation_actor(run), "step.waiting", f"step:{step.id}", run_id=run_id,
                                      cause=cause, data={"step": step.id, "until": step.until,
-                                                        **({"for_each": step.for_each} if step.for_each else {})})
+                                                        **({"for_each": step.for_each} if step.for_each else {}),
+                                                        **_timing(step)})
                     if not self._wait_over(run, step, cause) and step.role:
                         self._notice(run, step, f"Waiting: {step.title}", role=step.role, cause=cause)
                     break
@@ -697,6 +705,7 @@ class Engine:
             run["status"] = "completed"
             self._save(run)
             hub.track.append(self.automation_actor(run), "run.completed", run["record"] or "", run_id=run_id, cause=cause)
+            self._late_finish(run, cause)
 
     def _wait_over(self, run, step, cause) -> bool:
         """Finish a waiting step if what it waits for now holds (for every item of its for_each). A wait that cannot
@@ -718,6 +727,11 @@ class Engine:
 
     def _check_wait(self, run, step, cause) -> bool:
         live = self._live_ctx(run)
+        timer = self._wait_timer(run, step, live)
+        if timer is not None:
+            if self.instant() < _parse(timer):
+                return False
+            return self._end_wait(run, step, cause, {"waited_for": [], "woke_at": timer}, "step.done")
         waited = None
         if step.for_each:
             items = wfmod.render(step.for_each, live) or []
@@ -730,18 +744,99 @@ class Engine:
                 if isinstance(each, str) and "/" in each:
                     each_record = self.hub.records.read(*each.split("/", 1))
                 if not expr.holds(step.until, {**live, "each": each, "each_record": each_record or {}}):
-                    return False
+                    return self._timed_out(run, step, cause)
                 waited.append(each)
         elif not expr.holds(step.until, live):
-            return False
-        run["ctx"][step.id] = {"waited_for": waited or []}
+            return self._timed_out(run, step, cause)
+        out = {"waited_for": waited or []}
+        if getattr(step, "timeout", None):
+            out["timed_out"] = False
+        return self._end_wait(run, step, cause, out, "step.done")
+
+    def _end_wait(self, run, step, cause, output: dict, action: str) -> bool:
+        run["ctx"][step.id] = output
         run["steps"][step.id] = {"state": "done", "by": self.automation_actor(run)["id"]}
         self._save(run)
         self.hub.db.items.update({"run_id": run["id"], "step_id": step.id, "kind": "notice", "status": "open"},
                                  {"$set": {"status": "done", "updated_at": utcnow()}}, many=True)  # no longer waiting
-        self.hub.track.append(self.automation_actor(run), "step.done", f"step:{step.id}", run_id=run["id"],
-                              cause=cause, data={"step": step.id, "until": step.until, "waited_for": waited or []})
+        self.hub.track.append(self.automation_actor(run), action, f"step:{step.id}", run_id=run["id"],
+                              cause=cause, data={"step": step.id, "until": step.until, **_timing(step), **output})
         return True
+
+    def _timed_out(self, run, step, cause) -> bool:
+        """A wait on ``until`` whose ``timeout`` has passed ends anyway, as timed out: later steps branch on
+        ``<step>.timed_out``."""
+        if not getattr(step, "timeout", None):
+            return False
+        st = run["steps"][step.id]
+        if not st.get("timeout_at"):
+            st["timeout_at"] = clock.stamp(self.instant() + timedelta(seconds=wfmod.duration_seconds(step.timeout)),
+                                           self.zone())
+            self._save(run)
+        if self.instant() < _parse(st["timeout_at"]):
+            return False
+        return self._end_wait(run, step, cause, {"waited_for": [], "timed_out": True}, "step.timed_out")
+
+    def _wait_timer(self, run, step, live) -> str | None:
+        """When a wait on time (``for`` or ``at``) ends, as a track time; worked out once, when the wait starts, and
+        kept on the step (``wake_at``). None for a wait on ``until``."""
+        if not (getattr(step, "wait_for", None) or getattr(step, "at", None)):
+            return None
+        st = run["steps"][step.id]
+        if st.get("wake_at"):
+            return st["wake_at"]
+        tz = self.zone()
+        if step.wait_for:
+            when = self.instant() + timedelta(seconds=wfmod.duration_seconds(step.wait_for))
+        else:
+            m = wfmod.AT.fullmatch(step.at)
+            value = wfmod.render(m.group(1), live)
+            when = _moment(value, tz)
+            if when is None:
+                raise ValueError(f"it waits until {m.group(1).strip()}, which is {value!r}: not a date or a time")
+            if m.group(2):
+                secs = wfmod.duration_seconds(m.group(3))
+                when += timedelta(seconds=secs if m.group(2) == "+" else -secs)
+        st["wake_at"] = clock.stamp(when, tz)
+        self._save(run)
+        return st["wake_at"]
+
+    # ------------------------------------------------------------------ run deadlines (service levels)
+    def _deadline_at(self, wf) -> str:
+        return clock.stamp(self.instant() + timedelta(seconds=wfmod.duration_seconds(wf.deadline)), self.zone())
+
+    def _late_finish(self, run: dict, cause) -> None:
+        """A run that finished after its deadline before a tick noticed still counts as late."""
+        row = self.hub.db.runs.get(run["id"]) or {}
+        if row.get("deadline_at") and not row.get("deadline_missed_at") \
+                and self.instant() >= _parse(row["deadline_at"]):
+            self.hub.db.runs.set(run["id"], {"deadline_missed_at": clock.stamp(self.instant(), self.zone())})
+            self.hub.track.append(self.automation_actor(run), "run.deadline_missed", run.get("record") or "",
+                                  run_id=run["id"], cause=cause,
+                                  data={"deadline_at": row["deadline_at"], "finished": True})
+
+    def _missed_deadlines(self, now_utc: datetime) -> list[str]:
+        """Runs still open past their deadline: flagged once, on the track and with a notice to the deadline's
+        role (else the practice's escalation role), and marked ``deadline_missed_at``."""
+        hub, tz = self.hub, self.zone()
+        out = []
+        for row in hub.db.runs.find({"status": "running", "deadline_at": {"$ne": None, "$lte": clock.stamp(now_utc, tz)},
+                                     "deadline_missed_at": None}, sort=[("deadline_at", 1)]):
+            run = _plain(row)
+            try:
+                wf, _ = hub.workflow(run["workflow_id"], run["version"])
+            except Exception:  # noqa: BLE001
+                wf = None
+            with hub.db:
+                hub.db.runs.set(run["id"], {"deadline_missed_at": clock.stamp(now_utc, tz)})
+                seq = hub.track.append(self.automation_actor(run), "run.deadline_missed", run.get("record") or "",
+                                       run_id=run["id"], cause=run.get("root_event"),
+                                       data={"deadline_at": run["deadline_at"]})
+                text = (f"Not done in time: {run['title']}, started {clock.shown(run['created_at'], tz)}, was to be "
+                        f"done by {clock.shown(run['deadline_at'], tz)}")
+                self.alert(run, None, text, role=getattr(wf, "deadline_escalate_to", None), cause=seq)
+            out.append(run["id"])
+        return out
 
     def recheck_waits(self, cause: int | None) -> None:
         """Something changed: let every run that is waiting see whether what it waits for now holds."""
@@ -1717,14 +1812,24 @@ class Engine:
     # ------------------------------------------------------------------ time: schedules and deadlines
     def tick(self, now: datetime | None = None) -> dict:
         """Run what time makes due: scheduled workflows (once per slot, remembered in settings) and overdue items
-        (flagged, and escalated to the step's ``escalate_to`` role). Safe to call as often as you like."""
-        hub = self.hub
+        (flagged, and escalated to the step's ``escalate_to`` role), waits whose time or timeout has come, and runs
+        past their deadline (flagged once). Safe to call as often as you like."""
         tz = self.zone()
         # schedules fire by the practice's wall clock (a daily 08:00 is 08:00 in the practice, whatever the server's
         # zone); an aware ``now`` (an instant) is turned into it, a naive one already is it
         now = clock.local(now, tz) if now else self.now()
         now_utc = clock.utc(now, tz)
         stamp = now.strftime("%Y-%m-%dT%H:%M")
+        self._tick_at = now_utc
+        try:
+            out = self._tick(now, now_utc, stamp)
+        finally:
+            self._tick_at = None
+        return out
+
+    def _tick(self, now: datetime, now_utc: datetime, stamp: str) -> dict:
+        hub = self.hub
+        tz = self.zone()
         started, overdue = [], []
         last = hub.db.get_setting("schedule_last", {}) or {}
         for w in hub.workflows():
@@ -1782,13 +1887,15 @@ class Engine:
                     self.alert(run, step, text, role=hub.practice.get("escalation_role"), cause=seq,
                                priority="urgent", besides=late, owners_too=True)
             overdue.append(item["id"])
+        missed = self._missed_deadlines(now_utc)
         checked = hub.db.get_setting("waits_checked", "") or ""
         if (clock.stamp(now_utc - timedelta(minutes=15), tz) >= checked
-                and hub.db.runs.exists({"status": "running", **_WAITING})):
+                and hub.db.runs.exists({"status": "running", **_WAITING})) \
+                or hub.db.runs.exists({"status": "running", **_timers_due(clock.stamp(now_utc, tz))}):
             hub.db.set_setting("waits_checked", clock.stamp(now_utc, tz))
             tick_seq = hub.track.append({"id": "clock", "kind": "automation"}, "clock.ticked", "", data={"at": stamp})
             self.recheck_waits(tick_seq)  # a wait on something time changes (or that changed outside the hub)
-        return {"started": started, "overdue": overdue, "at": stamp}
+        return {"started": started, "overdue": overdue, "deadlines_missed": missed, "at": stamp}
 
 
 def _parse(stamp: str) -> datetime:
@@ -1796,21 +1903,70 @@ def _parse(stamp: str) -> datetime:
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
+def _timing(step) -> dict:
+    """A wait's time settings, for the track."""
+    return {k: v for k, v in (("for", getattr(step, "wait_for", None)), ("at", getattr(step, "at", None)),
+                              ("timeout", getattr(step, "timeout", None))) if v}
+
+
+def _timers_due(now_stamp: str) -> dict:
+    """Runs with a waiting step whose time (``wake_at``) or timeout (``timeout_at``) has come."""
+    due = lambda k: {"$lte": [{"$ifNull": [f"$$s.v.{k}", "~"]}, now_stamp]}  # "~" sorts after every time
+    return {"$expr": {"$gt": [{"$size": {"$filter": {
+        "input": {"$objectToArray": {"$ifNull": ["$steps", {}]}}, "as": "s",
+        "cond": {"$and": [{"$eq": ["$$s.v.state", "waiting"]}, {"$or": [due("wake_at"), due("timeout_at")]}]}}}}, 0]}}
+
+
+def _moment(value, tz) -> datetime | None:
+    """A value a wait's ``at`` gives, as an aware instant: a date is its midnight in the practice, a time without
+    an offset the practice's wall time, one with an offset (or Z) that instant. None for anything else."""
+    from datetime import date
+    if isinstance(value, dict) and "start" in value:
+        value = value["start"]
+    if isinstance(value, datetime):
+        return clock.utc(value, tz)
+    if isinstance(value, date):
+        return clock.utc(datetime(value.year, value.month, value.day), tz)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return clock.utc(t, tz)
+
+
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def _slot(schedule: str, now: datetime) -> str | None:
-    """The slot a schedule is in at ``now`` (once it has come round), or None if it has not fired yet today/this
-    week. A slot is the label that makes a schedule fire once: the hour, the day or the week."""
+    """The slot a schedule is in at ``now`` (once it has come round), or None if it has not fired yet in this
+    period. A slot is the label that makes a schedule fire once: the hour, the stretch of minutes, the day, the week
+    or the month."""
+    import calendar
     if schedule == "hourly":
         return now.strftime("%Y-%m-%dT%H")
     parts = schedule.split()
+    if parts[0] == "every":  # every 15m, every 2h: stretches counted from midnight, so each day starts afresh
+        n, unit = int(parts[1][:-1]), parts[1][-1]
+        size = n * (60 if unit == "h" else 1)
+        start = (now.hour * 60 + now.minute) // size * size
+        return f"{now:%Y-%m-%d}T{start // 60:02d}:{start % 60:02d}"
     hh, mm = map(int, parts[-1].split(":"))
+    if (now.hour, now.minute) < (hh, mm):
+        return None
     if parts[0] == "daily":
-        return now.strftime("%Y-%m-%d") if (now.hour, now.minute) >= (hh, mm) else None
+        return now.strftime("%Y-%m-%d")
+    if parts[0] == "weekdays":
+        return now.strftime("%Y-%m-%d") if now.weekday() < 5 else None
     if parts[0] == "weekly":
-        day = DAYS.index(parts[1])
-        if now.weekday() != day or (now.hour, now.minute) < (hh, mm):
+        days = [DAYS.index(d) for d in parts[1].split(",")]
+        if now.weekday() not in days:
             return None
-        return now.strftime("%G-W%V")
+        # one day keeps its old label (the week), so a schedule already fired this week does not fire again
+        return now.strftime("%G-W%V") if len(days) == 1 else now.strftime("%Y-%m-%d")
+    if parts[0] == "monthly":
+        day = calendar.monthrange(now.year, now.month)[1] if parts[1] == "last" else int(parts[1])
+        return now.strftime("%Y-%m") if now.day == day else None
     return None
