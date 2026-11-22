@@ -336,7 +336,8 @@ class CatalogMixin:
             elif w["source"] == "records" and w["type"]:
                 rt = self.record_type(w["type"])
                 names = {f["name"] for f in rt.fields} | rt.top_keys() if rt else set()
-                for c in [*w["columns"], *([{"path": w["group_by"]}] if w["group_by"] else [])]:
+                for c in [*w["columns"], *([{"path": w["group_by"]}] if w["group_by"] else []),
+                          *([{"path": w["sort"]}] if w.get("sort") else [])]:
                     if rt and c["path"].split(".")[0] not in names:
                         problems.append(f"{where}: {rt.label} has no field {c['path']!r} (its fields: "
                                         f"{', '.join(f['name'] for f in rt.fields)})")

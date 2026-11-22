@@ -1712,62 +1712,88 @@ class RecordPages:
     def page_view(self, req, vid):
         """A view or dashboard the practice defined: each widget computed for the member looking at it."""
         from ..hub import NotFound
-        from .. import views as viewmod
         me, hub = req["me"], self.hub
         v = hub.view(vid)
         if v is None:
             raise NotFound(f"there is no view {vid}")
         out = [f"<p class='muted'>{e(v.summary)}</p>"] if v.summary else []
-        for w in viewmod.compute(hub, me, v):
-            head = f"<h2>{e(w['title'] or v.title)} <span class='badge'>{w['total']}</span></h2>"
-            if w["note"]:
-                out.append(f"<div class='section'>{head}<p class='muted'>Not shown: {e(w['note'])}.</p></div>")
-                continue
-            if w["kind"] == "tree":
-                items = "".join(
-                    f'<li style="--depth:{d}"><a href="{e(self._view_href(w, r))}">{e(hub.title(r))}</a>'
-                    + "".join(f' <span class="muted">{e(str(x))}</span>' for x in
-                              (w["value"](r, c["path"]) for c in w["columns"]) if x not in (None, ""))
-                    + "</li>" for d, r in w["tree"])
-                out.append(f"<div class='section'>{head}" + (f"<ul class='tree'>{items}</ul>" if items else
-                                                             "<p class='muted'>Nothing yet.</p>") + "</div>")
-                continue
-            if w["kind"] == "count":
-                out.append(f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{w['total']}</p></div>")
-            elif w["kind"] in ("board", "chart"):
-                if w["kind"] == "chart":
-                    top = max(w["counts"].values() or [1])
-                    bars = "".join(f"<tr><th scope='row'>{e(k)}</th><td><span class='bar' style='width:"
-                                   f"{max(4, 100 * n // top)}%'></span> {n}</td></tr>" for k, n in w["counts"].items())
-                    out.append(f"<div class='section'>{head}<table class='chart'><tbody>{bars}</tbody></table></div>")
-                    continue
-                groups, counts = w["groups"], w["counts"]
-                moving = self._board_moves(me, w)
-                if moving:  # a board of a lifecycle: every state is a column, in the lifecycle's order
-                    order = moving.states()
-                    groups = {k: groups.get(k, []) for k in order + [k for k in groups if k not in order]}
-                    counts = {k: counts.get(k, 0) for k in groups}
-                back = self.here(req)
-                cols = "".join(
-                    f'<section class="col" data-col="{e(k)}" aria-label="{e(k)}"><header>{self._state_loz(k)}'
-                    f'<span class="n">{counts[k]}</span></header>'
-                    + "".join(self._view_tile(w, r, moving, back) for r in rows) + "</section>"
-                    for k, rows in groups.items())
-                out.append(f"<div class='section'>{head}<div class='board'>{cols or '<p class=muted>Nothing yet.</p>'}"
-                           f"</div></div>")
-            else:
-                cols = w["columns"] or [{"label": "Title", "path": "title"}]
-                heads = "".join(f"<th scope='col'>{e(c['label'])}</th>" for c in cols)
-                body = "".join("<tr>" + "".join(
-                    f"<td>{self._view_cell(w, r, c, i == 0)}</td>" for i, c in enumerate(cols)) + "</tr>"
-                    for r in w["rows"])
-                out.append(f"<div class='section'>{head}" + (
-                    f"<div class='tablewrap'><table><thead><tr>{heads}</tr></thead><tbody>{body}</tbody></table></div>"
-                    if w["rows"] else "<p class='muted'>Nothing yet.</p>") + "</div>")
+        out.append(self.view_widgets(req, me, v))
         owner = me["kind"] == "person" and hub.is_policy_owner(me)
         tree = next((w.get("type") for w in v.widgets if w.get("kind") == "tree"), None) if hasattr(v, "widgets") else None
         return self.layout(req, v.title, "".join(out), subnav=self.navigator(me, tree) if tree else "",
                            actions=f'<a class="btn" href="/define/views/{e(vid)}">Change this view</a>' if owner else "")
+
+    def view_widgets(self, req, me, v, *, live: bool = True) -> str:
+        """A view's widgets, computed for this member: on its grid when it has one (a widget without a place goes
+        below, in order), else one after another. ``live=False`` (the editor's preview): nothing in it moves records."""
+        from .. import views as viewmod
+        computed = viewmod.compute(self.hub, me, v)
+        if not any(w.get("grid") for w in computed):
+            return "".join(self.view_widget(req, me, w, v.title, live=live) for w in computed)
+        cells = []
+        for w, g in sorted(zip(computed, viewmod.placed(computed)), key=lambda p: (p[1]["y"], p[1]["x"])):
+            cells.append(f'<div class="dash-cell k-{e(w["kind"])}" style="grid-column:{g["x"] + 1}/span {g["w"]};'
+                         f'grid-row:{g["y"] + 1}/span {g["h"]}">{self.view_widget(req, me, w, v.title, live=live)}</div>')
+        return f'<div class="dash-grid">{"".join(cells)}</div>'
+
+    def view_widget(self, req, me, w, fallback: str = "", *, live: bool = True) -> str:
+        """One computed widget (``views.compute``) as HTML."""
+        hub = self.hub
+        head = f"<h2>{e(w['title'] or fallback)} <span class='badge'>{w['total']}</span></h2>"
+        if w["note"]:
+            return f"<div class='section'>{head}<p class='muted'>Not shown: {e(w['note'])}.</p></div>"
+        if w["kind"] == "links":
+            items = "".join(f'<li><a href="{e(x["href"])}"' + (' rel="noopener noreferrer" target="_blank"'
+                                                               if x["href"].startswith("https://") else "")
+                            + f'>{e(x["label"])}</a></li>' for x in w["links"])
+            return f"<div class='section'><h2>{e(w['title'] or fallback)}</h2><ul class='dash-links'>{items}</ul></div>"
+        if w["kind"] == "tree":
+            items = "".join(
+                f'<li style="--depth:{d}"><a href="{e(self._view_href(w, r))}">{e(hub.title(r))}</a>'
+                + "".join(f' <span class="muted">{e(str(x))}</span>' for x in
+                          (w["value"](r, c["path"]) for c in w["columns"]) if x not in (None, ""))
+                + "</li>" for d, r in w["tree"])
+            return f"<div class='section'>{head}" + (f"<ul class='tree'>{items}</ul>" if items else
+                                                     "<p class='muted'>Nothing yet.</p>") + "</div>"
+        if w["kind"] == "count":
+            return f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{w['total']}</p></div>"
+        if w["kind"] == "chart":
+            top = max(w["counts"].values() or [1])
+            bars = "".join(f"<tr><th scope='row'>{e(k)}</th><td><span class='bar' style='width:"
+                           f"{max(4, 100 * n // top)}%'></span> {n}</td></tr>" for k, n in w["counts"].items())
+            return (f"<div class='section'>{head}" + (f"<table class='chart'><tbody>{bars}</tbody></table>" if bars
+                                                      else "<p class='muted'>Nothing yet.</p>") + "</div>")
+        if w["kind"] == "board":
+            groups, counts = w["groups"], w["counts"]
+            moving = self._board_moves(me, w) if live else None
+            if moving:  # a board of a lifecycle: every state is a column, in the lifecycle's order
+                order = moving.states()
+                groups = {k: groups.get(k, []) for k in order + [k for k in groups if k not in order]}
+                counts = {k: counts.get(k, 0) for k in groups}
+            back = self.here(req)
+            cols = "".join(
+                f'<section class="col" data-col="{e(k)}" aria-label="{e(k)}"><header>{self._state_loz(k)}'
+                f'<span class="n">{counts[k]}</span></header>'
+                + "".join(self._view_tile(w, r, moving, back) for r in rows) + "</section>"
+                for k, rows in groups.items())
+            return (f"<div class='section'>{head}<div class='board'>{cols or '<p class=muted>Nothing yet.</p>'}"
+                    f"</div></div>")
+        cols = w["columns"] or [{"label": "Title", "path": "title"}]
+        if w["kind"] == "list":
+            items = "".join(
+                f'<li>{self._view_cell(w, r, cols[0], True)}'
+                + "".join(f' <span class="muted">{e(str(x))}</span>' for x in
+                          (w["value"](r, c["path"]) for c in cols[1:]) if x not in (None, ""))
+                + "</li>" for r in w["rows"])
+            return f"<div class='section'>{head}" + (f"<ul class='dash-list'>{items}</ul>" if items else
+                                                     "<p class='muted'>Nothing yet.</p>") + "</div>"
+        heads = "".join(f"<th scope='col'>{e(c['label'])}</th>" for c in cols)
+        body = "".join("<tr>" + "".join(
+            f"<td>{self._view_cell(w, r, c, i == 0)}</td>" for i, c in enumerate(cols)) + "</tr>"
+            for r in w["rows"])
+        return f"<div class='section'>{head}" + (
+            f"<div class='tablewrap'><table><thead><tr>{heads}</tr></thead><tbody>{body}</tbody></table></div>"
+            if w["rows"] else "<p class='muted'>Nothing yet.</p>") + "</div>"
 
     def _view_href(self, w, r) -> str:
         if w["source"] == "records":
