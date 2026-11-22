@@ -305,8 +305,25 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             (t[0] == "practice:main" and t[1] in ("policy_owner", "member_admin", "break_glass")))}
         new_roles = [r for r in p.roles if not self.db.roles.exists({"_id": r["id"]})]
         new_classes = [d for d in p.data_classes if not self.db.data_classes.exists({"_id": d["id"]})]
+        # the definitions below are checked against the roles and data classes this pack brings, not the ones in
+        # force before it (a new workflow may use a new data class); put back if the upgrade does not go through
+        held = {k: getattr(self.pack, k) for k in self.PACK_CONFIG} if isinstance(self.pack, packmod.Pack) else None
+        try:
+            return self._upgrade_pack_in(actor, p, cfg, before, new_grants, old_grants, new_roles, new_classes, held)
+        except BaseException:
+            if held is not None:
+                for k, v in held.items():
+                    setattr(self.pack, k, v)
+                self._defs_reset()
+            raise
+
+    def _upgrade_pack_in(self, actor, p, cfg, before, new_grants, old_grants, new_roles, new_classes, held) -> dict:
         with self.db:
             self.db.set_setting("pack_config", cfg)
+            if held is not None:
+                for k in self.PACK_CONFIG:
+                    setattr(self.pack, k, cfg[k])
+                self._defs_reset()
             # what the reviewed settings say about access takes effect now, not only on paper
             for r in new_roles:
                 self.db.roles.insert({"_id": r["id"], "id": r["id"], "name": r["name"],

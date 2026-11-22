@@ -1493,6 +1493,46 @@ def test_a_reviewed_pack_upgrade_takes_break_glass_away(tmp_path, monkeypatch):
     assert any("break_glass" in str(t) for t in ev["data"]["grants_revoked"]), out
 
 
+def test_a_pack_upgrade_checks_a_new_workflow_against_the_data_classes_it_brings(tmp_path, monkeypatch):
+    """A pack that adds a data class and a workflow reading it upgrades: the workflow is checked against the
+    upgraded pack's classes and roles, not the ones in force before it. A refused upgrade leaves those as they were."""
+    import shutil
+    from practicehub import pack as packmod
+    from practicehub.hub import Hub, Invalid
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    copy = tmp_path / "packs" / "general-practice"
+    shutil.copytree(packmod.find("general-practice"), copy, ignore=shutil.ignore_patterns("__pycache__"))
+    state = tmp_path / "state"
+    Hub(state, pack=str(copy)).install(str(copy))
+    toml = copy / "pack.toml"
+    toml.write_text(toml.read_text() + '\n[[data_classes]]\nid = "audit-notes"\nname = "Audit notes"\n'
+                                       'description = "Notes kept for an audit"\nrecord_types = []\n')
+    wf = copy / "workflows" / "audit-note.toml"
+    wf.write_text('id = "audit-note"\ntitle = "Audit note"\n\n[[steps]]\nid = "look"\nkind = "task"\n'
+                  'role = "practice-manager"\ntitle = "Look at it"\ncontext = ["record:audit-notes"]\n'
+                  '\n[[steps.fields]]\nname = "seen"\ntype = "boolean"\n')
+    hub = Hub(state)
+    classes = {d["id"] for d in hub.pack.all_data_classes()}
+    assert "audit-notes" not in classes
+    hub.review_pack(M(hub, "rana"))
+    out = hub.upgrade_pack(M(hub, "dr-amara"))
+    assert "workflow audit-note" in out["added"]
+    assert hub.workflow("audit-note")
+
+    # a refused upgrade puts back what the definitions are checked against
+    wf.write_text('id = "audit-note-2"\ntitle = "Broken"\n\n[[steps]]\nid = "look"\nkind = "task"\n'
+                  'role = "no-such-role"\ntitle = "Look"\n')
+    (copy / "workflows" / "audit-note-2.toml").write_text(wf.read_text())
+    toml.write_text(toml.read_text() + '\n[[data_classes]]\nid = "more-notes"\nname = "More"\n'
+                                       'description = "More"\nrecord_types = []\n')
+    hub = Hub(state)
+    before = {d["id"] for d in hub.pack.all_data_classes()}
+    hub.review_pack(M(hub, "rana"))
+    with pytest.raises(Invalid):
+        hub.upgrade_pack(M(hub, "dr-amara"))
+    assert {d["id"] for d in hub.pack.all_data_classes()} == before
+
+
 def test_a_forged_event_is_never_sealed_or_trusted(tmp_path, monkeypatch):
     """Someone who can write the database but does not hold the secret cannot add a trusted event."""
     import hashlib
