@@ -212,6 +212,9 @@ ul.admin-cards a:hover,ul.admin-cards a:focus-visible{background:var(--raised-ho
 .pagehead{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 16px}
 .pagehead h1{flex:1;min-width:min(240px,100%)}
 .pagehead .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#proposed-profile .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+#proposed-profile td{overflow-wrap:anywhere}#proposed-profile tbody th{vertical-align:top}
+@media (max-width:640px){main .tablewrap table.fates,main #proposed-profile table{white-space:normal}main #proposed-profile table{display:table}table.fates thead{display:none}table.fates,table.fates tbody,table.fates tr,table.fates td{display:block}table.fates td{border:0;padding:4px 0}table.fates tr{padding:8px 0;border-bottom:1px solid var(--border)}table.fates select{width:100%}}
 
 /* ---- avatars: people round, agents hexagons, services square */
 .av{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;font-size:12px;line-height:16px;

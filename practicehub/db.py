@@ -25,6 +25,8 @@ block_versions      "block_id@version"                     block_id ... (as work
 type_versions       "type_id@version"                      type_id ...
 view_versions       "view_id@version"                      view_id ...
 skill_versions      "skill_id@version"                     skill_id ...
+agent_profile_versions "agent_id@version"                  agent_id version status profile{} source author note
+                                                           created_at approved_by approved_at based_on
 data_classes        id                                     id name description module
 record_versions     "Type/id@version"                      type id version data{} refs[] actor run_id at
 office_drafts       file id (signed, opaque)              ref field base working name editors[] lock modified
@@ -70,6 +72,7 @@ INDEXES = {
     "type_versions": [("type_id", "status"), "status"],
     "view_versions": [("view_id", "status"), "status"],
     "skill_versions": [("skill_id", "status"), "status"],
+    "agent_profile_versions": [("agent_id", "status")],
     "record_versions": [("type", "id", "version"), "refs"],
     "links": ["to_ref", "from_ref"],
     "titles": [("type", "key")],

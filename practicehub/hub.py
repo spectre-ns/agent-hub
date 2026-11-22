@@ -1172,6 +1172,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.track.append(actor, "member.added", member_ref(m["id"]), cause=cause,
                               data={"kind": kind, "name": m["name"], "roles": roles, "sponsor": sponsor,
                                     "profile": profile})
+            if kind == "agent":  # its profile is a versioned record from the start: version 1 is what it was added with
+                self._record_profile(actor, m["id"], profile, "added with the agent")
         return self.member(m["id"])
 
     def add_member(self, actor: dict, m: dict) -> dict:
@@ -1181,10 +1183,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         roles = list(m.get("roles", []) or [])
         held_back = self.privileged_roles() | (self.data_roles() if m.get("kind", "person") != "person" else set())
         plain = [r for r in roles if r not in held_back]
+        asked = dict(m.get("profile") or {}) if m.get("kind") == "agent" else {}
+        if asked:  # a new agent may do nothing yet: the skills and risk it asks for are proposed, like any change
+            asked = self._check_profile({"max_risk": "low", "skills": [], **asked})
+            m = {**m, "profile": {**({"model": asked["model"]} if asked.get("model") else {}),
+                                  "max_risk": "low", "skills": []}}
         with self.db:
             out = self._create_member(actor, {**m, "roles": plain})
             if len(plain) != len(roles):
                 self.set_roles(actor, out["id"], roles)
+            if asked and asked != self.member(out["id"])["profile"]:
+                self.propose_agent_profile(actor, out["id"], asked, "what it was added to do")
         return self.member(out["id"])
 
     def privileged_roles(self) -> set[str]:
@@ -1210,8 +1219,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 for t in self.authz.read(obj=f"data_class:{dc}", relation=rel) if t[2].startswith("role:")}
 
     def _request_for(self, actor: dict, mid: str, **change) -> dict:
-        """Put a change into the member's waiting request (roles, an agent's max_risk), keeping what it already asks
-        for and everyone who asked: none of them approves it."""
+        """Put a change into the member's waiting role request, keeping everyone who asked: none of them approves
+        it."""
         req = self.role_request(mid) or {}
         asked = list(dict.fromkeys([*req.get("asked_by", [req["by"]] if req.get("by") else []), actor["id"]]))
         req = {**req, **change, "by": actor["id"], "asked_by": asked, "at": utcnow()}
@@ -1222,8 +1231,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def set_roles(self, actor: dict, mid: str, roles: list[str]) -> dict:
         """Change a member's roles. Taking roles away, or giving ordinary ones, applies now; giving a role that
-        approves changes or manages members waits for a second policy owner (two people for every change)."""
-        self.require(actor, "member_admin", "practice:main", "change roles")
+        approves changes or manages members waits for a second policy owner (two people for every change).
+
+        A policy owner who does not manage members may ask too: then the whole change waits for a second policy
+        owner. Two policy owners together are the practice's way back when its only member admin is gone."""
+        admin = self.can(actor, "member_admin", "practice:main")
+        if not admin and not (actor.get("kind") == "person" and self.is_policy_owner(actor)):
+            self.require(actor, "member_admin", "practice:main", "change roles")
         target = self.member(mid)
         if target["id"] == actor["id"]:
             raise Denied("nobody changes their own roles")
@@ -1239,22 +1253,26 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid("only a person may hold a role that approves changes or manages members")
         if target["kind"] != "person":  # an agent or service reaching restricted data: a second policy owner approves
             raised = (wanted - before) & self.data_roles()
+        if not admin:  # two policy owners together: all of it waits for the second
+            raised = wanted ^ before
+            if not raised:
+                return target
         with self.db:
-            pending = self.role_request(mid) or {}
             if raised:
                 self._request_for(actor, mid, roles=sorted(wanted))
                 self.track.append(actor, "member.roles_requested", member_ref(mid),
-                                  data={"roles": sorted(wanted), "needs_approval": sorted(raised)})
+                                  data={"roles": sorted(wanted), "needs_approval": sorted(raised),
+                                        **({} if admin else {"by_policy_owners": True})})
+                if not admin:
+                    return self.member(mid)
                 wanted -= raised  # the rest applies now
-            elif pending.get("max_risk"):  # the roles are settled; a raised max_risk still waits
-                self._request_for(actor, mid, roles=sorted(wanted))
             else:
                 self.db.del_setting(f"role_request:{mid}")
             self._apply_roles(actor, mid, before, wanted)
         return self.member(mid)
 
     def approve_roles(self, actor: dict, mid: str) -> dict:
-        """A second policy owner gives the roles another member admin asked for."""
+        """A second policy owner gives the roles another member admin (or policy owner) asked for."""
         self.require(actor, "policy_owner", "practice:main", "approve a role change")
         req = self.role_request(mid)
         if not req:
@@ -1268,15 +1286,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         with self.db:
             self.db.del_setting(f"role_request:{mid}")
             self._apply_roles(actor, mid, set(target["roles"]), set(req["roles"]), approved_from=req["by"])
-            if req.get("max_risk") and target["kind"] == "agent":
-                profile = {**target["profile"], "max_risk": req["max_risk"]}
-                self.db.members.set(mid, {"profile": profile})
-                self.track.append(actor, "member.profile_changed", member_ref(mid),
-                                  data={"before": target["profile"], "after": profile, "asked_by": req["by"]})
         return self.member(mid)
 
     def withdraw_roles(self, actor: dict, mid: str) -> None:
-        self.require(actor, "member_admin", "practice:main", "withdraw a role change")
+        if not self.is_policy_owner(actor):
+            self.require(actor, "member_admin", "practice:main", "withdraw a role change")
         with self.db:
             if self.role_request(mid):
                 self.db.del_setting(f"role_request:{mid}")
@@ -1286,10 +1300,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if before == after:
             return
         with self.db:
-            owners = self.policy_owner_count()
+            owners, admins = self.policy_owner_count(), len(self.member_admins())
             self.authz.delete([(f"role:{r}", "assignee", member_ref(mid)) for r in before - after])
             self.authz.write([(f"role:{r}", "assignee", member_ref(mid)) for r in after - before])
             self._keep_a_policy_owner(owners)
+            self._keep_a_member_admin(admins)
             self.track.append(actor, "member.roles_changed", member_ref(mid),
                               data={"added": sorted(after - before), "removed": sorted(before - after),
                                     **({"asked_by": approved_from} if approved_from else {})})
@@ -1342,55 +1357,210 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                     "policy_owners_before": self.policy_owner_count() - 1})
         return {**self.member(mid), "role": role or "policy_owner"}
 
-    def set_status(self, actor: dict, mid: str, status: str, reason: str = "") -> dict:
+    # ------------------------------------------------------------------ someone to manage members
+    def member_admins(self) -> list[dict]:
+        """Switched-on people who manage members (add people, change roles, switch someone off)."""
+        return [m for m in self.members("person") if m["status"] == "active" and self.can(m, "member_admin", "practice:main")]
+
+    def member_admin_warning(self) -> str | None:
+        """What to tell a practice that has only one person (or nobody) who manages members."""
+        admins = self.member_admins()
+        if len(admins) == 1:
+            return (f"{admins[0]['name']} is the only person who manages members. If they leave, nobody can switch "
+                    f"them off or add anyone, except two policy owners together. Give a second person a role that "
+                    f"manages members.")
+        if not admins:
+            return ("Nobody switched on manages members. Two policy owners together can give someone a role that "
+                    "does: one asks, the other approves.")
+        return None
+
+    def _keep_a_member_admin(self, before: int) -> None:
+        """Refuse whatever leaves the practice with nobody who manages members (it had someone before)."""
+        if before and not self.member_admins():
+            raise Invalid("that would leave nobody who manages members (adds people, changes roles, switches someone "
+                          "off): give another person a role that manages members first")
+
+    # ------------------------------------------------------------------ the off switch
+    def dependents(self, mid: str) -> list[dict]:
+        """The switched-on agents and services a person sponsors. They stop with their sponsor, and their credentials
+        end for good, unless each is handed to a new sponsor first: what the switch-off form shows and asks about."""
+        target = self.member(mid)
+        if target["kind"] != "person":
+            return []
+        rows = [self.member(r["id"]) for r in self.db.members.find({"sponsor": mid, "status": "active"},
+                                                                   sort=[("name", ASC)], fields=["id"])]
+        going = {mid} | {m["id"] for m in rows}
+        out = []
+        for m in rows:
+            out.append({"id": m["id"], "name": m["name"], "kind": m["kind"], "roles": m["roles"],
+                        "credentials": self.db.tokens.count({"member": m["id"], "revoked": 0}),
+                        "only_holder_of": [r for r in m["roles"]
+                                           if not [h for h in self.active_holders(r) if h["id"] not in going]]})
+        return out
+
+    def _dependents_plan(self, target: dict, hand_over: dict | None, stop) -> dict:
+        """What becomes of each agent or service the target sponsors: handed to a new sponsor, or stopped, each one
+        chosen. Nothing stops without someone saying so."""
+        deps = self.dependents(target["id"])
+        hand_over = {str(k): str(v) for k, v in (hand_over or {}).items() if v}
+        ids = {d["id"] for d in deps}
+        if stop is True or stop == "all":
+            stop = [d["id"] for d in deps if d["id"] not in hand_over]
+        stop = [str(x) for x in (stop or [])]
+        problems = [f"{x} is not an agent or service {target['name']} sponsors" for x in [*hand_over, *stop]
+                    if x not in ids]
+        problems += [f"{x} is both handed over and stopped" for x in set(hand_over) & set(stop)]
+        for aid, sp in hand_over.items():
+            new = self.db.members.get(sp)
+            if not new or new["kind"] != "person" or new["status"] != "active" or sp == target["id"]:
+                problems.append(f"{aid}: a new sponsor is a switched-on person other than {target['name']}")
+        undecided = [d for d in deps if d["id"] not in hand_over and d["id"] not in stop]
+        for d in undecided:
+            what = [f"{d['credentials']} live credential{'s' if d['credentials'] != 1 else ''} end for good"
+                    if d["credentials"] else "", f"nobody else holds {', '.join(d['only_holder_of'])}"
+                    if d["only_holder_of"] else ""]
+            problems.append(f"{d['name']} stops" + (f" ({'; '.join(w for w in what if w)})" if any(what) else "")
+                            + ": hand it to a new sponsor, or say that it may stop")
+        if problems:
+            names = ", ".join(d["name"] for d in deps)
+            raise Invalid(f"{target['name']} sponsors {names}: choose a new sponsor for each, or say that it stops",
+                          problems)
+        return {"hand_over": hand_over, "stop": stop}
+
+    def set_status(self, actor: dict, mid: str, status: str, reason: str = "", *, hand_over: dict | None = None,
+                   stop=None) -> dict:
         """Disable (the off switch) or re-enable a member. An agent's sponsor may switch it off; turning anyone on,
-        or off a person, takes a member admin."""
+        or off a person, takes a member admin (or two policy owners: ``request_switch_off``).
+
+        A person who sponsors agents or services is switched off only once each of them is handed to a new sponsor
+        (``hand_over``: agent -> person) or stops by choice (``stop``: their ids, or ``"all"``)."""
         target = self.member(mid)
         if status not in ("active", "disabled"):
             raise Invalid("status is active or disabled")
         is_sponsor = target["sponsor"] == actor["id"]
         if not (self.can(actor, "member_admin", "practice:main") or (is_sponsor and status == "disabled")):
-            raise Denied(f"{actor['name']} may not {'disable' if status == 'disabled' else 'enable'} {target['name']}")
+            raise Denied(f"{actor['name']} may not {'disable' if status == 'disabled' else 'enable'} {target['name']}"
+                         + (": two policy owners together may (one asks, the other approves)"
+                            if status == "disabled" and self.is_policy_owner(actor) else ""))
         if status == "active" and target["kind"] != "person":
             sp = self.member(target["sponsor"])
             if sp["status"] != "active":
                 raise Invalid(f"{target['name']}'s sponsor {sp['name']} is not active: give it a new sponsor first")
-        # the roles held by whoever goes off: this member, and a person's agents, which stop with them
-        going = [target] + ([self.member(a["id"]) for a in self.db.members.find(
-            {"sponsor": mid, "status": "active"}, fields=["id"])]
-            if target["kind"] == "person" and status == "disabled" else [])
+        plan = self._dependents_plan(target, hand_over, stop) if status == "disabled" else None
+        return self._switch(actor, target, status, reason, plan)
+
+    def _switch(self, actor: dict, target: dict, status: str, reason: str, plan: dict | None,
+                asked_by: str | None = None) -> dict:
+        mid = target["id"]
+        # the roles held by whoever goes off: this member, and the agents that stop with them
+        going = [target] + [self.member(a) for a in (plan or {}).get("stop", [])]
         had = [r for r in dict.fromkeys(r for m in going for r in m["roles"]) if self.active_holders(r)]
         with self.db:
-            released = self._set_status(actor, target, status, reason)
+            released = self._set_status(actor, target, status, reason, plan, asked_by)
         out = self.member(mid)
         out["roles_left_empty"] = [r for r in had if not self.active_holders(r)] if status == "disabled" else []
         out["released"] = released or []
         return out
 
-    def _set_status(self, actor: dict, target: dict, status: str, reason: str) -> list[str]:
+    def _set_status(self, actor: dict, target: dict, status: str, reason: str, plan: dict | None = None,
+                    asked_by: str | None = None) -> list[str]:
         mid = target["id"]
-        owners = self.policy_owner_count()
+        plan = plan or {"hand_over": {}, "stop": []}
+        owners, admins = self.policy_owner_count(), len(self.member_admins())
+        for aid, sp in plan["hand_over"].items():  # handed over while their sponsor is still on: they never stop
+            self._move_sponsor(actor, aid, sp, f"handed over when {target['name']} was switched off")
         self.db.members.set(mid, {"status": status})
         if status == "disabled" and target["kind"] == "person":
             self._keep_a_policy_owner(owners)
+            self._keep_a_member_admin(admins)
+        data = {"reason": reason}
+        if status == "disabled" and target["kind"] == "person" and (plan["hand_over"] or plan["stop"]):
+            data.update(handed_over=plan["hand_over"], stopped=plan["stop"])
+        if asked_by:
+            data["asked_by"] = asked_by
         self.track.append(actor, "member.disabled" if status == "disabled" else "member.enabled", member_ref(mid),
-                          data={"reason": reason})
+                          data=data)
         released: list[str] = []
         if status == "disabled":
             # switching someone off ends their credentials for good: switching them on again does not revive them
             self._revoke_all(actor, mid, "switched off")
-            if target["kind"] == "person":  # agents sponsored by a person who leaves stop until re-sponsored
+            if target["kind"] == "person":  # the agents chosen to stop with their sponsor stop until re-sponsored
                 for agent in self.db.members.find({"sponsor": mid, "status": "active"}, fields=["id"]):
+                    if agent["id"] not in plan["stop"]:  # nothing stops that nobody chose to stop
+                        raise Invalid(f"{agent['id']} is sponsored by {target['name']}: hand it over or say it stops")
                     self.db.members.set(agent["id"], {"status": "disabled"})
-                    self._revoke_all(actor, agent["id"], "its sponsor was switched off")
+                    self._revoke_all(actor, agent["id"], f"its sponsor {target['name']} was switched off and "
+                                                         f"{actor['name']} chose that it stops")
                     self.track.append(actor, "member.disabled", member_ref(agent["id"]),
-                                      data={"reason": f"its sponsor {target['name']} was disabled"})
+                                      data={"reason": f"its sponsor {target['name']} was disabled; "
+                                                      f"{actor['name']} chose that it stops"})
                     released += self.engine.release_claims_of(agent["id"], actor, "its sponsor was disabled")
             released += self.engine.release_claims_of(mid, actor, reason or "disabled")
         return released
 
+    # ------------------------------------------------------------------ two policy owners switch someone off
+    def off_request(self, mid: str) -> dict | None:
+        """A policy owner's request to switch a member off, waiting for a second policy owner."""
+        return self.db.get_setting(f"off_request:{mid}")
+
+    def request_switch_off(self, actor: dict, mid: str, reason: str, *, hand_over: dict | None = None,
+                           stop=None) -> dict:
+        """Two policy owners together switch a member off, for when no member admin can (the only one is away, or
+        is the one leaving): one asks, with the reason and what becomes of their agents; another approves."""
+        if actor.get("kind") != "person":
+            raise Denied("a person asks to switch someone off")
+        self.require(actor, "policy_owner", "practice:main", "ask to switch someone off")
+        target = self.member(mid)
+        if mid == actor["id"]:
+            raise Denied("nobody asks to switch themselves off")
+        if target["status"] != "active":
+            raise Invalid(f"{target['name']} is already switched off")
+        if not (reason or "").strip():
+            raise Invalid("say why they are being switched off")
+        plan = self._dependents_plan(target, hand_over, stop)
+        req = {"by": actor["id"], "reason": reason.strip(), **plan, "at": utcnow()}
+        with self.db:
+            self.db.set_setting(f"off_request:{mid}", req)
+            self.track.append(actor, "member.off_requested", member_ref(mid),
+                              data={"reason": req["reason"], "handed_over": plan["hand_over"], "stopped": plan["stop"]})
+        return req
+
+    def approve_switch_off(self, actor: dict, mid: str) -> dict:
+        """A second policy owner, not the one who asked and not the member, switches them off as asked."""
+        if actor.get("kind") != "person":
+            raise Denied("a person approves switching someone off")
+        self.require(actor, "policy_owner", "practice:main", "approve switching someone off")
+        req = self.off_request(mid)
+        if not req:
+            raise Invalid("nobody has asked to switch them off")
+        if actor["id"] in (req["by"], mid):
+            raise Denied("switching someone off is approved by a policy owner other than the one who asked, and not "
+                         "by the member it is for")
+        target = self.member(mid)
+        if target["status"] != "active":
+            raise Invalid(f"{target['name']} is already switched off")
+        plan = self._dependents_plan(target, req["hand_over"], req["stop"])  # their agents may have changed since
+        with self.db:
+            self.db.del_setting(f"off_request:{mid}")
+            return self._switch(actor, target, "disabled", req["reason"], plan, asked_by=req["by"])
+
+    def withdraw_switch_off(self, actor: dict, mid: str) -> None:
+        req = self.off_request(mid)
+        if not req:
+            raise Invalid("nobody has asked to switch them off")
+        if actor["id"] != req["by"]:
+            self.require(actor, "policy_owner", "practice:main", "withdraw a request to switch someone off")
+        with self.db:
+            self.db.del_setting(f"off_request:{mid}")
+            self.track.append(actor, "member.off_withdrawn", member_ref(mid))
+
     def set_sponsor(self, actor: dict, mid: str, sponsor: str) -> dict:
         self.require(actor, "member_admin", "practice:main", "change a sponsor")
+        with self.db:
+            self._move_sponsor(actor, mid, sponsor)
+        return self.member(mid)
+
+    def _move_sponsor(self, actor: dict, mid: str, sponsor: str, why: str = "") -> None:
         target, sp = self.member(mid), self.member(sponsor)
         if target["kind"] == "person":
             raise Invalid("people do not have sponsors")
@@ -1401,46 +1571,146 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.authz.write([(member_ref(mid), "sponsor", member_ref(sponsor))])
         self.db.members.set(mid, {"sponsor": sponsor})
         self.track.append(actor, "member.sponsor_changed", member_ref(mid),
-                          data={"from": target["sponsor"], "to": sponsor})
+                          data={"from": target["sponsor"], "to": sponsor, **({"reason": why} if why else {})})
         self.engine.move_sponsor_work(mid, sponsor, actor)
-        return self.member(mid)
 
-    def update_agent_profile(self, actor: dict, mid: str, changes: dict) -> dict:
-        self.require(actor, "member_admin", "practice:main", "change an agent's profile")
+    # ------------------------------------------------------------------ an agent's profile: a controlled record
+    # What an agent may do (its model, the skills and prompt blocks it takes, the highest risk) is a versioned record
+    # under the same change control as a definition: proposed, approved by a second person who is a policy owner,
+    # then in force. Nothing changes an agent's behaviour at once, and every version is kept.
+    PROFILE_KEYS = ("model", "max_risk", "skills")
+
+    def _check_profile(self, profile: dict) -> dict:
+        extra = sorted(set(profile) - set(self.PROFILE_KEYS))
+        if extra:
+            raise Invalid(f"an agent's profile holds {', '.join(self.PROFILE_KEYS)}, not {', '.join(extra)}")
+        out = {k: profile[k] for k in self.PROFILE_KEYS if k in profile}
+        if out.get("max_risk") not in RISK_ORDER:
+            raise Invalid("max_risk is low, medium or high")
+        if "model" in out:
+            out["model"] = str(out["model"] or "").strip()
+            if not out["model"]:
+                out.pop("model")
+        skills = out.get("skills", [])
+        if not isinstance(skills, list) or not all(isinstance(x, str) for x in skills):
+            raise Invalid("skills is a list of skill or prompt block ids")
+        out["skills"] = list(dict.fromkeys(skills))
+        prompts = set(self.db.block_versions.distinct("block_id", {"status": "active"}))
+        unknown = [x for x in out["skills"] if self.pack and x not in self.pack.skills and x not in prompts]
+        if unknown:
+            raise Invalid(f"there is no skill or prompt block {', '.join(unknown)}")
+        return out
+
+    @staticmethod
+    def _profile_source(profile: dict) -> str:
+        return json.dumps(profile, sort_keys=True, separators=(",", ":"))
+
+    def _record_profile(self, actor: dict, mid: str, profile: dict, note: str) -> dict:
+        """Put a profile in force without a second person: an agent's first version (added, or installed with a
+        pack or module, which were reviewed themselves), or the one it had before profiles were versioned."""
+        version = (self.db.agent_profile_versions.max("version", {"agent_id": mid}) or 0) + 1
+        source = self._profile_source(profile)
+        row = {"_id": f"{mid}@{version}", "agent_id": mid, "version": version, "status": "active",
+               "profile": profile, "source": source, "author": actor["id"], "note": note, "created_at": utcnow(),
+               "approved_by": None, "approved_at": None, "based_on": None}
+        self.db.agent_profile_versions.insert(row)
+        self.track.append(actor, "agent.profile_recorded", member_ref(mid),
+                          data={"version": version, "note": note,
+                                "source_sha256": hashlib.sha256(source.encode()).hexdigest()})
+        return row
+
+    def agent_profile_versions(self, mid: str) -> list[dict]:
+        return self.db.agent_profile_versions.find({"agent_id": mid}, sort=[("version", DESC)])
+
+    def agent_profile_proposal(self, mid: str) -> dict | None:
+        return self.db.agent_profile_versions.find_one({"agent_id": mid, "status": "proposed"},
+                                                       sort=[("version", DESC)])
+
+    def _profile_in_force(self, actor: dict, target: dict) -> dict:
+        row = self.db.agent_profile_versions.find_one({"agent_id": target["id"], "status": "active"})
+        return row or self._record_profile(actor, target["id"], target["profile"],
+                                           "the profile it had before profiles were versioned")
+
+    def propose_agent_profile(self, actor: dict, mid: str, changes: dict, note: str = "") -> dict:
+        """Propose a new version of an agent's profile (a member admin, or its sponsor). It is in force only once a
+        policy owner other than whoever proposed it approves it. A newer proposal replaces one still waiting."""
         target = self.member(mid)
         if target["kind"] != "agent":
             raise Invalid("only agents have a profile")
-        profile = {**target["profile"]}
-        for k in ("model", "max_risk", "skills"):
-            if k in changes:
-                profile[k] = changes[k]
-        if profile.get("max_risk") not in RISK_ORDER:
-            raise Invalid("max_risk is low, medium or high")
-        prompts = set(self.db.block_versions.distinct("block_id", {"status": "active"}))
-        unknown = [s for s in profile.get("skills", []) if self.pack and s not in self.pack.skills and s not in prompts]
-        if unknown:
-            raise Invalid(f"there is no skill or prompt block {', '.join(unknown)}")
-        old_risk = target["profile"].get("max_risk", "low")
+        if not (self.can(actor, "member_admin", "practice:main") or target["sponsor"] == actor["id"]):
+            self.require(actor, "member_admin", "practice:main", "propose a change to an agent's profile")
+        extra = sorted(set(changes) - set(self.PROFILE_KEYS))
+        if extra:
+            raise Invalid(f"an agent's profile holds {', '.join(self.PROFILE_KEYS)}, not {', '.join(extra)}")
+        now = {"max_risk": "low", "skills": [], **target["profile"]}
+        profile = self._check_profile({**now, **{k: v for k, v in changes.items() if v is not None}})
+        if profile == self._check_profile(now):
+            raise Invalid("that is the profile in force: there is nothing to propose")
         with self.db:
-            if RISK_ORDER[profile["max_risk"]] > RISK_ORDER.get(old_risk, 0):
-                # letting an agent take riskier work waits for a second policy owner; the rest applies now
-                self._request_for(actor, mid, max_risk=profile["max_risk"])
-                self.track.append(actor, "member.risk_requested", member_ref(mid),
-                                  data={"from": old_risk, "to": profile["max_risk"]})
-                profile["max_risk"] = old_risk
-            else:
-                pending = self.role_request(mid)
-                if pending and pending.get("max_risk"):  # lowered or kept: an earlier request to raise it lapses
-                    pending.pop("max_risk")
-                    if sorted(pending["roles"]) == sorted(target["roles"]):
-                        self.db.del_setting(f"role_request:{mid}")
-                    else:
-                        self.db.set_setting(f"role_request:{mid}", pending)
-            if profile != target["profile"]:
-                self.db.members.set(mid, {"profile": profile})
-                self.track.append(actor, "member.profile_changed", member_ref(mid),
-                                  data={"before": target["profile"], "after": profile})
+            base = self._profile_in_force(actor, target)
+            for old in self.db.agent_profile_versions.find({"agent_id": mid, "status": "proposed"}):
+                self.db.agent_profile_versions.set(old["_id"], {"status": "withdrawn"})
+                self.track.append(actor, "agent.profile_withdrawn", member_ref(mid),
+                                  data={"version": old["version"], "reason": "a newer proposal replaces it"})
+            version = (self.db.agent_profile_versions.max("version", {"agent_id": mid}) or 0) + 1
+            source = self._profile_source(profile)
+            self.db.agent_profile_versions.insert({
+                "_id": f"{mid}@{version}", "agent_id": mid, "version": version, "status": "proposed",
+                "profile": profile, "source": source, "author": actor["id"], "note": note, "created_at": utcnow(),
+                "approved_by": None, "approved_at": None, "based_on": base["version"]})
+            self.track.append(actor, "agent.profile_proposed", member_ref(mid),
+                              data={"version": version, "note": note, "before": base["profile"], "after": profile})
+        return {"agent_id": mid, "version": version, "profile": profile, "status": "proposed"}
+
+    def approve_agent_profile(self, actor: dict, mid: str, version: int, meaning: str = "") -> dict:
+        """A policy owner who did not propose it puts a proposed profile in force, signing its text."""
+        row = self.db.agent_profile_versions.find_one({"agent_id": mid, "version": int(version)})
+        if not row or row["status"] != "proposed":
+            raise Invalid("only a proposed profile can be approved")
+        if actor.get("kind") != "person":
+            raise Denied("an agent's profile is approved by a person, never an agent")
+        self.require(actor, "policy_owner", "practice:main", "approve a change to an agent's profile")
+        if row["author"] == actor["id"]:
+            raise Denied("whoever proposed a change does not approve it")
+        target = self.member(mid)
+        base = self.db.agent_profile_versions.find_one({"agent_id": mid, "status": "active"})
+        if base and row["based_on"] != base["version"]:
+            raise Invalid(f"version {base['version']} came into force after this was proposed: propose it again")
+        try:
+            profile = self._check_profile(row["profile"])
+        except Invalid as exc:
+            raise Invalid(f"this profile no longer checks: {exc}") from None
+        digest = hashlib.sha256(row["source"].encode()).hexdigest()
+        meaning = meaning or f"I approve version {row['version']} of {target['name']}'s profile"
+        with self.db:
+            self.db.agent_profile_versions.update({"agent_id": mid, "status": "active"},
+                                                  {"$set": {"status": "retired"}}, many=True)
+            n = self.db.agent_profile_versions.update(
+                {"agent_id": mid, "version": row["version"], "status": "proposed"},
+                {"$set": {"status": "active", "approved_by": actor["id"], "approved_at": utcnow()}})
+            if n != 1:
+                raise Invalid(f"version {row['version']} is no longer proposed")
+            self.db.members.set(mid, {"profile": profile})
+            self.track.append(actor, "agent.profile_approved", member_ref(mid),
+                              data={"version": row["version"], "source_sha256": digest, "asked_by": row["author"]},
+                              signed={"agent": mid, "version": row["version"], "meaning": meaning,
+                                      "source_sha256": digest})
+            self.track.append(actor, "member.profile_changed", member_ref(mid),
+                              data={"before": target["profile"], "after": profile, "asked_by": row["author"],
+                                    "version": row["version"]})
         return self.member(mid)
+
+    def withdraw_agent_profile(self, actor: dict, mid: str, version: int, reason: str = "") -> None:
+        """Its author withdraws a proposed profile, or a policy owner declines it."""
+        with self.db:
+            row = self.db.agent_profile_versions.find_one({"agent_id": mid, "version": int(version)})
+            if not row or row["status"] != "proposed":
+                raise Invalid("only a proposed profile can be withdrawn or declined")
+            if row["author"] != actor["id"] and not self.is_policy_owner(actor):
+                raise Denied("only its author or a policy owner may withdraw a proposed profile")
+            self.db.agent_profile_versions.set(row["_id"], {"status": "withdrawn"})
+            self.track.append(actor, "agent.profile_withdrawn", member_ref(mid),
+                              data={"version": row["version"], "reason": reason})
 
     # ------------------------------------------------------------------ credentials
     @staticmethod
