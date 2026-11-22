@@ -161,7 +161,7 @@ def test_every_record_the_core_reads_keeps_the_contract(firm, hub):
                     seen += 1
     assert seen >= 3
     out = contract.export([firm.record_type("Meeting")])
-    assert out["version"] == contract.CORE_CONTRACT and {t["name"] for t in out["types"]} == {"Subject", "Booking"}
+    assert out["version"] == contract.CORE_CONTRACT and {t["name"] for t in out["types"]} == {"Subject", "Booking", "Restriction"}
     assert out["extensions"] == [{"type": "Meeting", "extends": "ca.practicehub.core.Booking",
                                   "base": {"start": {"fields": ["start"]}, "end": {"fields": ["end"]},
                                            "reason": {"fields": ["reason"]}, "subject": {"fields": ["client"]},

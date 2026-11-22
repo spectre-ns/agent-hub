@@ -2000,13 +2000,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if not text:
             return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, field=field,
                                                                since=since, until=until, offset=offset))
-        if self.restrictions.any():  # words in what a restriction withholds find nothing: match what they are shown
-            from .records import search_text, words_of
-            words = words_of(text)
-            recs = self.redact_all(member, self.records.search(rtype, subject=subject, limit=None, text=text,
-                                                               field=field, since=since, until=until))
-            recs = [r for r in recs if all(w in search_text(r) for w in words)]
-            return recs[offset:][:limit] if limit is not None else recs[offset:]
+        recs = self._search_words(member, rtype, text=text, limit=limit, subject=subject, field=field,
+                                  since=since, until=until, offset=offset)
+        if not self.restrictions.any():
+            return recs
+        # what a patient's directive withholds never matches: a record shown masked is matched against what is shown
+        from .records import search_text, words_of
+        words = words_of(text)
+        return [r for r in recs if not visibility.withheld(r) or all(w in search_text(r) for w in words)]
+
+    def _search_words(self, member: dict, rtype: str | None, *, text: str, limit: int | None, subject: str | None,
+                      field: str | None, since: str | None, until: str | None, offset: int) -> list[dict]:
         types = {rtype: self.record_type_for_reading(rtype)} if rtype else self.record_types()
         guarded = {t for t, rt in types.items() if visibility.hidden_fields(self, member, rt)}
         if guarded and hasattr(self.records, "reindex"):
