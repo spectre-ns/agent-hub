@@ -1958,6 +1958,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     if a != member.get("id") and not self.may_write(self.member(a), rtype):
                         raise Denied(f"{a} may not write {rtype} records")
             rec = self.records.update(rtype, rid, after)  # a store replaces the record: store what was validated
+            note = comment.strip()[:500] if comment and comment.strip() else None
             self._write_version(rt, rec, member, run_id, comment=comment, authors=authors)
             changed = sorted(k for k in set(before) | set(rec) if k != "meta" and before.get(k) != rec.get(k))
             ev = self.track.append(member, "record.updated", ref, cause=cause, run_id=run_id,
