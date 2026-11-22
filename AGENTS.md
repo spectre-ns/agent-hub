@@ -38,7 +38,7 @@ If you change one of these, add or update a test in `tests/test_rules.py` that s
 ```sh
 scripts/test-mongo.sh   # a one-node MongoDB replica set on 127.0.0.1:27118; every test gets its own database
 .venv/bin/python -m pytest -q
-scripts/test-parallel.sh     # or: the suite in one shard per core, each with a MongoDB of its own (removed afterwards); one run at a time per machine
+scripts/test-parallel.sh     # or: the suite in one shard per core, each with a MongoDB of its own (removed afterwards); at most two runs at once per machine (PH_TEST_SLOTS)
 python3 -m practicehub.cli --state /tmp/ph init --demo --force && \
   python3 -m practicehub.cli --state /tmp/ph agents run --once && \
   python3 -m practicehub.cli --state /tmp/ph verify

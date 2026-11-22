@@ -294,12 +294,15 @@ class Store:
     def ensure_indexes(self, spec: dict[str, list]) -> None:
         """``{collection: [field | (field, ...) | {"fields": [...], "unique": True}]}``."""
         for coll, idx in spec.items():
+            models = []
             for i in idx:
                 if isinstance(i, str):
                     i = {"fields": [i]}
                 elif isinstance(i, tuple):
                     i = {"fields": list(i)}
-                self.db[coll].create_index([(f, ASC) for f in i["fields"]], unique=bool(i.get("unique")))
+                models.append(pymongo.IndexModel([(f, ASC) for f in i["fields"]], unique=bool(i.get("unique"))))
+            if models:  # one createIndexes command per collection: one round trip, not one per index
+                self.db[coll].create_indexes(models)
 
     def drop_database(self) -> None:
         self.client.drop_database(self.name)

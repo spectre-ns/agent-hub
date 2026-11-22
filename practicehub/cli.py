@@ -267,6 +267,68 @@ def cmd_member(args):
     elif args.sub == "tokens":
         for t in hub.tokens(actor, args.id):
             print(f"{t['id']}  {'revoked' if t['revoked'] else 'live   '}  {t['created_at'][:16]}  {t['label']}")
+    elif args.sub == "list":
+        for m in hub.members():
+            print(f"{m['id']:22} {m['kind']:8} {m['status']:9} {', '.join(m['roles'])}"
+                  + (f"  (sponsor {m['sponsor']})" if m["sponsor"] else ""))
+    elif args.sub == "withdraw-roles":
+        hub.withdraw_roles(actor, args.id)
+        print("withdrawn")
+    elif args.sub == "dependents":
+        deps = hub.dependents(args.id)
+        for d in deps:
+            print(f"{d['id']:22} {d['kind']:8} {d['credentials']} live credential(s)"
+                  + (f"; nobody else holds {', '.join(d['only_holder_of'])}" if d["only_holder_of"] else ""))
+        if not deps:
+            print("nothing depends on them")
+    elif args.sub in ("disable", "ask-disable"):
+        hand = {}
+        for pair in args.hand_over or []:
+            agent, _, person = pair.partition("=")
+            if not person:
+                raise SystemExit(f"--hand-over takes agent=person, not {pair!r}")
+            hand[agent] = person
+        stop = "all" if args.stop_all else (args.stop or [])
+        if args.sub == "disable":
+            out = hub.set_status(actor, args.id, "disabled", args.reason, hand_over=hand, stop=stop)
+            print(f"{out['name']} is switched off")
+            if out["roles_left_empty"]:
+                print(f"nobody switched on now holds: {', '.join(out['roles_left_empty'])}")
+        else:
+            hub.request_switch_off(actor, args.id, args.reason, hand_over=hand, stop=stop)
+            print(f"asked: a second policy owner approves with practicehub member approve-disable {args.id} "
+                  f"--as <another policy owner>")
+    elif args.sub == "approve-disable":
+        out = hub.approve_switch_off(actor, args.id)
+        print(f"{out['name']} is switched off")
+    elif args.sub == "withdraw-disable":
+        hub.withdraw_switch_off(actor, args.id)
+        print("withdrawn")
+    elif args.sub == "enable":
+        out = hub.set_status(actor, args.id, "active")
+        print(f"{out['name']} is switched on")
+    elif args.sub == "profile":
+        changes = {k: v for k, v in (("model", args.model), ("max_risk", args.max_risk)) if v is not None}
+        if args.skill is not None:
+            changes["skills"] = args.skill
+        out = hub.propose_agent_profile(actor, args.id, changes, args.note or "")
+        print(f"proposed version {out['version']} of {args.id}'s profile; it takes effect when another policy owner "
+              f"approves it: practicehub member approve-profile {args.id} {out['version']} --as <policy owner>")
+    elif args.sub == "approve-profile":
+        out = hub.approve_agent_profile(actor, args.id, args.version)
+        print(f"version {args.version} of {out['name']}'s profile is in force")
+    elif args.sub == "withdraw-profile":
+        hub.withdraw_agent_profile(actor, args.id, args.version, args.reason or "")
+        print("withdrawn")
+    elif args.sub == "profile-versions":
+        for v in hub.agent_profile_versions(args.id):
+            pr = v["profile"]
+            print(f"v{v['version']:<3} {v['status']:9} {pr.get('model', ''):14} {pr.get('max_risk', 'low'):6} "
+                  f"{', '.join(pr.get('skills', []))}  by {v['author']}"
+                  + (f", approved by {v['approved_by']}" if v["approved_by"] else ""))
+    warn = hub.member_admin_warning()
+    if warn and args.sub in ("list", "roles", "approve-roles", "disable", "approve-disable"):
+        print("warning:", warn)
     if args.sub in ("add", "roles") and hub.role_request(args.id):
         print("a role that approves changes or manages members, or gives an agent or service restricted data, "
               "waits for a second policy owner: "
@@ -742,6 +804,42 @@ def main(argv=None):
     p.add_argument("id")
     p.add_argument("credential")
     p = mb.add_parser("passphrase-link", help="issue a person a one-time code to set their passphrase (a member admin)")
+    p.add_argument("id")
+    p = mb.add_parser("list", help="every member, and a warning when only one person manages members")
+    p = mb.add_parser("withdraw-roles", help="withdraw a waiting role change")
+    p.add_argument("id")
+    p = mb.add_parser("dependents", help="the agents and services that stop if this person is switched off")
+    p.add_argument("id")
+    for name, hlp in (("disable", "switch a member off (a member admin, or an agent's sponsor)"),
+                      ("ask-disable", "a policy owner asks to switch a member off; a second policy owner approves")):
+        p = mb.add_parser(name, help=hlp)
+        p.add_argument("id")
+        p.add_argument("--reason", required=True)
+        p.add_argument("--hand-over", action="append", metavar="AGENT=PERSON",
+                       help="give an agent or service they sponsor to a new sponsor (repeat)")
+        p.add_argument("--stop", action="append", metavar="AGENT",
+                       help="let an agent or service they sponsor stop; its credentials end for good (repeat)")
+        p.add_argument("--stop-all", action="store_true", help="let every one not handed over stop")
+    p = mb.add_parser("approve-disable", help="a second policy owner approves switching a member off")
+    p.add_argument("id")
+    p = mb.add_parser("withdraw-disable", help="withdraw or decline a request to switch a member off")
+    p.add_argument("id")
+    p = mb.add_parser("enable", help="switch a member on again (a member admin)")
+    p.add_argument("id")
+    p = mb.add_parser("profile", help="propose a new version of an agent's profile (a second policy owner approves)")
+    p.add_argument("id")
+    p.add_argument("--model")
+    p.add_argument("--max-risk", choices=["low", "medium", "high"])
+    p.add_argument("--skill", action="append", help="every skill or prompt block it takes (repeat)")
+    p.add_argument("--note")
+    p = mb.add_parser("approve-profile", help="a policy owner other than its author puts a proposed profile in force")
+    p.add_argument("id")
+    p.add_argument("version", type=int)
+    p = mb.add_parser("withdraw-profile", help="withdraw or decline a proposed profile")
+    p.add_argument("id")
+    p.add_argument("version", type=int)
+    p.add_argument("--reason")
+    p = mb.add_parser("profile-versions", help="every version of an agent's profile")
     p.add_argument("id")
     p = mb.add_parser("channel", help="let a service (a delivery connector) deliver on an outbox channel")
     p.add_argument("id")
