@@ -303,3 +303,26 @@ def test_the_mcp_core_names_no_module_or_practice(hub):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for w in banned:
                     assert w not in node.value.split("/") and node.value != w, (f.name, node.value)
+
+
+def test_a_call_the_hub_cannot_finish_is_an_error_to_the_agent_and_a_failure_on_the_track(hub, monkeypatch):
+    from practicehub.store import Transient
+    pat = hub.records.search("Patient", limit=1)[0]
+
+    def broken(*a, **k):
+        raise KeyError("a bug")
+    monkeypatch.setattr(mcp, "_run", broken)
+    out = call(hub, "practice", "jo", "read_patient", {"id": pat["id"]})
+    assert out["isError"] and out["structuredContent"]["error"] == "failed"
+    assert "a bug" not in json.dumps(out)  # the detail goes to the log, not to the agent
+    (failed,) = [e for e in hub.track.list(limit=5000) if e["action"] == "mcp.failed"]
+    called = next(e for e in hub.track.list(limit=5000) if e["action"] == "mcp.called" and e["seq"] == failed["cause"])
+    assert failed["data"]["tool"] == "read_patient" and failed["data"]["error"] == "KeyError"
+    assert called["data"]["tool"] == "read_patient"
+
+    def busy(*a, **k):
+        raise Transient("the database stayed busy")
+    monkeypatch.setattr(mcp, "_run", busy)
+    out = call(hub, "practice", "jo", "read_patient", {"id": pat["id"]})
+    assert out["isError"] and out["structuredContent"]["error"] == "busy"
+    assert hub.track.verify()["ok"]
