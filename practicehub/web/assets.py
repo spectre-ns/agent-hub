@@ -659,6 +659,36 @@ flex-wrap:wrap;gap:8px 12px;align-items:center;box-shadow:var(--shadow-overlay)}
 .ed-problems{margin:4px 0 0;padding-left:16px;color:var(--danger-fg)}
 .bad-json{border-color:var(--danger)!important}
 
+/* ---- the record type builder: the form, and what modules added beside it (read only) */
+.fb-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,300px);gap:16px;align-items:start}
+.fb-layout>.card,.fb-main>.card{margin:0}.fb-main{display:flex;flex-direction:column;gap:12px;min-width:0}
+.fb-aside{position:sticky;top:72px}.fb-aside h2{margin:0 0 4px;font-size:16px}
+.fb-module{border-top:1px solid var(--border);padding-top:8px;margin-top:8px}.fb-module h3{font-size:14px;margin:0 0 4px}
+.fb-mod-fields{margin:0 0 8px;padding-left:16px}.fb-mod-fields li{margin:2px 0}
+.fb-module pre.code{max-height:240px;overflow:auto;font-size:12px}
+.fb-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+.fb-head h2,form.fb h2.fb-h{margin:8px 0 0;font-size:16px;line-height:20px}
+form.fb h3.fb-h3{margin:4px 0 0;font-size:14px}
+.fb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(180px,100%),1fr));gap:8px 12px;align-items:start}
+.fb-grid>.field{margin:0}.fb-req{align-self:end;padding-bottom:6px}
+.fb-fd{border:1px solid var(--border);border-radius:3px;padding:4px 12px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;scroll-margin-top:72px}
+.fb-fd>details{flex:1 1 280px;min-width:0}.fb-fd>details>summary{cursor:pointer;padding:6px 0;overflow-wrap:anywhere}
+.fb-fd>details[open]{flex-basis:100%}.fb-fd[aria-invalid=true]{border-color:var(--danger)}
+.fb-body{display:flex;flex-direction:column;gap:8px;padding:4px 0 8px}
+.fb-fd>.fb-row-actions{margin-left:auto}
+fieldset.fb-field,fieldset.fb-part,fieldset.fb-lc{border:1px solid var(--border);border-radius:3px;margin:0;padding:8px 12px 12px;
+min-width:0;display:flex;flex-direction:column;gap:8px;scroll-margin-top:72px}
+fieldset.fb-field>legend,fieldset.fb-part>legend{padding:0 4px;font-weight:600;font-size:14px;color:var(--fg)}
+fieldset.fb-field[aria-invalid=true],fieldset.fb-lc[aria-invalid=true]{border-color:var(--danger)}
+fieldset.fb-chips{margin:0}fieldset.fb-chips[aria-invalid=true]{outline:2px solid var(--danger);outline-offset:4px;border-radius:3px}
+.fb-when[hidden]{display:none}.fb-when{display:flex;flex-direction:column;gap:8px}
+.fb-tab{border-left:3px solid var(--border);padding-left:12px;display:flex;flex-direction:column;gap:8px}
+.fb-row-actions{justify-content:flex-end}
+.fb-errors{margin:0;padding:4px 8px 4px 24px;border-radius:3px;background:var(--danger-bg);color:var(--danger-fg);font-size:13px}
+.fb-more,.fb-note{margin:0;font-size:12px;overflow-wrap:anywhere}
+.fb-keep pre.code{font-size:12px;overflow:auto}
+@media (max-width:900px){.fb-layout{grid-template-columns:minmax(0,1fr)}.fb-aside{position:static}}
+
 /* ---- narrow screens: side panel first, single column, 16px gutter */
 @media (max-width:900px){
   .shell.has-subnav{grid-template-columns:minmax(0,1fr)}
@@ -936,6 +966,14 @@ document.querySelectorAll("textarea[data-check]").forEach((t) => {
   }
   t.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(check, 500); });
   if (t.value.trim()) check();
+});
+// The record type builder: a field's choices and its target show for the types that use them.
+document.querySelectorAll("select[data-fb-type]").forEach((sel) => {
+  const row = sel.closest(".fb-field");
+  sel.addEventListener("change", () => row.querySelectorAll("[data-fb-for]").forEach((box) => {
+    if (box.dataset.fbFor === sel.value) box.hidden = false;
+    else if (!box.querySelector("input:checked, option:checked")) box.hidden = true;
+  }));
 });
 // The settings ribbon, a strip on a narrow screen: the lit item scrolled into view (the page itself stays put).
 (function () {

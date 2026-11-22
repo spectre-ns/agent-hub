@@ -958,6 +958,34 @@ def test_a_module_may_only_add_to_another_type(hub, mods):
     assert hub.record_type("Document").label != "Mine now"
 
 
+def test_a_practice_change_keeps_what_a_module_added_and_never_takes_it_over(hub, mods):
+    """The practice owns its own text of a type a module extends: the module's lines are put back after it on save,
+    and a proposal that adds, changes, removes or redefines them is refused, saying so."""
+    from practicehub import schema
+    rana = M(hub, "rana")
+    install(hub, "dms")
+    _site_module(mods)
+    install(hub, "dms-site")
+    full = next(v for v in hub.definition_versions("type", "Document") if v["status"] == "active")["source"]
+    own = schema.own_text(full)
+    assert "dms-site" not in own and schema.module_additions(full)[0][0] == "dms-site"
+    # its own text only, with a field of its own: the module's field is kept on
+    out = hub.propose("type", rana, own + '\n[[field]]\nname = "room"\nlabel = "Room"\n', "add a room")
+    row = next(v for v in hub.definition_versions("type", "Document") if v["version"] == out["version"])
+    assert schema.module_additions(row["source"]) == schema.module_additions(full) and 'name = "room"' in row["source"]
+    hub.propose("type", rana, full, "the text as it stands")  # the module's lines as they are: accepted
+    for bad, says in ((full.replace('"south"', '"east"'), "cannot be changed here"),
+                      (full.replace("# <<< dms-site\n", ""), "marks where a module's additions"),
+                      (own + "# >>> added by the dms-site module\nx = 1\n", "marks where"),
+                      (own + '\n# >>> added by the qms module\n[[field]]\nname = "q"\n# <<< qms\n',
+                       "only the module adds them"),
+                      (own + '\n[[field]]\nname = "site"\nlabel = "Site"\n', "added by the dms-site module")):
+        with pytest.raises(Invalid) as exc:
+            hub.propose("type", rana, bad, "take it over")
+        assert any(says in p for p in exc.value.problems), exc.value.problems
+    assert hub.record_type("Document").field("site")["choices"] == ["north", "south"]
+
+
 def test_a_module_is_named_never_given_as_a_path(hub):
     with pytest.raises(Invalid):
         install(hub, "../../tmp/evil")
