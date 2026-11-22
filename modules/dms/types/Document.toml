@@ -6,6 +6,10 @@ data_class = "documents"
 date = "effective"
 flag = "status"
 order = 10
+# Every revision is worked from draft to in force by one workflow: written, sent for review, approved (signed) by a
+# controller who did not write it, or returned; in force until revised or made obsolete. Its status is where that
+# work is. An obsolete document is not walked.
+workflow = { id = "dms-review", when = "record.status in ['draft', 'in-review', 'approved']" }
 summary = "A policy, procedure or form under document control."
 
 [[field]]
