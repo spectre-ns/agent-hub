@@ -164,7 +164,8 @@ def test_comments_anchor_reply_resolve_and_mention(live):
     c = live.comment(jo, ref, "Is this still 17:00, @noor?", quote="from 17:00 to 08:00",
                      before="on-call phone ", after=", and all")
     assert c["mentions"] == ["noor"]
-    assert hub.db.events.find_one({"action": "comment.mentioned", "data.who": "noor"})
+    assert hub.db.events.find_one({"action": "mention.created", "data.who": "noor"})
+    assert any(i["output"]["about"] == ref for i in hub.engine.inbox(M(hub, "noor")))  # a notice, like other work
     live.reply(M(hub, "noor"), ref, c["id"], "Yes.")
     with pytest.raises(Denied):  # a reader who did not write it does not resolve it
         hub.authz.delete([("role:wiki-editor", "assignee", member_ref("sam"))])

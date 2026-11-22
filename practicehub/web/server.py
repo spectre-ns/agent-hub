@@ -30,6 +30,7 @@ from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
+from .live_pages import LivePages
 from .records_pages import Download, RecordPages, a_an
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
@@ -64,7 +65,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(RecordPages, DefinitionPages):
+class App(RecordPages, DefinitionPages, LivePages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -159,6 +160,7 @@ class App(RecordPages, DefinitionPages):
         R("GET", r"/outbox", self.page_outbox)
         R("POST", r"/outbox/(?P<oid>\d+)/delivered", self.post_outbox_delivered)
         R("GET", r"/schedule", self.page_schedule)
+        self.live_routes(R)
         self.record_routes(R)
         self.definition_routes(R)
 
@@ -2752,6 +2754,8 @@ def serve(hub, host: str = "127.0.0.1", port: int = 8200, *, dev: bool = False, 
     if port in FORBIDDEN_PORTS:
         raise SystemExit(f"port {port} is reserved on this machine; pick another (default 8200)")
     httpd = ThreadingHTTPServer((host, port), make_handler(App(hub, dev=dev, oidc=oidc)))
+    from ..live import live_of
+    live_of(hub).start_sweeper()  # saves idle live sessions and lets go of editors who closed their tab
     print(f"Practice Hub on http://{host}:{port}/" + (" (dev sign-in on)" if dev else ""))
     try:
         httpd.serve_forever()

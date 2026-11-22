@@ -42,7 +42,6 @@ INDEXES = {
     "live_comments": [("ref", "at")],
 }
 
-_MENTION = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]*[a-z0-9])")
 
 
 def names(people: list[str]) -> str:
@@ -215,6 +214,13 @@ class Live:
             s = self.db.live_sessions.get(sid)
         self._wake(sid)
         return self._state(s, mode="edit")
+
+    def watch(self, member: dict, ref: str, field: str) -> dict:
+        """The session as it stands, for someone reading the page while others edit it (nothing joined)."""
+        rt, f = self._field(ref, field)
+        self.hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rt.id} records")
+        s = self.session(ref, field)
+        return self._state(s, mode="watch", rec=None if s else self._record(ref), f=f)
 
     def leave(self, member: dict, ref: str, field: str) -> dict:
         """Out of the session (the tab closed, or the editor left the page). The last one out saves."""
@@ -417,6 +423,13 @@ class Live:
                     self._mark_ended(s, str(exc))
                     return None
             version = int(self._version(rec) or 0)
+            from .mentions import mentioned_ids
+            before = set(mentioned_ids(s["base_text"]))
+            if set(mentioned_ids(s["text"])) - before:  # someone was newly named in the text: tell them
+                fresh = "\n".join(line for line in s["text"].splitlines()
+                                   if set(mentioned_ids(line)) - before)
+                self.mentions.mention(by, s["ref"], fresh, anchor=f"field:{f['name']}", quote=fresh[:500],
+                                      field=f["name"], skip_refused=True)
             self.db.live_sessions.update({"_id": sid}, {"$set": {
                 "base_text": s["text"], "base_version": self._version(rec), "base_seq": s["seq"], "contributors": [],
                 "checkpoints": s.get("checkpoints", 0) + 1, "saved_at": utcnow(), "saved_reason": reason},
@@ -517,9 +530,10 @@ class Live:
         self.hub.require(member, "reader", f"data_class:{self.hub.class_of(rtype)}", f"read {rtype} records")
         return self.db.live_comments.find({"ref": ref}, sort=[("at", 1)])
 
-    def _mentions(self, body: str) -> list[str]:
-        ids = set(self.db.members.distinct("_id"))
-        return sorted({m for m in _MENTION.findall(body or "") if m in ids})
+    @property
+    def mentions(self):
+        from .mentions import mentions_of
+        return mentions_of(self.hub)
 
     def comment(self, member: dict, ref: str, body: str, *, quote: str = "", before: str = "", after: str = "",
                 field: str = "") -> dict:
@@ -536,23 +550,18 @@ class Live:
         if len(body) > 5000:
             raise Invalid("a comment is at most 5000 characters")
         quote = (quote or "").strip()[:500]
+        who = self.mentions.check(member, ref, body)  # a member who may not read the record is not mentioned
         cid = "c-" + secrets.token_hex(6)
         doc = {"_id": cid, "id": cid, "ref": ref, "field": field or "", "quote": quote,
                "before": (before or "")[-60:], "after": (after or "")[:60], "body": body, "by": member["id"],
-               "at": utcnow(), "replies": [], "resolved": False, "mentions": self._mentions(body)}
+               "agent": member["kind"] == "agent", "at": utcnow(), "replies": [], "resolved": False,
+               "mentions": [m["id"] for m in who]}
         with self.db:
             self.db.live_comments.insert(doc)
             seq = self.hub.track.append(member, "comment.added", ref, data={"comment": cid, "on": "text" if quote
                                                                              else "page"})
-            self._mentioned(member, ref, doc["mentions"], cid, seq)
+            self.mentions.mention(member, ref, body, anchor=cid, quote=quote, field=field or "", cause=seq)
         return doc
-
-    def _mentioned(self, member, ref, mids, cid, seq) -> None:
-        # the hub's inbox holds the work of runs; a mention is not work, so it is recorded (on the comment and on the
-        # track) and shown on the page, not sent as a notice
-        for mid in mids:
-            if mid != member["id"]:
-                self.hub.track.append(member, "comment.mentioned", ref, cause=seq, data={"comment": cid, "who": mid})
 
     def reply(self, member: dict, ref: str, cid: str, body: str) -> dict:
         c = self._comment(member, ref, cid)
@@ -561,12 +570,76 @@ class Live:
             raise Invalid("write the reply")
         if len(body) > 5000:
             raise Invalid("a reply is at most 5000 characters")
+        return self._reply(member, ref, c, body)
+
+    def _reply(self, member, ref, c, body, suggestion=None) -> dict:
+        if member.get("kind") not in ("person", "agent"):
+            raise Denied("only people and agents comment")
+        cid = c["id"]
+        who = self.mentions.check(member, ref, body)
         r = {"id": "r-" + secrets.token_hex(5), "by": member["id"], "body": body, "at": utcnow(),
-             "mentions": self._mentions(body)}
+             "agent": member["kind"] == "agent", "mentions": [m["id"] for m in who]}
+        if suggestion:
+            r["suggestion"] = suggestion
         with self.db:
             self.db.live_comments.update({"_id": cid}, {"$push": {"replies": r}, "$set": {"resolved": False}})
-            seq = self.hub.track.append(member, "comment.replied", ref, data={"comment": cid})
-            self._mentioned(member, ref, r["mentions"], cid, seq)
+            seq = self.hub.track.append(member, "comment.replied", ref,
+                                        data={"comment": cid, "reply": r["id"], "agent": r["agent"]})
+            if suggestion:
+                self.hub.track.append(member, "suggestion.proposed", ref, cause=seq,
+                                      data={"comment": cid, "reply": r["id"], "field": suggestion["field"]})
+            self.mentions.mention(member, ref, body, anchor=cid, quote=c.get("quote") or "", field=c.get("field") or "",
+                                  cause=seq)
+            self.mentions.answered(member, ref, cid, cause=seq)
+        return self.db.live_comments.get(cid)
+
+    def suggest(self, member: dict, ref: str, cid: str, field: str, find: str, text: str, note: str = "") -> dict:
+        """A proposed change to the record's text, as a reply in a thread: ``find`` (words now in ``field``, once)
+        becomes ``text`` only when a person who may change the record accepts it. Whoever proposes it changes
+        nothing; this is how an agent edits."""
+        c = self._comment(member, ref, cid)
+        rt, f = self._field(ref, field)
+        cur = str(self._record(ref).get(f["path"]) or "")
+        if not find or cur.count(find) != 1:
+            raise Invalid("a suggestion replaces words that are in the text exactly once: quote them as written")
+        if len(text or "") > 20000:
+            raise Invalid("a suggestion is at most 20000 characters")
+        sug = {"field": f["name"], "find": find, "text": text or "", "status": "open"}
+        return self._reply(member, ref, c, (note or "").strip() or "Suggested a change.", suggestion=sug)
+
+    def decide_suggestion(self, member: dict, ref: str, cid: str, rid: str, accept: bool) -> dict:
+        """A person who may change the record accepts a suggestion (saved as their change, naming who proposed it)
+        or rejects it. An agent never decides one, its own or another's."""
+        c = self._comment(member, ref, cid)
+        r = next((x for x in c["replies"] if x["id"] == rid and x.get("suggestion")), None)
+        if not r:
+            raise NotFound("there is no such suggestion")
+        if member["kind"] != "person":
+            raise Denied("a person accepts or rejects a suggestion")
+        rtype = ref.split("/", 1)[0]
+        self.hub.require(member, "writer", f"data_class:{self.hub.class_of(rtype)}", f"change {rtype} records")
+        sug = r["suggestion"]
+        if sug["status"] != "open":
+            raise Invalid(f"this suggestion was {sug['status']} already")
+        if accept:
+            rt, f = self._field(ref, sug["field"])
+            if self.editing(ref):
+                raise Invalid("people are editing it now: accept the suggestion once they are done")
+            cur = self._record(ref)
+            now = str(cur.get(f["path"]) or "")
+            if now.count(sug["find"]) != 1:
+                raise Invalid("the text it changes is no longer there as it was: it cannot be applied")
+            proposer = self._name(r["by"])
+            self.hub.update_record(member, ref, {f["path"]: now.replace(sug["find"], sug["text"], 1)},
+                                   expected_version=self._version(cur),
+                                   comment=f"Accepted a suggestion from {proposer}")
+        status = "accepted" if accept else "rejected"
+        with self.db:
+            self.db.live_comments.update({"_id": cid, "replies.id": rid}, {"$set": {
+                "replies.$.suggestion.status": status, "replies.$.suggestion.by": member["id"],
+                "replies.$.suggestion.at": utcnow()}})
+            self.hub.track.append(member, f"suggestion.{status}", ref,
+                                  data={"comment": cid, "reply": rid, "proposed_by": r["by"]})
         return self.db.live_comments.get(cid)
 
     def resolve(self, member: dict, ref: str, cid: str, resolved: bool = True) -> dict:

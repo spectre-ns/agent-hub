@@ -2051,6 +2051,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return wfmod.parse(UNHANDLED_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
                                                           "source": UNHANDLED_SOURCE, "author": "hub", "note": "",
                                                           "module": "", "approved_by": None, "approved_at": None}
+        from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
+        if wid == MENTION_WORKFLOW and version == 0:  # the home of a notice that someone mentioned a member
+            return wfmod.parse(MENTION_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
+                                                        "source": MENTION_SOURCE, "author": "hub", "note": "",
+                                                        "module": "", "approved_by": None, "approved_at": None}
         if version is None:
             row = self.db.workflow_versions.find_one({"workflow_id": wid, "status": "active"})
         else:

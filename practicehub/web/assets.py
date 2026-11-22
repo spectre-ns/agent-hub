@@ -939,7 +939,7 @@ const MD = (() => {
   const MENTION = /^\[\[([^\[\]\n|]{1,200})(?:\|([^\[\]\n]{1,200}))?\]\]$/;
   const INLINE = /(`[^`\n]+`)|(\[\[[^\[\]\n]{1,400}\]\])|(\[([^\[\]\n]{1,300})\]\(([^()\s]{1,2000})\))|(\*\*([^*\n]+?)\*\*)|(~~([^~\n]+?)~~)|((?<![\w*])\*([^*\s][^*\n]*?)\*(?![\w*]))/g;
   const SEP = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/;
-  const BLOCK = new Set(["P", "DIV", "H1", "H2", "H3", "H4", "H5", "H6", "UL", "OL", "BLOCKQUOTE", "PRE", "HR", "TABLE"]);
+  const BLOCK = new Set(["P", "DIV", "H1", "H2", "H3", "H4", "H5", "H6", "UL", "OL", "BLOCKQUOTE", "PRE", "HR", "TABLE", "ASIDE"]);
 
   function mention(source, titles) {
     const bar = source.indexOf("|");
@@ -965,6 +965,14 @@ const MD = (() => {
     }
     return out + esc(s.slice(pos));
   }
+  const CALLOUTS = { note: "Note", tip: "Tip", warning: "Warning", important: "Important" };
+  function item(x, titles) {  // a checklist item when it starts [ ] or [x], as markup.py has it
+    const t = /^\[( |x|X)\]\s+([\s\S]*)$/.exec(x);
+    if (!t) return `<li>${inline(x, titles)}</li>`;
+    const done = t[1] !== " ";
+    return `<li class="task${done ? " done" : ""}"><span class="box${done ? " done" : ""}" aria-hidden="true">${done ? "✓" : ""}</span>`
+      + `<span class="visually-hidden">${done ? "done: " : "to do: "}</span>${inline(t[2], titles)}</li>`;
+  }
   const cells = (line) => line.trim().replace(/^\|+|\|+$/g, "").split("|").map((c) => c.trim());
 
   // Markdown to HTML: the same subset, read the same way, as practicehub/markup.py.
@@ -989,8 +997,13 @@ const MD = (() => {
       if (s.startsWith(">")) {
         flush(); const q = [];
         while (i < lines.length && lines[i].trim().startsWith(">")) q.push(lines[i++].trim().slice(1).replace(/^\s+/, ""));
-        out.push("<blockquote>" + (depth < 4 ? toHtml(q.join("\n"), titles, depth + 1)
-          : "<p>" + q.filter(Boolean).map((x) => inline(x, titles)).join("<br>") + "</p>") + "</blockquote>");
+        const call = q.length ? /^\[!(note|tip|warning|important)\]$/i.exec(q[0].trim()) : null;
+        if (call) q.shift();
+        const inner = depth < 4 ? toHtml(q.join("\n"), titles, depth + 1)
+          : "<p>" + q.filter(Boolean).map((x) => inline(x, titles)).join("<br>") + "</p>";
+        if (call) { const k = call[1].toLowerCase();
+          out.push(`<aside class="callout ${k}" role="note"><p class="callout-title">${CALLOUTS[k]}</p>${inner}</aside>`); }
+        else out.push("<blockquote>" + inner + "</blockquote>");
         continue;
       }
       if (s.startsWith("|") && i + 1 < lines.length && SEP.test(lines[i + 1].trim())) {
@@ -1010,7 +1023,7 @@ const MD = (() => {
           i++;
         }
         const tag = ordered ? "ol" : "ul";
-        out.push(`<${tag}>` + items.map((x) => `<li>${inline(x, titles)}</li>`).join("") + `</${tag}>`);
+        out.push(`<${tag}>` + items.map((x) => item(x, titles)).join("") + `</${tag}>`);
         continue;
       }
       para.push(s); i++;
@@ -1050,9 +1063,10 @@ const MD = (() => {
       for (const li of l.children) {
         if (li.tagName !== "LI") continue;
         const own = li.cloneNode(true);
-        own.querySelectorAll("ul,ol").forEach((x) => x.remove());
+        own.querySelectorAll("ul,ol,.box,.visually-hidden").forEach((x) => x.remove());
         const x = inlineMd(own).replace(/\s*\n\s*/g, " ").trim();
-        if (x) lines.push((ordered ? (n++) + ". " : "- ") + x);
+        const box = li.classList.contains("task") ? (li.classList.contains("done") ? "[x] " : "[ ] ") : "";
+        if (x) lines.push((ordered ? (n++) + ". " : "- ") + box + x);
         for (const sub of li.children) if (sub.tagName === "UL" || sub.tagName === "OL") walk(sub);
       }
     };
@@ -1088,7 +1102,12 @@ const MD = (() => {
         const x = hasBlock(c) ? toMd(c) : inlineMd(c).replace(/^\n+|\n+$/g, "").trim();
         if (x) out.push(x);
       } else if (t === "UL" || t === "OL") { const x = listMd(c, t === "OL"); if (x) out.push(x); }
-      else if (t === "BLOCKQUOTE") {
+      else if (t === "ASIDE" && c.classList.contains("callout")) {
+        const own = c.cloneNode(true), k = [...c.classList].find((x) => CALLOUTS[x]) || "note";
+        own.querySelectorAll(".callout-title").forEach((x) => x.remove());
+        const x = hasBlock(own) ? toMd(own) : inlineMd(own).trim();
+        out.push(["[!" + k + "]", ...x.split("\n")].map((l) => (l ? "> " + l : ">")).join("\n"));
+      } else if (t === "BLOCKQUOTE") {
         const x = hasBlock(c) ? toMd(c) : inlineMd(c).trim();
         if (x) out.push(x.split("\n").map((l) => (l ? "> " + l : ">")).join("\n"));
       } else if (t === "PRE") out.push("```\n" + c.textContent.replace(/\n$/, "").replace(/```/g, "ˋˋˋ") + "\n```");
@@ -1858,6 +1877,7 @@ function formModal() {
   });
 }
 
+window.PH = { MD, el };  // for the live editor's script, which follows
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".avatar-menu").forEach(avatarMenu);
   formModal();
@@ -1873,3 +1893,802 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 })();
 """
+
+# ---------------------------------------------------------------------------------------------- writing together
+# The live editor: a page's text edited by several people at once (see practicehub/live.py). Its operations are those
+# of practicehub/ot.py, part for part; lengths are UTF-16 units, as JavaScript strings count them. Nothing typed is
+# ever evaluated: the text is markdown, shown through MD.toHtml, which escapes everything it does not know.
+LIVE_JS = r"""
+(function () {
+"use strict";
+const { MD, el } = window.PH || {};
+if (!MD) return;
+
+// ---- operations (practicehub/ot.py)
+const OT = (() => {
+  const isIns = (p) => typeof p === "string", isRet = (p) => typeof p === "number" && p > 0;
+  function normalize(op) {
+    const out = [];
+    for (const p of op) {
+      if (p === 0 || p === "") continue;
+      const last = out[out.length - 1];
+      if (isIns(p)) {
+        if (typeof last === "number" && last < 0) {
+          if (out.length >= 2 && isIns(out[out.length - 2])) out[out.length - 2] += p;
+          else out.splice(out.length - 1, 0, p);
+        } else if (isIns(last)) out[out.length - 1] += p;
+        else out.push(p);
+      } else if (typeof last === "number" && (last > 0) === (p > 0)) out[out.length - 1] += p;
+      else out.push(p);
+    }
+    return out;
+  }
+  const baseLen = (op) => op.reduce((n, p) => n + (typeof p === "number" ? Math.abs(p) : 0), 0);
+  const targetLen = (op) => op.reduce((n, p) => n + (isIns(p) ? p.length : p > 0 ? p : 0), 0);
+  function apply(op, text) {
+    if (baseLen(op) !== text.length) throw new Error("operation does not fit the text");
+    let out = "", pos = 0;
+    for (const p of op) {
+      if (isIns(p)) out += p;
+      else if (p > 0) { out += text.slice(pos, pos + p); pos += p; }
+      else pos -= p;
+    }
+    return out;
+  }
+  const plen = (p) => (isIns(p) ? p.length : Math.abs(p));
+  function split(p, n) {
+    if (isIns(p)) return [p.slice(0, n), p.slice(n) || null];
+    if (p > 0) return [n, p - n || null];
+    return [-n, p + n || null];
+  }
+  function walker(a) { let i = 0; return { cur: a[0] === undefined ? null : a[0], next() { i++; this.cur = i < a.length ? a[i] : null; } }; }
+  function transform(a, b) {
+    a = normalize(a); b = normalize(b);
+    if (baseLen(a) !== baseLen(b)) throw new Error("not made on the same text");
+    const oa = [], ob = [], A = walker(a), B = walker(b);
+    while (A.cur !== null || B.cur !== null) {
+      if (A.cur !== null && isIns(A.cur)) { oa.push(A.cur); ob.push(A.cur.length); A.next(); continue; }
+      if (B.cur !== null && isIns(B.cur)) { oa.push(B.cur.length); ob.push(B.cur); B.next(); continue; }
+      if (A.cur === null || B.cur === null) throw new Error("not made on the same text");
+      const n = Math.min(Math.abs(A.cur), Math.abs(B.cur));
+      const [xh, xr] = split(A.cur, n), [yh, yr] = split(B.cur, n);
+      if (xh > 0 && yh > 0) { oa.push(n); ob.push(n); }
+      else if (xh < 0 && yh > 0) oa.push(xh);
+      else if (xh > 0 && yh < 0) ob.push(yh);
+      if (xr !== null) A.cur = xr; else A.next();
+      if (yr !== null) B.cur = yr; else B.next();
+    }
+    return [normalize(oa), normalize(ob)];
+  }
+  function compose(a, b) {
+    a = normalize(a); b = normalize(b);
+    if (targetLen(a) !== baseLen(b)) throw new Error("does not follow");
+    const out = [], A = walker(a), B = walker(b);
+    while (A.cur !== null || B.cur !== null) {
+      if (A.cur !== null && typeof A.cur === "number" && A.cur < 0) { out.push(A.cur); A.next(); continue; }
+      if (B.cur !== null && isIns(B.cur)) { out.push(B.cur); B.next(); continue; }
+      if (A.cur === null || B.cur === null) throw new Error("does not follow");
+      const n = Math.min(plen(A.cur), Math.abs(B.cur));
+      const [xh, xr] = split(A.cur, n), [yh, yr] = split(B.cur, n);
+      if (yh > 0) out.push(xh);
+      else if (typeof xh === "number") out.push(yh);
+      if (xr !== null) A.cur = xr; else A.next();
+      if (yr !== null) B.cur = yr; else B.next();
+    }
+    return normalize(out);
+  }
+  function diff(old, now, caret) {
+    let p = 0, s = 0;
+    const lim = Math.min(old.length, now.length);
+    // the change is where the caret is: the common start stops there
+    const pmax = typeof caret === "number" ? Math.min(lim, Math.max(0, caret - Math.max(0, now.length - old.length))) : lim;
+    while (p < pmax && old[p] === now[p]) p++;
+    while (s < old.length - p && s < now.length - p && old[old.length - 1 - s] === now[now.length - 1 - s]) s++;
+    const hi = (c) => c >= 0xD800 && c <= 0xDBFF, lo = (c) => c >= 0xDC00 && c <= 0xDFFF;
+    while (p && hi(old.charCodeAt(p - 1))) p--;
+    while (s && lo(old.charCodeAt(old.length - s))) s--;
+    return normalize([p, now.slice(p, now.length - s), -(old.length - p - s), s]);
+  }
+  function transformIndex(op, index, beforeInsert) {
+    let pos = 0, out = index;
+    for (const p of normalize(op)) {
+      if (pos > index || (pos === index && beforeInsert && isIns(p))) break;
+      if (isIns(p)) out += p.length;
+      else if (p > 0) pos += p;
+      else { out -= Math.min(-p, index - pos); pos -= p; }
+    }
+    return Math.max(out, 0);
+  }
+  const noop = (op) => normalize(op).every(isRet);
+  return { normalize, apply, transform, compose, diff, transformIndex, noop };
+})();
+window.PH.OT = OT;
+
+// ---- talking to the server
+async function call(method, url, body) {
+  const r = await fetch(url, { method, credentials: "same-origin", headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined });
+  let data = {};
+  try { data = await r.json(); } catch (_) { /* not JSON */ }
+  if (!r.ok) { const e = new Error(data.error || ("HTTP " + r.status)); e.status = r.status; throw e; }
+  return data;
+}
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+const initials = (n) => n.split(/\s+/).slice(0, 2).map((w) => w[0] || "").join("").toUpperCase();
+
+// ---- blocks: a page is re-rendered one block at a time, so the rest stays as it was (and selection with it)
+function blocks(text, titles) {
+  const t = document.createElement("template");
+  t.innerHTML = MD.toHtml(text, titles);
+  return [...t.content.childNodes];
+}
+function patch(host, oldText, newText, titles, prev) {
+  const before = prev || blocks(oldText, titles).map((n) => n.outerHTML || n.textContent);
+  const nodes = blocks(newText, titles), after = nodes.map((n) => n.outerHTML || n.textContent);
+  const kids = [...host.children];
+  if (kids.length !== before.length) { host.replaceChildren(...nodes); return after; }
+  let a = 0;
+  while (a < before.length && a < after.length && before[a] === after[a]) a++;
+  let z = 0;
+  while (z < before.length - a && z < after.length - a && before[before.length - 1 - z] === after[after.length - 1 - z]) z++;
+  const anchor = kids[before.length - z] || null;
+  for (let i = a; i < before.length - z; i++) kids[i].remove();
+  for (let i = a; i < after.length - z; i++) host.insertBefore(nodes[i], anchor);
+  return after;
+}
+
+// ---- the people in it
+function faces(members, cfg, me) {
+  return el("span", { class: "live-faces" }, ...members.map((m) => el("span", {
+    class: "av" + (m.id === me ? " me" : ""), style: `background:${cfg.colors[m.color % cfg.colors.length]}`,
+    title: m.name + (m.id === me ? " (you)" : "") }, initials(m.name))));
+}
+
+// ---- a caret's place in a text box: a copy of the box, its text up to the caret, and a marker
+function caretBox(area, mirror, index) {
+  const cs = getComputedStyle(area);
+  for (const k of ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "paddingTop", "paddingRight",
+    "paddingBottom", "paddingLeft", "borderTopWidth", "borderLeftWidth", "boxSizing", "tabSize"]) mirror.style[k] = cs[k];
+  mirror.style.width = area.clientWidth + "px";
+  mirror.textContent = area.value.slice(0, index);
+  const mark = el("span", {}, "​");
+  mirror.append(mark);
+  const r = { top: mark.offsetTop - area.scrollTop, left: mark.offsetLeft - area.scrollLeft, h: mark.offsetHeight };
+  mirror.textContent = "";
+  return r;
+}
+
+const SLASH = [
+  ["Heading", "heading title", (sel) => "## " + (sel || "Heading")],
+  ["Bulleted list", "list bullet", () => "- "],
+  ["Numbered list", "list number ordered", () => "1. "],
+  ["Checklist", "check task todo", () => "- [ ] "],
+  ["Table", "table grid", () => "| Column | Column |\n| --- | --- |\n|  |  |"],
+  ["Code block", "code pre", () => "```\n\n```", 4],
+  ["Callout", "callout note warning tip", () => "> [!note]\n> "],
+  ["Link to a page", "link page mention", () => "[[]]", 2],
+  ["Divider", "rule line hr", () => "---\n"],
+];
+
+function liveEditor(article, cfg) {
+  const base = `/api/live/${cfg.ref}/${encodeURIComponent(cfg.field)}`;
+  const titles = {};
+  article.querySelectorAll("[data-mention]").forEach((m) => {
+    const src = m.dataset.mention; if (!src.includes("|")) titles[src] = m.textContent;
+  });
+  const say = el("div", { class: "visually-hidden", "aria-live": "polite", role: "status" });
+  document.body.append(say);
+  const announce = (t) => { say.textContent = ""; setTimeout(() => { say.textContent = t; }, 30); };
+  let state = null, text = "", seq = 0, pv = -1, editing = false, stopped = false, rendered = null;
+  let inflight = null, inflightCid = null, buffer = null, sending = false, cidN = 0, lastMembers = null;
+  const sessionId = Math.random().toString(36).slice(2, 10);
+  const newCid = () => `${cfg.me.replace(/[^A-Za-z0-9_.:-]/g, "")}-${sessionId}-${++cidN}`.slice(0, 80);
+  const nowBar = document.querySelector("[data-live-now]");
+
+  // the editor, made when Edit is pressed
+  let wrap, area, mirror, carets, status, faceHost, preview, menu;
+  function setStatus(t, kind) { if (status) { status.textContent = t; status.className = "live-status " + (kind || ""); } }
+
+  function build() {
+    area = el("textarea", { class: "live-text", "aria-label": "Page text, in markdown", spellcheck: "true",
+      "aria-describedby": "live-help" });
+    mirror = el("div", { class: "live-mirror", "aria-hidden": "true" });
+    carets = el("div", { class: "live-carets", "aria-hidden": "true" });
+    status = el("span", { class: "live-status", role: "status" });
+    faceHost = el("span", { class: "live-people" });
+    preview = el("div", { class: "prose live-preview", "aria-label": "How it reads", role: "region" });
+    const btn = (label, key, fn, icon) => el("button", { type: "button", class: "subtle", title: label + (key ? ` (${key})` : ""),
+      "aria-label": label, onclick: (ev) => { ev.preventDefault(); fn(); area.focus(); } }, icon);
+    const bar = el("div", { class: "live-toolbar", role: "toolbar", "aria-label": "Formatting" },
+      btn("Bold", "Ctrl+B", () => wrapSel("**"), el("b", {}, "B")),
+      btn("Italic", "Ctrl+I", () => wrapSel("*"), el("i", {}, "I")),
+      btn("Heading", "", () => linePrefix("## "), "H"),
+      btn("Bulleted list", "", () => linePrefix("- "), "•"),
+      btn("Checklist", "", () => linePrefix("- [ ] "), "☐"),
+      btn("Link", "Ctrl+K", () => link(), "Link"),
+      btn("Insert…", "/", () => openMenu(true), "/"),
+      el("span", { class: "grow" }), faceHost, status,
+      el("button", { type: "button", class: "primary", onclick: () => finish() }, "Done"));
+    const help = el("p", { id: "live-help", class: "muted live-help" },
+      "Saved as you type, for everyone in the page; a version is kept when you press Done or stop for two minutes. ",
+      "Type / at the start of a line for headings, lists, tables and more.");
+    const box = el("div", { class: "live-box" }, area, carets);
+    wrap = el("div", { class: "live-editor", role: "group", "aria-label": "Editing the page with others" }, bar,
+      el("div", { class: "live-panes" }, box, preview), help, mirror);
+    article.hidden = true;
+    article.after(wrap);
+    atPicker(area, cfg.ref);  // registered first: while its list is open, it takes the arrow keys
+    area.addEventListener("input", onInput);
+    area.addEventListener("keydown", onKey);
+    area.addEventListener("paste", onPaste);
+    area.addEventListener("scroll", drawCarets);
+    for (const ev of ["keyup", "mouseup", "select"]) area.addEventListener(ev, sendCaretSoon);
+    window.addEventListener("resize", drawCarets);
+  }
+
+  // ---- local changes
+  function local(op) {
+    if (OT.noop(op)) return;
+    buffer = buffer ? OT.compose(buffer, op) : op;
+    text = OT.apply(op, text);
+    showPreview();
+    flush();
+  }
+  function onInput() {
+    if (area.value === text) return;
+    const op = OT.diff(text, area.value, area.selectionEnd);
+    local(op);
+    if (menuAt >= 0) renderMenu();
+    shortcut();
+  }
+  function replace(from, to, words, caretAt) {
+    area.setRangeText(words, from, to, "end");
+    if (caretAt !== undefined) area.setSelectionRange(caretAt, caretAt);
+    onInput();
+  }
+  function wrapSel(mark) {
+    const a = area.selectionStart, b = area.selectionEnd, sel = area.value.slice(a, b);
+    replace(a, b, mark + (sel || "words") + mark);
+    area.setSelectionRange(a + mark.length, a + mark.length + (sel || "words").length);
+  }
+  function lineStart(at) { return area.value.lastIndexOf("\n", at - 1) + 1; }
+  function linePrefix(p) {
+    const s = lineStart(area.selectionStart);
+    const line = area.value.slice(s).split("\n")[0];
+    const cur = /^(#{1,4} |- \[[ xX]\] |[-*+] |\d+\. )/.exec(line);
+    replace(s, s + (cur ? cur[0].length : 0), cur && cur[0] === p ? "" : p);
+  }
+  function link() {
+    const a = area.selectionStart, b = area.selectionEnd, sel = area.value.slice(a, b) || "words";
+    replace(a, b, `[${sel}](https://)`);
+    area.setSelectionRange(a + sel.length + 3, a + sel.length + 11);
+  }
+  // markdown as it is typed: "[] " is a checklist item, ``` closes itself, Enter carries a list on
+  function shortcut() {
+    const at = area.selectionStart, s = lineStart(at), line = area.value.slice(s, at);
+    if (line === "[] " || line === "[ ] ") replace(s, at, "- [ ] ");
+    else if (line === "```" && area.value.slice(at, at + 1) !== "`" && area.value.slice(at).split("\n")[0] === "")
+      replace(at, at, "\n\n```", at + 1);
+    else if (line === "/" ) openMenu(false);
+  }
+  function onKey(ev) {
+    if (menu && !menu.hidden && menuKey(ev)) return;
+    const mod = ev.ctrlKey || ev.metaKey;
+    if (mod && ev.key.toLowerCase() === "b") { ev.preventDefault(); wrapSel("**"); }
+    else if (mod && ev.key.toLowerCase() === "i") { ev.preventDefault(); wrapSel("*"); }
+    else if (mod && ev.key.toLowerCase() === "k") { ev.preventDefault(); link(); }
+    else if (ev.key === "Enter" && !ev.shiftKey && !mod && area.selectionStart === area.selectionEnd) {
+      const at = area.selectionStart, s = lineStart(at), line = area.value.slice(s, at);
+      const m = /^(\s*)(- \[[ xX]\] |[-*+] |(\d+)\. )(.*)$/.exec(line);
+      if (!m) return;
+      ev.preventDefault();
+      if (!m[4].trim()) { replace(s, at, ""); return; }  // Enter on an empty item ends the list
+      const next = m[3] ? `${+m[3] + 1}. ` : m[2].startsWith("- [") ? "- [ ] " : m[2];
+      replace(at, at, "\n" + m[1] + next);
+    }
+  }
+  function onPaste(ev) {
+    const html = ev.clipboardData && ev.clipboardData.getData("text/html");
+    if (!html) return;  // plain text goes in as it is
+    ev.preventDefault();
+    const md = MD.toMd(new DOMParser().parseFromString(html, "text/html").body);
+    replace(area.selectionStart, area.selectionEnd, md);
+  }
+
+  // ---- the slash menu
+  let menuAt = -1, menuIdx = 0, menuItems = SLASH;
+  function openMenu(fromButton) {
+    if (!menu) {
+      menu = el("ul", { class: "live-menu", role: "listbox", id: "live-menu", "aria-label": "Insert" });
+      wrap.append(menu);
+    }
+    if (fromButton) {  // the toolbar's "Insert…": as if / were typed on a new line
+      const at = area.selectionStart, s = lineStart(at);
+      replace(at, at, (at > s ? "\n" : "") + "/");
+    }
+    menuAt = area.selectionStart - 1;
+    menuIdx = 0;
+    renderMenu();
+  }
+  function menuQuery() { return area.value.slice(menuAt + 1, area.selectionStart); }
+  function renderMenu() {
+    const q = menuQuery().toLowerCase();
+    if (area.value[menuAt] !== "/" || /\s/.test(q) || area.selectionStart <= menuAt) { closeMenu(); return; }
+    menuItems = SLASH.filter(([l, k]) => (l + " " + k).toLowerCase().includes(q));
+    if (!menuItems.length) { closeMenu(); return; }
+    menuIdx = Math.min(menuIdx, menuItems.length - 1);
+    menu.replaceChildren(...menuItems.map(([l], i) => el("li", { role: "option", id: "live-opt-" + i,
+      "aria-selected": i === menuIdx ? "true" : "false", onmousedown: (ev) => { ev.preventDefault(); menuIdx = i; choose(); } }, l)));
+    const r = caretBox(area, mirror, area.selectionStart);
+    menu.style.top = (area.offsetTop + r.top + r.h + 4) + "px";
+    menu.style.left = (area.offsetLeft + Math.min(r.left, area.clientWidth - 200)) + "px";
+    menu.hidden = false;
+    area.setAttribute("aria-controls", "live-menu");
+    area.setAttribute("aria-activedescendant", "live-opt-" + menuIdx);
+    announce(menuItems.length + " choices: " + menuItems[menuIdx][0]);
+  }
+  function closeMenu() {
+    if (menu) menu.hidden = true;
+    menuAt = -1;
+    area.removeAttribute("aria-activedescendant");
+  }
+  function choose() {
+    const [, , make, back] = menuItems[menuIdx];
+    const from = menuAt, to = area.selectionStart;
+    closeMenu();
+    const words = make("");
+    replace(from, to, words);
+    if (back) { const c = from + words.length - back; area.setSelectionRange(c, c); }
+    area.focus();
+  }
+  function menuKey(ev) {
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      menuIdx = (menuIdx + (ev.key === "ArrowDown" ? 1 : menuItems.length - 1)) % menuItems.length;
+      renderMenu(); return true;
+    }
+    if (ev.key === "Enter" || ev.key === "Tab") { ev.preventDefault(); choose(); return true; }
+    if (ev.key === "Escape") { ev.preventDefault(); closeMenu(); return true; }
+    return false;
+  }
+
+  // ---- sending: one operation in flight, the rest gathered until it is acknowledged
+  async function flush() {
+    if (sending || inflight || !buffer || stopped) return;
+    inflight = buffer; buffer = null; inflightCid = newCid();
+    sending = true;
+    setStatus("Saving…");
+    for (let tries = 0; !stopped; tries++) {
+      try {
+        await call("POST", base + "/ops", { cid: inflightCid, base: seq, op: inflight,
+          caret: buffer ? undefined : [area.selectionStart, area.selectionEnd] });
+        break;
+      } catch (err) {
+        if (err.status === 403 || err.status === 404 || err.status === 422) { stop(err.message); break; }
+        setStatus("Not connected: trying again", "warn");  // the same id again: the server keeps it once
+        await sleep(Math.min(8000, 500 * 2 ** tries));
+      }
+    }
+    sending = false;
+  }
+  function receive(o) {
+    if (o.seq <= seq) return;
+    if (inflight && o.cid === inflightCid) {  // ours, numbered
+      seq = o.seq; inflight = null; inflightCid = null;
+      if (buffer) flush(); else setStatus("Saved");
+      return;
+    }
+    let op = o.op;
+    if (inflight) [inflight, op] = OT.transform(inflight, op);
+    if (buffer) [buffer, op] = OT.transform(buffer, op);
+    const old = text;
+    text = OT.apply(op, text);
+    seq = o.seq;
+    if (editing) {
+      const a = OT.transformIndex(op, area.selectionStart, true), b = OT.transformIndex(op, area.selectionEnd, true);
+      const top = area.scrollTop;
+      area.value = text;
+      area.setSelectionRange(a, b);
+      area.scrollTop = top;
+      showPreview();
+    } else {
+      rendered = patch(article, old, text, titles, rendered);
+    }
+  }
+  let previewText = null, previewBlocks = null;
+  function showPreview() {
+    if (!preview) return;
+    if (previewText === null) { preview.innerHTML = MD.toHtml(text, titles); previewBlocks = null; }
+    else previewBlocks = patch(preview, previewText, text, titles, previewBlocks);
+    previewText = text;
+    drawCarets();
+  }
+
+  // ---- presence
+  let caretTimer = null, lastCaret = "";
+  function sendCaretSoon() {
+    if (menuAt >= 0) renderMenu();
+    clearTimeout(caretTimer);
+    caretTimer = setTimeout(() => {
+      if (!editing || inflight || buffer) return;
+      const k = area.selectionStart + ":" + area.selectionEnd;
+      if (k === lastCaret) return;
+      lastCaret = k;
+      call("POST", base + "/caret", { at: area.selectionStart, end: area.selectionEnd, seq }).catch(() => {});
+    }, 250);
+  }
+  function drawCarets() {
+    if (!editing || !lastMembers) return;
+    carets.replaceChildren();
+    for (const m of lastMembers) {
+      if (m.id === cfg.me || typeof m.caret !== "number") continue;
+      let at = m.caret;
+      if (inflight) at = OT.transformIndex(inflight, at);
+      if (buffer) at = OT.transformIndex(buffer, at);
+      at = Math.min(at, area.value.length);
+      const r = caretBox(area, mirror, at);
+      if (r.top < -r.h || r.top > area.clientHeight) continue;
+      const c = cfg.colors[m.color % cfg.colors.length];
+      carets.append(el("span", { class: "live-caret", style: `top:${r.top}px;left:${r.left}px;height:${r.h}px;--c:${c}` },
+        el("span", { class: "live-caret-name" }, m.name)));
+    }
+  }
+  function people(members) {
+    const before = new Map((lastMembers || []).map((m) => [m.id, m.name]));
+    const after = new Map(members.map((m) => [m.id, m.name]));
+    if (lastMembers) {
+      for (const [id, n] of after) if (!before.has(id) && id !== cfg.me) announce(n + " started editing");
+      for (const [id, n] of before) if (!after.has(id) && id !== cfg.me) announce(n + " stopped editing");
+    }
+    lastMembers = members;
+    if (faceHost) faceHost.replaceChildren(faces(members, cfg, cfg.me));
+    const others = members.filter((m) => m.id !== cfg.me);
+    if (nowBar) {
+      nowBar.hidden = !others.length;
+      if (others.length) {
+        const names = others.map((m) => m.name);
+        const words = names.length === 1 ? names[0] : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+        nowBar.replaceChildren(faces(others, cfg, cfg.me), " ", el("b", {}, words),
+          (others.length === 1 ? " is" : " are") + (editing ? " editing with you." : " editing this page now."));
+      }
+    }
+    drawCarets();
+  }
+
+  // ---- the stream of news
+  async function loop() {
+    let fails = 0;
+    while (!stopped) {
+      try {
+        const r = await call("GET", `${base}/poll?since=${seq}&pv=${pv}`);
+        fails = 0;
+        if (r.ended) { ended(r); return; }
+        if (r.reset) { start(r); continue; }
+        for (const o of r.ops) receive(o);
+        pv = r.pv;
+        people(r.members || []);
+        if (editing && !inflight && !buffer) setStatus(r.dirty ? "Saved for everyone" : "Saved");
+      } catch (err) {
+        if (err.status === 403) { stop(err.message); return; }
+        fails++;
+        if (editing) setStatus("Not connected: trying again", "warn");
+        if (fails === 2) announce("Connection lost; trying again");
+        await sleep(Math.min(10000, 1000 * fails));
+      }
+    }
+  }
+  function start(st) {
+    state = st; text = st.text; seq = st.seq; pv = st.pv;
+    inflight = buffer = null; inflightCid = null;
+    rendered = null; previewText = null;
+    if (editing) { area.value = text; showPreview(); }
+    people(st.members || []);
+  }
+  function ended(r) {
+    stopped = true;
+    if (editing) {
+      setStatus("Editing ended", "warn");
+      wrap.prepend(el("div", { class: "flash warning", role: "alert" }, el("p", {}, "Editing ended: " + r.ended + ". "),
+        el("p", {}, "What you see here is kept in the box below; copy anything you need, then reload.")));
+      area.readOnly = true;
+      return;
+    }
+    if (!editing) location.reload();
+  }
+  function stop(why) {
+    stopped = true;
+    setStatus("Not saved", "error");
+    if (wrap) {
+      wrap.prepend(el("div", { class: "flash error", role: "alert" }, el("p", {}, why),
+        el("p", {}, "Your last change was not kept. Copy what you need, then reload the page.")));
+      area.readOnly = true;
+    }
+    announce(why);
+  }
+
+  async function edit() {
+    if (editing) return;
+    let st;
+    try { st = await call("POST", base + "/join"); } catch (err) { announce(err.message); return; }
+    if (st.mode !== "edit") { announce(st.why || "You may not edit this page."); return; }
+    editing = true;
+    build();
+    start(st);
+    area.value = text;
+    area.focus();
+    area.setSelectionRange(0, 0);
+    setStatus("Saved");
+    announce((st.members.length > 1 ? "Editing with " + st.members.filter((m) => m.id !== cfg.me).map((m) => m.name).join(", ")
+      : "Editing") + ". Press Done when finished.");
+    document.querySelectorAll("[data-live-edit]").forEach((b) => { b.hidden = true; });
+    if (!polling) { polling = true; loop(); }
+  }
+  async function finish() {
+    for (let i = 0; i < 40 && (inflight || buffer) && !stopped; i++) await sleep(150);
+    stopped = true;
+    try { await call("POST", base + "/done"); } catch (_) { /* the server saves when the session goes quiet */ }
+    location.href = cfg.url;
+  }
+  window.addEventListener("pagehide", () => {
+    if (editing && !stopped) navigator.sendBeacon(base + "/leave", new Blob(["{}"], { type: "text/plain" }));
+  });
+
+  let polling = false;
+  document.querySelectorAll("[data-live-edit]").forEach((b) => b.addEventListener("click", (ev) => {
+    ev.preventDefault(); edit();
+  }));
+  if (cfg.may && /[?&]edit=1/.test(location.search) === false && location.hash === "#live") edit();
+  if (cfg.active) {  // someone is in it now: follow along as they type
+    call("GET", base + "/state").then((st) => {
+      if (editing || !st.active) return;
+      const old = text;
+      start(st);
+      rendered = patch(article, old, text, titles, null);
+      polling = true; loop();
+    }).catch(() => {});
+  }
+}
+
+// ---- comments on words of the page
+function comments(article) {
+  const form = document.getElementById("c-new");
+  if (!form) return;
+  const plainOf = () => article.textContent.replace(/\s+/g, " ");
+  // mark what each open comment is about, where it still is
+  const marks = [...document.querySelectorAll(".comments-side .thread:not(.resolved) .c-quote:not(.gone)")];
+  for (const q of marks) highlight(article, q.dataset.quote, q.dataset.before, q.closest("[data-comment]").dataset.comment);
+  article.addEventListener("click", (ev) => {
+    const m = ev.target.closest("mark.c-mark");
+    if (!m) return;
+    const t = document.getElementById(m.dataset.for);
+    if (t) { t.scrollIntoView({ block: "nearest", behavior: "smooth" }); t.classList.add("active"); t.querySelector("summary, button")?.focus();
+      setTimeout(() => t.classList.remove("active"), 2000); }
+  });
+  const pop = el("button", { type: "button", class: "c-pop primary", hidden: true }, "Comment");
+  document.body.append(pop);
+  let pending = null;
+  function check() {
+    const s = getSelection();
+    if (!s.rangeCount || s.isCollapsed || !article.contains(s.anchorNode) || !article.contains(s.focusNode) || article.hidden) {
+      pop.hidden = true; return;
+    }
+    const quote = s.toString().replace(/\s+/g, " ").trim();
+    if (!quote || quote.length > 500) { pop.hidden = true; return; }
+    const r = s.getRangeAt(0), pre = document.createRange();
+    pre.selectNodeContents(article); pre.setEnd(r.startContainer, r.startOffset);
+    const all = plainOf(), at = pre.toString().replace(/\s+/g, " ").length;
+    pending = { quote, before: all.slice(Math.max(0, at - 40), at), after: all.slice(at + quote.length, at + quote.length + 40) };
+    const box = r.getBoundingClientRect();
+    pop.style.top = (window.scrollY + box.bottom + 6) + "px";
+    pop.style.left = (window.scrollX + Math.max(8, Math.min(box.left, innerWidth - 120))) + "px";
+    pop.hidden = false;
+  }
+  document.addEventListener("selectionchange", () => { clearTimeout(check.t); check.t = setTimeout(check, 200); });
+  pop.addEventListener("mousedown", (ev) => ev.preventDefault());
+  pop.addEventListener("click", () => {
+    if (!pending) return;
+    for (const k of ["quote", "before", "after"]) form.elements[k].value = pending[k];
+    const on = form.querySelector(".c-on");
+    on.textContent = "On: “" + pending.quote + "”"; on.hidden = false;
+    form.querySelector("label").firstChild.nodeValue = "Your comment";
+    form.querySelector("[data-c-cancel]").hidden = false;
+    pop.hidden = true;
+    form.scrollIntoView({ block: "center" });
+    form.elements.body.focus();
+  });
+  form.querySelector("[data-c-cancel]").addEventListener("click", (ev) => {
+    for (const k of ["quote", "before", "after"]) form.elements[k].value = "";
+    form.querySelector(".c-on").hidden = true; ev.target.hidden = true;
+    form.querySelector("label").firstChild.nodeValue = "Comment on the page";
+  });
+}
+// ---- @ to mention a person or an agent: a list of members, agents marked, and who may not read the record said
+let atN = 0;
+function atPicker(area, ref) {
+  if (!area || area.dataset.atReady) return;
+  area.dataset.atReady = "1";
+  const id = "at-menu-" + (++atN);
+  const menu = el("ul", { class: "live-menu at-menu", role: "listbox", id, "aria-label": "Mention", hidden: true });
+  const say = el("p", { class: "visually-hidden", "aria-live": "polite" });
+  area.after(menu, say);
+  if (getComputedStyle(area.parentNode).position === "static") area.parentNode.style.position = "relative";
+  let at = -1, idx = 0, rows = [], asked = 0;
+  const query = () => area.value.slice(at + 1, area.selectionStart);
+  function close() { menu.hidden = true; at = -1; area.removeAttribute("aria-activedescendant"); area.removeAttribute("aria-controls"); }
+  async function look() {
+    const v = area.value, c = area.selectionStart, m = /(^|[\s(])@([a-z0-9_.-]{0,40})$/i.exec(v.slice(0, c));
+    if (!m) { close(); return; }
+    at = c - m[2].length - 1;
+    const n = ++asked;
+    let got;
+    try { got = await call("GET", "/api/mentions/candidates?ref=" + encodeURIComponent(ref) + "&q=" + encodeURIComponent(m[2])); }
+    catch (_) { close(); return; }
+    if (n !== asked || at < 0) return;
+    rows = got.members || [];
+    if (!rows.length) { close(); return; }
+    idx = Math.max(0, rows.findIndex((r) => r.may_read));
+    draw();
+  }
+  function draw() {
+    menu.replaceChildren(...rows.map((r, i) => el("li", { role: "option", id: id + "-" + i,
+      "aria-selected": i === idx ? "true" : "false", "aria-disabled": r.may_read ? "false" : "true",
+      class: r.may_read ? "" : "off", onmousedown: (ev) => { ev.preventDefault(); idx = i; pick(); } },
+      el("b", {}, r.name), " ", el("span", { class: "muted" }, "@" + r.id),
+      r.kind === "agent" ? el("span", { class: "badge agent" }, "agent") : "",
+      r.may_read ? "" : el("small", { class: "muted at-why" }, " " + r.why))));
+    menu.style.top = (area.offsetTop + area.offsetHeight + 2) + "px";
+    menu.style.left = area.offsetLeft + "px";
+    menu.hidden = false;
+    area.setAttribute("aria-controls", id);
+    area.setAttribute("aria-activedescendant", id + "-" + idx);
+    const r = rows[idx];
+    say.textContent = rows.length + " members. " + r.name + (r.kind === "agent" ? ", agent" : "") + (r.may_read ? "" : ", " + r.why);
+  }
+  function pick() {
+    const r = rows[idx];
+    if (!r) return;
+    if (!r.may_read) { say.textContent = r.why + ": not mentioned."; return; }
+    const from = at, to = area.selectionStart;
+    close();
+    area.setRangeText("@" + r.id + " ", from, to, "end");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    area.focus();
+  }
+  area.addEventListener("input", () => { clearTimeout(look.t); look.t = setTimeout(look, 120); });
+  area.addEventListener("blur", () => setTimeout(close, 150));
+  area.addEventListener("keydown", (ev) => {
+    if (menu.hidden) return;
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      idx = (idx + (ev.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length; draw();
+    } else if (ev.key === "Enter" || ev.key === "Tab") { pick(); }
+    else if (ev.key === "Escape") { close(); }
+    else return;
+    ev.preventDefault(); ev.stopImmediatePropagation();
+  }, true);
+}
+function highlight(root, quote, before, cid) {
+  if (!quote) return;
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [];
+  let all = "";
+  for (let n; (n = walk.nextNode());) { nodes.push([n, all.length]); all += n.nodeValue; }
+  const norm = (s) => s.replace(/\s+/g, " ");
+  // find the quote, preferring the place whose words before it match
+  let best = -1, bestScore = -1;
+  for (let i = all.indexOf(quote); i >= 0; i = all.indexOf(quote, i + 1)) {
+    const pre = norm(all.slice(Math.max(0, i - 60), i)), want = norm(before || "").trim();
+    let sc = 0;
+    while (sc < want.length && pre.trimEnd().endsWith(want.slice(want.length - sc - 1))) sc++;
+    if (sc > bestScore) { best = i; bestScore = sc; }
+  }
+  if (best < 0) return;
+  const end = best + quote.length;
+  for (const [n, off] of nodes) {
+    const s = Math.max(best, off), e = Math.min(end, off + n.nodeValue.length);
+    if (s >= e) continue;
+    const r = document.createRange();
+    r.setStart(n, s - off); r.setEnd(n, e - off);
+    const m = el("mark", { class: "c-mark", "data-for": cid, title: "Commented: open the comment" });
+    r.surroundContents(m);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const article = document.querySelector("article.page-body[data-live]");
+  if (article) {
+    let cfg = null;
+    try { cfg = JSON.parse(article.dataset.live); } catch (_) { cfg = null; }
+    if (cfg) liveEditor(article, cfg);
+  }
+  const page = document.querySelector("article.page-body");
+  if (page) comments(page);
+  for (const t of document.querySelectorAll("textarea[data-at]")) atPicker(t, t.dataset.at);
+});
+})();
+"""
+
+JS = JS + LIVE_JS
+
+LIVE_CSS = r"""
+/* ---- writing together: the live editor, people in it, comments beside the page, versions compared */
+.prose li.task{list-style:none;margin-left:-20px;display:flex;gap:8px;align-items:baseline}
+.prose li.task .box{flex:none;display:inline-grid;place-items:center;width:16px;height:16px;border:2px solid var(--border-bold);
+border-radius:3px;font-size:11px;line-height:1;position:relative;top:2px}
+.prose li.task .box.done{background:var(--brand);border-color:var(--brand);color:var(--brand-fg)}
+.prose li.task.done{color:var(--subtle)}
+.prose aside.callout{font-size:inherit;color:var(--fg);border-radius:3px;padding:8px 12px;margin:0 0 12px;background:var(--info-bg);border-left:3px solid var(--info-icon)}
+.prose aside.callout>:last-child{margin-bottom:0}
+.prose aside.callout .callout-title{font-weight:600;margin:0 0 4px;color:var(--info-fg)}
+.prose aside.callout.tip{background:var(--success-bg);border-color:var(--success-icon)}.prose aside.callout.tip .callout-title{color:var(--success-fg)}
+.prose aside.callout.warning{background:var(--warning-bg);border-color:var(--warning-icon)}.prose aside.callout.warning .callout-title{color:var(--warning-fg)}
+.prose aside.callout.important{background:var(--discovery-bg);border-color:var(--discovery)}.prose aside.callout.important .callout-title{color:var(--discovery-fg)}
+.kind-badge{display:inline-block;margin-left:6px;padding:0 4px;border-radius:3px;font-size:11px;line-height:16px;font-weight:600;
+text-transform:uppercase;background:var(--discovery-bg);color:var(--discovery-fg);vertical-align:1px}
+.page-banner{max-width:780px;margin:0 0 16px;padding:8px 12px;border-radius:3px;background:var(--sunken);border:1px solid var(--border);
+display:flex;flex-direction:column;gap:6px}
+.page-banner p{margin:0}.page-banner .seg{align-self:flex-start}
+.seg{display:inline-flex;border:1px solid var(--border-bold);border-radius:3px;overflow:hidden}
+.seg a{padding:2px 10px;color:var(--fg);text-decoration:none;font-size:13px}.seg a+a{border-left:1px solid var(--border-bold)}
+.seg a[aria-current]{background:var(--selected-bg);color:var(--selected-fg);font-weight:600}
+.page-banner form.read-sign{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0}
+.page-banner form.read-sign p{flex:1 1 260px}
+.live-now{max-width:780px;margin:0 0 12px;display:flex;align-items:center;gap:6px;font-size:13px}
+.live-now[hidden]{display:none}
+.live-now .av{width:20px;height:20px;font-size:10px;margin-right:-4px;box-shadow:0 0 0 2px var(--sunken)}
+.page-with-side{display:grid;grid-template-columns:minmax(0,780px) minmax(220px,300px);gap:32px;align-items:start}
+.comments-side{position:sticky;top:72px;max-height:calc(100vh - 96px);overflow:auto;font-size:13px}
+.comments-side h2,.page-comments h2{font-size:14px;margin:0 0 8px}
+ul.threads{display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
+.thread{padding:8px 10px;border:1px solid var(--border);border-radius:3px;background:var(--raised)}
+.thread.active{outline:2px solid var(--brand)}.thread.resolved{opacity:.75}
+.thread p{margin:0 0 4px}.thread .c-by{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px}
+.thread .c-by .av{width:20px;height:20px;font-size:10px}
+.c-quote{margin:0 0 6px;padding:0 0 0 8px;border-left:3px solid var(--warning-icon);color:var(--subtle);font-style:italic}
+.c-quote.gone{text-decoration:line-through;border-color:var(--border-bold)}
+.c-gone{font-size:12px}
+.thread .replies{margin:6px 0 0 12px;padding-left:8px;border-left:1px solid var(--border)}
+.thread details.c-reply summary{cursor:pointer;color:var(--link);font-size:12px}
+.thread form.inline{display:inline}
+.at{color:var(--link);font-weight:600}
+mark.c-mark{background:var(--warning-bg);color:inherit;border-bottom:2px solid var(--warning-icon);cursor:pointer}
+.page-comments{max-width:780px;margin-top:32px;padding-top:16px;border-top:1px solid var(--border)}
+.c-pop{position:absolute;z-index:30;box-shadow:var(--shadow-overlay)}
+.live-editor{max-width:1200px;position:relative}
+.live-toolbar{position:sticky;top:56px;z-index:8;display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px;
+background:var(--raised);border:1px solid var(--border);border-radius:3px 3px 0 0}
+.live-toolbar button.subtle{min-width:32px;height:32px;padding:0 6px}.live-toolbar .grow{flex:1}
+.live-people{display:inline-flex;margin-right:8px}.live-people .av{margin-left:-4px;box-shadow:0 0 0 2px var(--raised)}
+.live-people .av.me{outline:2px solid var(--brand);outline-offset:1px}
+.live-status{font-size:12px;color:var(--subtle);margin-right:8px}.live-status.warn{color:var(--warning-fg)}
+.live-status.error{color:var(--danger-fg)}
+.live-panes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);border:1px solid var(--border);border-top:0}
+.live-box{position:relative}
+textarea.live-text{display:block;width:100%;min-height:65vh;border:0;border-radius:0;margin:0;resize:vertical;padding:12px 16px;
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:20px;background:var(--input-bg);
+color:var(--fg);white-space:pre-wrap;overflow-wrap:break-word}
+textarea.live-text:focus{outline:2px solid var(--brand);outline-offset:-2px}
+.live-mirror{position:absolute;visibility:hidden;top:0;left:0;white-space:pre-wrap;overflow-wrap:break-word}
+.live-carets{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.live-caret{position:absolute;width:2px;background:var(--c)}
+.live-caret-name{position:absolute;bottom:100%;left:-1px;padding:0 4px;font:600 10px/14px system-ui,sans-serif;color:#fff;
+background:var(--c);border-radius:3px 3px 3px 0;white-space:nowrap}
+.live-preview{padding:12px 16px;border-left:1px solid var(--border);overflow:auto;max-height:80vh}
+.live-help{font-size:12px;margin:6px 0 0}
+.live-menu{position:absolute;z-index:30;margin:0;padding:4px 0;min-width:200px;list-style:none;background:var(--overlay);
+border-radius:3px;box-shadow:var(--shadow-overlay)}
+.at-menu{min-width:260px;max-width:min(420px,90vw);max-height:260px;overflow:auto}
+.at-menu li.off{opacity:.65;cursor:not-allowed}.at-menu .badge{margin-left:6px}.at-menu .at-why{display:block}
+.c-sug{margin:6px 0;padding:8px;border:1px dashed var(--border-bold);border-radius:6px}
+.c-sug .c-change{margin:4px 0}
+.live-menu li{padding:6px 12px;cursor:pointer}.live-menu li[aria-selected=true]{background:var(--selected-bg);color:var(--selected-fg)}
+.diff-text{white-space:pre-wrap;font-size:14px;line-height:22px;padding:12px;border:1px solid var(--border);border-radius:3px;background:var(--raised)}
+.diff ins,.diff-key ins{background:var(--success-bg);color:var(--success-fg);text-decoration:none;border-bottom:1px solid var(--success-icon)}
+.diff del,.diff-key del{background:var(--danger-bg);color:var(--danger-fg)}
+@media (max-width:1000px){
+  .page-with-side{grid-template-columns:minmax(0,1fr)}
+  .comments-side{position:static;max-height:none}
+  .live-panes{grid-template-columns:minmax(0,1fr)}
+  .live-preview{display:none}
+}
+"""
+
+CSS = CSS + LIVE_CSS

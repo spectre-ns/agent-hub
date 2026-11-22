@@ -1247,6 +1247,9 @@ class Engine:
                 if name not in literal:
                     data[f"block-input.{name}"] = value
             instructions = "\n\n".join(p for p in (blockmod.render_prompt(block, inputs, literal), step.instructions) if p)
+        if run["workflow_id"] == "mention" and run["version"] == 0 and (item.get("output") or {}).get("mention"):
+            from .mentions import mentions_of
+            data["mention"] = mentions_of(hub).context(member, item["output"]["mention"])
         if step.kind == "gate":
             fields = [{"name": "outcome", "label": "Decision", "type": "choice", "required": True,
                        "choices": step.outcomes, "help": ""},

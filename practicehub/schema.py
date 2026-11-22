@@ -169,7 +169,7 @@ KEYS = {
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
-    "signature": {"meaning", "roles", "states", "moves_to"},
+    "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "screen": {"id", "on", "tab", "fields", "label"},
     "tab": {"label", "fields"},
     "navigator": {"tops", "hide"},
@@ -489,7 +489,10 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         for st in states:
             if lc is not None and st not in lc["states"]:
                 problems.append(f"signature {meaning!r}: {st!r} is not one of its states")
-        sigs.append({"meaning": meaning, "roles": list(roles), "states": list(states), "moves_to": g.get("moves_to")})
+        sigs.append({"meaning": meaning, "roles": list(roles), "states": list(states), "moves_to": g.get("moves_to"),
+                     "readers": g.get("readers") is True})  # readers: everyone who reads it is asked to sign it
+        if "readers" in g and not isinstance(g["readers"], bool):
+            problems.append(f"signature {meaning!r}: readers is true or false")
         if g.get("moves_to") and (lc is None or g["moves_to"] not in lc["states"]):
             problems.append(f"signature {meaning!r}: moves_to {g['moves_to']!r} is not one of its states")
         if g.get("moves_to") and not g.get("roles"):

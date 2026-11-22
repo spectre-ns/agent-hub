@@ -2410,7 +2410,7 @@ def test_wiki_pages_form_a_tree_and_link_each_other_by_title_even_before_the_pag
     # a page knows the pages above it and below it
     assert [a["title"] for a in hub.ancestors(amara, f"WikiPage/{oncall['id']}")] == ["Clinic handbook"]
     assert [k["title"] for k in hub.children(amara, f"WikiPage/{home['id']}")] == [
-        "Booking rules", "On-call guide", "Onboarding"]
+        "Booking rules", "On-call guide", "Onboarding", "Procedures"]
 
 
 def test_a_wiki_page_never_sits_under_itself(wiki):
@@ -2769,3 +2769,22 @@ def test_a_returned_sop_says_why_and_goes_back_to_its_authors(wiki):
     rec = hub.records.read("Procedure", sop["id"])
     assert rec["status"] == "draft" and rec["returned_because"] == "Say which detergent."
     assert not rec.get("revision")
+
+
+def test_an_agent_is_mentioned_only_where_it_may_read_and_never_changes_the_text_itself(wiki):
+    """Rule: a mention hands an agent only what its grants let it read; what it proposes is a suggestion a person
+    accepts or rejects (tests/test_mentions.py has the whole of it)."""
+    hub = wiki
+    from practicehub.hub import member_ref
+    from practicehub.live import Live
+    lv = hub._live = Live(hub)
+    p = next(r for r in hub.records.search("WikiPage", limit=None) if r["title"] == "Backups")
+    ref, jo = f"WikiPage/{p['id']}", M(hub, "jo")
+    with pytest.raises(Invalid):
+        lv.comment(jo, ref, "@scribe-agent please look")
+    hub.authz.write([("role:wiki-reader", "assignee", member_ref("scribe-agent"))])
+    c = lv.comment(jo, ref, "@scribe-agent please look", quote="IT only")
+    s = lv.suggest(M(hub, "scribe-agent"), ref, c["id"], "body", "IT only", "nobody")["replies"][-1]
+    assert hub.records.read("WikiPage", p["id"])["body"] == p["body"]
+    with pytest.raises(Denied):
+        lv.decide_suggestion(M(hub, "scribe-agent"), ref, c["id"], s["id"], True)
