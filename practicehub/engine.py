@@ -1345,10 +1345,16 @@ class Engine:
 
     def decide(self, member: dict, item_id: str, outcome: str, comment: str = "", *, seen: str | None = None,
                propose: bool = False) -> dict:
-        """Decide a gate. The decision is an electronic signature with the step's meaning, by this signer, over the
-        hash of what they were shown (``seen``: the hash the page showed them; refused if it no longer matches).
-        ``propose``: an agent's decision is only proposed, whatever the step's risk: it waits, unapplied, for its
-        sponsor to approve it (how an agent decides over MCP, where it never signs on its own)."""
+        """Decide a gate. A person's decision is an electronic signature with the step's meaning, by this signer, over
+        the hash of what they were shown (``seen``: the hash the page showed them; refused if it no longer matches).
+
+        Agents never sign, whichever way they call (the API, the agent runner, MCP): the engine itself makes an
+        agent's decision one of two things, and neither carries a signature.
+        - A *proposal*, when the step is high risk or ``propose`` is set (MCP always sets it): it waits, unapplied,
+          for its sponsor, whose approval is the person's signature.
+        - An *attestation*, for the routine decisions a workflow lets agents make (``signer = "any"`` within the
+          gate's ``agent_criteria``, at low or medium risk): the agent's own recorded action, with the same fields a
+          signature would cover, shown as "decided by <agent> (an agent)", never in a record's signatures."""
         from .hub import Invalid
         hub = self.hub
         with hub.db:
@@ -1364,20 +1370,24 @@ class Engine:
             if outcome not in step.outcomes:
                 raise Invalid(f"the decision is one of: {', '.join(step.outcomes)}")
             values = {"outcome": outcome, "comment": comment or ""}
-            signed = {"run": run["id"], "step": step.id, "outcome": outcome, "meaning": step.meanings.get(outcome, step.meaning),
-                      "record": run["record"], "workflow": f"{wf.id}@v{run['version']}", "signer": member["id"],
-                      "shown_sha256": self._check_shown(member, item_id, seen), "comment": comment or ""}
+            what = {"run": run["id"], "step": step.id, "outcome": outcome, "meaning": step.meanings.get(outcome, step.meaning),
+                    "record": run["record"], "workflow": f"{wf.id}@v{run['version']}",
+                    "shown_sha256": self._check_shown(member, item_id, seen), "comment": comment or ""}
             if run["record"] and "/" in run["record"]:  # the decision is also a signature on the record it is about
                 rec = hub.records.read(*run["record"].split("/", 1))
                 if rec is not None:
-                    signed.update(version=hub.record_version(run["record"]), record_sha256=hub._record_digest(rec))
-            if member["kind"] == "agent" and (step.risk == "high" or propose):
-                return self._hold(member, item, run, step, values, action="gate.decided", signed=signed)
-            return self._finish(member, item, run, step, values, action="gate.decided", signed=signed)
+                    what.update(version=hub.record_version(run["record"]), record_sha256=hub._record_digest(rec))
+            if member["kind"] != "person":
+                attested = {**what, "agent": member["id"], "kind": "agent attestation"}
+                if step.risk == "high" or propose:
+                    return self._hold(member, item, run, step, values, action="gate.decided", attested=attested)
+                return self._finish(member, item, run, step, values, action="gate.decided", attested=attested)
+            return self._finish(member, item, run, step, values, action="gate.decided",
+                                signed={**what, "signer": member["id"]})
 
     # ------------------------------------------------------------------ high risk: held for the sponsor
-    def _hold(self, agent, item, run, step, values, *, action, signed=None) -> dict:
-        """An agent's high-risk answer waits, unapplied, until its sponsor approves it."""
+    def _hold(self, agent, item, run, step, values, *, action, attested=None) -> dict:
+        """An agent's high-risk answer (or its proposed decision) waits, unapplied, until its sponsor approves it."""
         hub = self.hub
         hub.db.items.set(item["id"], {"status": "held", "claimed_by": agent["id"], "output": values,
                                       "updated_at": utcnow()})
@@ -1387,7 +1397,7 @@ class Engine:
         hub.db.items.insert(_item_doc(
             hub, id=hold_id, run_id=run["id"], step_id=step.id, kind="hold",
             title=f"Approve {agent['name']}'s '{step.title}'" + (" (high risk)" if step.risk == "high" else ""), role=None, assignee=agent["sponsor"],
-            persons_only=1, status="open", output={"holds": item["id"], "action": action, "signed": signed}, cause=seq))
+            persons_only=1, status="open", output={"holds": item["id"], "action": action, "attested": attested}, cause=seq))
         sp = hub.db.members.find_one({"_id": agent["sponsor"]}, fields=["status"])
         if not sp or sp["status"] != "active":
             self._pass_on(self.item(hold_id), agent, "the agent's sponsor is not active")
@@ -1404,16 +1414,27 @@ class Engine:
         agent = hub.member(held["claimed_by"])
         if outcome == "approve" and agent["status"] != "active":
             raise Invalid(f"{agent['name']} has been switched off since; reject its work instead")
+        attested = hold["output"].get("attested")
         meaning = f"I approve {agent['name']}'s work on '{step.title}'" if outcome == "approve" else ""
+        signed = None
+        if outcome == "approve":
+            signed = {"run": run["id"], "step": step.id, "outcome": outcome, "meaning": meaning,
+                      "item": held["id"], "signer": member["id"], "shown_sha256": shown}
+            if attested:  # approving an agent's proposed decision: the person signs that decision, on the record
+                signed["meaning"] = (f"I approve {agent['name']}'s decision on '{step.title}': "
+                                     f"{attested.get('meaning') or attested.get('outcome')}")
+                signed["decision"] = attested.get("outcome")
+                ref = attested.get("record")
+                rec = hub.records.read(*ref.split("/", 1)) if ref and "/" in ref else None
+                if rec is not None:
+                    signed.update(record=ref, version=hub.record_version(ref), record_sha256=hub._record_digest(rec))
         seq = hub.track.append(member, "hold.decided", f"item:{hold['id']}", run_id=run["id"], cause=hold["cause"],
                                data={"step": step.id, "outcome": outcome, "comment": comment or "", "agent": agent["id"]},
-                               signed={"run": run["id"], "step": step.id, "outcome": outcome, "meaning": meaning,
-                                       "item": held["id"], "signer": member["id"], "shown_sha256": shown}
-                               if outcome == "approve" else None)
+                               signed=signed)
         hub.db.items.set(hold["id"], {"status": "done", "claimed_by": member["id"], "updated_at": utcnow()})
         if outcome == "approve":
             self._finish(agent, held, run, step, held["output"], action=hold["output"]["action"],
-                         signed=hold["output"]["signed"], cause=seq, approved_by=member["id"])
+                         attested=attested, cause=seq, approved_by=member["id"], signature=seq)
         else:  # back to people, with the sponsor's reason
             role, assignee = self._to_people(held)
             hub.db.items.set(held["id"], {
@@ -1422,15 +1443,25 @@ class Engine:
                 "role": role, "assignee": assignee, "updated_at": utcnow()})
         return self.item(hold["id"])
 
-    def _finish(self, member, item, run, step, values, *, action, signed=None, cause=None, approved_by=None) -> dict:
+    def _finish(self, member, item, run, step, values, *, action, signed=None, attested=None, cause=None,
+                approved_by=None, signature=None) -> dict:
+        """Apply a step's answer. ``signed``: a person's signature on it. ``attested``: an agent's decision, recorded
+        as the agent's own attested action and never as a signature (``signature``: the event of the person who
+        signed their approval of it, if any). The engine refuses a signature by anyone but a person, whatever the
+        caller passes."""
+        from .hub import Denied
         hub = self.hub
+        if signed is not None and member.get("kind") != "person":
+            raise Denied("only a person signs: agents never sign")
         hub.db.items.set(item["id"], {"status": "done", "claimed_by": member["id"], "output": values,
                                       "updated_at": utcnow()})
-        data = {"step": step.id, "output": values, **({"approved_by": approved_by} if approved_by else {})}
+        data = {"step": step.id, "output": values, **({"approved_by": approved_by} if approved_by else {}),
+                **({"attested": attested} if attested else {})}
         seq = hub.track.append(member, action, f"item:{item['id']}", run_id=run["id"], cause=cause or item["cause"],
                                data=data, signed=signed)
         run = self.run(run["id"])
-        run["ctx"][step.id] = {**values, "by": member["id"], "by_kind": member["kind"], "event": seq}
+        run["ctx"][step.id] = {**values, "by": member["id"], "by_kind": member["kind"], "event": seq,
+                               **({"signature": seq} if signed else {"signature": signature} if signature else {})}
         run["steps"][step.id] = {"state": "done", "item": item["id"], "by": member["id"]}
         self._save(run)
         if member["kind"] == "agent" and RISK_ORDER[step.risk] == 1:

@@ -736,6 +736,7 @@ class RecordPages:
         from .server import SHOWN
         recs = hub.search_records(me, rtype, limit=SHOWN + 1, text=q or None)  # without what they may not read
         more, recs = len(recs) > SHOWN, recs[:SHOWN]
+        hub.note_list(me, recs, how="search" if q else "list", what=f"records:{rtype}", text=q or None)
         lc = rt.lifecycle
         heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
         rows = "".join(

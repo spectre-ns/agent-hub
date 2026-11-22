@@ -3420,3 +3420,132 @@ def test_a_field_names_a_declared_data_class(hub):
     with pytest.raises(Invalid) as e:
         hub.propose("type", M(hub, "rana"), bad)
     assert any("no-such-class" in p for p in e.value.problems)
+
+
+# ------------------------------------------------------------------------------------------- agents never sign
+def _agent_check(hub, risk="low"):
+    """A gate an agent may decide on its own (signer any, within criteria), about a patient record."""
+    agent = M(hub, "intake-agent")
+    src = ('id = "agent-check"\ntitle = "Agent check"\n[trigger]\nstarters = ["intake-coordinator"]\nrecord = "Patient"\n'
+           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[[steps]]\nid = "check"\ntitle = "Check"\n'
+           f'kind = "gate"\nrole = "{agent["roles"][0]}"\nsigner = "any"\nagent_criteria = "input.kind == \'routine\'"\n'
+           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "{risk}"\noutcomes = ["ok", "not-ok"]\n'
+           'meaning = "I confirm the check"\ncontext = ["input.kind"]\n')
+    p = hub.propose_workflow(M(hub, "jo"), src, "a check")
+    hub.approve_workflow(M(hub, "rana"), "agent-check", p["version"])
+    pat = hub.records.search("Patient")[0]
+    run = hub.engine.start(M(hub, "jo"), "agent-check", record=f"Patient/{pat['id']}", inputs={"kind": "routine"})
+    return agent, run, f"Patient/{pat['id']}"
+
+
+def test_an_agents_routine_decision_is_its_attestation_never_a_signature(hub):
+    """Agents never sign. Where the workflow lets an agent decide (a low-risk gate within its criteria), the decision
+    is the agent's attested action: on the track with what it decided and over what, but with no signature, and it
+    is never listed among the record's signatures. This holds for every caller (the REST decide, the agent runner),
+    because the engine decides it."""
+    agent, run, ref = _agent_check(hub)
+    iid = item_for(hub, run, "check")
+    hub.engine.decide(agent, iid, "ok", "routine", seen=hub.engine.shown_digest(agent, iid))
+    ev = [e for e in hub.track.list(run_id=run["id"]) if e["action"] == "gate.decided"][-1]
+    assert ev["actor"] == agent["id"] and not ev["signature"] and "signed" not in ev["data"]
+    att = ev["data"]["attested"]
+    assert att["agent"] == agent["id"] and att["kind"] == "agent attestation" and att["meaning"] == "I confirm the check"
+    assert att["record"] == ref and att["record_sha256"]
+    assert hub.engine.run(run["id"])["steps"]["check"]["state"] == "done"
+    assert not [s for s in hub.signatures(M(hub, "rana"), ref) if s["by"] == agent["id"]]
+    assert hub.track.verify()["ok"]
+
+
+def test_the_engine_refuses_a_signature_from_an_agent_whatever_the_caller_passes(hub):
+    agent, run, ref = _agent_check(hub)
+    iid = item_for(hub, run, "check")
+    item = hub.engine.item(iid)
+    r, wf, step = hub.engine.step_of(item)
+    with pytest.raises(Denied):
+        hub.engine._finish(agent, item, r, step, {"outcome": "ok", "comment": ""}, action="gate.decided",
+                           signed={"meaning": "I confirm the check", "signer": agent["id"]})
+    assert not [e for e in hub.track.list(run_id=run["id"]) if e["action"] == "gate.decided"]
+
+
+def test_a_proposed_agent_decision_is_signed_only_by_the_person_who_approves_it(hub):
+    """An agent's proposal (MCP, or a high-risk gate) waits for its sponsor; the sponsor's approval is their own
+    signature on the decision and the record. The agent's applied decision stays an attestation."""
+    agent, run, ref = _agent_check(hub)
+    iid = item_for(hub, run, "check")
+    hub.engine.decide(agent, iid, "ok", "", seen=hub.engine.shown_digest(agent, iid), propose=True)
+    hold = hub.db.items.find_one({"run_id": run["id"], "kind": "hold"})
+    assert not [e for e in hub.track.list(run_id=run["id"]) if e.get("signature")]  # proposing signs nothing
+    sponsor = M(hub, hold["assignee"])
+    hub.engine.decide(sponsor, hold["id"], "approve", "fine", seen=hub.engine.shown_digest(sponsor, hold["id"]))
+    evs = hub.track.list(run_id=run["id"])
+    signed = [e for e in evs if e.get("signature")]
+    assert [e["actor"] for e in signed] == [sponsor["id"]] and signed[0]["action"] == "hold.decided"
+    assert signed[0]["data"]["signed"]["record"] == ref and "Check" in signed[0]["data"]["signed"]["meaning"]
+    gate = [e for e in evs if e["action"] == "gate.decided"][-1]
+    assert gate["actor"] == agent["id"] and not gate["signature"] and gate["data"]["approved_by"] == sponsor["id"]
+    sigs = hub.signatures(M(hub, "rana"), ref)
+    assert [s["by"] for s in sigs] == [sponsor["id"]] and sigs[0]["outcome"] == "ok"
+    assert hub.track.verify()["ok"]
+
+
+# ------------------------------------------------------------------------------- search looks where you may read
+def test_a_search_matches_only_what_the_member_may_read_and_is_answered_by_the_database(hub, monkeypatch):
+    """Searching by words, for a member who may not read some fields, asks the database for exactly the records whose
+    readable parts hold every word, a page at a time: nothing is read into the hub to be filtered there, and a hidden
+    field's value never matches, by any type or none."""
+    jo, amara = M(hub, "jo"), M(hub, "dr-amara")
+    v = _visit_with_a_reason(hub, "Quokkaburn")
+    pat_ref = v["subject"]["reference"]
+    calls = []
+    real = hub.records.search
+    monkeypatch.setattr(hub.records, "search", lambda *a, **k: calls.append(k) or real(*a, **k))
+    assert [r["id"] for r in hub.search_records(amara, "Encounter", text="quokka")] == [v["id"]]  # by its start
+    assert hub.search_records(jo, "Encounter", text="quokkaburn") == []
+    assert hub.search_records(jo, None, text="quokkaburn cough") == []
+    assert all(k.get("limit") == 200 for k in calls)  # a page, never every record
+    # what jo may read of the same visit still finds it
+    pat = hub.records.read(*pat_ref.split("/"))
+    family = pat["name"][0]["family"]
+    v2 = hub.records.read("Encounter", v["id"])
+    assert v2["id"] in {r["id"] for r in hub.search_records(jo, "Encounter", text="ambulatory", limit=50)}
+    assert any(r["id"] == pat["id"] for r in hub.search_records(jo, "Patient", text=family))
+    # paged in the database: the second page carries on from the first
+    a = hub.search_records(amara, "Encounter", text="ambulatory", limit=1)
+    b = hub.search_records(amara, "Encounter", text="ambulatory", limit=1, offset=1)
+    assert a and (not b or a[0]["id"] != b[0]["id"])
+
+
+def test_records_indexed_before_their_type_classed_a_field_are_reindexed_before_a_search(hub):
+    """A record's words were built from its type as it was. One indexed before (or without) the per-class parts is
+    rewritten before anyone searches it, so an old index never lets a hidden value match."""
+    jo = M(hub, "jo")
+    v = _visit_with_a_reason(hub, "Wombatique")
+    hub.db.records.set(f"Encounter/{v['id']}", {"search_parts": None, "ix": "old"})  # as an older hub left it
+    hub._indexed_types.clear()  # a hub started since
+    assert hub.search_records(jo, "Encounter", text="wombatique") == []
+    row = hub.db.records.get(f"Encounter/{v['id']}")
+    assert row["ix"] != "old" and row["search_parts"]
+    assert [r["id"] for r in hub.search_records(M(hub, "dr-amara"), "Encounter", text="wombatique")] == [v["id"]]
+
+
+# ---------------------------------------------------------------------------- lists that show patients are reads
+def test_a_list_or_search_that_shows_patients_is_in_each_patients_access_report(hub):
+    """A list page or a search shows each patient's name and birth date: it is one records.listed event naming every
+    record shown, and the access report for each of those patients says who saw them in a list, and how. The same
+    list shown again soon is one listing; a list of nothing about a patient writes nothing."""
+    from practicehub.web.server import App
+    app = App(hub, dev=False)
+    noor = M(hub, "noor")
+    pats = hub.records.search("Patient", limit=None)
+    app.page_records({"me": noor, "query": {}, "path": "/records/Patient"}, "Patient")
+    app.page_records({"me": noor, "query": {}, "path": "/records/Patient"}, "Patient")  # again: the same listing
+    listed = [e for e in hub.track.list(limit=50) if e["action"] == "records.listed" and e["actor"] == "noor"]
+    assert len(listed) == 1 and set(listed[0]["data"]["refs"]) == {f"Patient/{p['id']}" for p in pats}
+    ref = f"Patient/{pats[-1]['id']}"
+    rows = [r for r in hub.access_report(M(hub, "rana"), ref) if r["who"] == "noor"]
+    assert rows and rows[-1]["action"] == "listed" and rows[-1]["record"] == ref and "list" in rows[-1]["how"]
+    family = pats[0]["name"][0]["family"]
+    app.page_records({"me": noor, "query": {"q": family}, "path": "/records/Patient"}, "Patient")
+    rows = [r for r in hub.access_report(M(hub, "rana"), f"Patient/{pats[0]['id']}") if r["who"] == "noor"]
+    assert any("search" in r["how"] and family.lower() in r["how"] for r in rows)
+    assert hub.note_list(noor, [{"resourceType": "Practitioner", "id": "dr-amara"}]) is None
