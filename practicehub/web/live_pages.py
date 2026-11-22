@@ -298,9 +298,7 @@ class LivePages:
                   f'{act}</li>')
 
     def _comment_text(self, body: str) -> str:
-        out = e(body).replace("\n", "<br>")
-        return __import__("re").sub(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]*[a-z0-9])",
-                                    lambda m: f'<span class="at">@{m.group(1)}</span>', out)
+        return self.mention_text(body)
 
     def _back(self, rtype, rid, anchor="", req=None) -> None:
         """Back to the record page, or to ``next`` when it is a page of the same record (the office editor)."""
@@ -425,7 +423,7 @@ class LivePages:
                        f'name="version" value="{a}"><p>Make version {a} the page’s text again. It is saved as a new '
                        f'version; nothing in between is lost.</p><button class="secondary" '
                        f'data-confirm="Restore version {a}?">Restore version {a}</button></form>')
-        title = hub.title(hub.read_record(me, ref))
+        title = hub.short_title(hub.read_record(me, ref))
         return self.layout(req, f"Compare versions of {title}", "".join(out),
                            crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural),
                                    (f"/records/{rtype}/{rid}", title), (None, "Compare versions")])

@@ -187,6 +187,24 @@ class CatalogMixin:
                 return text
         return f"{rt.label if rt else rtype} {rec.get('id', '')}".strip()
 
+    def short_title(self, rec: dict | None) -> str:
+        """What a record is called where its name travels on screen (the browser tab, breadcrumbs, headings,
+        tooltips, notices): its type's ``short_title`` when it has one (a patient's name and birth date, without the
+        health card number the record itself shows), else :meth:`title`."""
+        if not rec:
+            return ""
+        rt = self.record_type_for_reading(rec.get("resourceType") or "")
+        if rt is not None and rt.short_title:
+            if rt.classed_fields:
+                from .visibility import strip
+                rec = strip(rec, rt.classed_fields)
+            values = {f["name"]: schema.first(rec, f["path"]) for f in rt.fields if "*" not in f["path"]}
+            values.update(schema.project(rt, rec, self.member_types()))
+            text = schema.render_title(rt.short_title, values)
+            if text:
+                return text
+        return self.title(rec)
+
     def facts(self, rec: dict) -> dict:
         """A subject's headline facts: the pack's ``facts``, else its type's ``fact = true`` fields, else the
         identifier and contact its base type has."""

@@ -6,6 +6,7 @@ data_class = "demographics"
 standard = "fhir-r4"
 extends = "Subject"           # the core's subject: work, calendars and modules (a CAPA, a document) point at it
 title = "{name}[ (born {birthDate})][ · card {health_card}]"
+short_title = "{name}[ (born {birthDate})]"   # tab, breadcrumbs, headings, tooltips: the card number stays on the chart
 strict = true
 date = "birthDate"
 active = "record.active != false"

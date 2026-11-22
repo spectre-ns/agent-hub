@@ -217,7 +217,8 @@ class DefinitionPages:
         editor = (f'<form method="post" action="/define/{kinds}/propose" class="card"><label>{e(noun.capitalize())} '
                   f'(TOML) *<textarea name="source" rows="28" class="code" spellcheck="false" required '
                   f'data-check="/api/define/{kinds}/check" data-status="def-status" aria-describedby="def-status">'
-                  f'{e(source)}</textarea></label><div class="status" id="def-status" aria-live="polite"></div>'
+                  f'{e(source)}</textarea></label><div class="status" id="def-status" aria-live="polite" '
+                  f'data-checked="1">{self._check_status(kind, source)}</div>'
                   + (f'<input type="hidden" name="did" value="{e(did)}">' if did else "") +
                   f'<label>What changes and why *<input name="note" value="{e(note)}" required></label>'
                   f'<div class="actions"><button class="primary">Propose</button>{to_form}</div></form>')
@@ -227,6 +228,20 @@ class DefinitionPages:
                 + (f'<div class="fb-layout">{editor}{self._module_aside(additions)}</div>' if additions else editor))
         crumbs = [(f"/define/{kinds}", title)] + ([(f"/define/{kinds}/{did}", did)] if did else [])
         return self.layout(req, f"Propose a change: {did}" if did else f"New {noun}", body, crumbs=crumbs)
+
+    def _check_status(self, kind, source) -> str:
+        """The check's verdict on the text as the page opens, rendered here so the page never depends on a
+        request it may not get to finish (the script re-checks as you type)."""
+        if not source.strip():
+            return ""
+        try:
+            self.hub.check_definition(kind, source)
+        except Exception as exc:  # noqa: BLE001 - every problem comes back in plain words
+            problems = list(getattr(exc, "problems", [str(exc)]))
+            n = len(problems)
+            return (f'<span class="loz bad">{n} problem{"" if n == 1 else "s"}</span><ul class="ed-problems">'
+                    + "".join(f"<li>{e(p)}</li>" for p in problems) + "</ul>")
+        return '<span class="loz done">ready</span> The hub accepts this.'
 
     def post_definition_propose(self, req, kinds):
         from ..hub import Invalid

@@ -1795,3 +1795,79 @@ def test_a_type_that_is_not_a_fhir_resource_has_no_fhir_export_on_the_web(server
     assert fetch(server, f"/records/{t}/{rid}/export?format=fhir", tok)[0] == 422
     st, h, body = fetch(server, f"/api/records/{t}/{rid}?format=json", tok)
     assert st == 200 and h["content-type"] == "application/json" and json.loads(body)["id"] == rid
+
+
+# ------------------------------------------------------------------------------- words, not codes (names, labels, titles)
+def test_a_mention_in_a_comment_shows_the_member_not_their_id(hub):
+    """An @id in what someone wrote shows that member: avatar, name linking to their page, the agent badge; the text
+    keeps the id. An @ of nobody, or inside an e-mail address, stays as written."""
+    app = App(hub, dev=False)
+    agent = next(m for m in hub.members("agent"))
+    out = app.mention_text(f"Ask @dr-amara, then @{agent['id']}.\nmail jo@dr-amara.example or @nobody <b>")
+    assert '<a href="/team/dr-amara">Dr. Amara Okafor</a>' in out and 'data-member="dr-amara"' in out
+    assert f'<a href="/team/{agent["id"]}">{html.escape(agent["name"])}</a> <span class="badge agent">' in out
+    assert 'class="av' in out and "<br>" in out and "jo@dr-amara.example" in out and "@nobody" in out
+    assert "<b>" not in out and "&lt;b&gt;" in out
+
+
+def test_a_patients_title_crumbs_and_work_leave_out_the_health_card_number(hub, server):
+    """The card number is in the chart's banner and details only: not the page title, crumbs, heading or work titles."""
+    amara = token(hub, "dr-amara")
+    p = next(r for r in hub.records.search("Patient") if "1234 567 890" in hub.title(r))
+    sub = hub.pack.subject
+    page = call(server, "GET", f"/{sub['path']}/{p['id']}", amara)[1]
+    title = re.search(r"<title>(.*?)</title>", page).group(1)
+    crumbs = page.split('class="crumbs"', 1)[1].split("</div>", 1)[0]
+    h1 = re.search(r'<h1 class="name">(.*?)</h1>', page).group(1)
+    assert all("Ellen MacLeod" in x and "1234 567 890" not in x for x in (title, crumbs, h1))
+    assert "1234 567 890" in page  # the banner
+    assert "1234 567 890" not in hub.run_title(M(hub, "dr-amara"), {"title": "Renewal", "record": f"Patient/{p['id']}"})
+
+
+def test_the_visit_list_names_the_patient_and_says_codes_in_words(hub, server):
+    page = call(server, "GET", "/records/Encounter", token(hub, "dr-amara"))[1]
+    heads = re.findall(r"<th>(.*?)</th>", page)
+    assert heads[:3] == ["Visit", "Status", "Patient"]
+    assert ">In clinic<" in page and ">AMB<" not in page and "(born " in page
+
+
+def test_a_board_says_its_columns_in_the_lifecycles_words(hub, server):
+    page = call(server, "GET", "/views/dms-documents", _modules(hub, server))[1]
+    names = re.findall(r'<span class="col-name">(.*?)</span>', page)
+    assert "In review" in names and "IN-REVIEW" not in page and "in-review</span>" not in page
+
+
+def test_a_type_declares_a_short_title_and_words_for_its_choices(hub):
+    from practicehub import schema
+    base = 'id = "Thing"\ndata_class = "visits"\ntitle = "{name}"\n'
+    f = '[[field]]\nname = "name"\n\n[[field]]\nname = "kind"\ntype = "choice"\nchoices = ["a", "b"]\n'
+    rt = schema.parse(base + 'short_title = "{name}"\n' + f + 'labels = { a = "Ay" }\n')
+    assert rt.short_title == "{name}" and schema.choice_words(rt.field("kind"), "a") == "Ay"
+    assert schema.choice_words(rt.field("kind"), "b") == "b"
+    with pytest.raises(Exception) as exc:  # a DefinitionError, every problem in words
+        schema.parse(base + 'short_title = "{nope}"\n' + f + 'labels = { c = "Sea" }\n')
+    assert any("short_title" in p for p in exc.value.problems) and any("'c'" in p for p in exc.value.problems)
+
+
+def test_a_long_link_group_offers_every_one_on_a_list_of_its_own(hub, server):
+    """A record's page shows the 50 most recent of a kind linked to it, and a link to all of them."""
+    amara = M(hub, "dr-amara")
+    p = hub.records.search("Patient")[0]
+    ref = f"Patient/{p['id']}"
+    have = [r for r in hub.records.search("Observation") if r.get("subject", {}).get("reference") == ref]
+    tmpl = {k: v for k, v in hub.records.search("Observation")[0].items() if k not in ("id", "meta")}
+    for i in range(51 - len(have)):
+        hub.create_record(amara, "Observation", {**tmpl, "status": "registered", "subject": {"reference": ref}})
+    tok = token(hub, "dr-amara")
+    page = call(server, "GET", f"/{hub.pack.subject['path']}/{p['id']}", tok)[1]
+    q = urllib.parse.quote(ref, safe="")
+    assert f'href="/records/Observation?linked={q}">Show all ' in page
+    code, all_ = call(server, "GET", f"/records/Observation?linked={q}", tok)
+    assert code == 200 and all_.count('<tr><td><a href="') >= 51
+    assert call(server, "GET", "/records/Observation?linked=Patient/nope", tok)[0] == 404
+
+
+def test_the_definition_editor_says_whether_the_hub_accepts_the_text_without_asking_again(hub, server):
+    page = call(server, "GET", "/define/types/Encounter/edit?as=toml", token(hub, "rana"))[1]
+    status = page.split('id="def-status"', 1)[1].split("</div>", 1)[0]
+    assert "The hub accepts this." in status and 'data-checked="1"' in status

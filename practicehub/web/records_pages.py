@@ -15,7 +15,7 @@ import urllib.parse
 from .. import pack as packmod
 from .. import export as exportmod
 from .. import schema, visibility
-from ..hub import Conflict, HubError, Denied, Invalid
+from ..hub import Conflict, HubError, Denied, Invalid, NotFound
 
 e = html.escape
 SIMPLE, NESTED, SCALAR = schema.FORM_SIMPLE, schema.FORM_NESTED, schema.SCALAR  # what a form can edit
@@ -159,9 +159,9 @@ class RecordPages:
         base = f"/records/{rtype}/{urllib.parse.quote(rid)}/export?format="
         hints = {"json": "This kind of record is not a FHIR resource: its fields as JSON, for another system"}
         picks = self._export_pick([(base + f, f, hints.get(f, "")) for f in exportmod.offered(hub, rtype, "record")])
-        return self._export_page(req, "Export", f"Export <b>{e(hub.title(rec))}</b> ({e(self._lower(rt.label))}):",
+        return self._export_page(req, "Export", f"Export <b>{e(hub.short_title(rec))}</b> ({e(self._lower(rt.label))}):",
                                  picks, [("/records", "Records"), (f"/records/{rtype}", rt.plural),
-                                         (self.record_href(ref), hub.title(rec)), (None, "Export")])
+                                         (self.record_href(ref), hub.short_title(rec)), (None, "Export")])
 
     def page_export_list(self, req, rtype):
         me, hub, q = req["me"], self.hub, req["query"]
@@ -255,7 +255,7 @@ class RecordPages:
         if rt and (me is None or not self.hub.may_read(me, t)):  # its title is what it holds: not for this reader
             return f'<span class="muted">{e(rt.label)} you may not open</span>'
         rec = self.hub.records.read(t, rid) if self.hub.record_type(t) else None
-        text = self.hub.title(rec) if rec else ref
+        text = self.hub.short_title(rec) if rec else ref
         rt = self.hub.record_type(t)
         return (f'<a href="{e(self.record_href(ref))}">{e(text)}</a> '
                 f'<span class="muted">{e(rt.label if rt else t)}</span>')
@@ -329,6 +329,8 @@ class RecordPages:
                     out.append(self._plain_html(item))
                 elif isinstance(item, str) and "\n" in item:
                     out.append(f"<pre class='wrap'>{e(item)}</pre>")
+                elif f["type"] == "choice":
+                    out.append(e(schema.choice_words(f, item)))
                 else:
                     out.append(e(str(item)))
         return "<br>".join(out) if out else "<span class='muted'>—</span>"
@@ -550,7 +552,8 @@ class RecordPages:
             cid, ids = self._control_id(name, bool(f.get("help")))
             return self._labelled(f, f'<select name="{e(name)}"{ids}>{opts}</select>', cid,
                                   [f["help"]] if f.get("help") else [])
-        choices = [{"value": c, "label": c} for c in f["choices"]] if f["type"] == "choice" else None
+        choices = ([{"value": c, "label": schema.choice_words(f, c)} for c in f["choices"]]
+                   if f["type"] == "choice" else None)
         if f["type"] == "markdown":  # the editor starts from the text as its reader sees it, and offers the titles
             rt = self.hub.record_type((rec or {}).get("resourceType", "")) if rec else None
             spec["_start"] = self.markdown_html(str(val or ""), rec if rt else None, me)
@@ -734,8 +737,12 @@ class RecordPages:
             raise Denied(f"{me['name']} may not read {rt.plural.lower()}")
         q = req["query"].get("q", "").lower()
         from .server import SHOWN
-        recs = hub.search_records(me, rtype, limit=SHOWN + 1, text=q or None)  # without what they may not read
-        more, recs = len(recs) > SHOWN, recs[:SHOWN]
+        linked = req["query"].get("linked", "")
+        if linked:  # every one linked to a record ("Show all" under its links): the record's page shows 50
+            recs, more = self._linked_records(me, rtype, rt, linked), False
+        else:
+            recs = hub.search_records(me, rtype, limit=SHOWN + 1, text=q or None)  # without what they may not read
+            more, recs = len(recs) > SHOWN, recs[:SHOWN]
         lc = rt.lifecycle
         heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
         rows = "".join(
@@ -760,9 +767,35 @@ class RecordPages:
         qs = f"?q={urllib.parse.quote(q)}" if q else ""
         export = (f'<a class="btn secondary" href="/records/{e(rtype)}/export{e(qs)}" data-modal>Export</a>'
                   if recs or hub.is_policy_owner(me) else "")
+        if linked:
+            owner = hub.short_title(hub.redact(me, hub.records.read(*linked.split("/", 1))) or {})
+            title = f"{rt.plural} linked to {owner}"
+            back = f'<p><a href="{e(self.record_href(linked))}">Back to {e(owner)}</a></p>'
+            return self.layout(req, title, back + table, crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural),
+                                                                 (self.record_href(linked), owner), (None, "Linked")],
+                               subnav=self.navigator(me, rtype))
         return self.layout(req, rt.plural, search + table + note,
                            crumbs=[("/records", "Records"), (None, rt.plural)], subnav=self.navigator(me, rtype),
                            actions=export + create)
+
+    def _linked_records(self, me, rtype, rt, ref) -> list[dict]:
+        """Every record of ``rtype`` that points at ``ref`` and that the member may read, newest first."""
+        hub = self.hub
+        t, _, rid = ref.partition("/")
+        if not rid or not hub.record_type(t):
+            raise Invalid("say which record, as Type/id")
+        if not hub.may_read(me, t) or not hub.redact(me, hub.records.read(t, rid)):
+            raise NotFound(f"there is no record {ref}")
+        out: dict = {}
+        for x in hub.linked(me, ref):
+            xt, _, xid = x["ref"].partition("/")
+            if xt != rtype or xid in out:
+                continue
+            r = hub.redact(me, hub.records.read(xt, xid))
+            if r:
+                out[xid] = r
+                hub.note_view(me, x["ref"], how=f"linked to {ref}")
+        return sorted(out.values(), key=lambda r: schema.record_date(rt, r), reverse=True)
 
     def page_record_new(self, req, rtype, kept: dict | None = None, error: Exception | None = None):
         """A record type's create form, on its own: the Create dialog shows it over the page (``data-modal``), and
@@ -804,9 +837,9 @@ class RecordPages:
             skip = (of["name"],)
             href = self.record_href(owner)
             own = (f'<input type="hidden" name="{e(of["path"])}" value="{e(owner)}">'
-                   f'<p class="part-of">Part of <a href="{e(href)}">{e(self.hub.title(o))}</a></p>')
+                   f'<p class="part-of">Part of <a href="{e(href)}">{e(self.hub.short_title(o))}</a></p>')
             cancel, back = e(href), ""
-            crumbs = [(href, self.hub.title(o)), (f"{href}#part-{rtype}", rt.plural), (None, "Add")]
+            crumbs = [(href, self.hub.short_title(o)), (f"{href}#part-{rtype}", rt.plural), (None, "Add")]
         start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
         inputs = self._inputs(rt, seed, me, "create", skip=skip)
         verb = "Add" if rt.part_of else "Create"
@@ -946,6 +979,17 @@ class RecordPages:
                 "default")
         return f'<span class="loz {tone}">{e(str(st))}</span>'
 
+    @staticmethod
+    def _state_words(rt, st) -> str:
+        """A lifecycle state in words, as a column or a Move to… choice says it: the lifecycle's label for it where
+        the type gives one, else its code with dashes and underscores as spaces, capitalised (in-progress: In progress)."""
+        if st is None:
+            return ""
+        if rt is not None and hasattr(rt, "state_label"):
+            return rt.state_label(st)
+        text = str(st).replace("-", " ").replace("_", " ").strip()
+        return text[:1].upper() + text[1:] if text and not text.isupper() else text
+
     # ------------------------------------------------------------------------------------------ parts and links
     def _status_of(self, rt, r) -> str:
         """A record's state in a list: its lifecycle state, else active or inactive when its type says which."""
@@ -1043,7 +1087,8 @@ class RecordPages:
             links.append(f'<section class="chart-section" id="link-{e(t)}" aria-labelledby="link-{e(t)}-h"><header>'
                          f'<h3 id="link-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></h3>'
                          f'{new}</header>{self._part_rows(rt, recs[:50])}'
-                         + (f'<p class="muted body">The 50 most recent of {len(recs)}.</p>' if len(recs) > 50 else "")
+                         + (f'<p class="muted body">The 50 most recent of {len(recs)}. <a href="/records/{e(t)}?linked='
+                            f'{e(urllib.parse.quote(ref, safe=""))}">Show all {len(recs)}</a></p>' if len(recs) > 50 else "")
                          + '</section>')
             rail.append((f"link-{t}", rt.plural, len(recs)))
         if links:
@@ -1097,8 +1142,8 @@ class RecordPages:
             return ""
         facts = "".join(f'<div><dt>{e(self.human(k))}</dt><dd>{self._fact_html(v)}</dd></div>'
                         for k, v in hub.facts(p).items() if v not in (None, ""))
-        name = (f'<h1 class="name">{e(hub.title(p))}</h1>' if heading else
-                f'<p class="name"><a href="{e(self.record_href(ref))}">{e(hub.title(p))}</a></p>')
+        name = (f'<h1 class="name">{e(hub.short_title(p))}</h1>' if heading else
+                f'<p class="name"><a href="{e(self.record_href(ref))}">{e(hub.short_title(p))}</a></p>')
         return f'<div class="subject-banner">{name}<dl class="facts">{facts}</dl></div>' + self.alerts(me, ref)
 
     def record_banner(self, me, rec: dict) -> str:
@@ -1112,11 +1157,11 @@ class RecordPages:
         if when:
             facts.append(("Date", e(self._day(when))))
         subs = self._subjects_of(rt, rec)
-        facts += [(lbl, f'<a href="{e(self.record_href(s))}">{e(hub.title(hub.records.read(*s.split("/", 1)) or {}) or s)}</a>')
+        facts += [(lbl, f'<a href="{e(self.record_href(s))}">{e(hub.short_title(hub.records.read(*s.split("/", 1)) or {}) or s)}</a>')
                   for lbl, s in subs]
         dl = "".join(f'<div><dt>{e(k)}</dt><dd>{v}</dd></div>' for k, v in facts if v)
         return (f'<div class="subject-banner"><p class="name"><a href="{e(self.record_href(ref))}">'
-                f'{e(hub.title(rec))}</a></p><dl class="facts">{dl}</dl></div>'
+                f'{e(hub.short_title(rec))}</a></p><dl class="facts">{dl}</dl></div>'
                 + "".join(self.alerts(me, s) for _, s in subs[:1]))
 
     def _subjects_of(self, rt, rec) -> list[tuple[str, str]]:
@@ -1142,7 +1187,7 @@ class RecordPages:
         up = (self.owner_crumbs(me, ort, o) or []) if ort and ort.part_of else []
         up = up[:-1] if up else []
         href = self.record_href(owner)
-        return [*up, (href, self.hub.title(o)), (f"{href}#part-{rt.id}", rt.plural), (None, self.hub.title(rec))]
+        return [*up, (href, self.hub.short_title(o)), (f"{href}#part-{rt.id}", rt.plural), (None, self.hub.short_title(rec))]
 
     def owner_banner(self, me, owner: str) -> str:
         t = owner.split("/", 1)[0]
@@ -1301,7 +1346,7 @@ class RecordPages:
         moves_html = "".join(move(t) for t in mine) if not editing else ""
         sigs = hub.signatures(me, ref)
         cur = [s for s in sigs if s["current"]]
-        title = hub.title(rec)
+        title = hub.short_title(rec)
         owner = hub.owner_of(rec)
         part_crumbs = self.owner_crumbs(me, rt, rec)
         banner = ""
@@ -1319,10 +1364,10 @@ class RecordPages:
             body = refused + self._page_body(req, rt, shown if editing else lp.get("rec", rec), main, prose, st, tab,
                                              editing, url, ver, moves_html, lp.get("edit") or edit_btn, auto, sigs,
                                              cur, may_write, live=lp)
-            above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
-            return self.layout(req, hub.title(rec), body, heading=not editing,
+            above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.short_title(a)) for a in hub.ancestors(me, ref)]
+            return self.layout(req, hub.short_title(rec), body, heading=not editing,
                                crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
-                                                      (None, hub.title(rec))], subnav=nav, above=banner)
+                                                      (None, hub.short_title(rec))], subnav=nav, above=banner)
 
         # side column: state, moves a person may make, signatures at a glance
         side = []
@@ -1345,7 +1390,7 @@ class RecordPages:
                 + "</ul>")
         body = (f'<div class="issue"><div>{"".join(main)}</div><aside class="issue-side">{"".join(side)}'
                 f'</aside></div>')
-        above = [(self.record_href(f"{rtype}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
+        above = [(self.record_href(f"{rtype}/{a['id']}"), hub.short_title(a)) for a in hub.ancestors(me, ref)]
         return self.layout(req, title, body, crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural),
                                                                     *above, (None, title)], subnav=nav,
                            actions=edit_btn, above=banner)
@@ -1591,7 +1636,7 @@ class RecordPages:
         err = f'<div class="flash error" role="alert"><p>{e(problem)}</p></div>' if problem else ""
         ver = e(str((rec.get("meta") or {}).get("versionId", "")))
         st = schema.first(rec, rt.lifecycle["path"])
-        body = (f'<div data-modal-body>{err}<p>{e(self.hub.title(rec))}: from {self._state_loz(st)} to {self._state_loz(t["to"])}.</p>'
+        body = (f'<div data-modal-body>{err}<p>{e(self.hub.short_title(rec))}: from {self._state_loz(st)} to {self._state_loz(t["to"])}.</p>'
                 f'<form method="post" action="/records/{e(rt.id)}/{e(rec["id"])}/move" class="card stack">'
                 f'<input type="hidden" name="to" value="{e(t["to"])}"><input type="hidden" name="_version" '
                 f'value="{ver}">' + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")
@@ -1600,7 +1645,7 @@ class RecordPages:
                 f'</form></div>')
         return self.layout(req, t["label"], body, crumbs=[("/records", "Records"),
                                                           (f"/records/{rt.id}", rt.plural),
-                                                          (f"/records/{ref}", self.hub.title(rec)), (None, t["label"])])
+                                                          (f"/records/{ref}", self.hub.short_title(rec)), (None, t["label"])])
 
     def post_record(self, req, rtype, rid, verb):
         me, hub = req["me"], self.hub
@@ -1747,8 +1792,12 @@ class RecordPages:
                     groups = {k: groups.get(k, []) for k in order + [k for k in groups if k not in order]}
                     counts = {k: counts.get(k, 0) for k in groups}
                 back = self.here(req)
+                srt = hub.record_type(w["type"]) if w["source"] == "records" and w.get("type") else None
+                if not (srt and srt.lifecycle and w["group_by"] in (srt.lifecycle["path"], srt.lifecycle.get("field"))):
+                    srt = None  # grouped by something else: its values as they are, in words
                 cols = "".join(
-                    f'<section class="col" data-col="{e(k)}" aria-label="{e(k)}"><header>{self._state_loz(k)}'
+                    f'<section class="col" data-col="{e(k)}" aria-label="{e(self._state_words(srt, k))}"><header>'
+                    f'<span class="col-name">{e(self._state_words(srt, k))}</span>'
                     f'<span class="n">{counts[k]}</span></header>'
                     + "".join(self._view_tile(w, r, moving, back) for r in rows) + "</section>"
                     for k, rows in groups.items())
@@ -1798,7 +1847,9 @@ class RecordPages:
             if t["by"] == "workflow" or t["to"] == st or not (st in t["from"] or "*" in t["from"]) or t["to"] in out:
                 continue
             asks = bool(t["fields"] or t["comment"])
-            out[t["to"]] = {"how": "screen" if asks else "post", "label": t["to"] + ("…" if asks else ""),
+            out[t["to"]] = {"how": "screen" if asks else "post",
+                            "label": (t["label"] if t.get("label") and not t["label"].startswith("Move to ")
+                                      else self._state_words(rt, t["to"])) + ("…" if asks else ""),
                             **({"href": f"/records/{rt.id}/{rec['id']}/move?"
                                         + urllib.parse.urlencode({"to": t["to"]})} if asks else {})}
         return out

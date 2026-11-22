@@ -1097,7 +1097,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             rec = self.records.read(rtype, rid)
         except Exception:  # noqa: BLE001
             rec = None
-        return f"{base}: {self.title(rec)}" if rec else base
+        return f"{base}: {self.short_title(rec)}" if rec else base
 
     def active_holders(self, rid: str, *, persons_only: bool = False) -> list[dict]:
         """Members who hold this role and are switched on (people only, for work only a person may do)."""
