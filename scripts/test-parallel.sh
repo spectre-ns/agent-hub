@@ -5,11 +5,21 @@
 # contend for one server's locks; every test still gets a database of its own inside it.
 # Each shard's server is on a free port docker picks, so several runs at once never collide.
 set -u
-# One run at a time on the machine: several agents or terminals queue here instead of starving each other.
+# A few runs at a time on the machine (PH_TEST_SLOTS, default 2): more agents or terminals queue here instead of
+# starving each other. A run holds its slot's lock on fd 9, which pytest and docker inherit until the run ends.
 lock="${XDG_RUNTIME_DIR:-/tmp}/practicehub-tests.lock"
 if [ -z "${PH_TEST_LOCKED:-}" ]; then
-  echo "waiting for other test runs on this machine to finish" >&2
-  PH_TEST_LOCKED=1 exec flock "$lock" "$0" "$@"
+  said=""
+  while :; do
+    for k in $(seq 1 "${PH_TEST_SLOTS:-2}"); do
+      f=$lock; [ "$k" -gt 1 ] && f=$lock.$k
+      exec 9>"$f"
+      if flock -n 9; then PH_TEST_LOCKED=1 exec "$0" "$@"; fi
+      exec 9>&-
+    done
+    [ -z "$said" ] && echo "waiting for a free test slot on this machine" >&2 && said=1
+    sleep 3
+  done
 fi
 N=${1:-auto}; [ $# -gt 0 ] && shift
 if [ "$N" = auto ]; then
