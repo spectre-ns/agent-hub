@@ -1559,7 +1559,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             strip = (lambda x: {k: v for k, v in x.items() if not (lc and k == lc["path"].split(".")[0])
                                 and k not in ("meta", "revision")})
             if prev is None or strip(d) != strip(prev):
-                authors.add(r["actor"])
+                authors.update(r.get("authors") or [r["actor"]])  # a version several people wrote together names them
             prev = d
         return authors
 
@@ -1636,31 +1636,57 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def parent_of(self, rt: schema.RecordType, rec: dict) -> str | None:
         return schema.ref_of(schema.first(rec, rt.parent)) if rt.parent else None
 
+    def tree_types(self, rtype: str) -> list[str]:
+        """The types that share a tree with this one: it, then each type whose parent may be one of this type and
+        which this type may sit under (a wiki's pages and its procedures). One tree, one navigator."""
+        rt = self.record_type(rtype)
+        if not rt or not rt.parent:
+            return [rtype] if rt else []
+        mine = set(rt.field(rt.parent)["target"])
+        out = [rtype]
+        for tid, other in sorted(self.record_types().items()):
+            if tid != rtype and other.parent and tid in mine and rtype in other.field(other.parent)["target"]:
+                out.append(tid)
+        return out
+
+    def _rt_of(self, rec: dict):
+        return self.record_type(rec.get("resourceType", ""))
+
     def ancestors(self, member: dict, ref: str) -> list[dict]:
-        """The records above this one in its type's tree, top first, that the member may read."""
+        """The records above this one in its tree, top first, that the member may read (``resourceType`` says which
+        type each is)."""
         t, _, rid = ref.partition("/")
         rt = self.record_type(t)
         out, seen = [], {ref}
         rec = self.records.read(t, rid) if rt and rt.parent else None
         while rec:
-            up = self.parent_of(rt, rec)
+            rrt = self._rt_of(rec)
+            up = self.parent_of(rrt, rec) if rrt else None
             if not up or up in seen or len(out) > 50:
                 break
             seen.add(up)
             rec = self.records.read(*up.split("/", 1))
-            if rec:
+            if rec and self.may_read(member, rec["resourceType"]):
                 out.append(rec)
+            elif rec is None or not self.may_read(member, up.split("/", 1)[0]):
+                break
         return list(reversed(out)) if self.may_read(member, t) else []
 
     def children(self, member: dict, ref: str) -> list[dict]:
-        """The records directly under this one in its type's tree, by title."""
+        """The records directly under this one in its tree, by title, of any type in the tree that the member may
+        read."""
         t = ref.split("/", 1)[0]
         rt = self.record_type(t)
         if not rt or not rt.parent or not self.may_read(member, t):
             return []
-        rel = rt.field(rt.parent)["rel"] if rt.field(rt.parent) else rt.parent
-        kids = [self.records.read(*r["from_ref"].split("/", 1)) for r in self.db.links.find(
-            {"to_ref": ref, "rel": rel, "from_ref": {"$regex": f"^{re.escape(t)}/"}})]
+        kids = []
+        for kt in self.tree_types(t):
+            krt = self.record_type(kt)
+            if not self.may_read(member, kt):
+                continue
+            rel = krt.field(krt.parent)["rel"] or krt.parent
+            kids += [self.records.read(*r["from_ref"].split("/", 1)) for r in self.db.links.find(
+                {"to_ref": ref, "rel": rel, "from_ref": {"$regex": f"^{re.escape(kt)}/"}})]
         return sorted((k for k in kids if k), key=lambda r: self.title(r).casefold())
 
     # ------------------------------------------------------------------ parts and links
@@ -1696,22 +1722,25 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         return out, hidden
 
     def tree(self, member: dict, rtype: str, where=None) -> list[tuple[int, dict]]:
-        """Every record of a type that has a tree, as (depth, record) in reading order: each under its parent, each
-        level by title. A record whose parent is missing or filtered out sits at the top."""
+        """Every record in a tree, as (depth, record) in reading order: each under its parent, each level by title.
+        A record whose parent is missing or filtered out sits at the top. The tree holds every type that shares
+        it (``tree_types``) that the member may read; ``resourceType`` says which each is."""
         rt = self.record_type(rtype)
         if not rt or not self.may_read(member, rtype):
             return []
-        recs = [r for r in self.records.search(rtype, limit=None) if where is None or where(r)]
-        ids = {f"{rtype}/{r['id']}" for r in recs}
+        recs = [r for t in self.tree_types(rtype) if self.may_read(member, t)
+                for r in self.records.search(t, limit=None) if where is None or where(r)]
+        ids = {f"{r['resourceType']}/{r['id']}" for r in recs}
         under: dict = {}
         for r in recs:
-            up = self.parent_of(rt, r) if rt.parent else None
+            rrt = self._rt_of(r)
+            up = self.parent_of(rrt, r) if rrt and rrt.parent else None
             under.setdefault(up if up in ids else None, []).append(r)
         out, seen = [], set()
 
         def walk(key, depth):
             for r in sorted(under.get(key, []), key=lambda x: self.title(x).casefold()):
-                ref = f"{rtype}/{r['id']}"
+                ref = f"{r['resourceType']}/{r['id']}"
                 if ref in seen:
                     continue
                 seen.add(ref)
@@ -1719,29 +1748,42 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 walk(ref, depth + 1)
         walk(None, 0)
         for r in recs:  # a loop no write lets in, but never hidden if one is there
-            if f"{rtype}/{r['id']}" not in seen:
+            if f"{r['resourceType']}/{r['id']}" not in seen:
                 out.append((0, r))
         return out
 
     def navigator(self, member: dict, rtype: str, ref: str | None = None) -> dict | None:
-        """A tree type's second navigation column, for the member: its tops (spaces), and the tree of the top the
-        open record is in. Records in the hidden states are left out, but the open one and those above it never."""
+        """A tree's second navigation column, for the member: its tops (spaces), and the tree of the top the open
+        record is in. Records in their type's hidden states are left out, but the open one and those above it
+        never. Opened from any type in the tree, it is the tree of the first type in it that has a navigator."""
         rt = self.record_type(rtype)
+        if rt and not rt.navigator:
+            rtype = next((t for t in self.tree_types(rtype) if self.record_type(t).navigator), rtype)
+            rt = self.record_type(rtype)
         if not rt or not rt.navigator or not self.may_read(member, rtype):
             return None
-        keep = {ref} | {f"{rtype}/{a['id']}" for a in (self.ancestors(member, ref) if ref else [])}
-        hide = set(rt.navigator["hide"])
-        state = (lambda r: schema.first(r, rt.lifecycle["path"])) if rt.lifecycle else (lambda r: None)
-        rows = self.tree(member, rtype, where=lambda r: f"{rtype}/{r['id']}" in keep or state(r) not in hide)
+        refof = lambda r: f"{r['resourceType']}/{r['id']}"
+        above = self.ancestors(member, ref) if ref else []
+        keep = {ref} | {refof(a) for a in above}
+
+        def shown(r):
+            if refof(r) in keep:
+                return True
+            trt = self._rt_of(r)
+            if not trt or not trt.lifecycle:
+                return True
+            hide = set((trt.navigator or rt.navigator)["hide"])
+            return schema.first(r, trt.lifecycle["path"]) not in hide
+        rows = self.tree(member, rtype, where=shown)
         tops = [r for d, r in rows if d == 0]
-        top = next((f"{rtype}/{a['id']}" for a in self.ancestors(member, ref)), ref) if ref else None
+        top = next((refof(a) for a in above), ref) if ref else None
         tree, inside = [], False
         for d, r in rows:
             if d == 0:
-                inside = f"{rtype}/{r['id']}" == top
+                inside = refof(r) == top
             if inside and d > 0:
                 tree.append((d - 1, r))
-        return {"label": rt.navigator["tops"], "tops": tops, "top": top, "tree": tree, "open": keep}
+        return {"label": rt.navigator["tops"], "type": rtype, "tops": tops, "top": top, "tree": tree, "open": keep}
 
     def _member_ids(self) -> set[str]:
         return set(self.db.members.distinct("_id"))
@@ -1778,14 +1820,19 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
 
-    def _write_version(self, rt: schema.RecordType, rec: dict, member: dict, run_id: str | None,
-                       comment: str | None = None) -> None:
+    def _write_version(self, rt: schema.RecordType, rec: dict, member: dict, run_id: str | None, *,
+                       comment: str | None = None, authors: list[str] | None = None) -> None:
+        """A version of the record. ``comment``: what the change was, in words; ``authors``: everyone who wrote it,
+        when several people wrote it together (a live editing session), besides the member who saved it."""
         ref = f"{rt.id}/{rec['id']}"
         version = (self.db.record_versions.max("version", {"type": rt.id, "id": rec["id"]}) or 0) + 1
-        self.db.record_versions.insert({"_id": f"{ref}@{version}", "type": rt.id, "id": rec["id"], "version": version,
-                                        "data": rec, "refs": _refs_in(rec), "actor": member.get("id", ""),
-                                        "run_id": run_id, "at": utcnow(),
-                                        **({"comment": comment} if comment else {})})
+        row = {"_id": f"{ref}@{version}", "type": rt.id, "id": rec["id"], "version": version, "data": rec,
+               "refs": _refs_in(rec), "actor": member.get("id", ""), "run_id": run_id, "at": utcnow()}
+        if comment and comment.strip():
+            row["comment"] = comment.strip()[:500]
+        if authors:
+            row["authors"] = list(dict.fromkeys(authors))
+        self.db.record_versions.insert(row)
         if any(f["type"] == "markdown" for f in rt.fields):
             self._retitle(rt, rec)
         self._relink(rt, rec)
@@ -1854,8 +1901,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
-                      expected_version: str | None = None, comment: str | None = None) -> dict:
-        """``_signature``: the move is made by a signature the record type allows (``moves_to``), which the signer's
+                      expected_version: str | None = None, comment: str | None = None,
+                      authors: list[str] | None = None) -> dict:
+        """``comment``: why, kept on the version (and on the move, if the record moves). ``authors``: who wrote the
+        change, when several people did (each must be a member who may write the record).
+
+        ``_signature``: the move is made by a signature the record type allows (``moves_to``), which the signer's
         role was checked for; it may make moves reserved to workflows. ``expected_version``: the version the editor
         saw; when someone changed the record since, nothing is saved (their change is never silently overwritten)."""
         rtype, rid = ref.split("/", 1)
@@ -1902,9 +1953,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
                     moved = (old, new)
             self._check_record(rt, after)
+            if authors:
+                for a in authors:
+                    if a != member.get("id") and not self.may_write(self.member(a), rtype):
+                        raise Denied(f"{a} may not write {rtype} records")
             rec = self.records.update(rtype, rid, after)  # a store replaces the record: store what was validated
-            note = comment.strip() if comment and comment.strip() else None
-            self._write_version(rt, rec, member, run_id, note)  # the version keeps the comment (who edited it, why)
+            self._write_version(rt, rec, member, run_id, comment=comment, authors=authors)
             changed = sorted(k for k in set(before) | set(rec) if k != "meta" and before.get(k) != rec.get(k))
             ev = self.track.append(member, "record.updated", ref, cause=cause, run_id=run_id,
                                    data={"changed": changed, **({"comment": note} if note and not moved else {})})
@@ -2082,6 +2136,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return wfmod.parse(UNHANDLED_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
                                                           "source": UNHANDLED_SOURCE, "author": "hub", "note": "",
                                                           "module": "", "approved_by": None, "approved_at": None}
+        from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
+        if wid == MENTION_WORKFLOW and version == 0:  # the home of a notice that someone mentioned a member
+            return wfmod.parse(MENTION_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
+                                                        "source": MENTION_SOURCE, "author": "hub", "note": "",
+                                                        "module": "", "approved_by": None, "approved_at": None}
         if version is None:
             row = self.db.workflow_versions.find_one({"workflow_id": wid, "status": "active"})
         else:

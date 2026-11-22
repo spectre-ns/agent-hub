@@ -960,7 +960,7 @@ def test_a_wiki_page_reads_as_a_page_with_its_place_in_the_tree_and_its_links(hu
     assert "<blockquote>" in page and 'class="mention"' in page          # the link to the controlled document
     assert f'href="/records/WikiPage/{pages["Clinic handbook"]["id"]}"' in page  # its parent, in the breadcrumbs
     # a page: its text leads, under one bar of what it is and what can be done; no side column, no form until Edit
-    assert '<div class="page-bar">' in page and '<article class="page-body">' in page and 'class="issue-side"' not in page
+    assert '<div class="page-bar">' in page and '<article class="page-body"' in page and 'class="issue-side"' not in page
     assert 'href="/records/WikiPage/' + oncall["id"] + '?edit=1#edit"' in page and 'class="markdown"' not in page
     editing = call(server, "GET", f"/records/WikiPage/{oncall['id']}?edit=1", sam)[1]
     assert '<form method="post" action="/records/WikiPage/' + oncall["id"] + '/edit" class="page-edit" id="edit">' in editing

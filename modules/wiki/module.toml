@@ -9,7 +9,7 @@ id = "wiki"
 name = "Wiki"
 version = "1"
 summary = "Pages of formatted text in spaces and trees, linked to records and work, checked for being out of date."
-shortcuts = ["WikiPage"]
+shortcuts = ["WikiPage", "Procedure"]
 
 [[roles]]
 id = "wiki-owner"
@@ -21,6 +21,16 @@ id = "wiki-editor"
 name = "Wiki editor"
 description = "Writes and changes wiki pages. Give it to everyone who should write in the wiki."
 
+[[roles]]
+id = "wiki-reader"
+name = "Wiki reader"
+description = "Reads the wiki. People read it already; give it to an agent that should answer when mentioned in it."
+
+[[roles]]
+id = "sop-approver"
+name = "SOP approver"
+description = "Releases SOPs for use: reads a revision someone else wrote, and releases it or returns it with why."
+
 [[data_classes]]
 id = "wiki"
 name = "Wiki pages"
@@ -29,10 +39,17 @@ description = "How the practice works: handbooks, guides, how-tos and meeting no
 [grants.everyone]   # everyone who works here reads the wiki; who writes in it holds wiki-editor
 read = ["wiki"]
 
+[grants.wiki-reader]
+read = ["wiki"]
+
 [grants.wiki-editor]
 read = ["wiki"]
 write = ["wiki"]
 
 [grants.wiki-owner]
+read = ["wiki"]
+write = ["wiki"]
+
+[grants.sop-approver]
 read = ["wiki"]
 write = ["wiki"]

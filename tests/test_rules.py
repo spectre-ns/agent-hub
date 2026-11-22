@@ -2471,7 +2471,7 @@ def test_wiki_pages_form_a_tree_and_link_each_other_by_title_even_before_the_pag
     # a page knows the pages above it and below it
     assert [a["title"] for a in hub.ancestors(amara, f"WikiPage/{oncall['id']}")] == ["Clinic handbook"]
     assert [k["title"] for k in hub.children(amara, f"WikiPage/{home['id']}")] == [
-        "Booking rules", "On-call guide", "Onboarding"]
+        "Booking rules", "On-call guide", "Onboarding", "Procedures"]
 
 
 def test_a_wiki_page_never_sits_under_itself(wiki):
@@ -2781,3 +2781,107 @@ def test_a_record_type_stored_before_a_stricter_check_is_set_aside_not_a_failure
     assert "Patient" in hub.record_types() and "initial" in hub.broken_types["Condition"]
     listed = {d["id"]: d for d in hub.definitions("type")}
     assert listed["Condition"]["definition"] is None and "initial" in listed["Condition"]["problem"]
+
+
+# ------------------------------------------------------------------------------------------- live co-editing and SOPs
+def test_two_people_editing_a_page_live_keep_both_changes_and_the_version_names_both(wiki):
+    from practicehub.live import Live
+    hub = wiki
+    lv = hub._live = Live(hub)
+    jo, noor = M(hub, "jo"), M(hub, "noor")
+    p = _page(hub, "Onboarding")
+    ref = f"WikiPage/{p['id']}"
+    text = lv.join(jo, ref, "body")["text"]
+    lv.join(noor, ref, "body")
+    n = len(text.encode("utf-16-le")) // 2
+    lv.submit(jo, ref, "body", "jo-r-000001", 0, ["Hello. ", n])
+    lv.submit(noor, ref, "body", "noor-r-00001", 0, [n, " Bye."])  # made on the same text, at once
+    lv.leave(jo, ref, "body")
+    lv.leave(noor, ref, "body")
+    assert hub.records.read("WikiPage", p["id"])["body"] == "Hello. " + text + " Bye."
+    v = hub.record_history(jo, ref)[0]
+    assert v["comment"] == f"Edited by {jo['name']} and {noor['name']}" and set(v["authors"]) == {"jo", "noor"}
+
+
+def _sop(hub, title):
+    return next(p for p in hub.records.search("Procedure", limit=None) if p["title"] == title)
+
+
+def test_a_sop_is_released_only_by_an_approver_who_did_not_write_it(wiki):
+    hub = wiki
+    noor, liam, amara = M(hub, "noor"), M(hub, "dr-liam"), M(hub, "dr-amara")
+    sop = hub.create_record(noor, "Procedure", {"title": "Sharps", "number": "SOP-090", "owner": "noor",
+                                                "body": "Use the yellow bin."})
+    ref = f"Procedure/{sop['id']}"
+    with pytest.raises(Invalid):  # what changed is said first
+        hub.update_record(noor, ref, {"status": "in-review"})
+    # dr-liam writes part of it, live, with noor: he is one of its editors now
+    from practicehub.live import Live
+    lv = hub._live = Live(hub)
+    lv.join(noor, ref, "body")
+    lv.join(liam, ref, "body")
+    lv.submit(liam, ref, "body", "liam-s-0001", 0, [19, " Never recap."])
+    lv.leave(noor, ref, "body")
+    lv.leave(liam, ref, "body")
+    hub.update_record(noor, ref, {"change_summary": "First issue.", "status": "in-review"})
+    with pytest.raises(Invalid):  # locked: what the approver reads is what is released
+        hub.update_record(noor, ref, {"body": "Changed while in review."})
+    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release" and r["record"] == ref)
+    i = item_for(hub, run, "release")
+    with pytest.raises(Denied):  # a co-editor does not release it
+        hub.engine.claim(liam, i)
+        hub.engine.decide(liam, i, "release")
+    hub.engine.claim(amara, i)
+    hub.engine.decide(amara, i, "release")
+    rec = hub.records.read("Procedure", sop["id"])
+    today = hub.engine.now().date()
+    assert rec["status"] == "released" and rec["revision"] == 1 and rec["effective"] == today.isoformat()
+    assert rec["review_by"] == today.replace(year=today.year + 1).isoformat()
+    with pytest.raises(Invalid):
+        hub.update_record(noor, ref, {"body": "x"})
+
+
+def test_while_a_released_sop_is_revised_everyone_reads_the_released_revision(wiki):
+    hub = wiki
+    rana = M(hub, "rana")
+    sop = _sop(hub, "Hand hygiene")
+    ref = f"Procedure/{sop['id']}"
+    released = sop["body"]
+    hub.update_record(rana, ref, {"status": "draft"}, comment="the poster changed")  # Revise
+    rec = hub.records.read("Procedure", sop["id"])
+    assert rec["status"] == "draft" and hub.record_history(rana, ref)[0]["comment"] == "the poster changed"
+    hub.update_record(rana, ref, {"body": released + "\n\nNew poster."})
+    used = hub.in_use_version(M(hub, "jo"), ref)
+    assert used["data"]["body"] == released and used["data"]["revision"] == 2
+
+
+def test_a_returned_sop_says_why_and_goes_back_to_its_authors(wiki):
+    hub = wiki
+    amara = M(hub, "dr-amara")
+    sop = _sop(hub, "Cleaning the treatment rooms")
+    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release")
+    i = item_for(hub, run, "release")
+    hub.engine.claim(amara, i)
+    hub.engine.decide(amara, i, "return", "Say which detergent.")
+    rec = hub.records.read("Procedure", sop["id"])
+    assert rec["status"] == "draft" and rec["returned_because"] == "Say which detergent."
+    assert not rec.get("revision")
+
+
+def test_an_agent_is_mentioned_only_where_it_may_read_and_never_changes_the_text_itself(wiki):
+    """Rule: a mention hands an agent only what its grants let it read; what it proposes is a suggestion a person
+    accepts or rejects (tests/test_mentions.py has the whole of it)."""
+    hub = wiki
+    from practicehub.hub import member_ref
+    from practicehub.live import Live
+    lv = hub._live = Live(hub)
+    p = next(r for r in hub.records.search("WikiPage", limit=None) if r["title"] == "Backups")
+    ref, jo = f"WikiPage/{p['id']}", M(hub, "jo")
+    with pytest.raises(Invalid):
+        lv.comment(jo, ref, "@scribe-agent please look")
+    hub.authz.write([("role:wiki-reader", "assignee", member_ref("scribe-agent"))])
+    c = lv.comment(jo, ref, "@scribe-agent please look", quote="IT only")
+    s = lv.suggest(M(hub, "scribe-agent"), ref, c["id"], "body", "IT only", "nobody")["replies"][-1]
+    assert hub.records.read("WikiPage", p["id"])["body"] == p["body"]
+    with pytest.raises(Denied):
+        lv.decide_suggestion(M(hub, "scribe-agent"), ref, c["id"], s["id"], True)

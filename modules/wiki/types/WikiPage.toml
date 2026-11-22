@@ -23,7 +23,7 @@ max_length = 200
 name = "parent"
 label = "Under"
 type = "reference"
-target = ["WikiPage"]
+target = ["WikiPage", "Procedure"]
 rel = "parent"
 help = "the page this one sits under; leave it empty to start a new space"
 
@@ -31,6 +31,7 @@ help = "the page this one sits under; leave it empty to start a new space"
 name = "body"
 label = "Page"
 type = "markdown"
+live = true             # several people write it at once, on the page itself
 
 [[field]]
 name = "labels"

@@ -298,6 +298,65 @@ The wiki rests on three core features that any module can use:
     links to its practitioner, and the patient's page shows its visits from the other side.
 - **Links written in the text**: they become links like a reference field's, including links to a page created after
   the text that named it.
+- **Trees of several types:** a parent field may point at more than one type (`target = ["WikiPage", "Procedure"]`).
+  The types are then one tree, with one navigator, and the page of each says what kind of record its children are.
+
+### Writing together
+
+A markdown field with `live = true` is edited by several people at once, on the page itself.
+
+- **Who:** whoever may write the record edits it. The check runs on every change, so a grant taken away stops the next
+  keystroke. Whoever may only read it sees "Jo is editing" and the text as it is typed. A locked state refuses edits.
+- **Saving:** the record changes only at a checkpoint: when the last editor leaves, after two quiet minutes, or on
+  Done. Each checkpoint is one version whose comment names its editors ("Edited by Jo and Noor"). All of them count
+  as its authors, so a review that is "not by the record's editors" excludes each of them.
+- **Changes made elsewhere:** a change saved some other way while people are editing is merged in, not lost. This
+  covers a form, an import or a workflow.
+- **Comments:** anyone who may read the page may comment on it. There is no separate grant, because a comment changes
+  nothing the record says. A comment is made on words selected on the page, or on the whole page. It stays with its
+  words while they are there; once they are gone, it shows as "on text that was removed". A thread is resolved by the
+  person who started it, or by someone who may change the page. An `@id` in a comment records a mention.
+- **History:** any two versions can be compared word by word. "Restore" makes an old version's text the page's text
+  again, as a new version.
+- **Editor:**
+  - A `/` menu offers headings, lists, checklists, tables, code, callouts and links to pages.
+  - Markdown shortcuts work as you type: `[] ` starts a checklist item, a code fence closes itself, and Enter continues
+    a list.
+  - A paste keeps only what Markdown can say.
+- **Markdown:** the text may have checklists (`- [ ] to do`, `- [x] done`) and callouts (`> [!note]`, `tip`,
+  `warning`, `important`).
+
+The merging is operational transformation (`practicehub/ot.py`, mirrored in the page script) around one ordered log per
+field. The server keeps the order and transforms each change past those made since its sender last heard.
+
+### Mentions: people and agents
+
+Write `@` in a page or a comment and pick a member: people first, then agents (marked *agent*). The mention is kept as
+that member's reference with the record, the passage and the thread (`practicehub/mentions.py`; it knows nothing of
+wikis, so any record with text can use it). The member gets a notice in their inbox; an agent finds it in
+`/api/inbox`, reads what it was asked with `GET /api/items/<item>/context` (the record, the passage and the thread,
+asked again as that agent: only what its grants let it read), and answers with its own token:
+`POST /api/mentions/<id>/reply {"body"}`, or `POST /api/mentions/<id>/suggest {"field", "find", "text", "body"}` to
+propose a change. Its words show in the thread marked as an agent's; a suggestion changes nothing until a person who
+may change the record accepts it (saved as their change, "Accepted a suggestion from …") or rejects it. An agent that
+may not read the record is not offered in the list as one to pick, and a comment naming it is refused with why. Give an
+agent the wiki's `wiki-reader` role to let it answer there. The track has `mention.created`, `mention.refused`,
+`mention.answered` and `suggestion.proposed`/`accepted`/`rejected`. An agent never releases a SOP (the release is a
+person's signature) and never signs.
+
+### Released documents (SOPs)
+
+A lifecycle with `in_use = "<state>"` keeps a record's approved revision in use while a new one is written.
+
+- **Readers:** someone who may only read the record reads the version in use, under a banner saying a new revision is
+  being written.
+- **Writers:** someone who may write it switches between the version in use and the draft.
+- **Read and sign:** a `[[signature]]` with `readers = true` asks every reader to read and sign the version they read.
+  Its page says whether you signed it, and tells writers who has.
+- **Workflow dates:** a workflow template can count days, months and years (`{{run.today + 1y}}`,
+  `{{record.effective + 30d}}`). A scheduled workflow's `where` can use `run.today`.
+- **The wiki's SOPs:** each SOP is released by an approver who did not write it, and comes back for review a year after
+  it is released.
 
 ## Layout
 

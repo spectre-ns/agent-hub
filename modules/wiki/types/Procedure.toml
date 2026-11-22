@@ -1,0 +1,140 @@
+# A standard operating procedure: a wiki page under release control. It is written like any page (together, live),
+# then sent for release review; a SOP approver who did not write this revision releases it, or returns it with why.
+# While a released SOP is revised, everyone keeps reading the released revision. Staff sign that they have read it.
+id = "Procedure"
+label = "SOP"
+plural = "SOPs"
+data_class = "wiki"
+title = "{number} {title}"
+parent = "parent"
+flag = "status"
+date = "effective"
+order = 21
+summary = "A standard operating procedure: a page released by an approver, revised under control, read and signed."
+layout = "page"
+
+[navigator]
+tops = "Spaces"
+hide = ["retired"]
+
+[[field]]
+name = "title"
+required = true
+max_length = 200
+
+[[field]]
+name = "number"
+label = "SOP number"
+required = true
+max_length = 40
+help = "e.g. SOP-014; each SOP has its own"
+
+[[field]]
+name = "parent"
+label = "Under"
+type = "reference"
+target = ["WikiPage", "Procedure"]
+rel = "parent"
+help = "the wiki page it sits under"
+
+[[field]]
+name = "body"
+label = "Procedure"
+type = "markdown"
+live = true
+
+[[field]]
+name = "owner"
+type = "member"
+required = true
+help = "who keeps the SOP current: they get its periodic review"
+
+[[field]]
+name = "approver"
+label = "Approved by"
+help = "who releases it (a SOP approver who did not write this revision); a note for readers"
+advanced = true
+
+[[field]]
+name = "change_summary"
+label = "What changed"
+type = "text"
+help = "what this revision changes, for the approver and for readers; needed to send it for review"
+
+[[field]]
+name = "revision"
+type = "number"
+by = "workflow"
+help = "the released revision; a release counts it up"
+
+[[field]]
+name = "effective"
+label = "Effective from"
+type = "date"
+by = "workflow"
+
+[[field]]
+name = "review_by"
+label = "Review by"
+type = "date"
+by = "workflow"
+
+[[field]]
+name = "returned_because"
+label = "Returned because"
+type = "text"
+by = "workflow"
+
+[[field]]
+name = "review_asked"
+label = "Review asked for"
+type = "date"
+by = "workflow"
+show = false
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "in-review", "released", "retired"]
+
+[lifecycle]
+field = "status"
+initial = "draft"
+in_use = "released"     # while a released SOP is revised, everyone keeps reading the released revision
+locked = ["in-review", "released", "retired"]   # what the approver read is what is released
+abandoned = { "in-review" = "draft" }           # a review that is cancelled hands it back to its authors
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "in-review"
+label = "Send for release review"
+require = ["change_summary"]
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "released"
+by = "workflow"         # only a signed release gets here
+label = "Release"
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "draft"
+by = "workflow"
+label = "Return to the authors"
+
+[[lifecycle.transition]]
+from = ["released"]
+to = "draft"
+label = "Revise"
+comment = true
+
+[[lifecycle.transition]]
+from = ["released"]
+to = "retired"
+label = "Retire"
+comment = true
+
+[[signature]]
+meaning = "I have read and understood this SOP"
+states = ["released"]
+readers = true           # its page asks everyone who reads it to read and sign it

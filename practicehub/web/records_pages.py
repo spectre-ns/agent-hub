@@ -1110,7 +1110,7 @@ class RecordPages:
                     if editable and not editing else "")
         rail: list = []
         if tab == "details":
-            used = hub.in_use_version(me, ref)
+            used = hub.in_use_version(me, ref) if not is_page else None  # a page says so in its banner
             if used:
                 d = used["data"]
                 body = "".join(f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, d)}</td></tr>"
@@ -1152,7 +1152,8 @@ class RecordPages:
                        f'Add {e(a_an(self._lower(rt.label)))} under this one</a>' if may_write else "")
                 main.append(f"<section class='children'><h2>Under this {e(self._lower(rt.label))}{add}</h2>" + (
                     "<ul class='plain'>" + "".join(
-                        f'<li><a href="{e(self.record_href(f"{rtype}/{k["id"]}"))}">{e(hub.title(k))}</a></li>'
+                        f'<li><a href="{e(self.record_href(f"{k["resourceType"]}/{k["id"]}"))}">{e(hub.title(k))}</a>'
+                        f'{self._kind_badge(rtype, k)}</li>'
                         for k in kids) + "</ul>" if kids else "<p class='muted'>Nothing yet.</p>") + "</section>")
             if not editing:  # what is part of it, then what links to it
                 sections, rail, hidden = self.owner_sections(me, ref) if not is_page else ("", [], 0)
@@ -1206,9 +1207,11 @@ class RecordPages:
         if not nav and tab == "details" and not editing and len(rail) >= 3:  # a few sections need no column
             nav = self.owner_rail(title, rail, label=rt.label)
         if is_page:
-            body = refused + self._page_body(req, rt, shown if editing else rec, main, prose, st, tab, editing,
-                                                      url, ver, moves_html, edit_btn, auto, sigs, cur, may_write)
-            above = [(self.record_href(f"{rtype}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
+            lp = self.live_parts(req, rt, rec, ref, st, tab, may_write, locked) if not editing else {}
+            body = refused + self._page_body(req, rt, shown if editing else lp.get("rec", rec), main, prose, st, tab,
+                                             editing, url, ver, moves_html, lp.get("edit") or edit_btn, auto, sigs,
+                                             cur, may_write, live=lp)
+            above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.title(a)) for a in hub.ancestors(me, ref)]
             return self.layout(req, hub.title(rec), body, heading=not editing,
                                crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
                                                       (None, hub.title(rec))], subnav=nav, above=banner)
@@ -1240,7 +1243,7 @@ class RecordPages:
                            actions=edit_btn, above=banner)
 
     def _page_body(self, req, rt, rec, main, prose, st, tab, editing, url, ver, moves_html, edit_btn, auto, sigs, cur,
-                   may_write) -> str:
+                   may_write, live=None) -> str:
         """A type with ``layout = "page"``: its formatted text is the page. Above it, one bar holds what it is (status,
         its other fields, version, signatures) and what can be done (the sections, moves, Edit). Edit turns the page
         itself into its editor, where it stood, with Save and Cancel in the bar."""
@@ -1283,11 +1286,14 @@ class RecordPages:
                f'<div class="page-controls">{controls}</div></div>')
         if not editing:
             rest = main[1:]
+            live = live or {}
             if tab == "details":  # its text is the page; the other fields are in the bar
-                rest[1] = '<article class="page-body">' + "".join(
+                rest[1] = f'<article class="page-body"{live.get("article", "")}>' + "".join(
                     (f"<h2 class='prose-label'>{e(f['label'])}</h2>" if len(prose) > 1 else "")
                     + self._value_html(f, rec) for f in prose) + "</article>"
-            return bar + "".join(rest)
+                if live.get("side"):  # its comments beside it
+                    rest[1] = f'<div class="page-with-side">{rest[1]}{live["side"]}</div>'
+            return bar + live.get("banner", "") + "".join(rest) + live.get("after", "")
         fields = self._editable(rt)
         title_f = next((f for f in fields if f["name"] == "title"), None)
         texts = [f for f in fields if f["type"] == "markdown"]
@@ -1307,11 +1313,13 @@ class RecordPages:
         if not nav:
             return ""
         hub, label = self.hub, nav["label"]
-        link = lambda r: f"{rtype}/{r['id']}"
+        rtype = nav["type"]
+        link = lambda r: f"{r['resourceType']}/{r['id']}"
 
         def a(r, cls=""):
             here = ' aria-current="page"' if link(r) == ref else ""
-            return f'<a class="{cls}" href="{e(self.record_href(link(r)))}"{here}>{e(hub.title(r))}</a>'
+            return (f'<a class="{cls}" href="{e(self.record_href(link(r)))}"{here}>{e(hub.title(r))}'
+                    f'{self._kind_badge(rtype, r)}</a>')
         tops = "".join(f'<li>{a(r, "top")}</li>' for r in nav["tops"]) or '<li class="muted">None yet</li>'
         top = next((r for r in nav["tops"] if link(r) == nav["top"]), None)
         rows = nav["tree"]
@@ -1334,11 +1342,22 @@ class RecordPages:
             inner, _ = branch(0, 0)
             add = (f'<a class="btn subtle add" href="/records/{e(rtype)}/new?parent={e(urllib.parse.quote(nav["top"]))}" data-modal>'
                    f'+ Add under {e(hub.title(top))}</a>' if hub.may_write(me, rtype) else "")
+            add += "".join(f'<a class="btn subtle add" href="/records/{e(t)}/new?parent={e(urllib.parse.quote(nav["top"]))}"'
+                           f' data-modal>+ New {e(hub.record_type(t).label)}</a>'
+                           for t in hub.tree_types(rtype)[1:] if hub.may_write(me, t))
             pages = (f'<div class="sec">{e(hub.title(top))}</div>{add}'
                      + (f'<ul class="pagetree">{inner}</ul>' if inner else '<p class="muted">No pages under it yet.</p>'))
         return (f'<nav class="subnav" aria-label="{e(label)} and pages"><details class="spaces" '
                 f'{"" if top is not None else "open"}><summary class="sec">{e(label)}</summary><ul class="tops">{tops}'
                 f'</ul></details>{pages}</nav>')
+
+    def _kind_badge(self, rtype: str, r: dict) -> str:
+        """In a tree of several types, a record of another type than the tree's carries its type's name."""
+        t = r.get("resourceType")
+        if not t or t == rtype:
+            return ""
+        other = self.hub.record_type(t)
+        return f' <span class="kind-badge">{e(other.label if other else t)}</span>' if other else ""
 
     def _signatures_panel(self, me, rt, rec, ref, st, kept: dict | None = None, error: Exception | None = None) -> str:
         kept = kept or {}
@@ -1418,8 +1437,10 @@ class RecordPages:
                        != schema.get(prev, schema.locate(prev, f["path"], f.get("with")))]
             via = f' · <a href="/runs/{e(v["run_id"])}">in a run</a>' if v.get("run_id") else ""
             note = f'<br><span class="muted">{e(v["comment"])}</span>' if v.get("comment") else ""
+            cmp_ = (f' <a href="/records/{e(rt.id)}/{e(ref.split("/", 1)[1])}/compare?a={versions[i + 1]["version"]}'
+                    f'&amp;b={v["version"]}">Compare</a>') if i + 1 < len(versions) else ""
             rows.append(f'<tr><td>v{v["version"]}</td><td>{self.who(v["actor"]) if v["actor"] else ""}{via}</td>'
-                        f'<td>{e(", ".join(changed) or "—")}{note}</td><td class="muted">{e(v["at"][:16].replace("T", " "))}</td>'
+                        f'<td>{e(", ".join(changed) or "—")}{note}{cmp_}</td><td class="muted">{e(v["at"][:16].replace("T", " "))}</td>'
                         f'<td><details><summary>record</summary><pre>{e(json.dumps(v["data"], indent=1))}</pre></details></td></tr>')
         out = ("<div class='tablewrap'><table><tr><th>Version</th><th>By</th><th>Changed</th><th>When</th><th><span class='visually-hidden'>Record</span></th></tr>"
                + "".join(rows) + "</table></div>") if rows else "<p class='muted'>No history.</p>"

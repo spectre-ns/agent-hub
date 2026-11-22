@@ -31,6 +31,7 @@ from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
 from .office_pages import OfficePages
+from .live_pages import LivePages
 from .records_pages import Download, RecordPages, a_an
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
@@ -65,7 +66,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(RecordPages, DefinitionPages, OfficePages):
+class App(RecordPages, DefinitionPages, OfficePages, LivePages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -162,6 +163,7 @@ class App(RecordPages, DefinitionPages, OfficePages):
         R("GET", r"/outbox", self.page_outbox)
         R("POST", r"/outbox/(?P<oid>\d+)/delivered", self.post_outbox_delivered)
         R("GET", r"/schedule", self.page_schedule)
+        self.live_routes(R)
         self.record_routes(R)
         self.definition_routes(R)
         self.office_routes(R)
@@ -3029,6 +3031,8 @@ def serve(hub, host: str = "127.0.0.1", port: int = 8200, *, dev: bool = False, 
         side = ThreadingHTTPServer((extra, port), make_handler(app, only="/wopi/"))
         threading.Thread(target=side.serve_forever, daemon=True).start()
         print(f"WOPI (Collabora) on http://{extra}:{port}/wopi/")
+    from ..live import live_of
+    live_of(hub).start_sweeper()  # saves idle live sessions and lets go of editors who closed their tab
     print(f"Practice Hub on http://{host}:{port}/" + (" (dev sign-in on)" if dev else ""))
     try:
         httpd.serve_forever()
