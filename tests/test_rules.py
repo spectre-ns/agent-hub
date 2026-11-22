@@ -3228,7 +3228,7 @@ def test_the_clinic_packs_types_are_fhir_resources(hub):
 def test_a_record_exports_as_fhir_json_that_round_trips(hub):
     from practicehub import export
     amara = M(hub, "dr-amara")
-    rec = hub.records.search("MedicationRequest")[0]
+    rec = next(r for r in hub.records.search("MedicationRequest") if not hub.restrictions.restricted(r))  # no directive
     x = export.record(hub, amara, f"MedicationRequest/{rec['id']}", "fhir")
     assert x.content_type == "application/fhir+json" and x.filename == f"MedicationRequest-{rec['id']}.json"
     res = json.loads(x.body)

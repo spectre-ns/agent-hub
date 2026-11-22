@@ -1719,7 +1719,7 @@ def _odf_ok(body, mimetype):
 
 def test_a_record_exports_from_the_api_and_its_page(server, hub):
     tok = token(hub, "dr-amara")
-    rec = hub.records.search("MedicationRequest")[0]
+    rec = next(r for r in hub.records.search("MedicationRequest") if not hub.restrictions.restricted(r))  # no directive
     st, h, body = fetch(server, f"/api/records/MedicationRequest/{rec['id']}?format=fhir", tok)
     assert st == 200 and h["content-type"] == "application/fhir+json"
     assert f'filename="MedicationRequest-{rec["id"]}.json"' in h["content-disposition"]
