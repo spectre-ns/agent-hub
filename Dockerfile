@@ -1,6 +1,10 @@
 # Practice Hub: the standard library and pymongo (its database is MongoDB), so the image is Python and the source.
 FROM python:3.12-slim
 
+# the tz database: the practice's "now" and "today" are in its own time zone ([practice] timezone, via zoneinfo), not
+# the container's (UTC). The hub refuses to open without it rather than date notes in the wrong day.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/* \
+    && python -c "import zoneinfo; zoneinfo.ZoneInfo('America/Halifax')"
 RUN useradd --create-home --uid 10001 hub
 WORKDIR /app
 COPY pyproject.toml ./

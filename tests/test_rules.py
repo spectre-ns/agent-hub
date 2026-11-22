@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import M, item_for, quiet, run_of
+from conftest import M, item_for, quiet, run_of, snapshot_onto
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid
 from practicehub.models import ModelError, ModelGateway
@@ -55,7 +55,7 @@ def _a_third_policy_owner(hub):
 def test_disabling_a_sponsor_disables_their_agents(hub):
     _a_third_policy_owner(hub)
     rana = M(hub, "rana")
-    hub.set_status(rana, "dr-amara", "disabled", "on leave")
+    hub.set_status(rana, "dr-amara", "disabled", "on leave", stop="all")
     assert hub.member("scribe-agent")["status"] == "disabled"
     assert hub.member("clinical-admin-agent")["status"] == "disabled"
     assert hub.member("billing-agent")["status"] == "active"
@@ -526,7 +526,8 @@ def test_an_injected_prompt_goes_only_to_agents_given_it(hub):
     agent = M(hub, "clinical-admin-agent")
     assert hub.engine.eligibility(agent, item) == (True, "")
     rana = M(hub, "rana")
-    hub.update_agent_profile(rana, agent["id"], {"skills": ["renewal-prep", "lab-triage", "referral-letter"]})
+    out = hub.propose_agent_profile(rana, agent["id"], {"skills": ["renewal-prep", "lab-triage", "referral-letter"]})
+    hub.approve_agent_profile(M(hub, "dr-amara"), agent["id"], out["version"])
     ok, why = hub.engine.eligibility(M(hub, "clinical-admin-agent"), item)
     assert not ok and "patient-reply-draft" in why
 
@@ -626,11 +627,12 @@ def install(hub, name, by="rana"):
 @pytest.fixture
 def quality(hub):
     """The demo practice with document control and quality installed, and their demo data."""
-    rana = M(hub, "rana")
-    install(hub, "dms")
-    install(hub, "qms")
-    for m in hub.pack.modules:
-        m.module.demo(hub)
+    def build(hub):
+        install(hub, "dms")
+        install(hub, "qms")
+        for m in hub.pack.modules:
+            m.module.demo(hub)
+    snapshot_onto(hub, "rules:quality", build, modules=["dms", "qms"])
     return hub
 
 
@@ -1719,7 +1721,7 @@ def test_when_someone_leaves_their_work_and_their_agents_approvals_are_not_stran
     only_agents = [r for r in M(hub, "clinical-admin-agent")["roles"]
                    if all(x["sponsor"] == "dr-amara" for x in hub.active_holders(r))]
     _a_third_policy_owner(hub)
-    out = hub.set_status(M(hub, "rana"), "dr-amara", "disabled", "left the practice")
+    out = hub.set_status(M(hub, "rana"), "dr-amara", "disabled", "left the practice", stop="all")
     assert set(only_agents) <= set(out["roles_left_empty"])
     assert task in out["released"]
     notes = hub.db.items.find({"kind": "notice", "status": "open", "title": {"$regex": "^Back in the queue"}})
@@ -1740,7 +1742,7 @@ def test_an_overdue_item_whose_escalation_role_is_empty_reaches_someone(hub):
     iid = item_for(hub, run, "clinician")
     _a_third_policy_owner(hub)
     for mid in ("dr-liam", "dr-amara"):
-        hub.set_status(M(hub, "rana"), mid, "disabled", "away")
+        hub.set_status(M(hub, "rana"), mid, "disabled", "away", stop="all")
     assert not hub.active_holders("physician", persons_only=True)
     hub.db.items.set(iid, {"due_at": "2000-01-01T00:00:00Z"})
     hub.engine.tick(datetime.now(timezone.utc) + timedelta(minutes=1))
@@ -1760,7 +1762,7 @@ def test_a_practice_takes_on_and_replaces_people_without_code(hub):
     hub.approve_roles(amara, "dr-chen")
     assert "medical-director" in hub.member("dr-chen")["roles"] and hub.is_policy_owner(hub.member("dr-chen"))
     agent = next(m["id"] for m in hub.members("agent") if m["sponsor"] == "dr-amara")
-    hub.set_status(rana, "dr-amara", "disabled", "left the practice")
+    hub.set_status(rana, "dr-amara", "disabled", "left the practice", stop="all")
     hub.set_sponsor(rana, agent, "dr-chen")
     assert hub.set_status(rana, agent, "active")["status"] == "active"
 
@@ -2071,7 +2073,7 @@ def test_the_practice_keeps_two_policy_owners(hub):
     rana = M(hub, "rana")
     assert hub.policy_owner_count() == 2
     with pytest.raises(Invalid):
-        hub.set_status(rana, "dr-amara", "disabled", "leaving")
+        hub.set_status(rana, "dr-amara", "disabled", "leaving", stop="all")
     with pytest.raises(Invalid):
         hub.set_roles(rana, "dr-amara", ["physician"])
     assert hub.policy_owner_count() == 2
@@ -2105,16 +2107,125 @@ def test_giving_an_agent_restricted_data_waits_for_a_second_policy_owner(hub):
 
 def test_raising_an_agents_max_risk_waits_for_a_second_policy_owner(hub):
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    hub.update_agent_profile(rana, "intake-agent", {"max_risk": "high"})
+    v = hub.propose_agent_profile(rana, "intake-agent", {"max_risk": "high"})["version"]
     assert M(hub, "intake-agent")["profile"]["max_risk"] == "low"
-    assert hub.role_request("intake-agent")["max_risk"] == "high"
     with pytest.raises(Denied):
-        hub.approve_roles(rana, "intake-agent")
-    hub.approve_roles(amara, "intake-agent")
+        hub.approve_agent_profile(rana, "intake-agent", v)
+    hub.approve_agent_profile(amara, "intake-agent", v)
     assert M(hub, "intake-agent")["profile"]["max_risk"] == "high"
-    hub.update_agent_profile(rana, "intake-agent", {"max_risk": "low"})  # lowering applies at once
-    assert M(hub, "intake-agent")["profile"]["max_risk"] == "low"
 
+
+# ------------------------------------------------------------------------- someone always manages members
+def test_the_practice_always_keeps_someone_who_manages_members(hub):
+    """The practice manager is the only member admin: the hub says so, refuses to leave nobody who manages members,
+    and two policy owners together can give the role to someone else and then switch her off."""
+    _a_third_policy_owner(hub)
+    amara, deputy, rana = M(hub, "dr-amara"), M(hub, "deputy"), M(hub, "rana")
+    assert [m["id"] for m in hub.member_admins()] == ["rana"]
+    assert "Rana" in hub.member_admin_warning() and "only person who manages members" in hub.member_admin_warning()
+    with pytest.raises(Denied):  # a policy owner alone does not switch anyone off
+        hub.set_status(amara, "rana", "disabled", "left")
+    # two policy owners ask and approve; the hub refuses to leave nobody who manages members
+    hub.request_switch_off(amara, "rana", "left the practice", hand_over={"portal": "dr-amara", "lab-feed": "dr-amara"})
+    with pytest.raises(Denied):
+        hub.approve_switch_off(amara, "rana")  # who asked does not approve
+    with pytest.raises(Invalid, match="nobody who manages members"):
+        hub.approve_switch_off(deputy, "rana")
+    assert M(hub, "rana")["status"] == "active"
+    # the way back: two policy owners give someone else a role that manages members
+    hub.set_roles(amara, "jo", [*M(hub, "jo")["roles"], "practice-manager"])
+    assert "practice-manager" not in M(hub, "jo")["roles"]
+    with pytest.raises(Denied):
+        hub.approve_roles(amara, "jo")
+    hub.approve_roles(deputy, "jo")
+    assert {m["id"] for m in hub.member_admins()} == {"rana", "jo"} and hub.member_admin_warning() is None
+    out = hub.approve_switch_off(deputy, "rana")
+    assert out["status"] == "disabled" and hub.off_request("rana") is None
+    assert M(hub, "lab-feed")["status"] == "active" and M(hub, "lab-feed")["sponsor"] == "dr-amara"
+    ev = hub.db.events.find_one({"action": "member.disabled", "subject": "member:rana"})
+    assert ev["actor"] == "deputy" and ev["data"]["asked_by"] == "dr-amara"
+    assert ev["data"]["handed_over"] == {"portal": "dr-amara", "lab-feed": "dr-amara"}
+    assert "Jo" in hub.member_admin_warning()
+    # taking the role from the last one who manages members is refused, whoever asks
+    hub.set_roles(amara, "jo", ["front-desk"])  # asked by a policy owner: it waits
+    assert "practice-manager" in M(hub, "jo")["roles"]
+    with pytest.raises(Invalid, match="nobody who manages members"):
+        hub.approve_roles(deputy, "jo")
+    hub.withdraw_roles(amara, "jo")
+    hub.request_switch_off(amara, "jo", "leaving", stop="all")
+    with pytest.raises(Invalid, match="nobody who manages members"):
+        hub.approve_switch_off(deputy, "jo")
+    assert M(hub, "jo")["status"] == "active" and M(hub, "intake-agent")["status"] == "active"
+
+
+def test_switching_off_a_sponsor_asks_what_becomes_of_their_agents(hub):
+    """Nothing stops silently: each agent or service a person sponsors is handed to a new sponsor, or stops because
+    someone chose that, and the track says which."""
+    _a_third_policy_owner(hub)
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    token = hub.issue_token(amara, "scribe-agent", "dictation")
+    deps = {d["id"]: d for d in hub.dependents("dr-amara")}
+    assert set(deps) == {"scribe-agent", "clinical-admin-agent"} and deps["scribe-agent"]["credentials"] == 1
+    assert "documentation-assistant" in deps["scribe-agent"]["only_holder_of"]
+    with pytest.raises(Invalid) as exc:
+        hub.set_status(rana, "dr-amara", "disabled", "left the practice")
+    assert any("Scribe" in p or "scribe" in p for p in exc.value.problems)
+    assert M(hub, "dr-amara")["status"] == "active" and hub.authenticate(token)
+    with pytest.raises(Invalid):  # the new sponsor is someone staying
+        hub.set_status(rana, "dr-amara", "disabled", "left", hand_over={"scribe-agent": "dr-amara"},
+                       stop=["clinical-admin-agent"])
+    with pytest.raises(Invalid):  # every one is decided
+        hub.set_status(rana, "dr-amara", "disabled", "left", hand_over={"scribe-agent": "dr-liam"})
+    out = hub.set_status(rana, "dr-amara", "disabled", "left the practice", hand_over={"scribe-agent": "dr-liam"},
+                         stop=["clinical-admin-agent"])
+    assert out["status"] == "disabled"
+    scribe = M(hub, "scribe-agent")
+    assert scribe["status"] == "active" and scribe["sponsor"] == "dr-liam"
+    assert hub.authenticate(token)["id"] == "scribe-agent"  # handed over: the dictation feed keeps working
+    assert M(hub, "clinical-admin-agent")["status"] == "disabled"
+    ev = hub.db.events.find_one({"action": "member.disabled", "subject": "member:dr-amara"})
+    assert ev["data"]["handed_over"] == {"scribe-agent": "dr-liam"} and ev["data"]["stopped"] == ["clinical-admin-agent"]
+    moved = hub.db.events.find_one({"action": "member.sponsor_changed", "subject": "member:scribe-agent"})
+    assert moved["data"]["to"] == "dr-liam" and "switched off" in moved["data"]["reason"]
+    stopped = hub.db.events.find_one({"action": "member.disabled", "subject": "member:clinical-admin-agent"})
+    assert "chose that it stops" in stopped["data"]["reason"]
+
+
+def test_an_agents_profile_changes_only_through_a_reviewed_version(hub):
+    """An agent's model, skills and risk are a versioned record: proposed, approved by a second person who is a
+    policy owner, then in force; every version is kept and the approval is signed."""
+    rana, amara, jo = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "jo")
+    before = M(hub, "scribe-agent")["profile"]
+    assert [v["status"] for v in hub.agent_profile_versions("scribe-agent")] == ["active"]  # v1: as installed
+    out = hub.propose_agent_profile(rana, "scribe-agent", {"model": "anthropic/claude-opus-5-5"}, "a better model")
+    assert M(hub, "scribe-agent")["profile"] == before  # nothing changes at once
+    assert hub.agent_profile_proposal("scribe-agent")["version"] == out["version"]
+    with pytest.raises(Denied):
+        hub.approve_agent_profile(rana, "scribe-agent", out["version"])  # not the one who proposed it
+    with pytest.raises(Denied):
+        hub.approve_agent_profile(jo, "scribe-agent", out["version"])  # a policy owner approves
+    hub.approve_agent_profile(amara, "scribe-agent", out["version"])
+    assert M(hub, "scribe-agent")["profile"]["model"] == "anthropic/claude-opus-5-5"
+    assert [v["status"] for v in hub.agent_profile_versions("scribe-agent")] == ["active", "retired"]
+    ev = hub.db.events.find_one({"action": "agent.profile_approved", "subject": "member:scribe-agent"})
+    assert ev["signature"] and ev["data"]["asked_by"] == "rana"
+    # skills too; a newer proposal replaces one still waiting; a withdrawn one changes nothing
+    first = hub.propose_agent_profile(rana, "scribe-agent", {"skills": []})
+    second = hub.propose_agent_profile(rana, "scribe-agent", {"skills": [], "max_risk": "low"})
+    assert hub.db.agent_profile_versions.get(f"scribe-agent@{first['version']}")["status"] == "withdrawn"
+    with pytest.raises(Invalid):
+        hub.approve_agent_profile(amara, "scribe-agent", first["version"])
+    hub.withdraw_agent_profile(rana, "scribe-agent", second["version"], "not now")
+    assert M(hub, "scribe-agent")["profile"]["skills"] == before["skills"]
+    # its sponsor may propose; someone else who does not manage members may not
+    hub.propose_agent_profile(jo, "intake-agent", {"skills": ["intake-review", "slot-proposal"]})
+    with pytest.raises(Denied):
+        hub.propose_agent_profile(M(hub, "sam"), "intake-agent", {"model": "x"})
+    # a new agent may do nothing until what it asks for is approved
+    hub.add_member(rana, {"id": "helper", "kind": "agent", "name": "Helper", "sponsor": "jo", "roles": [],
+                          "profile": {"model": "standin", "max_risk": "medium", "skills": ["slot-proposal"]}})
+    assert M(hub, "helper")["profile"] == {"model": "standin", "max_risk": "low", "skills": []}
+    assert hub.agent_profile_proposal("helper")["profile"]["skills"] == ["slot-proposal"]
 
 def test_only_its_sponsor_issues_an_agents_credentials(hub):
     with pytest.raises(Denied):
@@ -2320,7 +2431,7 @@ def test_switching_a_member_off_ends_their_sessions(hub):
     hub.set_passphrase(M(hub, "jo"), "jo", "a whole new set of words", current=WORDS)
     assert hub.session_member(sess) is None  # a new passphrase ends every session
     sess = hub.start_session(hub.sign_in("jo", "a whole new set of words"))
-    hub.set_status(M(hub, "rana"), "jo", "disabled", "left")
+    hub.set_status(M(hub, "rana"), "jo", "disabled", "left", stop="all")
     assert hub.session_member(sess) is None
 
 
@@ -2814,10 +2925,9 @@ def test_a_member_is_never_booked_twice(hub):
     hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-02T09:00"))  # the cancelled time is free
 
 
-def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, monkeypatch):
-    """A practice on version 1 (Appointment and Visit apart) upgrades: each appointment becomes a visit (the visit
-    filed for it, or a new one with its id), whatever pointed at it points at the visit, none is left behind, and the
-    Appointment type is retired."""
+def _practice_on_version_1(tmp_path, monkeypatch):
+    """A practice installed on version 1 (Appointment and Visit apart), with appointments, a visit filed for one and
+    work under way about one; then version 2's files on disk, reviewed and upgraded to. Returns (state, made)."""
     import shutil
     from practicehub import pack as packmod
     from practicehub.hub import Hub
@@ -2837,29 +2947,44 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     appt = lambda status, start, why: hub.records.create("Appointment", {
         "status": status, "start": start, "minutesDuration": 15, "description": why,
         "participant": [{"actor": {"reference": pat}}, {"actor": {"reference": "Practitioner/dr-liam"}}]})
-    booked = appt("booked", "2027-03-02T09:00", "Flu shot")
+    made = {"booked": appt("booked", "2027-03-02T09:00", "Flu shot")}
     gone = appt("cancelled", "2027-03-02T09:00", "Annual physical")
-    gone = hub.records.update("Appointment", gone["id"], {**gone, "cancelationReason": {"text": "Patient sick"}})
-    seen = appt("fulfilled", "2026-11-02T10:00", "Sore throat")
-    filed = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
-                                             "appointment": [{"reference": f"Appointment/{seen['id']}"}],
-                                             "period": {"start": "2026-11-02T10:05"}})
-    note = hub.records.create("Composition", {"status": "final", "subject": {"reference": pat}, "title": "Note",
-                                              "encounter": {"reference": f"Encounter/{filed['id']}"}})
-    walk_in = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
-                                               "period": {"start": "2026-11-03T11:00", "end": "2026-11-03T11:20"}})
-
+    made["gone"] = hub.records.update("Appointment", gone["id"], {**gone, "cancelationReason": {"text": "Patient sick"}})
+    made["seen"] = seen = appt("fulfilled", "2026-11-02T10:00", "Sore throat")
+    made["filed"] = filed = hub.records.create("Encounter", {
+        "status": "finished", "subject": {"reference": pat}, "appointment": [{"reference": f"Appointment/{seen['id']}"}],
+        "period": {"start": "2026-11-02T10:05"}})
+    made["note"] = hub.records.create("Composition", {"status": "final", "subject": {"reference": pat}, "title": "Note",
+                                                      "encounter": {"reference": f"Encounter/{filed['id']}"}})
+    made["walk_in"] = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
+                                                       "period": {"start": "2026-11-03T11:00", "end": "2026-11-03T11:20"}})
+    booked = f"Appointment/{made['booked']['id']}"  # a reminder run under way about a booking, and its work
+    hub.db.runs.insert({"_id": "r-remind", "id": "r-remind", "status": "running", "record": booked,
+                        "ctx": {"run": {"record": booked}, "input": {"visit": {"reference": booked}}}, "steps": {}})
+    hub.db.items.insert({"_id": "i-remind", "id": "i-remind", "run_id": "r-remind", "status": "open",
+                         "output": {"about": booked}})
+    hub.db.outbox.insert({"_id": 9001, "id": 9001, "status": "queued", "run_id": "r-remind", "about": booked})
+    hub.db.runs.insert({"_id": "r-old", "id": "r-old", "status": "completed", "record": booked, "ctx": {}, "steps": {}})
     for name in ("Appointment.toml", "Encounter.toml"):  # version 2 arrives
         (copy / "types" / name).unlink()
     shutil.copy(src / "types" / "Encounter.toml", copy / "types" / "Encounter.toml")
     hub = Hub(state)
     hub.review_pack(M(hub, "rana"))
     hub.upgrade_pack(M(hub, "dr-amara"))
+    return state, made
+
+
+def _approve_the_new_visit(state):
+    from practicehub.hub import Hub
     hub = Hub(state)
     for row in hub.db.type_versions.find({"type_id": "Encounter", "status": "proposed"}):  # its second owner
         hub.approve(M(hub, "rana"), "type", "Encounter", row["version"])
-    hub = Hub(state)
 
+
+def _converted_as_version_2_says(state, made):
+    from practicehub.hub import Hub
+    hub = Hub(state)
+    booked, gone, seen, filed, walk_in = (made[k] for k in ("booked", "gone", "seen", "filed", "walk_in"))
     assert hub.records.search("Appointment", limit=None) == []
     assert hub.record_type("Appointment") is None and hub.of_base("Booking") == ["Encounter"]
     visits = {v["id"]: v for v in hub.records.search("Encounter", limit=None)}
@@ -2872,12 +2997,68 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     assert seen["id"] not in visits  # the appointment a visit was filed for is that visit
     assert visits[filed["id"]]["plannedStartDate"] == "2026-11-02T10:00"
     assert visits[filed["id"]]["period"]["start"] == "2026-11-02T10:05" and "appointment" not in visits[filed["id"]]
+    assert visits[filed["id"]]["reasonCode"][0]["text"] == "Sore throat"  # the visit said no reason: the booking's
     assert visits[walk_in["id"]]["plannedStartDate"] == "2026-11-03T11:00"
-    assert hub.records.read("Composition", note["id"])["encounter"]["reference"] == f"Encounter/{filed['id']}"
+    assert hub.records.read("Composition", made["note"]["id"])["encounter"]["reference"] == f"Encounter/{filed['id']}"
     assert all(v.get("plannedStartDate") for v in visits.values())
+    # work under way names the visit now; finished work keeps what it named
+    now = f"Encounter/{booked['id']}"
+    run = hub.db.runs.get("r-remind")
+    assert run["record"] == now and run["ctx"]["run"]["record"] == now and run["ctx"]["input"]["visit"]["reference"] == now
+    assert hub.db.items.get("i-remind")["output"]["about"] == now and hub.db.outbox.get(9001)["about"] == now
+    assert hub.db.runs.get("r-old")["record"] == f"Appointment/{booked['id']}"
     assert hub.track.verify()["ok"]
     from practicehub.engine import bookings
     assert {b["record"]["id"] for b in bookings(hub)} == {booked["id"], filed["id"], walk_in["id"]}  # not cancelled
+    assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")
+    assert not hub.db.get_setting("pack_upgrade_progress")
+    return hub
+
+
+def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, monkeypatch):
+    """A practice on version 1 (Appointment and Visit apart) upgrades: each appointment becomes a visit (the visit
+    filed for it, or a new one with its id), whatever pointed at it points at the visit (open runs, items and queued
+    messages too), the booking's reason is kept on a visit that had none, none is left behind, and the Appointment
+    type is retired."""
+    state, made = _practice_on_version_1(tmp_path, monkeypatch)
+    _approve_the_new_visit(state)
+    hub = _converted_as_version_2_says(state, made)
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    assert done["data"]["appointments_now_visits"] == 2 and done["data"]["appointments_merged_into_their_visit"] == 1
+
+
+def test_the_appointment_upgrade_runs_in_batches_and_a_stopped_one_goes_on_where_it_stopped(tmp_path, monkeypatch):
+    """Each batch is a transaction of its own, written with the upgrade's place. An upgrade that stops part way (here
+    the third conversion fails, as a crash would) leaves what it did whole, and what it did not do as it was (no
+    appointment is lost or half converted); the next start goes on from there and finishes."""
+    from practicehub.hub import Hub
+    monkeypatch.setattr(Hub, "UPGRADE_BATCH", 1)
+    state, made = _practice_on_version_1(tmp_path, monkeypatch)
+    real, calls = Hub.convert_record, []
+
+    def crashes(self, *a, **k):
+        calls.append(a[1])
+        if len(calls) >= 3:  # the third and every one after, until the server is mended
+            raise RuntimeError("the server stopped")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Hub, "convert_record", crashes)
+    _approve_the_new_visit(state)
+    hub = Hub(state, pack=None)
+    assert hub.db.events.exists({"action": "practice.upgrade_failed"})
+    progress = hub.db.get_setting("pack_upgrade_progress")["2-appointments-are-visits"]
+    assert progress["batches"] == 2  # one appointment a batch: two written, the third undone whole
+    left = {a["id"] for a in hub.records.search("Appointment", limit=None)}
+    visits = {v["id"] for v in hub.records.search("Encounter", limit=None)}
+    assert len(left) == 1 and all(f"Appointment/{i}" not in calls[:2] for i in left)
+    for k in ("booked", "gone", "seen"):  # each appointment is an appointment still, or converted: never gone
+        assert made[k]["id"] in left or made[k]["id"] in visits or made[k]["id"] == made["seen"]["id"]
+    assert made["seen"]["id"] in left or made["filed"]["id"] in visits
+    assert len(hub.db.events.find({"action": "practice.upgrade_progress"})) == 2
+    monkeypatch.setattr(Hub, "convert_record", real)  # the next start
+    hub = _converted_as_version_2_says(state, made)
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    assert done["data"]["appointments_now_visits"] + done["data"]["appointments_merged_into_their_visit"] == 3
+    assert done["data"]["batches"] >= 5
 
 
 # ------------------------------------------------------------------------------------------- live co-editing and SOPs
@@ -3125,6 +3306,44 @@ def test_only_a_policy_owner_makes_a_bulk_export(hub):
     assert "manifest.json" in files and manifest["output"]
     # the owner reads no clinical records: those are counted, not exported
     assert manifest["left_out"] and not any(o["type"] == "MedicationRequest" for o in manifest["output"])
+
+
+def test_a_bulk_export_records_every_read_in_batches_each_its_own_transaction(hub, monkeypatch):
+    """The whole hub is never one transaction: the reads go on the track a batch at a time, each batch lost to
+    another writer is run again (not doubled), and every record exported is a read, then the export itself."""
+    from practicehub import export
+    from practicehub.store import Store, Transient
+    monkeypatch.setattr(export, "LOG_BATCH", 3)
+    opened, real_enter = [], Store.__enter__
+
+    def counting(self):
+        if not self.in_transaction():
+            opened.append(1)
+        return real_enter(self)
+    monkeypatch.setattr(Store, "__enter__", counting)
+    real_append, lost = type(hub.track).append, []
+
+    def loses_once(self, member, action, subject, *a, **k):  # the second batch is lost part way, once
+        if action == "record.viewed" and len(lost) == 0 and self.db.in_transaction() and \
+                len(_export_reads(hub)) == 3 + 1:
+            lost.append(subject)
+            self.db._lost()
+            raise Transient("write conflict")
+        return real_append(self, member, action, subject, *a, **k)
+    monkeypatch.setattr(type(hub.track), "append", loses_once)
+    rana = M(hub, "rana")
+    opened.clear()
+    files, manifest = export.everything(hub, rana)
+    rows = sum(len(body.decode().splitlines()) for name, body in files.items() if name.endswith(".ndjson"))
+    reads = [e["subject"] for e in _export_reads(hub)]
+    assert lost and lost[0] in reads and rows > 6
+    assert len(reads) == len(set(reads)) == rows  # each record once: the lost batch was run again whole, not doubled
+    refs = reads
+    batches = -(-len(refs) // 3)
+    assert len(opened) >= batches + 1  # one transaction a batch (and one more for the lost one), not one for all
+    (ev,) = hub.db.events.find({"action": "records.exported"})
+    assert ev["data"]["count"] == len(refs) and ev["seq"] > max(e["seq"] for e in _export_reads(hub))
+    assert hub.track.verify()["ok"]
 
 
 def test_a_type_that_is_not_a_fhir_resource_offers_no_fhir_format(quality):
@@ -3430,3 +3649,253 @@ def test_breaking_the_glass_needs_the_grant_and_a_reason_and_the_privacy_officer
     report = hub.access_report(M(hub, "rana"), ref)
     assert any(r.get("how") == "override" or (r.get("data") or {}).get("how") == "override" for r in report)
     assert "valueQuantity" not in hub.read_record(M(hub, "dr-liam"), obs), "only for the one who broke the glass"
+# ------------------------------------------------------------------------------------------- agents never sign
+def _agent_check(hub, risk="low"):
+    """A gate an agent may decide on its own (signer any, within criteria), about a patient record."""
+    agent = M(hub, "intake-agent")
+    src = ('id = "agent-check"\ntitle = "Agent check"\n[trigger]\nstarters = ["intake-coordinator"]\nrecord = "Patient"\n'
+           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[[steps]]\nid = "check"\ntitle = "Check"\n'
+           f'kind = "gate"\nrole = "{agent["roles"][0]}"\nsigner = "any"\nagent_criteria = "input.kind == \'routine\'"\n'
+           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "{risk}"\noutcomes = ["ok", "not-ok"]\n'
+           'meaning = "I confirm the check"\ncontext = ["input.kind"]\n')
+    p = hub.propose_workflow(M(hub, "jo"), src, "a check")
+    hub.approve_workflow(M(hub, "rana"), "agent-check", p["version"])
+    pat = hub.records.search("Patient")[0]
+    run = hub.engine.start(M(hub, "jo"), "agent-check", record=f"Patient/{pat['id']}", inputs={"kind": "routine"})
+    return agent, run, f"Patient/{pat['id']}"
+
+
+def test_an_agents_routine_decision_is_its_attestation_never_a_signature(hub):
+    """Agents never sign. Where the workflow lets an agent decide (a low-risk gate within its criteria), the decision
+    is the agent's attested action: on the track with what it decided and over what, but with no signature, and it
+    is never listed among the record's signatures. This holds for every caller (the REST decide, the agent runner),
+    because the engine decides it."""
+    agent, run, ref = _agent_check(hub)
+    iid = item_for(hub, run, "check")
+    hub.engine.decide(agent, iid, "ok", "routine", seen=hub.engine.shown_digest(agent, iid))
+    ev = [e for e in hub.track.list(run_id=run["id"]) if e["action"] == "gate.decided"][-1]
+    assert ev["actor"] == agent["id"] and not ev["signature"] and "signed" not in ev["data"]
+    att = ev["data"]["attested"]
+    assert att["agent"] == agent["id"] and att["kind"] == "agent attestation" and att["meaning"] == "I confirm the check"
+    assert att["record"] == ref and att["record_sha256"]
+    assert hub.engine.run(run["id"])["steps"]["check"]["state"] == "done"
+    assert not [s for s in hub.signatures(M(hub, "rana"), ref) if s["by"] == agent["id"]]
+    assert hub.track.verify()["ok"]
+
+
+def test_the_engine_refuses_a_signature_from_an_agent_whatever_the_caller_passes(hub):
+    agent, run, ref = _agent_check(hub)
+    iid = item_for(hub, run, "check")
+    item = hub.engine.item(iid)
+    r, wf, step = hub.engine.step_of(item)
+    with pytest.raises(Denied):
+        hub.engine._finish(agent, item, r, step, {"outcome": "ok", "comment": ""}, action="gate.decided",
+                           signed={"meaning": "I confirm the check", "signer": agent["id"]})
+    assert not [e for e in hub.track.list(run_id=run["id"]) if e["action"] == "gate.decided"]
+
+
+def test_a_proposed_agent_decision_is_signed_only_by_the_person_who_approves_it(hub):
+    """An agent's proposal (MCP, or a high-risk gate) waits for its sponsor; the sponsor's approval is their own
+    signature on the decision and the record. The agent's applied decision stays an attestation."""
+    agent, run, ref = _agent_check(hub)
+    iid = item_for(hub, run, "check")
+    hub.engine.decide(agent, iid, "ok", "", seen=hub.engine.shown_digest(agent, iid), propose=True)
+    hold = hub.db.items.find_one({"run_id": run["id"], "kind": "hold"})
+    assert not [e for e in hub.track.list(run_id=run["id"]) if e.get("signature")]  # proposing signs nothing
+    sponsor = M(hub, hold["assignee"])
+    hub.engine.decide(sponsor, hold["id"], "approve", "fine", seen=hub.engine.shown_digest(sponsor, hold["id"]))
+    evs = hub.track.list(run_id=run["id"])
+    signed = [e for e in evs if e.get("signature")]
+    assert [e["actor"] for e in signed] == [sponsor["id"]] and signed[0]["action"] == "hold.decided"
+    assert signed[0]["data"]["signed"]["record"] == ref and "Check" in signed[0]["data"]["signed"]["meaning"]
+    gate = [e for e in evs if e["action"] == "gate.decided"][-1]
+    assert gate["actor"] == agent["id"] and not gate["signature"] and gate["data"]["approved_by"] == sponsor["id"]
+    sigs = hub.signatures(M(hub, "rana"), ref)
+    assert [s["by"] for s in sigs] == [sponsor["id"]] and sigs[0]["outcome"] == "ok"
+    assert hub.track.verify()["ok"]
+
+
+# ------------------------------------------------------------------------------- search looks where you may read
+def test_a_search_matches_only_what_the_member_may_read_and_is_answered_by_the_database(hub, monkeypatch):
+    """Searching by words, for a member who may not read some fields, asks the database for exactly the records whose
+    readable parts hold every word, a page at a time: nothing is read into the hub to be filtered there, and a hidden
+    field's value never matches, by any type or none."""
+    jo, amara = M(hub, "jo"), M(hub, "dr-amara")
+    v = _visit_with_a_reason(hub, "Quokkaburn")
+    pat_ref = v["subject"]["reference"]
+    calls = []
+    real = hub.records.search
+    monkeypatch.setattr(hub.records, "search", lambda *a, **k: calls.append(k) or real(*a, **k))
+    assert [r["id"] for r in hub.search_records(amara, "Encounter", text="quokka")] == [v["id"]]  # by its start
+    assert hub.search_records(jo, "Encounter", text="quokkaburn") == []
+    assert hub.search_records(jo, None, text="quokkaburn cough") == []
+    assert all(k.get("limit") == 200 for k in calls)  # a page, never every record
+    # what jo may read of the same visit still finds it
+    pat = hub.records.read(*pat_ref.split("/"))
+    family = pat["name"][0]["family"]
+    v2 = hub.records.read("Encounter", v["id"])
+    assert v2["id"] in {r["id"] for r in hub.search_records(jo, "Encounter", text="ambulatory", limit=50)}
+    assert any(r["id"] == pat["id"] for r in hub.search_records(jo, "Patient", text=family))
+    # paged in the database: the second page carries on from the first
+    a = hub.search_records(amara, "Encounter", text="ambulatory", limit=1)
+    b = hub.search_records(amara, "Encounter", text="ambulatory", limit=1, offset=1)
+    assert a and (not b or a[0]["id"] != b[0]["id"])
+
+
+def test_records_indexed_before_their_type_classed_a_field_are_reindexed_before_a_search(hub):
+    """A record's words were built from its type as it was. One indexed before (or without) the per-class parts is
+    rewritten before anyone searches it, so an old index never lets a hidden value match."""
+    jo = M(hub, "jo")
+    v = _visit_with_a_reason(hub, "Wombatique")
+    hub.db.records.set(f"Encounter/{v['id']}", {"search_parts": None, "ix": "old"})  # as an older hub left it
+    hub._indexed_types.clear()  # a hub started since
+    assert hub.search_records(jo, "Encounter", text="wombatique") == []
+    row = hub.db.records.get(f"Encounter/{v['id']}")
+    assert row["ix"] != "old" and row["search_parts"]
+    assert [r["id"] for r in hub.search_records(M(hub, "dr-amara"), "Encounter", text="wombatique")] == [v["id"]]
+
+
+# ---------------------------------------------------------------------------- lists that show patients are reads
+def test_a_list_or_search_that_shows_patients_is_in_each_patients_access_report(hub):
+    """A list page or a search shows each patient's name and birth date: it is one records.listed event naming every
+    record shown, and the access report for each of those patients says who saw them in a list, and how. The same
+    list shown again soon is one listing; a list of nothing about a patient writes nothing."""
+    from practicehub.web.server import App
+    app = App(hub, dev=False)
+    noor = M(hub, "noor")
+    pats = hub.records.search("Patient", limit=None)
+    app.page_records({"me": noor, "query": {}, "path": "/records/Patient"}, "Patient")
+    app.page_records({"me": noor, "query": {}, "path": "/records/Patient"}, "Patient")  # again: the same listing
+    listed = [e for e in hub.track.list(limit=50) if e["action"] == "records.listed" and e["actor"] == "noor"]
+    assert len(listed) == 1 and set(listed[0]["data"]["refs"]) == {f"Patient/{p['id']}" for p in pats}
+    ref = f"Patient/{pats[-1]['id']}"
+    rows = [r for r in hub.access_report(M(hub, "rana"), ref) if r["who"] == "noor"]
+    assert rows and rows[-1]["action"] == "listed" and rows[-1]["record"] == ref and "list" in rows[-1]["how"]
+    family = pats[0]["name"][0]["family"]
+    app.page_records({"me": noor, "query": {"q": family}, "path": "/records/Patient"}, "Patient")
+    rows = [r for r in hub.access_report(M(hub, "rana"), f"Patient/{pats[0]['id']}") if r["who"] == "noor"]
+    assert any("search" in r["how"] and family.lower() in r["how"] for r in rows)
+    assert hub.note_list(noor, [{"resourceType": "Practitioner", "id": "dr-amara"}]) is None
+
+
+# ------------------------------------------------------------------------------------------ the practice's clock
+def _utc(*a):
+    from datetime import datetime, timezone
+    return datetime(*a, tzinfo=timezone.utc)
+
+
+def test_today_is_the_practices_date_not_the_servers(hub, monkeypatch):
+    """A Halifax practice on a server in another zone: at 00:30 UTC it is still 20:30 the evening before in Halifax
+    (AST, -4), so a note signed then carries the practice's date and its visit period the practice's wall time."""
+    import time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from practicehub import expr
+    monkeypatch.setenv("TZ", "Asia/Tokyo")  # whatever the server's own zone is, it is never used
+    time.tzset()
+    try:
+        assert hub.practice["timezone"] == "America/Halifax"
+        hub.engine._now = _utc(2026, 11, 23, 0, 30)
+        assert hub.engine.now() == datetime(2026, 11, 22, 20, 30) and hub.engine.now().tzinfo is None
+        when = hub.pack.module._when(hub.engine, {"valid_days": 30, "minutes": 20})  # what clock.now gives a note
+        assert when["today"] == "2026-11-22" and when["now"] == "2026-11-22T20:30:00"
+        assert when["valid_until"] == "2026-12-22"
+        assert (when["start"], when["end"]) == ("2026-11-22T20:10", "2026-11-22T20:30")
+        assert hub.engine.utc(hub.engine.now()) == "2026-11-23T00:30:00Z"  # instants are still stored in UTC
+        # a run's run.today, and date shifts from it, are the practice's
+        run = hub.engine.start(M(hub, "jo"), "missed-appointment", record=_patient(hub),
+                               inputs={"notice_hours": 48})
+        today = hub.engine.run(run["id"])["ctx"]["run"]["today"]
+        assert today == "2026-11-22"
+        assert expr.holds("record.due <= run.today + 1d", {"record": {"due": "2026-11-23"}, "run": {"today": today}})
+        assert not expr.holds("record.due <= run.today", {"record": {"due": "2026-11-23"}, "run": {"today": today}})
+        # the clock's tick (schedules, overdue work) reads the practice's wall time from an instant
+        assert hub.engine.tick(_utc(2026, 11, 23, 0, 30))["at"] == "2026-11-22T20:30"
+        # in summer Halifax is on ADT (-3): 00:30 UTC on 1 July is 21:30 on 30 June
+        hub.engine._now = _utc(2026, 7, 1, 0, 30)
+        assert hub.engine.now() == datetime(2026, 6, 30, 21, 30)
+        # with no clock set, "now" is Halifax's, not Tokyo's
+        hub.engine._now = None
+        hfx = datetime.now(ZoneInfo("America/Halifax")).replace(tzinfo=None)
+        assert abs((hub.engine.now() - hfx).total_seconds()) < 60
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+
+
+def test_a_due_time_is_the_right_instant(hub):
+    """A step due in 4 hours, started at 20:30 in Halifax, is due at 04:30 UTC the next day, and is overdue by
+    the practice's clock exactly then (not four hours early or late)."""
+    from datetime import datetime
+    hub.engine._now = _utc(2026, 11, 23, 0, 30)
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")  # due in 4 hours: 00:30 on the 23rd in Halifax, 04:30 UTC
+    assert hub.engine.item(iid)["due_at"] == "2026-11-23T04:30:00Z"
+    assert iid not in hub.engine.tick(_utc(2026, 11, 23, 4, 29))["overdue"]
+    assert iid in hub.engine.tick(datetime(2026, 11, 23, 0, 31))["overdue"]  # 00:31 in Halifax is 04:31 UTC
+
+
+def test_the_practice_time_zone_setting_moves_the_clock(hub):
+    from datetime import datetime
+    hub.engine._now = _utc(2026, 11, 23, 0, 30)
+    assert hub.engine.now().date().isoformat() == "2026-11-22"
+    hub.set_practice(M(hub, "rana"), {"timezone": "Europe/London"})
+    assert hub.engine.now() == datetime(2026, 11, 23, 0, 30)
+    with pytest.raises(Invalid):
+        hub.set_practice(M(hub, "rana"), {"timezone": ""})  # a practice always has a time zone
+    with pytest.raises(Invalid):
+        hub.set_practice(M(hub, "rana"), {"timezone": "../../etc/passwd"})
+    assert hub.practice["timezone"] == "Europe/London"
+
+
+def test_a_hub_with_an_unknown_time_zone_refuses_to_open(tmp_path, monkeypatch):
+    from practicehub.clock import ZoneError
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    state = tmp_path / "state"
+    Hub(state, pack="general-practice").install("general-practice")
+    h = Hub(state)
+    assert h.engine.zone().key == "America/Halifax"
+    h.db.set_setting("practice_local", {"timezone": "Mars/Base"})  # not through the settings page, which refuses it
+    with pytest.raises(ZoneError, match="Mars/Base"):
+        Hub(state)
+
+
+def test_no_tz_data_on_the_machine_fails_loudly(monkeypatch):
+    """A slim container without tzdata knows no zone at all: the hub says so, not "not a time zone name"."""
+    import zoneinfo
+    from practicehub import clock
+
+    def nothing(key):
+        raise zoneinfo.ZoneInfoNotFoundError(f"No time zone found with key {key}")
+    monkeypatch.setattr(clock, "ZoneInfo", nothing)
+    with pytest.raises(clock.ZoneError, match="no time zone data"):
+        clock.zone("America/Halifax")
+
+
+def test_a_practice_pack_must_name_its_time_zone(tmp_path):
+    import re
+    import shutil
+    from practicehub import pack as packmod
+    from practicehub.clock import ZoneError
+    copy = tmp_path / "packs" / "general-practice"
+    shutil.copytree(packmod.find("general-practice"), copy, ignore=shutil.ignore_patterns("__pycache__"))
+    toml = copy / "pack.toml"
+    text = toml.read_text()
+    toml.write_text(re.sub(r'(?m)^timezone = .*\n', "", text, count=1))
+    with pytest.raises(ValueError, match="timezone"):
+        packmod.load(str(copy))
+    toml.write_text(text.replace('timezone = "America/Halifax"', 'timezone = "Atlantis/Capital"'))
+    with pytest.raises(ZoneError):
+        packmod.load(str(copy))
+
+
+def test_pages_show_track_times_in_the_practices_zone():
+    from zoneinfo import ZoneInfo
+    from practicehub import clock
+    hfx = ZoneInfo("America/Halifax")
+    assert clock.shown("2026-11-23T00:30:00Z", hfx) == "2026-11-22 20:30"  # an instant: converted
+    assert clock.shown("2026-11-23T09:30", hfx) == "2026-11-23 09:30"      # a wall time: already the practice's
+    assert clock.shown("2026-11-23", hfx) == "2026-11-23" and clock.shown("", hfx) == ""
+    assert clock.stamp(clock.local(_utc(2026, 3, 8, 7, 0), hfx), hfx) == "2026-03-08T07:00:00Z"

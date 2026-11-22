@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from conftest import M
+from conftest import M, snapshot_onto
 from practicehub import ot
 from practicehub.hub import Denied, Invalid, member_ref
 from practicehub.live import Live, word_diff
@@ -21,10 +21,14 @@ class Clock:
 
 @pytest.fixture
 def wiki(hub):
+    snapshot_onto(hub, "live:wiki", _wiki, modules=["wiki"])
+    return hub
+
+
+def _wiki(hub):
     install(hub, "wiki")
     for m in hub.pack.modules:
         m.module.demo(hub)
-    return hub
 
 
 @pytest.fixture
