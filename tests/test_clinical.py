@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from practicehub import schema
-from tests.conftest import M, item_for, quiet, run_all_local, run_of
+from tests.conftest import M, item_for, quiet, run_all_local, run_of, visit_run
 
 def read(hub, ref):
     rtype, rid = ref.split("/")
@@ -84,7 +84,7 @@ def test_renewal_has_authored_on_and_dispense_request(worked):
 
 
 def test_signed_note_keeps_follow_up(worked):
-    run = run_of(worked, "visit-documentation")
+    run = visit_run(worked)
     amara = M(worked, "dr-amara")
     item = item_for(worked, run, "edit")
     draft = worked.engine.context(amara, item)["draft"]
@@ -96,7 +96,7 @@ def test_signed_note_keeps_follow_up(worked):
     (note,) = worked.records.search("Composition")
     sections = {s["title"]: s["text"] for s in note["section"]}
     assert sections["Follow-up"] == draft["follow_up"]
-    booked = worked.engine.run(run["id"])["ctx"]["input"]["appointment"]  # the visit was booked: documenting finishes it
+    booked = worked.engine.run(run["id"])["record"]  # the visit the run is about: signing its note completes it
     visit = worked.records.read(*booked.split("/", 1))
     assert visit["status"] == "finished" and visit["plannedStartDate"]
     assert visit["period"]["start"] and visit["diagnosis"][0]["condition"][0]["concept"]["text"] == "ICD-9 034"
@@ -106,7 +106,7 @@ def test_signed_note_keeps_follow_up(worked):
 
 def test_a_filed_note_carries_the_physicians_signature_and_is_locked(worked):
     from practicehub.hub import Denied, Invalid
-    run = run_of(worked, "visit-documentation")
+    run = visit_run(worked)
     amara = M(worked, "dr-amara")
     item = item_for(worked, run, "edit")
     draft = worked.engine.context(amara, item)["draft"]

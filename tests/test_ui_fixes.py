@@ -66,7 +66,7 @@ def test_the_side_panel_shows_one_primary_move(hub, server):
     with urllib.request.urlopen(req) as r:
         page = r.read().decode()
     side = page.split('class="side-actions"', 1)[1].split("</div>", 1)[0]
-    assert re.search(r'<button class="primary"[^>]*>Arrived</button>', side)
+    assert re.search(r'<button class="primary"[^>]*>Check in</button>', side)
     assert re.search(r'<button class="secondary"[^>]*>No-show</button>', side)
     assert len(re.findall(r'class="(?:btn )?primary"', side)) == 1
 

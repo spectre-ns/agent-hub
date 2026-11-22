@@ -1,7 +1,12 @@
 id = "appointment-request"
 title = "Appointment request"
-record = "Patient"
+record = "Encounter"
 summary = """
+One visit, from open to closed: the visit record is this workflow's, and its status is where the work is. Asked for
+(requested), it is booked (planned), checked in (arrived), seen (in progress), documented and signed, and completed
+(finished); or it is cancelled, or the patient does not come (noshow). A visit booked straight on the calendar starts
+here already booked; a walk-in starts checked in.
+
 A patient asks for an appointment. A slot is proposed from the calendar and booked, and the patient is told.
 Code screens the patient's reason for red flags first, as it does every patient message: a red flag, a warning sign
 the patient mentions, or a request marked urgent goes to a nurse to call back within the hour, and a red flag also
@@ -16,12 +21,29 @@ urgent is not booked: it goes to a nurse to call back, with the slot the desk ha
 reason (paperwork, a check-up) is booked in the slot they picked at once; any other reason is read by a nurse first,
 who books that slot, asks for a sooner one, or calls the patient. If the screen itself cannot run, a nurse calls the
 patient back: no reason goes unread because the screen failed.
+
+Once the patient is checked in and the visit started on the visit's own page, the physician ends it with the
+transcript. The scribe agent drafts the note; the physician edits it and signs it, and only then is the visit completed
+and the note filed in the chart. The visit is coded for billing from the physician's diagnosis codes, and routine
+claims are submitted; anything else waits for billing staff. A patient marked as a no-show is told, under the
+practice's missed-appointment policy.
 """
 
 [trigger]
 starters = ["front-desk", "scheduler", "nurse", "physician", "patient-portal"]
 event = "appointment.requested"
-one_open_per = "record"   # one open request per patient: pressing twice, or two people taking one call, starts one
+one_open_per = "subject"   # one open request per patient: pressing twice, or two people taking one call, starts one
+one_open_while = "record.status == 'requested'"   # ...while it is not booked yet; a booked visit does not count
+
+# Started on the patient (the portal, the front desk taking a call), the run asks for the visit: it is made at once,
+# requested, on the patient's chart, and this run works it from then on.
+[new_record]
+status = "requested"
+class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" }
+reason_text = "{{input.reason}}"
+booking_reason = "{{input.kind}}"
+urgency = "{{input.urgency}}"
+requested_by = "{{run.started_by}}"
 
 [[input]]
 name = "reason"
@@ -57,10 +79,12 @@ name = "preferences"
 type = "string"
 help = "days, times or physician the patient prefers"
 
+# Asked for: screened, read and booked. A visit that starts booked (the calendar) or checked in (a walk-in) skips these.
 [[steps]]
 id = "screen"
 title = "Screen the reason for red flags"
 kind = "automation"
+when = "run.start_state == 'requested'"
 block = "patient-message-screen"
 [steps.params]
 question = "{{input.reason}}"
@@ -74,7 +98,7 @@ when = "input.slot == null or screen.red_flag == true or screen.unsure == true"
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "We have your request"
 body = "{{screen.advice}}"
 
@@ -88,18 +112,23 @@ due = "1h"
 escalate_to = "physician"
 # not after the screen, so that a screen that fails (screen is empty) still reaches a nurse; the screen, the first
 # step, has always run or failed by the time this is reached
-when = "screen == null or input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true"
+when = "run.start_state == 'requested' and (screen == null or input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true)"
 persons_only = true
 context = ["input.reason", "input.kind", "input.slot", "screen", "record:demographics", "record:clinical"]
 instructions = """The patient's request was marked urgent, or their words may describe an emergency (see the screen),
 or the red-flag screen could not run (no screen is shown): read the reason yourself.
-Call them now. Advise 911 or the emergency department if needed, or book them in today yourself: no slot is
-proposed automatically for a request that comes to you, and a slot the front desk picked (input.slot) was not
-booked. If you cannot reach them,
+Call them now. Advise 911 or the emergency department if needed, or tick book to book them in yourself (you pick the
+slot next): no slot is proposed automatically for a request that comes to you, and a slot the front desk picked
+(input.slot) was not booked. Left unbooked, the request is closed. If you cannot reach them,
 leave reached unticked: a physician decides what to do next."""
 [[steps.fields]]
 name = "reached"
 type = "boolean"
+[[steps.fields]]
+name = "book"
+label = "Book a visit"
+type = "boolean"
+help = "you pick the slot next; unticked, the request is closed without a visit"
 [[steps.fields]]
 name = "advice"
 type = "text"
@@ -167,15 +196,39 @@ when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure
 context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "screen.admin_reason",
            "triage.decision", "triage.note_for_scheduler"]
 
+# A request a nurse called about, or said she would call and book: she picks the slot herself.
+[[steps]]
+id = "nurse-book"
+title = "Book the visit"
+kind = "task"
+role = "nurse"
+due = "1d"
+escalate_to = "physician"
+skill = "slot-proposal"
+after = ["nurse-call", "triage"]
+when = "nurse-call.book == true or triage.decision == 'i-will-call-and-book'"
+persons_only = true
+context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "input.reason"]
+
+# A request the nurse dealt with by phone and did not book (or the physician, for a patient nobody reached) is closed.
+[[steps]]
+id = "not-booked"
+title = "Close the request without a visit"
+kind = "automation"
+after = ["nurse-call", "not-reached"]
+when = "nurse-call.book != true"
+state = "cancelled"
+
 [[steps]]
 id = "book"
 title = "Book the visit"
 kind = "automation"
-after = ["propose"]
+after = ["propose", "nurse-book"]
 action = "booking.book"          # the core's: written through the Booking fields a visit keeps
 [steps.params]
-slot = "{{propose.slot}}"
-subject = "{{run.record}}"
+ref = "{{run.record}}"           # the visit asked for: it is booked, the same record
+slot = "{{propose.slot}}{{nurse-book.slot}}"
+subject = "{{run.subject}}"
 reason = "{{input.reason}}"
 kind = "{{input.kind}}"
 priority = "{{input.urgency}}"
@@ -190,8 +243,9 @@ after = ["screen", "triage"]
 when = "input.slot != null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and (screen.routine == true or triage.decision == 'book-a-slot')"
 action = "booking.book"
 [steps.params]
+ref = "{{run.record}}"
 slot = "{{input.slot}}"
-subject = "{{run.record}}"
+subject = "{{run.subject}}"
 reason = "{{input.reason}}"
 kind = "{{input.kind}}"
 priority = "{{input.urgency}}"
@@ -205,7 +259,7 @@ after = ["book"]
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your appointment"
 body = "You are booked on {{book.when}} with {{book.member_name}} at Harbourview Family Medicine. Reply to change or cancel."
 
@@ -230,6 +284,246 @@ after = ["book-chosen"]
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your appointment"
 body = "You are booked on {{book-chosen.when}} with {{book-chosen.member_name}} at Harbourview Family Medicine. Reply to change or cancel."
+
+# Booked: the visit's own page checks the patient in and starts the visit (its transitions); the run waits on them.
+[[steps]]
+id = "checked-in"
+title = "Wait for the patient to be checked in"
+kind = "wait"
+until = "record.status in ['arrived', 'triaged', 'in-progress', 'onleave', 'finished', 'cancelled', 'noshow', 'entered-in-error']"
+
+[[steps]]
+id = "no-show"
+title = "Apply the missed-appointment policy"
+kind = "automation"
+after = ["checked-in"]
+when = "record.status == 'noshow'"
+block = "missed-appointment-fee"
+[steps.params]
+notice_hours = 0
+missed_this_year = 0
+fee = 50
+
+[[steps]]
+id = "tell-missed"
+title = "Tell the patient"
+kind = "automation"
+after = ["no-show"]
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your missed appointment"
+body = "We missed you at your appointment. {{no-show.reason}}. Amount due: ${{no-show.amount}}. Reply to rebook."
+
+[[steps]]
+id = "seen"
+title = "Wait for the visit to start"
+kind = "wait"
+after = ["checked-in"]
+when = "record.status in ['arrived', 'triaged', 'in-progress', 'onleave']"
+until = "record.status in ['in-progress', 'onleave', 'finished', 'cancelled', 'noshow', 'entered-in-error']"
+
+[[steps]]
+id = "end"
+title = "End the visit"
+kind = "task"
+role = "physician"
+due = "1d"
+escalate_to = "medical-director"
+after = ["seen"]
+when = "record.status in ['in-progress', 'onleave']"
+persons_only = true
+context = ["record:clinical", "input.reason"]
+instructions = """The visit is under way. When it ends, give the transcript (or your notes of it), what kind of visit it
+was and how long it took: the scribe agent drafts the note from it, for you to edit and sign."""
+[[steps.fields]]
+name = "transcript"
+type = "text"
+required = true
+[[steps.fields]]
+name = "visit_type"
+type = "choice"
+choices = ["minor", "complete", "counselling"]
+default = "minor"
+[[steps.fields]]
+name = "minutes"
+type = "number"
+default = 15
+[[steps.fields]]
+name = "start"
+type = "datetime"
+help = "when the visit started (default: its length before it was signed)"
+[[steps.fields]]
+name = "end"
+type = "datetime"
+help = "when the visit ended"
+
+[[steps]]
+id = "draft"
+title = "Draft the note"
+kind = "task"
+role = "documentation-assistant"
+due = "1d"
+escalate_to = "practice-manager"
+people_role = "physician"
+skill = "visit-note-draft"
+risk = "medium"
+after = ["end"]
+context = ["record:clinical", "record:intake", "end.transcript"]
+
+[[steps]]
+id = "edit"
+title = "Edit the note"
+kind = "task"
+role = "physician"
+due = "3d"
+escalate_to = "medical-director"
+after = ["draft"]
+review_of = "draft"
+persons_only = true
+context = ["record:clinical", "end.transcript"]
+instructions = "Correct the draft. You are its author once you sign."
+[[steps.fields]]
+name = "subjective"
+type = "text"
+required = true
+[[steps.fields]]
+name = "objective"
+type = "text"
+[[steps.fields]]
+name = "assessment"
+type = "text"
+required = true
+[[steps.fields]]
+name = "plan"
+type = "text"
+required = true
+[[steps.fields]]
+name = "follow_up"
+type = "string"
+help = "when the patient should come back, as you told them"
+[[steps.fields]]
+name = "diagnosis_codes"
+type = "list"
+required = true
+help = "ICD-9 codes for billing, e.g. 401"
+
+[[steps]]
+id = "sign"
+title = "Sign the note"
+kind = "gate"
+role = "physician"
+due = "3d"
+escalate_to = "medical-director"
+after = ["edit"]
+signer = "person"
+outcomes = ["sign", "discard"]
+meaning = "I reviewed this note and it is accurate"
+meanings_if_did = { edit = "I am the author of this note and it is accurate" }
+meanings = { discard = "I discard this draft note" }
+context = ["edit"]
+
+[[steps]]
+id = "timing"
+title = "Note the time of the visit"
+kind = "automation"
+after = ["sign"]
+when = "sign.outcome == 'sign'"
+action = "clock.now"
+[steps.params]
+start = "{{end.start}}"
+end = "{{end.end}}"
+minutes = "{{end.minutes}}"
+
+# Signed: the visit is completed, with when it took place.
+[[steps]]
+id = "finish"
+title = "Complete the visit"
+kind = "automation"
+after = ["timing"]
+action = "record.update"
+state = "finished"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+participant = [{ individual = { reference = "Practitioner/{{sign.by}}" } }]
+type = [{ text = "{{end.visit_type}}" }]
+period = { start = "{{timing.start}}", end = "{{timing.end}}" }
+length = { value = "{{end.minutes}}", unit = "min" }
+diagnosis = [{ condition = [{ concept = { text = "ICD-9 {{edit.diagnosis_codes}}" } }] }]
+
+[[steps]]
+id = "file-note"
+title = "File the note in the chart"
+kind = "automation"
+after = ["finish"]
+action = "record.create"
+[steps.params]
+type = "Composition"
+attest = "sign"   # the note filed is the one the physician signed: its signature shows on the note
+[steps.params.data]
+status = "final"
+type = { text = "Visit note" }
+title = "Visit note"
+date = "{{timing.now}}"
+subject = { reference = "{{run.subject}}" }
+encounter = { reference = "{{run.record}}" }
+author = [{ reference = "Practitioner/{{sign.by}}" }]
+attester = [{ mode = "legal", time = "{{timing.now}}", party = { reference = "Practitioner/{{sign.by}}" } }]
+section = [
+  { title = "Subjective", text = "{{edit.subjective}}" },
+  { title = "Objective", text = "{{edit.objective}}" },
+  { title = "Assessment", text = "{{edit.assessment}}" },
+  { title = "Plan", text = "{{edit.plan}}" },
+  { title = "Follow-up", text = "{{edit.follow_up}}" },
+]
+
+[[steps]]
+id = "code"
+title = "Code the visit"
+kind = "task"
+role = "billing"
+due = "5d"
+escalate_to = "practice-manager"
+after = ["finish"]
+skill = "visit-coding"
+risk = "medium"
+context = ["record:visits", "end.visit_type", "end.minutes", "edit.diagnosis_codes"]
+
+[[steps]]
+id = "submit"
+title = "Submit the claim"
+kind = "gate"
+role = "billing"
+due = "5d"
+escalate_to = "practice-manager"
+after = ["code"]
+skill = "claim-submit"
+signer = "any"
+outcomes = ["submit", "hold"]
+meaning = "This claim matches the service documented"
+agent_criteria = "code.amount <= 80 and code.fee_code in ['minor-assessment', 'complete-assessment']"
+not_by = ["code"]
+context = ["record:visits", "code"]
+
+[[steps]]
+id = "charge"
+title = "Record the charge"
+kind = "automation"
+after = ["submit"]
+when = "submit.outcome == 'submit'"
+action = "record.create"
+[steps.params]
+type = "ChargeItem"
+[steps.params.data]
+status = "billable"
+subject = { reference = "{{run.subject}}" }
+code = { text = "{{code.fee_code}}" }
+occurrenceDateTime = "{{timing.now}}"
+context = { reference = "{{run.record}}" }
+quantity = { value = "{{code.units}}" }
+priceOverride = { value = "{{code.amount}}", currency = "CAD" }

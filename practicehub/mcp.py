@@ -533,8 +533,10 @@ def tools(hub, sid: str, member: dict) -> list[dict]:
         props = {"input": {**ins, "description": "the start form"}}
         req = ["input"] if ins["required"] else []
         if wf.record:
-            props["record"] = {"type": "string", "pattern": f"^{re.escape(wf.record)}/[A-Za-z0-9_.-]+$",
-                               "description": f"the {wf.record} it is about (Type/id)"}
+            on = hub.engine.start_on(wf)  # what a workflow that makes its record is started on
+            props["record"] = {"type": "string",
+                               "pattern": f"^({'|'.join(re.escape(t) for t in on)})/[A-Za-z0-9_.-]+$",
+                               "description": f"the {' or '.join(on)} it is about (Type/id)"}
             req.append("record")
         add({"name": f"start_{slug(wf.id)}", "title": f"Start {wf.title}",
              "description": f"Start the {wf.title} workflow (version in force). {wf.summary}".strip(),

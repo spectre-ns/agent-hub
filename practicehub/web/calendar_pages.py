@@ -489,7 +489,7 @@ class CalendarPages:
             if f.get("overbook") and not over:
                 raise Invalid(f"say {(rt.booking or {}).get('overbook_reason', 'why').lower()}")
             request = self._request(me, rt)
-            if request and not why and subject and subject.split("/")[0] == request[0].record:
+            if request and not why and subject and subject.split("/")[0] in self.hub.engine.start_on(request[0]):
                 return self._book_by_request(req, me, rt, request[0], rec, subject, start, who, f)
             self.hub.create_record(me, rtype, rec, overbook=over or None)
         except (Invalid, NotFound, Denied) as exc:
@@ -521,14 +521,15 @@ class CalendarPages:
         return out + self._sent_to_the_record(run, me)
 
     def _sent_to_the_record(self, run: dict, me: dict | None) -> str:
-        """The messages a run sent to its record (not pages to the team), apart from what staff say on the phone."""
-        record = run.get("record") or ""
-        if not record or not me:
+        """The messages a run sent to its record, or to what its record is about (not pages to the team), apart from
+        what staff say on the phone."""
+        to = {r for r in (run.get("record"), run.get("subject")) if r}
+        if not to or not me:
             return ""
-        rows = [r for r in self.hub.db.outbox.find({"run_id": run.get("id")}) if r.get("recipient") == record]
+        rows = [r for r in self.hub.db.outbox.find({"run_id": run.get("id")}) if r.get("recipient") in to]
         if not rows:
             return ""
-        rt = self.hub.record_type(record.split("/", 1)[0])
+        rt = self.hub.record_type(rows[0]["recipient"].split("/", 1)[0])
         whom = f"the {self._lower(rt.label)}" if rt else "them"
         items = "".join(
             f'<li><b>{e(r["subject"])}</b>: {e(r["body"])}</li>' if self.hub.may_read_message(me, r) else
@@ -589,9 +590,20 @@ class CalendarPages:
         return self.layout(req, "Not booked yet", body, crumbs=[("/schedule", "Schedule"), (None, "Not booked yet")])
 
     def _run_bookings(self, run_id: str) -> list[str]:
-        """The bookings a run made (``booking.book`` steps that ran)."""
-        ev = self.hub.db.events.find({"run_id": run_id, "action": "record.created"})
-        return [x["subject"] for x in ev if self.hub.is_a((x.get("subject") or "/").split("/")[0], "Booking")]
+        """The bookings a run made or gave their time (``booking.book`` steps that ran): those that hold a time now
+        (a booking asked for and not yet booked, or cancelled, is not said back as booked)."""
+        ev = self.hub.db.events.find({"run_id": run_id, "action": {"$in": ["record.created", "record.updated"]}})
+        out = []
+        for ref in dict.fromkeys(x.get("subject") or "" for x in ev):
+            t, _, rid = ref.partition("/")
+            rt = self.hub.record_type(t) if rid else None
+            if not rt or not rt.is_a("Booking"):
+                continue
+            rec = self.hub.records.read(t, rid)
+            seen = schema.project(rt, rec, self.hub.member_types()) if rec else {}
+            if seen.get("start") and not seen.get("cancelled"):
+                out.append(ref)
+        return out
 
     # ------------------------------------------------------------------------------------------ moving a booking
     def _booking(self, me, rtype, rid):

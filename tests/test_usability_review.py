@@ -65,8 +65,9 @@ def test_one_open_request_per_patient(hub):
                          inputs={"reason": "check-up", "urgency": "routine"}, allow_duplicate=True)
     hub.engine.start(jo, "appointment-request", record=f"Patient/{pats[1]['id']}",
                      inputs={"reason": "check-up", "urgency": "routine"})  # another patient: fine
+    # one open request: the patient's booked visits walk the same workflow, and are not requests
     assert len(hub.db.runs.find({"workflow_id": "appointment-request", "status": "running",
-                                 "record": f"Patient/{pats[0]['id']}"})) == 1
+                                 "ctx.run.start_state": "requested", "subject": f"Patient/{pats[0]['id']}"})) == 1
 
 
 def test_a_second_press_names_the_open_item(hub, server):  # noqa: F811
@@ -76,12 +77,13 @@ def test_a_second_press_names_the_open_item(hub, server):  # noqa: F811
             "urgency": "routine", "kind": "check-up"}
     code, _ = call(server, "POST", "/start", jo, form=form)
     assert code in (200, 303)  # started: the run, or a page saying so
-    run = hub.db.runs.find_one({"workflow_id": "appointment-request", "record": f"Patient/{pat['id']}"})
+    asked = {"workflow_id": "appointment-request", "ctx.run.start_state": "requested", "subject": f"Patient/{pat['id']}"}
+    run = hub.db.runs.find_one(asked)
     code, page = call(server, "POST", "/start", jo, form=form)
     assert code == 409
     assert f'href="/items/{run["item"]}"' in page and "is already open for this" in page
     assert "Start another anyway" not in page  # the workflow does not allow another
-    assert len(hub.db.runs.find({"workflow_id": "appointment-request", "record": f"Patient/{pat['id']}"})) == 1
+    assert len(hub.db.runs.find(asked)) == 1
 
 
 def test_start_another_anyway_only_where_the_workflow_allows(hub, server):  # noqa: F811
@@ -105,7 +107,7 @@ def test_an_event_is_never_refused_as_a_duplicate(hub):
 
 
 def test_one_open_per_is_checked():
-    for bad, says in (('one_open_per = "patient"\n', "record\" or \"input."),
+    for bad, says in (('one_open_per = "patient"\n', "\"subject\" or \"input."),
                       ('one_open_per = "input.nope"\n', "'nope' is not one of"),
                       ('one_open_per = "record"\n', "needs a record"),
                       ('allow_duplicate = true\n', "needs one_open_per")):

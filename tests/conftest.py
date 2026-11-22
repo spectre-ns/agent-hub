@@ -320,6 +320,14 @@ def run_of(hub, workflow_id):
     return runs[0]
 
 
+def visit_run(hub):
+    """The demo's documented visit (Priya's): the appointment run whose visit has ended and is being written up."""
+    runs = [r for r in hub.engine.runs(limit=1000) if r["workflow_id"] == "appointment-request"
+            and r["steps"].get("end", {}).get("state") == "done"]
+    assert runs, "no visit being documented"
+    return runs[-1]
+
+
 def item_for(hub, run, step_id, status=("open", "claimed")):
     row = hub.db.items.find_one({"run_id": run["id"], "step_id": step_id, "kind": {"$ne": "notice"},
                                  "status": {"$in": list(status)}}, sort="n")

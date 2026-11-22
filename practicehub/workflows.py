@@ -26,6 +26,18 @@ once per slot), once per record of ``trigger.for_each`` matching ``trigger.where
 A ``[deadline]`` table (``within = "5d"``, ``escalate_to = "<role>"``) gives every run a time to be done by: a run still
 open after it is flagged once (``run.deadline_missed``, a notice to that role) and keeps ``deadline_missed_at``.
 
+**A record's own workflow.** A record type may name the workflow that walks it (``workflow = "<id>"`` in the type,
+see ``practicehub/schema.py``): creating a record of that type, by any path, starts that workflow about it. The
+record's lifecycle state is where the work is: a step with ``state = "<lifecycle state>"`` puts the record in that
+state (a person's or wait step when it starts, an automation when it is done; an automation may have only a
+``state``), and a ``wait`` whose ``until`` reads ``record.<state field>`` goes on when someone moves the record on its
+own page. The run keeps one item, moved from step to step: the hand-off of that record. A workflow started on what
+its record is about (a subject) makes the record first, from ``[new_record]`` (field = value, placeholders over
+``run`` and ``input``); ``run.subject`` is then what it is about and ``run.start_state`` the state it began in.
+``trigger.one_open_per = "subject"`` with ``trigger.one_open_while = "<condition over record>"`` keeps one open
+run per subject while its record is so. When the run ends with the record in a state only workflows move it out of,
+the type's ``lifecycle.abandoned`` says where it goes.
+
 Steps read the run's context: ``run`` (``run.record`` is the reference of the run's record), ``input``, each finished
 step's output by its id, and ``record``, the run's record as it is when the step runs (``record.documents``).
 
@@ -144,6 +156,7 @@ class Step:
     wait_for: str | None = None      # a wait step: done after this long (``for = "3d"``)
     at: str | None = None            # a wait step: done at this moment (``at = "{{input.appointment}} - 1d"``)
     timeout: str | None = None       # a wait with until: done anyway, as timed out, after this long
+    state: str | None = None         # the lifecycle state the run's record moves to when this step is done
 
     @property
     def agents_may(self) -> bool:
@@ -169,6 +182,8 @@ class Workflow:
     deadline_escalate_to: str | None = None  # [deadline] escalate_to: the role told when it is
     one_open_per: str | None = None  # trigger.one_open_per: "record" or "input.<name>": one open run per value
     allow_duplicate: bool = False    # trigger.allow_duplicate: the starter may confirm another one anyway
+    one_open_while: str | None = None  # trigger.one_open_while: ...only while the open run's record is so
+    new_record: dict = field(default_factory=dict)  # [new_record]: started on its subject, the record it makes
 
     def step(self, sid: str) -> Step:
         for s in self.steps:
@@ -227,10 +242,28 @@ def parse(source: str, catalog=None) -> Workflow:
         if duration_seconds(deadline.get("within", "")) is None:
             problems.append("deadline: within is how long a run may take, a duration like '4h', '5d' or '2w'")
     one = trig.get("one_open_per")
-    if one is not None and not (isinstance(one, str) and (one == "record" or one.startswith("input."))):
-        problems.append("trigger.one_open_per: \"record\" or \"input.<name>\", the value only one open run may "
-                        "have at a time")
+    if one is not None and not (isinstance(one, str) and (one in ("record", "subject") or one.startswith("input."))):
+        problems.append("trigger.one_open_per: \"record\", \"subject\" or \"input.<name>\", the value only one "
+                        "open run may have at a time")
         one = None
+    while_ = trig.get("one_open_while")
+    if while_ is not None:
+        if not one or not isinstance(while_, str):
+            problems.append("trigger.one_open_while: a condition over record (the open run's record), with "
+                            "one_open_per")
+            while_ = None
+        else:
+            try:
+                expr.check(while_)
+            except expr.ExprError as exc:
+                problems.append(f"trigger.one_open_while: {exc}")
+    new_record = doc.get("new_record") or {}
+    if not isinstance(new_record, dict) or not all(isinstance(k, str) for k in new_record):
+        problems.append("new_record: a table of field = value (placeholders over run and input), the record a run "
+                        "started on its subject makes")
+        new_record = {}
+    if new_record and not doc.get("record"):
+        problems.append("new_record: the workflow is about a record; say which type (record = ...)")
     if one == "record" and not doc.get("record"):
         problems.append("trigger.one_open_per: \"record\" needs a record the workflow is about")
     if one and one.startswith("input.") and one[6:] not in {str(i.get("name")) for i in doc.get("input", []) or []}:
@@ -284,7 +317,11 @@ def parse(source: str, catalog=None) -> Workflow:
             due=raw.get("due"), escalate_to=raw.get("escalate_to"), priority=raw.get("priority", "normal"), assign_to=raw.get("assign_to"),
             people_role=raw.get("people_role") or None, for_each=raw.get("for_each") or None, where=raw.get("where") or None,
             until=raw.get("until") or None, wait_for=raw.get("for") or None, at=raw.get("at") or None,
-            timeout=raw.get("timeout") or None)
+            timeout=raw.get("timeout") or None, state=raw.get("state") or None)
+        if step.state is not None and not isinstance(step.state, str):
+            problems.append(f"{where}: state is the lifecycle state the record moves to when the step is done")
+        if step.state and not doc.get("record"):
+            problems.append(f"{where}: state moves the run's record; the workflow is about none")
         hidden = sorted(set(step.params) & {"when", "after", "until", "due", "escalate_to", "timeout", "for_each"})
         if hidden:  # written after [steps.params] in TOML, a step setting silently becomes a parameter
             problems.append(f"{where}: {', '.join(hidden)} is a step setting, not a parameter: put it above "
@@ -383,7 +420,7 @@ def parse(source: str, catalog=None) -> Workflow:
                 problems.append(f"{where}: use an action or a block, not both")
             if step.skill:
                 problems.append(f"{where}: a block step takes its skill from the block; remove skill")
-        if kind == "automation" and not step.action and not step.block:
+        if kind == "automation" and not step.action and not step.block and not step.state:
             problems.append(f"{where}: an automation names its action or block")
         if kind == "task" and not step.fields and not step.skill and not step.block:
             problems.append(f"{where}: a task needs fields (what it produces), a skill, or a prompt block")
@@ -453,7 +490,8 @@ def parse(source: str, catalog=None) -> Workflow:
                   inputs=inputs, steps=steps, source=source, when=trig.get("when"), schedule=trig.get("schedule"),
                   for_each=trig.get("for_each"), where=trig.get("where"),
                   deadline=deadline.get("within") or None, deadline_escalate_to=deadline.get("escalate_to") or None,
-                  one_open_per=one or None, allow_duplicate=trig.get("allow_duplicate") is True)
+                  one_open_per=one or None, allow_duplicate=trig.get("allow_duplicate") is True,
+                  one_open_while=while_ or None, new_record=dict(new_record))
     if catalog is not None:  # report every problem at once, so an author fixes them in one go
         try:
             problems += [p for p in catalog.check_workflow(wf) if p not in problems]

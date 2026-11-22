@@ -3226,9 +3226,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.db.mention_names.insert({"_id": f"{ref}|{key}", "from_ref": ref, "type": rt.id, "key": key})
 
     def create_record(self, member: dict, rtype: str, data: dict, *, cause: int | None = None,
-                      run_id: str | None = None, overbook: str | None = None) -> dict:
+                      run_id: str | None = None, overbook: str | None = None, start_workflow: bool = True,
+                      inputs: dict | None = None) -> dict:
         """``overbook``: for a booking, why it is booked over another one (a member the type lets do so); it is kept
-        on the booking and on the track."""
+        on the booking and on the track.
+
+        A type that names its ``workflow`` has that workflow start about the new record, in the same step (whoever
+        creates it, however: a form, the calendar, the API, another workflow), with ``inputs`` as its start form;
+        its record's lifecycle state is then where that work is. ``start_workflow=False``: the run making it is that
+        workflow's own."""
         rt = self._type(rtype)
         if member.get("kind") != "automation":
             self.require(member, "writer", f"data_class:{rt.data_class}", f"write {rtype} records")
@@ -3262,10 +3268,29 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if clashes:
                 ev = self._note_overbook(member, rt, f"{rtype}/{rec['id']}", clashes, over, cause=ev, run_id=run_id)
             self.engine.on_record("created", rt, rec, None, member, ev)
+            if start_workflow and not getattr(self, "_upgrading", False):
+                self._start_record_workflow(member, rt, rec, ev, inputs)
         if rt.is_a("Restriction"):
             self.restrictions.reset()  # in force at once, in this process
             self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)  # what they wrote, as they may read it
+
+    def _start_record_workflow(self, member: dict, rt, rec: dict, cause: int, inputs: dict | None) -> None:
+        """The workflow a new record's type names starts about it. Creating the record was the permission (no starter
+        role is asked again); a workflow that is not installed yet (a pack still installing) is noted, not fatal."""
+        wid = schema.starts_workflow(rt, rec)
+        if not wid:
+            return
+        try:
+            self.workflow(wid)
+        except NotFound:
+            self.track.append(member, "trigger.failed", f"{rt.id}/{rec['id']}", cause=cause,
+                              data={"workflow": wid, "error": f"there is no workflow {wid!r}"})
+            return
+        starter = member if member.get("kind") in ("person", "agent", "service") else \
+            {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
+        self.engine.start(starter, wid, record=f"{rt.id}/{rec['id']}", inputs=inputs or {}, cause=cause,
+                          via_automation=True, on_create=True)
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
@@ -3774,9 +3799,26 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             except wfmod.DefinitionError:
                 raise exc from None
         problems += [p for p in self._block_problems(wf, approving=approving) if p not in problems]
+        problems += [p for p in self._state_problems(wf) if p not in problems]
         if problems:
             raise wfmod.DefinitionError(problems)
         return wf
+
+    def _state_problems(self, wf: wfmod.Workflow) -> list[str]:
+        """A step's ``state`` is a state of its record's lifecycle; a ``[new_record]`` state is one too."""
+        rt = self.record_type(wf.record) if wf.record else None
+        if rt is None:
+            return []
+        states = rt.states()
+        if not states:
+            return [f"step {s.id}: state: a {wf.record} has no lifecycle to move" for s in wf.steps if s.state]
+        problems = [f"step {s.id}: state {s.state!r} is not a state of a {wf.record} ({', '.join(states)})"
+                    for s in wf.steps if s.state and s.state not in states]
+        field = (rt.lifecycle or {}).get("field")
+        made = (wf.new_record or {}).get(field) if field else None
+        if isinstance(made, str) and "{{" not in made and made not in states:
+            problems.append(f"new_record: {field} {made!r} is not a state of a {wf.record} ({', '.join(states)})")
+        return problems
 
     def _block_problems(self, wf: wfmod.Workflow, *, approving: bool) -> list[str]:
         problems = []

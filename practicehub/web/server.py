@@ -1389,7 +1389,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             wf = w["workflow"]
             if not hub.can(me, "starter", f"workflow:{wf.id}"):
                 continue
-            if wf.record and not choices(wf.record)[1]:
+            if wf.record and not any(choices(t)[1] for t in hub.engine.start_on(wf)):
                 continue
             cards.append(f'<li><a href="/start/{e(wf.id)}" data-modal><b>{e(wf.title)}</b>'
                          f'<span class="muted">{e(wf.summary.strip()[:160])}{"…" if len(wf.summary.strip()) > 160 else ""}'
@@ -1412,8 +1412,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         pick, about = "", ""
         if wf.record:
             want = q.get("record", "") or (kept or {}).get("_record", "")
-            fixed = (q.get("record") or (kept or {}).get("_fixed")) and want.startswith(wf.record + "/") \
-                and self._may_read(me, wf.record) and hub.records.read(wf.record, want.split("/", 1)[1])
+            on = hub.engine.start_on(wf)
+            fixed = (q.get("record") or (kept or {}).get("_fixed")) and want.split("/", 1)[0] in on \
+                and self._may_read(me, want.split("/", 1)[0]) and hub.records.read(*want.split("/", 1))
             if fixed:  # opened from the record itself: it is what the work is about, shown, not asked
                 about = want
                 pick = (f'<input type="hidden" name="_record" value="{e(want)}"><input type="hidden" name="_fixed" '
@@ -1451,9 +1452,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         return cut[:end + 1] if end > limit // 3 else cut.rsplit(" ", 1)[0] + "…"
 
     def _record_field(self, wf) -> dict:
-        rt = self.hub.record_type(wf.record)
-        return {"path": "_record", "name": "_record", "label": rt.label if rt else wf.record, "type": "reference",
-                "target": [wf.record], "required": True}
+        on = self.hub.engine.start_on(wf)  # a workflow that makes its record is started on what it is about
+        rt = self.hub.record_type(on[0]) if len(on) == 1 else None
+        return {"path": "_record", "name": "_record", "label": rt.label if rt else " or ".join(on), "type": "reference",
+                "target": on, "required": True}
 
     def _active_ref_input(self, me, f: dict, about: str, kept) -> str:
         """A start-form input that takes an active record (``active = true``), for work about a known record: a
@@ -1548,9 +1550,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f[i["name"]] = self._resolve_ref(self._ref_input(i), f[i["name"]])
         if wf.record and rec:
             rec = self._resolve_ref(self._record_field(wf), rec)
-        if wf.record and not (rec and rec.startswith(wf.record + "/")):
-            rt = self.hub.record_type(wf.record)
-            raise Invalid(f"choose {a_an((rt.label if rt else wf.record).lower())} to start this about")
+        on = self.hub.engine.start_on(wf)
+        if wf.record and not (rec and rec.split("/", 1)[0] in on):
+            label = self._record_field(wf)["label"]
+            raise Invalid(f"choose {a_an(label.lower())} to start this about")
         run = self.hub.engine.start(req["me"], wid, record=rec, inputs=f, allow_duplicate=anyway)
         tell = self.tell_the_caller(run["id"], me=req["me"])
         booked = self.booked_confirmation(run["id"])
@@ -1987,17 +1990,47 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
         if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
             dl.append((self.subj["label"], self.subject_link(run["record"])))
+        elif run["record"]:
+            dl.append(("About", self.record_link(run["record"])))
+        if run.get("subject") and run["subject"] != run["record"] and run["subject"].startswith(self.subj["type"] + "/"):
+            dl.append((self.subj["label"], self.subject_link(run["subject"])))
         dl += [("Started by", self.who(run["started_by"])), ("Created", self._at(run["created_at"])),
                ("Updated", self._at(run["updated_at"]))]
         if run.get("root_event"):
             dl.append(("Caused by", f'<a href="/track/{run["root_event"]}">event #{run["root_event"]}</a>'))
         details = ('<aside class="details"><h3>Details</h3><dl>'
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
-        main = (f'<div class="section"><h2>Workflow</h2>{self._flow(wf, run, links, viewer=viewer)}</div>'
+        main = (self._run_head(me, run, wf, shown_steps)
+                + f'<div class="section"><h2>Workflow</h2>{self._flow(wf, run, links, viewer=viewer)}</div>'
                 f'<div class="section"><h2>Steps</h2><div class="subtasks">{"".join(rows)}</div></div>'
                 f'<div class="section"><h2>Activity</h2>{self._activity(events, me)}</div>')
         return self.layout(req, self.hub.run_title(req["me"], run), f'<div class="issue"><div>{main}</div>{details}</div>',
                            crumbs=[("/runs", "All work"), (f"/workflows/{wf.id}", wf.title)], actions=actions)
+
+    def _run_head(self, me, run, wf, shown_steps) -> str:
+        """The run's one item, at the top of its page: its key and title, the step it is now at and whose it is, and
+        the record it walks in the state it is in. Nothing for a run without one, or a step the member may not see."""
+        hub = self.hub
+        item = hub.db.items.find_one({"_id": run.get("item")}) if run.get("item") else None
+        if not item:
+            return ""
+        step = next((s for s in wf.steps if s.id == item.get("step_id")), None)
+        if run["status"] != "running" or not step or step.id not in shown_steps:
+            now = self._loz(self.RUN_STATUS, run["status"])
+        else:
+            whose = self.who(item["assignee"]) if item.get("assignee") else e(item.get("role") or "")
+            now = f'now at <b>{e(step.title)}</b>' + (f' · {whose}' if whose else "")
+        rec = ""
+        if run.get("record") and "/" in run["record"]:
+            rtype, rid = run["record"].split("/", 1)
+            rt, r = hub.record_type(rtype), hub.records.read(rtype, rid)
+            field = ((rt.lifecycle or {}).get("field") if rt else None)
+            state = rt.state_label(r.get(field)) if r and field and self._may_read(me, rtype) else ""
+            rec = (f'<p>{self.record_link(run["record"])}'
+                   + (f' <span class="badge">{e(state)}</span>' if state else "") + "</p>")
+        title = f'<a href="/items/{e(item["id"])}">{e(item.get("title") or wf.title)}</a>'
+        return (f'<div class="card run-head"><p><span class="key">{self._key(item["id"])}</span> <b>{title}</b></p>'
+                f'<p class="muted">{now}</p>{rec}</div>')
 
     # ------------------------------------------------------------------------------------------ workflows
     def page_workflows(self, req):

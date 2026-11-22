@@ -1,8 +1,9 @@
 # A visit, from booking to the end: when it is booked for and with whom (the practice calendar), then what billing
 # needs (who, when, how long), never the note itself. Why the patient comes and the diagnosis codes (reasonCode) are
 # clinical: the front desk and the scheduling agent book and move a visit without ever seeing them; billing is given
-# the codes by the visit-documentation workflow, on the claim. FHIR R5 Encounter: a booked visit is
-# ``planned`` with plannedStartDate/plannedEndDate; it is the calendar's Booking. There is no separate appointment.
+# the codes on the claim. FHIR R5 Encounter: a booked visit is ``planned`` with plannedStartDate/plannedEndDate; it
+# is the calendar's Booking. There is no separate appointment: a visit asked for is a visit, ``requested``, with no
+# time yet, and the same record is booked, checked in, seen, documented and completed (the appointment workflow).
 # What the visit is for (serviceType: a check-up, forms) and how soon (priority) are not clinical: the front desk
 # books with them and the calendar shows them. Why the patient comes, why an urgent visit was squeezed in over another
 # and the diagnosis billed (diagnosis, kept apart from the booked reason) are clinical.
@@ -14,7 +15,11 @@ standard = "fhir-r4"
 extends = "Booking"
 strict = true
 date = "plannedStartDate"
-active = "record.status in ['planned', 'arrived', 'triaged', 'in-progress', 'onleave']"
+active = "record.status in ['requested', 'planned', 'arrived', 'triaged', 'in-progress', 'onleave']"
+# Every visit is worked from open to closed by one workflow: asked for (requested) or booked straight on the calendar
+# (planned) or a walk-in (arrived), it is screened and booked, checked in, seen, documented, signed and completed, or
+# cancelled or a no-show. Its status is where that work is. A visit filed after the fact (finished) is not.
+workflow = { id = "appointment-request", when = "record.status in ['requested', 'planned', 'arrived']" }
 order = 70
 summary = "A visit, from booking to the end: when and with whom, then what billing needs, never the note itself."
 
@@ -46,16 +51,17 @@ request_inputs = ["kind", "reason", "urgency"]
 [[field]]
 name = "status"
 type = "choice"
-choices = ["planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled", "noshow",
+choices = ["requested", "planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled", "noshow",
            "entered-in-error", "unknown"]
 required = true
-help = "planned is booked; noshow is the practice's own (FHIR R5 has no code for a patient who did not come)"
+help = "planned is booked, arrived checked in, finished completed; requested (asked for, no time yet) and noshow are the practice's own"
 
 [[field]]
 name = "plannedStartDate"
 label = "Booked for"
 type = "datetime"
 required = true
+required_unless = "record.status in ['requested', 'cancelled']"   # asked for: no time yet
 
 [[field]]
 name = "plannedEndDate"
@@ -233,6 +239,13 @@ advanced = true
 help = "what FHIR has no field for: why a booking was cancelled (url .../cancellation-reason, valueString), a note"
 
 [[field]]
+name = "requested_by"
+label = "Asked for by"
+type = "member"
+by = "workflow"
+help = "the member who took the request (the patient on the portal, the front desk on the phone)"
+
+[[field]]
 name = "serviceProvider"
 label = "Service provider"
 type = "object"
@@ -244,22 +257,35 @@ on = ["create"]
 fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "booking_reason", "reason_text", "urgency",
           "visit_type", "setting"]
 
-# A visit is booked (planned), the patient arrives, is triaged and seen, and the visit ends; or it is cancelled, or the
-# patient does not come. The visit-documentation workflow finishes the booked visit the note is for (or files one that
-# was never booked, as finished).
+# A visit is asked for (requested) and booked (planned), or booked straight away; the patient is checked in (arrived),
+# may be triaged, is seen (in progress), and the visit is completed (finished) once its note is signed. Or a request is
+# not booked after all (cancelled), a booking is cancelled, or the patient does not come (noshow). The appointment
+# workflow makes the moves marked by = "workflow"; people check in, start the visit, cancel and mark a no-show here.
 [lifecycle]
 field = "status"
 initial = "planned"
-labels = { planned = "Booked", onleave = "On leave", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
+labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", onleave = "On leave", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
+abandoned = { requested = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
+[[lifecycle.transition]]
+from = ["requested"]
+to = "planned"
+by = "workflow"
+label = "Book"
+[[lifecycle.transition]]
+from = ["requested"]
+to = "cancelled"
+by = "workflow"
 [[lifecycle.transition]]
 from = ["planned"]
 to = "arrived"
+label = "Check in"
 [[lifecycle.transition]]
 from = ["arrived"]
 to = "triaged"
 [[lifecycle.transition]]
 from = ["arrived", "triaged", "onleave"]
 to = "in-progress"
+label = "Start the visit"
 [[lifecycle.transition]]
 from = ["in-progress"]
 to = "onleave"

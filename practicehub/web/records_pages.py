@@ -245,7 +245,7 @@ class RecordPages:
         return "".join(
             f'<a class="btn" href="/start/{e(wf.id)}?record={e(urllib.parse.quote(ref, safe=""))}" data-modal>{e(wf.title)}</a>'
             for wf in (w["workflow"] for w in hub.workflows())
-            if wf.record == rtype and hub.can(me, "starter", f"workflow:{wf.id}"))
+            if rtype in hub.engine.start_on(wf) and hub.can(me, "starter", f"workflow:{wf.id}"))
 
     def record_link(self, ref: str) -> str:
         t, _, rid = ref.partition("/")
@@ -511,6 +511,8 @@ class RecordPages:
         name = f["path"].removesuffix(".*")
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "")] \
             if rec else []
+        if f.get("required_unless") and rec:  # not required while the record is in the state that excuses it
+            f = {**f, "required": schema.is_required(f, rec)}
         spec = {**f, "name": name}
         if f["type"] == "reference":
             refs = [schema.ref_of(v) for v in vals if schema.ref_of(v)]

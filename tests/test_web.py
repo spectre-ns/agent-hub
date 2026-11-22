@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from conftest import M, item_for, quiet, run_of
+from conftest import M, item_for, quiet, run_of, visit_run
 from practicehub.agents.runner import AgentRunner, HttpClient, Refused
 from practicehub.hub import Denied, Invalid
 from practicehub.web.server import App, Redirect, make_handler
@@ -133,7 +133,7 @@ def test_an_agent_cannot_sign(hub, server):
 
 def test_front_desk_does_not_see_the_draft_note(hub, server):
     AgentRunner(HttpClient(server, token(hub, "scribe-agent", by="dr-amara")), hub.models, quiet).work_once()
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     draft = hub.engine.run(run["id"])["ctx"]["draft"]["assessment"]
     assert draft
     jo, amara = token(hub, "jo", by="jo"), token(hub, "dr-amara", by="dr-amara")
@@ -151,7 +151,7 @@ def test_front_desk_does_not_see_the_draft_note(hub, server):
 def test_reading_a_run_is_in_the_patients_access_report(hub, server):
     """A run's page shows the patient's name, the run's input and its results: opening it is a view the privacy
     officer can report, on the page and through the API."""
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     assert run["record"]
     before = [r for r in hub.access_report(M(hub, "rana"), run["record"]) if r["who"] == "dr-liam"]
     assert call(server, "GET", f"/runs/{run['id']}", token(hub, "dr-liam", by="dr-liam"))[0] == 200
@@ -164,7 +164,7 @@ def test_reading_a_run_is_in_the_patients_access_report(hub, server):
 def test_a_physician_edits_and_signs_with_forms(hub, server):
     from practicehub.agents.runner import run_all_local
     run_all_local(hub, log=quiet)
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     words = passphrase(hub, "dr-amara")
     liams = passphrase(hub, "dr-liam")
     page = browser(server)
@@ -1666,7 +1666,7 @@ def test_an_item_page_is_for_who_may_see_it(hub, server):
     status, _ = call(server, "POST", "/start", token(hub, "jo"), form={
         "_workflow": "appointment-request", "_record": ellen, "reason": "crushing chest pain since an hour",
         "kind": "new-concern", "urgency": "routine"})
-    run = hub.db.runs.find_one({"workflow_id": "appointment-request", "record": ellen}, sort=[("created_at", -1)])
+    run = hub.db.runs.find_one({"workflow_id": "appointment-request", "subject": ellen}, sort=[("created_at", -1)])
     calls = [i for i in hub.db.items.find({"run_id": run["id"], "status": "open"}) if i.get("role") == "nurse"]
     assert calls
     for it in calls:
@@ -2116,9 +2116,9 @@ def _panel(page):
 
 
 def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
-    """A visit a documentation run is about shows that run on its own page, though the run's record is the patient;
+    """A visit shows the run walking it on its own page, and the patient's chart lists the same run;
     the status and moves are in words, and the workflow opens as a drawing with where it is now."""
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     visit = next(r for r in run["refs"] if r.startswith("Encounter/"))
     page = call(server, "GET", f"/records/{visit}", token(hub, "dr-amara"))[1]
     panel = _panel(page)
@@ -2129,12 +2129,12 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     assert status == 200 and "data-modal-body" in modal and "<svg" in modal
     assert re.search(r'class="lc-node [a-z]+ current"><title>In progress', modal)
     # the chart of the patient lists the same run beside it
-    chart = call(server, "GET", f"/patients/{run['record'].split('/')[1]}", token(hub, "dr-amara"))[1]
+    chart = call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", token(hub, "dr-amara"))[1]
     assert f'href="/runs/{run["id"]}"' in _panel(chart) and "On this patient" in chart
 
 
 def test_a_record_page_reads_in_words(hub, server):
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     visit = next(r for r in run["refs"] if r.startswith("Encounter/"))
     page = call(server, "GET", f"/records/{visit}", token(hub, "dr-amara"))[1]
     shown = re.sub(r'<time datetime="[^"]*"', "<time", page)
@@ -2144,7 +2144,7 @@ def test_a_record_page_reads_in_words(hub, server):
 
 
 def test_only_a_member_who_may_move_a_record_sees_its_moves(hub, server):
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     visit = next(r for r in run["refs"] if r.startswith("Encounter/"))
     seen = set()
     for mid in ("rana", "dr-amara", "jo", "noor", "sam"):
