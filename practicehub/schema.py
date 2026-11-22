@@ -203,7 +203,7 @@ KEYS = {
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
               "roles", "required_unless"},
-    "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use", "labels"},
+    "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "ended", "in_use", "labels"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "screen": {"id", "on", "tab", "fields", "label"},
@@ -519,6 +519,19 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                 problems.append(f"lifecycle.abandoned: {st!r} = {to!r}: both must be its states")
             elif not any(st in t["from"] or "*" in t["from"] for t in trans if t["to"] == to):
                 problems.append(f"lifecycle.abandoned: there is no move from {st!r} to {to!r}")
+        # Where a record goes when its workflow's run ends with it still in a state the run was to move it out of:
+        # a run of an older version that did the work without naming states (a question answered before the
+        # question had a lifecycle). A current version moves its record itself, so for it this never applies.
+        ended = lc.get("ended") or {}
+        if not isinstance(ended, dict):
+            problems.append("lifecycle.ended: a table of state = the state it goes to")
+            ended = {}
+        ended = dict(ended)
+        for st, to in ended.items():
+            if st not in states or to not in states:
+                problems.append(f"lifecycle.ended: {st!r} = {to!r}: both must be its states")
+            elif not any(st in t["from"] or "*" in t["from"] for t in trans if t["to"] == to):
+                problems.append(f"lifecycle.ended: there is no move from {st!r} to {to!r}")
         for st in states:
             exits = [t for t in trans if (st in t["from"] or "*" in t["from"]) and t["to"] != st]
             if exits and all(t["by"] == "workflow" for t in exits) and st not in abandoned:
@@ -539,7 +552,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                             grew = True
             revising = [x for x in states if x in reach and x != in_use]
         lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial,
-              "transition": trans, "locked": locked, "abandoned": abandoned, "in_use": in_use, "revising": revising,
+              "transition": trans, "locked": locked, "abandoned": abandoned, "ended": ended, "in_use": in_use, "revising": revising,
               "labels": labels}
     for key in ("date", "flag"):
         p = doc.get(key)

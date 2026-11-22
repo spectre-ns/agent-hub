@@ -1,4 +1,5 @@
-# A prescription. A renewal writes a new order and marks the one it replaces completed.
+# A prescription. A renewal request is a proposal (draft) that its workflow walks: prescribed, it becomes the active
+# order and the one it replaces is marked completed; declined, or a visit booked instead, it is cancelled.
 id = "MedicationRequest"
 label = "Prescription"
 plural = "Prescriptions"
@@ -8,7 +9,11 @@ strict = true
 date = "authoredOn"
 active = "record.status == 'active'"
 order = 30
-summary = "A prescription. A renewal writes a new order and marks the one it replaces completed."
+summary = "A prescription. A renewal request is a proposal its workflow prescribes or closes."
+# A renewal request (a draft proposal) is walked by its own workflow from asked for to prescribed or closed: the
+# request made, from the portal, the pharmacy or a person at the desk, is this record, and its status is where the work
+# is. A prescription a physician writes by hand (an order, not a proposal) starts no workflow and is theirs to issue.
+workflow = { id = "prescription-renewal", when = "record.status == 'draft' and record.intent == 'proposal'" }
 
 [[field]]
 name = "status"
@@ -149,6 +154,10 @@ fields = ["subject", "medication", "directions", "quantity", "quantity_unit", "r
 [lifecycle]
 field = "status"
 initial = "draft"
+# Its renewal cancelled, the request is closed; a renewal run of an older version that ended without moving it (it
+# wrote a separate order, or declined) closes it too.
+abandoned = { draft = "cancelled" }
+ended = { draft = "cancelled" }
 [[lifecycle.transition]]
 from = ["draft"]
 to = "active"

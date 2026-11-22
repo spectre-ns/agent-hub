@@ -3207,7 +3207,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         state: its own run, or a person (an import, the portal, any other path) only through a move the run is
         waiting on now (a wait whose ``until`` holds of the record as moved, or a state the open step lists in
         ``moves``). Another workflow never moves it. A correction open from every state (``from = ["*"]``, entered
-        in error) stays anyone's who may write the record."""
+        in error) stays anyone's who may write the record. A run of that workflow may also move another record of the type
+        that no open run of it walks (a renewal marks the order it replaces completed)."""
         owner = (rt.workflow or {}).get("id")
         if not owner or "*" in t["from"]:
             return None
@@ -3216,6 +3217,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             run = self.db.runs.get(run_id)
             if run and run["workflow_id"] == owner and run.get("record") == ref:
                 return None
+            if run and run["workflow_id"] == owner and not self.db.runs.find_one(
+                    {"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
+                return None  # its workflow, closing an earlier one no run walks (a renewal completing the old order)
             if run:
                 return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
         if self.state_move_waited_on(rt, ref, after, t["to"]):

@@ -147,6 +147,13 @@ def message_classes(hub, run, step) -> set[str]:
     return out
 
 
+def _besides(besides) -> set:
+    """``besides`` of an alert as a set: nobody, one member, or several."""
+    if not besides:
+        return set()
+    return {besides} if isinstance(besides, str) else set(besides)
+
+
 def act_record_create(engine, run, step, params, actor):
     rtype = params.get("type")
     data = params.get("data") or {}
@@ -201,7 +208,11 @@ def act_record_update(engine, run, step, params, actor):
 
 
 def act_workflow_start(engine, run, step, params, actor):
-    child = engine.start(actor, params["workflow"], record=params.get("record") or run["record"],
+    # no record named: what the run's own steps call its record (``run.record``), which for a run moved onto a record
+    # of its own (relink_runs) is still what its pinned version was written about
+    child = engine.start(actor, params["workflow"],
+                         record=params.get("record") or (run.get("ctx") or {}).get("run", {}).get("record")
+                         or run["record"],
                          inputs=params.get("input") or {}, via_automation=True, parent=run["id"])
     return {"run_id": child["id"]}
 
@@ -567,6 +578,12 @@ class Engine:
                 if make is None:
                     raise Invalid(f"a {wf.record} is not about a {record.split('/')[0]}; say which one")
                 subject, record = record, None
+                own = self._own_record_input(wf, inputs or {}, subject)
+                if own:  # the start form names one already made (the result the lab filed): the run walks that one
+                    record, make = own, None
+                    walking = [r for r in self.runs(record=own, status="running") if r["workflow_id"] == wid]
+                    if walking:  # the same submission again (the lab sending its result twice): the run walking it
+                        return walking[0]
             elif not record or record.split("/")[0] != wf.record:
                 raise Invalid(f"{wf.title} is about a {wf.record}; say which one")
             got = hub.records.read(*(record or subject).split("/", 1))
@@ -645,6 +662,22 @@ class Engine:
                 hub.db.runs.set(run_id, {"deadline_at": self._deadline_at(wf), "deadline_missed_at": None})
             self.advance(run_id, seq)
         return self.run(run_id)
+
+    def _own_record_input(self, wf, inputs: dict, subject: str) -> str | None:
+        """A record of the workflow's own type that the start form names, about ``subject``: started on the subject
+        with it, the run walks that record rather than making another. One about someone else is refused."""
+        from .hub import Invalid
+        for f in wf.inputs:
+            ref = self._ref_of(inputs.get(f["name"]))
+            if f["type"] != "reference" or not isinstance(ref, str) or ref.split("/", 1)[0] != wf.record:
+                continue
+            rec = self.hub.records.read(*ref.split("/", 1))
+            if rec is None:
+                raise Invalid(f"{f['label']}: there is no {ref}")
+            if self.hub.subject_of(rec) != subject:
+                raise Invalid(f"{f['label']}: {ref} is about someone else, not this {subject.split('/')[0].lower()}")
+            return ref
+        return None
 
     def start_on(self, wf) -> list[str]:
         """The record types a person starts ``wf`` on: its record's type, or, for a workflow that makes its record
@@ -734,6 +767,13 @@ class Engine:
             ref = out.get("reference") if isinstance(out, dict) else None
             if sid not in ("run", "input") and isinstance(ref, str) and ref.split("/", 1)[0] == wf.record:
                 made = ref
+        if made is None:  # else the record of that type it was started with (the lab result it reviews)
+            for val in ((run.get("ctx") or {}).get("input") or {}).values():
+                ref = self._ref_of(val)
+                if isinstance(ref, str) and ref.split("/", 1)[0] == wf.record and hub.records.read(*ref.split("/", 1)) \
+                        and not any(r["id"] != run_id for r in self.runs(record=ref, status="running")):
+                    made = ref
+                    break
         if made is None:
             ctx = {"run": {**run["ctx"].get("run", {}), "subject": subject},
                    "input": run["ctx"].get("input") or {}}
@@ -966,6 +1006,7 @@ class Engine:
             self._save(run)
             seq = hub.track.append(self.automation_actor(run), "run.completed", run["record"] or "", run_id=run_id,
                                    cause=cause)
+            self._ended(run, seq)
             self._abandon(run, seq, stranded_only=True)
             self._late_finish(run, cause)
             self._hand_on(run, seq)
@@ -1206,6 +1247,25 @@ class Engine:
             seq = self.hub.track.append(actor, "step.retried", f"step:{step_id}", run_id=run_id,
                                         data={"step": step_id, "error": st.get("error"), "reason": reason})
         self.advance(run_id, seq)
+
+    def _ended(self, run: dict, cause: int) -> None:
+        """A run of its record's own workflow ended with the record still in a state the lifecycle's ``ended`` names
+        (an older version that did the work without moving it): the record goes where that says, by the workflow."""
+        ref = run.get("record") or ""
+        if "/" not in ref:
+            return
+        hub = self.hub
+        rt = hub.record_type(ref.split("/", 1)[0])
+        lc = rt.lifecycle if rt else None
+        if not lc or not lc.get("ended") or (rt.workflow or {}).get("id") != run["workflow_id"]:
+            return
+        if any(r["id"] != run["id"] for r in self.runs(record=ref, status="running")):
+            return
+        rec = hub.records.read(*ref.split("/", 1))
+        to = lc["ended"].get(schema.first(rec, lc["path"])) if rec else None
+        if to:
+            hub.update_record(self.automation_actor(run), ref, schema.put(rec, lc["path"], to), cause=cause,
+                              run_id=run["id"])
 
     def _abandon(self, run: dict, cause: int, *, stranded_only: bool = False) -> None:
         """A run about a record was cancelled: move the record where its lifecycle says abandoned work goes, unless
@@ -1546,10 +1606,11 @@ class Engine:
             priority=prio if prio in ("normal", "urgent") else "normal", output={"about": about} if about else None))
         return item_id
 
-    def _staffed(self, role: str | None, besides: str | None = None) -> list[str]:
-        """The people on duty who hold ``role``, leaving out ``besides``."""
+    def _staffed(self, role: str | None, besides=None) -> list[str]:
+        """The people on duty who hold ``role``, leaving out ``besides`` (one member, or several)."""
+        out = _besides(besides)
         return [m["id"] for m in (self.hub.active_holders(role, persons_only=True) if role else [])
-                if m["id"] != besides]
+                if m["id"] not in out]
 
     def alert(self, run: dict, step, text: str, *, role: str | None = None, assignee: str | None = None,
               cause: int | None = None, priority: str | None = None, about: str | None = None,
@@ -1560,7 +1621,8 @@ class Engine:
         only holder on duty, each other person holding it is told by name, else the next in line is."""
         hub = self.hub
         out: list[str] = []
-        if assignee and assignee != besides:
+        late = _besides(besides)
+        if assignee and assignee not in late:
             m = hub.db.members.find_one({"_id": assignee}, fields=["status", "kind"])
             if m and m["status"] == "active" and m["kind"] == "person":
                 return [self._notice(run, step, text, assignee=assignee, cause=cause, priority=priority, about=about)]
@@ -1568,7 +1630,7 @@ class Engine:
             others = self._staffed(r, besides)
             if not others:
                 continue
-            if besides and besides in self._holders(r):  # the late one holds it too: tell the others by name
+            if late & set(self._holders(r)):  # the late one holds it too: tell the others by name
                 out = [self._notice(run, step, text, assignee=o, cause=cause, priority=priority, about=about)
                        for o in others]
             else:
@@ -1578,7 +1640,7 @@ class Engine:
         if out and not owners_too:
             return out
         owners = [m for m in hub.members("person") if m["status"] == "active" and hub.is_policy_owner(m)
-                  and m["id"] != besides]
+                  and m["id"] not in late]
         named = {r.get("assignee") for r in hub.db.items.find({"_id": {"$in": sorted(told)}}, fields=["assignee"])
                  } if told else set()
         return out + [self._notice(run, step, text, assignee=m["id"], cause=cause, priority=priority, about=about)
@@ -2529,7 +2591,9 @@ class Engine:
             run = self.run(item["run_id"])
             wf, _ = hub.workflow(run["workflow_id"], run["version"])
             step = wf.step(item["step_id"])
-            late = item["claimed_by"] or item["assignee"]
+            # whom it is stuck with: who took it, else everyone on duty it waits for (escalating a physician's
+            # critical review to the medical director, who is one of those physicians, tells no one new)
+            late = item["claimed_by"] or item["assignee"] or set(self._staffed(item.get("role")))
             with hub.db:
                 hub.db.items.set(item["id"], {"escalated": level + 1,
                                               "escalate_next": clock.stamp(now_utc + allowed, tz),
