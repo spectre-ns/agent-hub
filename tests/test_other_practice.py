@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from conftest import quiet
+from conftest import quiet, snapshot_hub
 from practicehub.agents.runner import run_all_local
-from practicehub.hub import Denied, Hub
+from practicehub.hub import Denied
 
 PACK = str(Path(__file__).parent / "packs" / "accounting")
 
@@ -14,9 +14,7 @@ PACK = str(Path(__file__).parent / "packs" / "accounting")
 @pytest.fixture
 def firm(monkeypatch):
     monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
-    h = Hub(None, pack=PACK)
-    h.install(PACK)
-    return h
+    return snapshot_hub("accounting", PACK, lambda h: h.install(PACK))
 
 
 def test_an_accounting_practice_files_a_return(firm):

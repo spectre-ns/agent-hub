@@ -28,8 +28,10 @@ from .. import workflows as wfmod
 from ..backends import engines
 from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, HubError, Invalid, NotFound, member_ref
+from ..store import Transient
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
+from .dashboard_pages import DashboardPages
 from .definitions_pages import DefinitionPages
 from .calendar_pages import CalendarPages
 from .mcp_pages import McpPages
@@ -69,7 +71,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, McpPages):
+class App(CalendarPages, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -113,7 +115,10 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         R("POST", r"/api/members/(?P<mid>[\w-]+)/status", self.api_member_status)
         R("POST", r"/api/members/(?P<mid>[\w-]+)/tokens", self.api_member_token)
         R("POST", r"/api/members", self.api_member_add)
-        R("POST", r"/api/members/(?P<mid>[\w-]+)/(?P<verb>roles|approve-roles|sponsor|profile|revoke)",
+        R("GET", r"/api/members/(?P<mid>[\w-]+)/dependents", self.api_member_dependents)
+        R("GET", r"/api/members/(?P<mid>[\w-]+)/profile-versions", self.api_member_profiles)
+        R("POST", r"/api/members/(?P<mid>[\w-]+)/(?P<verb>roles|approve-roles|withdraw-roles|sponsor|profile|"
+          r"approve-profile|withdraw-profile|switch-off-request|approve-switch-off|withdraw-switch-off|revoke)",
           self.api_member_change)
         R("GET", r"/api/outbox", self.api_outbox)
         R("POST", r"/api/outbox/(?P<oid>\d+)/(?P<verb>claim|sent|failed)", self.api_outbox_verb)
@@ -163,7 +168,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         R("GET", r"/team/(?P<mid>[\w-]+)", self.page_member)
         R("POST", r"/team", self.post_team_add)
         R("POST", r"/team/(?P<mid>[\w-]+)/(?P<verb>enable|disable|token|roles|approve-roles|withdraw-roles|sponsor|"
-          r"profile|revoke|setup-code)", self.post_member)
+          r"profile|approve-profile|withdraw-profile|ask-disable|approve-disable|withdraw-disable|revoke|setup-code)",
+          self.post_member)
         R("GET", r"/track", self.page_track)
         R("GET", r"/access", self.page_access)
         R("GET", r"/track/(?P<seq>\d+)", self.page_chain)
@@ -172,6 +178,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         self.calendar_routes(R)
         self.live_routes(R)
         self.record_routes(R)
+        self.dashboard_routes(R)
         self.definition_routes(R)
         self.office_routes(R)
         self.mcp_routes(R)
@@ -192,6 +199,12 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             if path.startswith("/mcp/"):  # MCP servers, with a member's token (mcp_pages, mcp.py)
                 return self.handle_mcp(method, raw_path, headers, body)
             return self._dispatch(method, path, query, is_api, req, headers)
+        except Transient:  # the database stayed busy past every retry: nothing of this transaction was saved
+            msg = "The hub is busy with other work; try again in a moment."
+            h = {"Retry-After": "2"}
+            if is_api:
+                return 503, {**h, "Content-Type": "application/json"}, _json({"error": msg})
+            return 503, {**h, "Content-Type": "text/plain; charset=utf-8"}, msg.encode()
         except Exception:  # a bug is a 500 with no detail to the client; the traceback goes to stderr
             import traceback
             traceback.print_exc()
@@ -456,12 +469,22 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         return self.hub.approve_block(req["me"], bid, int(ver), self.body_json(req).get("meaning", ""))
 
     def api_members(self, req):
+        warn = self.hub.member_admin_warning()
         return {"members": [{k: m[k] for k in ("id", "kind", "name", "title", "sponsor", "status", "roles", "profile")}
-                            for m in self.hub.members()]}
+                            for m in self.hub.members()], "warnings": [warn] if warn else []}
 
     def api_member_status(self, req, mid):
+        """Switch a member on or off. Switching off a person who sponsors agents or services names what becomes of
+        each: ``hand_over`` {agent: new sponsor} and ``stop`` [agent, ...] (or "all"); GET .../dependents lists them."""
         b = self.body_json(req)
-        return self.hub.set_status(req["me"], mid, b.get("status", ""), b.get("reason", ""))
+        return self.hub.set_status(req["me"], mid, b.get("status", ""), b.get("reason", ""),
+                                   hand_over=b.get("hand_over"), stop=b.get("stop"))
+
+    def api_member_dependents(self, req, mid):
+        return {"dependents": self.hub.dependents(mid), "switch_off_request": self.hub.off_request(mid)}
+
+    def api_member_profiles(self, req, mid):
+        return {"versions": [{k: v for k, v in r.items() if k != "_id"} for r in self.hub.agent_profile_versions(mid)]}
 
     def api_member_token(self, req, mid):
         return {"token": self.hub.issue_token(req["me"], mid, self.body_json(req).get("label", ""))}
@@ -475,10 +498,27 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             return hub.set_roles(me, mid, list(b.get("roles", [])))
         if verb == "approve-roles":
             return hub.approve_roles(me, mid)
+        if verb == "withdraw-roles":
+            hub.withdraw_roles(me, mid)
+            return {"withdrawn": True}
         if verb == "sponsor":
             return hub.set_sponsor(me, mid, str(b.get("sponsor", "")))
-        if verb == "profile":
-            return hub.update_agent_profile(me, mid, b)
+        if verb == "profile":  # proposed: in force once a second policy owner approves it
+            return hub.propose_agent_profile(me, mid, {k: v for k, v in b.items() if k != "note"},
+                                             str(b.get("note", "")))
+        if verb == "approve-profile":
+            return hub.approve_agent_profile(me, mid, int(b.get("version", 0)), str(b.get("meaning", "")))
+        if verb == "withdraw-profile":
+            hub.withdraw_agent_profile(me, mid, int(b.get("version", 0)), str(b.get("reason", "")))
+            return {"withdrawn": True}
+        if verb == "switch-off-request":
+            return hub.request_switch_off(me, mid, str(b.get("reason", "")), hand_over=b.get("hand_over"),
+                                          stop=b.get("stop"))
+        if verb == "approve-switch-off":
+            return hub.approve_switch_off(me, mid)
+        if verb == "withdraw-switch-off":
+            hub.withdraw_switch_off(me, mid)
+            return {"withdrawn": True}
         hub.revoke_token(me, mid, str(b.get("credential", "")))
         return {"revoked": True}
 
@@ -837,9 +877,10 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         tag = f' <span class="badge {m["kind"]}">{m["kind"]}</span>' if m["kind"] != "person" else ""
         return f'<span class="who">{self._av(m)}<a href="/team/{e(m["id"])}">{e(m["name"])}</a>{tag}</span>'
 
-    @staticmethod
-    def _when(ts: str) -> str:
-        return e((ts or "")[:16].replace("T", " "))
+    def _at(self, ts: str) -> str:
+        """A time as pages show it: in the practice's time zone (``clock.shown``; the track keeps instants in UTC)."""
+        from .. import clock
+        return e(clock.shown(ts, self.hub.engine.zone()))
 
     @staticmethod
     def _urgency(it) -> str:
@@ -900,7 +941,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                         f'<td><a href="/runs/{it["run_id"]}">{e(it.get("run_title", ""))}</a></td>'
                         f'<td>{e(it["role"] or "")}</td><td>{self._av(it["claimed_by"]) if it["claimed_by"] else ""}</td>'
                         f'<td>{self._item_loz(it)}</td><td class="muted" style="white-space:nowrap">'
-                        f'{self._when(it["created_at"])}</td></tr>')
+                        f'{self._at(it["created_at"])}</td></tr>')
         return ('<table class="list"><tr><th>Key</th><th>Work</th><th>About</th><th>Role</th><th>Assignee</th>'
                 f'<th>Status</th><th>Created</th></tr>{"".join(rows)}</table>')
 
@@ -1129,7 +1170,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                         f'<td>{e(wf.title if wf else r["workflow_id"])} <span class="muted">v{r["version"]}</span></td>'
                         f'<td>{e(", ".join(now))}</td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'
                         f'<td>{self._av(r["started_by"])}</td><td class="muted" style="white-space:nowrap">'
-                        f'{self._when(r["updated_at"])}</td></tr>')
+                        f'{self._at(r["updated_at"])}</td></tr>')
         opts = "".join(f'<option value="{e(k)}"{" selected" if k == wid else ""}>{e(w.title)}</option>' for k, w in wfs.items())
         sopts = "".join(f'<option value="{v}"{" selected" if v == status else ""}>{t}</option>'
                         for v, t in (("running", "In progress"), ("completed", "Done"), ("cancelled", "Cancelled"), ("", "Any status")))
@@ -1270,7 +1311,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             dl += [("Step", e(step.title)), ("Agent risk", risk),
                    ("Agents", "may do this" if step.agents_may and not item["persons_only"] else "people only")]
             if step.kind == "gate":
-                dl.append(("Signer", "a person" if step.signer == "person" else "a person, or an agent within criteria"))
+                dl.append(("Decided by", "a person, who signs" if step.signer == "person" else
+                           "a person, who signs; or an agent within criteria, whose decision is its attestation, not a signature"))
         rec = ""
         if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
             subj = self._may_read(me, self.subj["type"]) and self.hub.records.read(*run["record"].split("/", 1))
@@ -1292,7 +1334,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             dl.append((rt.label if rt else "Record", rec))
         dl += [("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}'),
                ("Run", f'<a href="/runs/{e(run["id"])}">{e(self.hub.run_title(req["me"], run))}</a>'),
-               ("Created", self._when(item["created_at"])), ("Updated", self._when(item["updated_at"]))]
+               ("Created", self._at(item["created_at"])), ("Updated", self._at(item["updated_at"]))]
         details = ('<aside class="details"><h3>Details</h3><dl>'
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
         note = f'<div class="note card">Note: {e(item["note"])}</div>' if item.get("note") else ""
@@ -1395,16 +1437,26 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                          f'class="card">{fields}<button>Done</button></form></div>')
         return "".join(parts)
 
+    def _signed_badge(self, ev) -> str:
+        """A person's signature, or an agent's attested decision, which is never a signature."""
+        if ev.get("signature"):
+            return ' <span class="badge signed">signed</span>'
+        att = (ev.get("data") or {}).get("attested")
+        if att:
+            return (f' <span class="badge">decided by {e(self.member_name(att.get("agent") or ev["actor"]))} (an agent)'
+                    f', not a signature</span>')
+        return ""
+
     def _activity(self, events, me) -> str:
         """Events as an activity feed, redacted for this viewer."""
         rows = []
         for ev in Viewer(self.hub, me).events(events):
-            signed = ' <span class="badge signed">signed</span>' if ev.get("signature") else ""
-            data = {k: v for k, v in ev["data"].items() if k != "signed"}
+            signed = self._signed_badge(ev)
+            data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             cause = f' · because of <a href="/track/{ev["cause"]}">#{ev["cause"]}</a>' if ev["cause"] else ""
             rows.append(f'<li>{self._av(ev["actor"])}<div class="body"><div><b>{e(self.member_name(ev["actor"]))}</b> '
                         f'{e(ev["action"].replace(".", " "))}{signed}</div><div class="meta">'
-                        f'<a href="/track/{ev["seq"]}">#{ev["seq"]}</a> · {self._when(ev["at"])}{cause}</div>'
+                        f'<a href="/track/{ev["seq"]}">#{ev["seq"]}</a> · {self._at(ev["at"])}{cause}</div>'
                         + (f'<details><summary class="meta">details</summary><pre>{e(json.dumps(data, indent=1))}</pre>'
                            f'</details>' if data else "") + "</div></li>")
         return f'<ul class="activity">{"".join(rows)}</ul>' if rows else '<p class="muted">No activity yet.</p>'
@@ -1445,7 +1497,9 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             if st["state"] == "done" and isinstance(out, dict):
                 ok, missing = viewer.step_visible(wf, s.id)
                 if ok:
-                    shown = {k: v for k, v in out.items() if k not in ("by", "by_kind", "event")}
+                    shown = {k: v for k, v in out.items() if k not in ("by", "by_kind", "event", "signature")}
+                    if out.get("by_kind") == "agent" and s.kind == "gate":
+                        shown = {"decided by": f"{self.member_name(out['by'])} (an agent)", **shown}
                     detail = f"<details><summary class='muted'>result</summary>{self._values(shown)}</details>"
                 else:
                     detail = f'<div class="muted">result needs access to: {e(", ".join(missing))}</div>'
@@ -1470,8 +1524,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
         if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
             dl.append((self.subj["label"], self.subject_link(run["record"])))
-        dl += [("Started by", self.who(run["started_by"])), ("Created", self._when(run["created_at"])),
-               ("Updated", self._when(run["updated_at"]))]
+        dl += [("Started by", self.who(run["started_by"])), ("Created", self._at(run["created_at"])),
+               ("Updated", self._at(run["updated_at"]))]
         if run.get("root_event"):
             dl.append(("Caused by", f'<a href="/track/{run["root_event"]}">event #{run["root_event"]}</a>'))
         details = ('<aside class="details"><h3>Details</h3><dl>'
@@ -1995,7 +2049,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
     def _confirm_signer(self, req, f) -> None:
         """A signature is made with the signer's own credential, given for it: on a page, their passphrase typed again;
         over the API, the call's ``Authorization: Bearer`` (sent with that request, never ambient like a cookie).
-        Agents never sign: the engine refuses them whatever they send."""
+        Agents never sign: the engine records their decisions as proposals or attestations, whatever they send."""
         given = str(f.get("passphrase", "") or "")
         if (not given and req["path"].startswith("/api/")
                 and req.get("headers", {}).get("authorization", "").lower().startswith("bearer ")):
@@ -2044,6 +2098,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         subs = self.hub.search_records(me, st, limit=SHOWN + 1, text=q or None)  # in the store: none is missed
         more = len(subs) > SHOWN
         subs = subs[:SHOWN]
+        self.hub.note_list(me, subs, how="search" if q else "list", what=f"records:{st}", text=q or None)
         heads = list(self.hub.facts(subs[0]).keys()) if subs else []
         rows = "".join(f'<tr><td>{self.subject_link(f"{st}/{p["id"]}", self.hub.title(p))}</td>'
                        + "".join(f"<td>{self._fact(v)}</td>" for v in self.hub.facts(p).values()) + "</tr>"
@@ -2125,7 +2180,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         runs = self.hub.engine.runs(record=ref)
         parts.append(f"<h2 id='work'>Work about this {e(self.subj['label'].lower())}</h2>" + (
             "<table>" + "".join(f'<tr><td><a href="/runs/{r["id"]}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
-                                f'<td class="muted">{e(r["created_at"][:16].replace("T", " "))}</td></tr>' for r in runs)
+                                f'<td class="muted">{self._at(r["created_at"])}</td></tr>' for r in runs)
             + "</table>" if runs else "<p class='muted'>None.</p>"))
         starts = self.start_buttons(me, st, ref)
         if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
@@ -2145,12 +2200,14 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         raise Redirect(f"/runs/{rid}")
 
     def _events(self, events, me) -> str:
-        rows = []
+        rows, who = [], {}
         for ev in Viewer(self.hub, me).events(events):
-            signed = ' <span class="badge signed">signed</span>' if ev.get("signature") else ""
-            data = {k: v for k, v in ev["data"].items() if k != "signed"}
+            if ev["actor"] not in who:  # one look-up per member on the page, not one per event
+                who[ev["actor"]] = self.who(ev["actor"])
+            signed = self._signed_badge(ev)
+            data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             rows.append(f'<tr><td><a href="/track/{ev["seq"]}">#{ev["seq"]}</a></td>'
-                        f'<td class="muted">{e(ev["at"][11:19])}</td><td>{self.who(ev["actor"])}</td>'
+                        f'<td class="muted">{e(ev["at"][11:19])}</td><td>{who[ev["actor"]]}</td>'
                         f'<td>{e(ev["action"])}{signed}</td><td>{e(ev["subject"])}</td>'
                         f'<td class="muted">{"#" + str(ev["cause"]) if ev["cause"] else ""}</td>'
                         f'<td><details><summary>data</summary><pre>{e(json.dumps(data, indent=1))}</pre></details></td></tr>')
@@ -2385,6 +2442,9 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             if any(h["status"] == "active" for h in r["holders"]):
                 return ""
             return '<div class="lozenge danger">nobody on duty</div>'
+        lone = hub.member_admin_warning()
+        if lone and (hub.can(me, "member_admin", "practice:main") or hub.is_policy_owner(me)):
+            parts.insert(0, f'<div class="warn" role="status">{e(lone)}</div>')
         empty = hub.empty_roles()
         if empty:
             parts.insert(0, '<div class="error">Work is routed to roles that nobody switched on holds: '
@@ -2488,9 +2548,14 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                         skills=", ".join(m["profile"].get("skills", [])))
         actions = []
         can_admin = hub.can(me, "member_admin", "practice:main")
-        if m["status"] == "active" and (can_admin or m["sponsor"] == me["id"]) and m["id"] != me["id"]:
-            actions.append(f'<form method="post" action="/team/{e(mid)}/disable" class="inline"><input name="reason" '
-                           f'placeholder="reason" required><button class="danger">Switch off</button></form>')
+        off_form = ""
+        if m["status"] == "active" and m["id"] != me["id"]:
+            if can_admin or m["sponsor"] == me["id"]:
+                off_form = self._switch_off_form(m, "disable", "Switch off")
+            elif hub.is_policy_owner(me) and me["kind"] == "person" and not hub.off_request(mid):
+                off_form = self._switch_off_form(m, "ask-disable", "Ask to switch off",
+                                                 "Two policy owners together switch someone off: a second policy "
+                                                 "owner approves.")
         if m["status"] == "disabled" and can_admin:
             actions.append(f'<form method="post" action="/team/{e(mid)}/enable" class="inline"><button>Switch on</button></form>')
         if m["status"] == "active" and (m["id"] == me["id"] if m["kind"] == "person" else m["sponsor"] == me["id"]):
@@ -2502,7 +2567,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                      f'<pre>{e(new_token)}</pre></div>')
         if setup:  # shown in this response only, like a new token; only its hash is stored
             token += (f'<div class="card"><p>A one-time setup code for {e(m["name"])}, shown once. Give it to them in '
-                      f'person or by phone, not by email. It works once, until {e(setup["expires_at"][:16].replace("T", " "))} '
+                      f'person or by phone, not by email. It works once, until {self._at(setup["expires_at"])} '
                       f'UTC, at <a href="/setup?member={e(urllib.parse.quote(mid))}">/setup</a>:</p>'
                       f'<pre>{e(setup["code"])}</pre></div>')
         if empty:
@@ -2510,7 +2575,11 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             token += ('<div class="error">Nobody switched on now holds: ' + ", ".join(e(names.get(r, r)) for r in empty)
                       + ". Work for these roles is raised with the escalation role or a policy owner until someone "
                       "holds them. Give the roles to someone below, or re-sponsor the agents that stopped.</div>")
-        actions += self._member_admin_forms(me, m)
+        lone = hub.member_admin_warning()
+        if (lone and m["status"] == "active" and (can_admin or hub.is_policy_owner(me))
+                and mid in {a["id"] for a in hub.member_admins()}):
+            token += f'<div class="warn" role="status">{e(lone)}</div>'
+        actions += self._off_request_card(me, m) + self._member_admin_forms(me, m)
         sponsored = [x for x in hub.members() if x["sponsor"] == mid]
         sp = ("<h2>Sponsors</h2><ul class='plain'>" + "".join(f"<li>{self.who(x['id'])} · {e(x['status'])}</li>"
                                                               for x in sponsored) + "</ul>") if sponsored else ""
@@ -2518,34 +2587,165 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         own = ""
         if mid == me["id"] and m["kind"] == "person":  # your own profile holds your passphrase
             own = self._own_passphrase(me, *passphrase)
-        body = (self._values(info) + own + token + "".join(actions) + sp + "<h2>Recent actions</h2>"
+        body = (self._values(info) + own + token + "".join(actions) + off_form + sp + "<h2>Recent actions</h2>"
                 + self._events(events, me))
         return self.layout(req, m["name"], body, actions=(f'<a class="btn" href="/me/settings">Settings</a>'
                                                           if mid == me["id"] else ""))
 
+    def _switch_off_form(self, m, verb: str, label: str, note: str = "") -> str:
+        """The off switch. For a person who sponsors agents or services it lists each one, what stops with it, and
+        asks what becomes of it: handed to a new sponsor, or stopped. There is no default: someone chooses."""
+        hub, mid = self.hub, m["id"]
+        deps = hub.dependents(mid)
+        reason = (f'<label>Why{"" if deps else " (for the track)"}<input name="reason" placeholder="reason" '
+                  f'required></label>')
+        if not deps:
+            return (f'<form method="post" action="/team/{e(mid)}/{verb}" class="inline">'
+                    f'<input name="reason" placeholder="reason" required aria-label="Why"><button class="danger">'
+                    f'{e(label)}</button></form>' + (f'<p class="muted">{e(note)}</p>' if note else ""))
+        people = [p for p in hub.members("person") if p["status"] == "active" and p["id"] != mid]
+        rnames = {r["id"]: r["name"] for r in hub.roles()}
+        rows = []
+        for d in deps:
+            opts = ('<option value="">Choose…</option>'
+                    + "".join(f'<option value="hand:{e(p["id"])}">Hand over to {e(p["name"])}</option>' for p in people)
+                    + '<option value="stop">Let it stop (its credentials end for good)</option>')
+            stops = [f'{d["credentials"]} live credential{"s" if d["credentials"] != 1 else ""}' if d["credentials"]
+                     else "", ("the only one switched on in " + ", ".join(e(rnames.get(r, r)) for r in d["only_holder_of"]))
+                     if d["only_holder_of"] else ""]
+            what = " · ".join(x for x in stops if x)
+            rows.append(f'<tr><td>{self.who(d["id"])}<div class="muted">{e(d["kind"].capitalize())}'
+                        f'{" · " + what if what else ""}</div></td><td><label class="visually-hidden" for="fate-{e(d["id"])}">'
+                        f'What becomes of {e(d["name"])}</label><select id="fate-{e(d["id"])}" name="fate:{e(d["id"])}" '
+                        f'required>{opts}</select></td></tr>')
+        return (f'<h2 id="switch-off">{e(label)}</h2><form method="post" action="/team/{e(mid)}/{verb}" class="card stack">'
+                f'<p>{e(m["name"])} sponsors {len(deps)} agent{"s" if len(deps) != 1 else ""} or service'
+                f'{"s" if len(deps) != 1 else ""} that would stop with them. Choose a new sponsor for each, or say '
+                f'that it stops: nothing stops without someone choosing it.</p>'
+                f'<div class="tablewrap"><table class="fates"><thead><tr><th scope="col">Depends on {e(m["name"])}</th>'
+                f'<th scope="col">What becomes of it</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+                f'{reason}' + (f'<p class="muted">{e(note)}</p>' if note else "")
+                + f'<div class="filters"><button class="danger">{e(label)}</button></div></form>')
+
+    def _fates(self, f: dict) -> tuple[dict, list]:
+        """The switch-off form's choices: fate:<agent> = hand:<person> | stop."""
+        hand, stop = {}, []
+        for k, v in f.items():
+            if k.startswith("fate:") and isinstance(v, str):
+                if v.startswith("hand:"):
+                    hand[k[5:]] = v[5:]
+                elif v == "stop":
+                    stop.append(k[5:])
+        return hand, stop
+
+    def _off_request_card(self, me, m) -> list[str]:
+        hub, mid = self.hub, m["id"]
+        req = hub.off_request(mid)
+        if not req or m["status"] != "active":
+            return []
+        what = [f'{self.member_name(a)} goes to {self.member_name(p)}' for a, p in req["hand_over"].items()]
+        what += [f'{self.member_name(a)} stops' for a in req["stop"]]
+        btns = ""
+        if hub.is_policy_owner(me) and me["kind"] == "person" and me["id"] not in (req["by"], mid):
+            btns += (f'<form method="post" action="/team/{e(mid)}/approve-disable" class="inline">'
+                     f'<button class="danger">Approve: switch {e(m["name"])} off</button></form>')
+        if me["id"] == req["by"] or hub.is_policy_owner(me):
+            btns += (f'<form method="post" action="/team/{e(mid)}/withdraw-disable" class="inline">'
+                     f'<button class="secondary">{"Withdraw" if me["id"] == req["by"] else "Decline"}</button></form>')
+        return [f'<div class="card"><p><b>Waiting for a second policy owner:</b> {self.member_name(req["by"])} asked '
+                f'to switch {e(m["name"])} off: {e(req["reason"])}.' + (f' {e("; ".join(what))}.' if what else "")
+                + f'</p>{btns}</div>']
+
+    def _profile_forms(self, me, m) -> list[str]:
+        """An agent's profile: the version in force, a proposed one waiting for a second person, the history."""
+        hub, mid, out = self.hub, m["id"], []
+        admin = hub.can(me, "member_admin", "practice:main")
+        prof = {"max_risk": "low", "skills": [], **m["profile"]}
+        prop = hub.agent_profile_proposal(mid)
+        if prop:
+            new = prop["profile"]
+            rows = []
+            if new.get("model", "") != prof.get("model", ""):
+                rows.append(("Model", e(prof.get("model", "") or "—"), e(new.get("model", "") or "—")))
+            if new.get("max_risk") != prof.get("max_risk"):
+                rows.append(("Highest risk", e(prof["max_risk"].capitalize()), e(new["max_risk"].capitalize())))
+            if sorted(new.get("skills", [])) != sorted(prof["skills"]):
+                def skills(xs, other):  # the whole list, with what the change adds or takes away marked
+                    return ", ".join(f'<b>{e(self.human(x))}</b>' if x not in other else e(self.human(x))
+                                     for x in xs) or "none"
+                rows.append(("Skills", skills(prof["skills"], new.get("skills", [])),
+                             skills(new.get("skills", []), prof["skills"])))
+            table = "".join(f'<tr><th scope="row">{k}</th><td>{a}</td><td>{b}</td></tr>' for k, a, b in rows)
+            btns = ""
+            if hub.is_policy_owner(me) and me["kind"] == "person" and me["id"] != prop["author"]:
+                btns += (f'<form method="post" action="/team/{e(mid)}/approve-profile" class="inline"><input '
+                         f'type="hidden" name="version" value="{prop["version"]}"><button>Approve version '
+                         f'{prop["version"]}</button></form>')
+            if me["id"] == prop["author"] or hub.is_policy_owner(me):
+                btns += (f'<form method="post" action="/team/{e(mid)}/withdraw-profile" class="inline"><input '
+                         f'type="hidden" name="version" value="{prop["version"]}"><button class="secondary">'
+                         f'{"Withdraw" if me["id"] == prop["author"] else "Decline"}</button></form>')
+            out.append(f'<div class="card" id="proposed-profile"><p><b>Waiting for a second policy owner:</b> '
+                       f'{self.member_name(prop["author"])} proposed version {prop["version"]} of what {e(m["name"])} '
+                       f'may do{": " + e(prop["note"]) if prop["note"] else ""}. Nothing changes until it is approved.'
+                       f'</p><div class="tablewrap"><table><thead><tr><th scope="col"></th><th scope="col">In force'
+                       f'</th><th scope="col">Proposed</th></tr></thead><tbody>{table}</tbody></table></div>'
+                       f'<div class="actions">{btns}</div></div>')
+        if admin or m["sponsor"] == me["id"]:
+            risks = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="max_risk" value="{r}"'
+                            f'{" checked" if prof.get("max_risk", "low") == r else ""}> {r.capitalize()}</label>'
+                            for r in ("low", "medium", "high"))
+            skills = sorted(set(hub.pack.all_skills()) if hub.pack else set())
+            boxes = "".join(f'<label class="radio multi"><input type="checkbox" class="opt-input" name="skills" value="{e(k)}"'
+                            f'{" checked" if k in prof.get("skills", []) else ""}> {e(self.human(k))}</label>'
+                            for k in skills)
+            out.append(f'<h2>What it may do</h2><form method="post" action="/team/{e(mid)}/profile" class="card">'
+                       f'<p class="muted">A change is proposed, not made: it takes effect when a policy owner other '
+                       f'than you approves it, and every version is kept.</p>'
+                       f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
+                       f'<fieldset class="choices options"><legend>Highest risk it may take</legend>{risks}</fieldset>'
+                       f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset>'
+                       f'<label>Why (for the reviewer)<input name="note" placeholder="what the change is for"></label>'
+                       f'<button>Propose the change</button></form>')
+        versions = hub.agent_profile_versions(mid)
+        if versions:
+            rows = "".join(
+                f'<tr><td>v{v["version"]}</td><td><span class="badge {e(v["status"])}">{e(v["status"])}</span></td>'
+                f'<td>{e(v["profile"].get("model", ""))} · {e(v["profile"].get("max_risk", "low"))} · '
+                f'{e(", ".join(self.human(x) for x in v["profile"].get("skills", [])))}</td>'
+                f'<td>{self.who(v["author"]) if hub.db.members.get(v["author"]) else e(v["note"])}</td>'
+                f'<td>{self.who(v["approved_by"]) if v["approved_by"] else ""}</td></tr>' for v in versions)
+            out.append(f'<details><summary>Profile versions ({len(versions)})</summary><div class="tablewrap"><table>'
+                       f'<thead><tr><th scope="col"></th><th scope="col">Status</th><th scope="col">Profile</th>'
+                       f'<th scope="col">Proposed by</th><th scope="col">Approved by</th></tr></thead><tbody>{rows}'
+                       f'</tbody></table></div></details>')
+        return out
+
     def _member_admin_forms(self, me, m) -> list[str]:
         hub, mid, out = self.hub, m["id"], []
         admin = hub.can(me, "member_admin", "practice:main")
+        owner_path = not admin and me["kind"] == "person" and hub.is_policy_owner(me)  # two policy owners together
         pending = hub.role_request(mid)
         if pending:
             names = {r["id"]: r["name"] for r in hub.roles()}
             asked = ", ".join(e(names.get(r, r)) for r in pending["roles"]) or "no roles"
-            if pending.get("max_risk"):
-                asked += f', and take work up to {e(pending["max_risk"])} risk'
             btns = ""
             if hub.is_policy_owner(me) and me["id"] not in {pending["by"], mid, *pending.get("asked_by", [])}:
                 btns += (f'<form method="post" action="/team/{e(mid)}/approve-roles" class="inline">'
                          f'<button>Approve these roles</button></form>')
-            if admin:
+            if admin or hub.is_policy_owner(me):
                 btns += (f'<form method="post" action="/team/{e(mid)}/withdraw-roles" class="inline">'
                          f'<button class="secondary">Withdraw the request</button></form>')
             out.append(f'<div class="card"><p><b>Waiting for a second policy owner:</b> {self.member_name(pending["by"])} '
                        f'asked that {e(m["name"])} hold {asked}.</p>{btns}</div>')
-        if admin and mid != me["id"] and m["status"] == "active":
-            out.append(f'<h2>Roles</h2><form method="post" action="/team/{e(mid)}/roles" class="card">'
+        if (admin or owner_path) and mid != me["id"] and m["status"] == "active":
+            note = ('<p class="muted">You do not manage members, so any change you ask for waits for a second policy '
+                    'owner: two policy owners together can give someone a role that manages members.</p>'
+                    if owner_path else "")
+            out.append(f'<h2>Roles</h2><form method="post" action="/team/{e(mid)}/roles" class="card">{note}'
                        f'<fieldset class="choices options"><legend>Roles {e(m["name"])} holds</legend>'
                        f'{self._role_boxes(m["roles"], pending["roles"] if pending else ())}</fieldset>'
-                       f'<button>Save roles</button></form>')
+                       f'<button>{"Ask for these roles" if owner_path else "Save roles"}</button></form>')
         if admin and m["kind"] == "person" and mid != me["id"] and m["status"] == "active":
             has = hub.has_passphrase(mid)
             out.append(f'<h2>Passphrase</h2><form method="post" action="/team/{e(mid)}/setup-code" class="card">'
@@ -2564,29 +2764,15 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                        f'{self._person_options(m["sponsor"])}</select></label>'
                        f'<small>Their open approvals and notices about this agent move to the new sponsor.</small>'
                        f'<button>Change the sponsor</button></form>')
-        if admin and m["kind"] == "agent":
-            prof = m["profile"]
-            risks = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="max_risk" value="{r}"'
-                            f'{" checked" if prof.get("max_risk", "low") == r else ""}> {r.capitalize()}</label>'
-                            for r in ("low", "medium", "high"))
-            skills = sorted(set(hub.pack.all_skills()) if hub.pack else set())
-            boxes = "".join(f'<label class="radio multi"><input type="checkbox" class="opt-input" name="skills" value="{e(k)}"'
-                            f'{" checked" if k in prof.get("skills", []) else ""}> {e(self.human(k))}</label>'
-                            for k in skills)
-            out.append(f'<h2>What it may do</h2><form method="post" action="/team/{e(mid)}/profile" class="card">'
-                       f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
-                       f'<div class="field"><fieldset class="choices options" aria-describedby="max-risk-help">'
-                       f'<legend>Highest risk it may take</legend>{risks}</fieldset><small id="max-risk-help" '
-                       f'class="help">Raising it waits for a second policy owner, as roles that reach restricted data '
-                       f'do.</small></div>'
-                       f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset><button>Save</button></form>')
+        if m["kind"] == "agent":
+            out += self._profile_forms(me, m)
         try:
             creds = hub.tokens(me, mid)
         except Denied:
             creds = []
         live = [c for c in creds if not c["revoked"]]
         if live:
-            rows = "".join(f'<tr><td>{e(c["label"] or "—")}</td><td class="muted">{self._when(c["created_at"])}</td>'
+            rows = "".join(f'<tr><td>{e(c["label"] or "—")}</td><td class="muted">{self._at(c["created_at"])}</td>'
                            f'<td>{self.who(c["issued_by"]) if c["issued_by"] else ""}</td><td><form method="post" '
                            f'action="/team/{e(mid)}/revoke" class="inline"><input type="hidden" name="credential" '
                            f'value="{e(c["id"])}"><button class="danger" data-confirm="Revoke this credential? Anything '
@@ -2603,7 +2789,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             return self.page_member(req, mid, new_token=tok)
         if verb == "setup-code":
             return self.page_member(req, mid, setup=hub.issue_setup_code(me, mid))
-        if verb in ("roles", "approve-roles", "withdraw-roles", "sponsor", "profile", "revoke"):
+        if verb in ("roles", "approve-roles", "withdraw-roles", "sponsor", "profile", "approve-profile",
+                    "withdraw-profile", "ask-disable", "withdraw-disable", "revoke"):
             many = lambda k: f.get(k, []) if isinstance(f.get(k), list) else ([f[k]] if f.get(k) else [])
             if verb == "roles":
                 hub.set_roles(me, mid, many("roles"))
@@ -2614,12 +2801,26 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             elif verb == "sponsor":
                 hub.set_sponsor(me, mid, str(f.get("sponsor", "")))
             elif verb == "profile":
-                hub.update_agent_profile(me, mid, {"model": str(f.get("model", "")), "max_risk": f.get("max_risk"),
-                                                   "skills": many("skills")})
+                hub.propose_agent_profile(me, mid, {"model": str(f.get("model", "")), "max_risk": f.get("max_risk"),
+                                                    "skills": many("skills")}, str(f.get("note", "")))
+            elif verb == "approve-profile":
+                hub.approve_agent_profile(me, mid, int(f.get("version") or 0))
+            elif verb == "withdraw-profile":
+                hub.withdraw_agent_profile(me, mid, int(f.get("version") or 0), str(f.get("reason", "")))
+            elif verb == "ask-disable":
+                hand, stop = self._fates(f)
+                hub.request_switch_off(me, mid, str(f.get("reason", "")), hand_over=hand, stop=stop)
+            elif verb == "withdraw-disable":
+                hub.withdraw_switch_off(me, mid)
             else:
                 hub.revoke_token(me, mid, str(f.get("credential", "")))
             raise Redirect(f"/team/{mid}")
-        out = hub.set_status(me, mid, "active" if verb == "enable" else "disabled", f.get("reason", ""))
+        if verb == "approve-disable":
+            out = hub.approve_switch_off(me, mid)
+        else:
+            hand, stop = self._fates(f)
+            out = hub.set_status(me, mid, "active" if verb == "enable" else "disabled", f.get("reason", ""),
+                                 hand_over=hand, stop=stop)
         if out.get("roles_left_empty"):
             return self.page_member(req, mid, empty=out["roles_left_empty"])
         raise Redirect(f"/team/{mid}")
@@ -2635,10 +2836,26 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                   f'signature valid.{checked}</div>' if v["ok"] else
                   '<div class="error"><p>The track does not verify:</p><ul>'
                   + "".join(f"<li>{e(p)}</li>" for p in v["problems"]) + "</ul></div>")
-        actor = req["query"].get("actor")
+        q = req["query"]
+        actor = q.get("actor")
+        flt: dict = {"actor": actor} if actor else {}
+        before = int(q["before"]) if str(q.get("before") or "").isdigit() else None
+        if before:
+            flt["seq"] = {"$lt": before}
+        page = self.hub.db.events.find(flt, sort=[("seq", -1)], limit=self.TRACK_PAGE + 1)  # one page, by index
+        more, page = len(page) > self.TRACK_PAGE, page[:self.TRACK_PAGE]
+        nav = []
+        if before:
+            nav.append(f'<a href="/track{"?actor=" + urllib.parse.quote(actor) if actor else ""}">Newest</a>')
+        if more:
+            nav.append(f'<a href="/track?{"actor=" + urllib.parse.quote(actor) + "&" if actor else ""}'
+                       f'before={page[-1]["seq"]}">Older events</a>')
+        nav_html = f'<p class="muted">{" · ".join(nav)}</p>' if nav else ""
         return self.layout(req, "Track", banner + "<p class='muted'>Every action, by whom, and what caused it. Open an "
                            "event to see its whole chain of causes. <a href='/access'>Who accessed a file</a></p>"
-                           + self._events(self.hub.track.list(actor=actor, limit=300), req["me"]))
+                           + self._events(page, req["me"]) + nav_html)
+
+    TRACK_PAGE = 100  # events on one page of the track
 
     def page_access(self, req):
         """Who saw or changed a subject's file: the privacy officer's report, on screen or as CSV."""
@@ -2686,7 +2903,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                      "Content-Disposition": f'attachment; filename="access-{name}.csv"'}, buf.getvalue().encode())
         what = {"record.viewed": "Opened", "exported": "Exported", "created": "Created", "updated": "Changed", "transitioned": "Moved on",
                 "signed": "Signed"}
-        trs = "".join(f'<tr><td class="muted">{self._when(r["at"])}</td><td>{self.who(r["who"])}</td>'
+        trs = "".join(f'<tr><td class="muted">{self._at(r["at"])}</td><td>{self.who(r["who"])}</td>'
                       f'<td>{e(what.get(r["action"].split(".")[-1], what.get(r["action"], self.human(r["action"]))))}'
                       f'</td><td>{self.record_link(r["record"]) if r["record"] else ""}</td><td>{self._how(r["how"])}</td>'
                       f'<td><a href="/track/{r["seq"]}">#{r["seq"]}</a></td></tr>' for r in rows)
@@ -2721,6 +2938,11 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             raise NotFound(f"there is no event {seq}")
         last = chain[-1]
         sig = ""
+        att = (last.get("data") or {}).get("attested")
+        if att and not last.get("signature"):
+            sig = (f'<div class="muted">Decided by {self.who(att.get("agent") or last["actor"])} (an agent) at '
+                   f'{e(last["at"])}: “{e(str(att.get("meaning", "")))}”. This is the agent\'s attested decision, '
+                   f'not a signature: agents never sign.</div>')
         if last.get("signature"):
             okay = self.hub.track.verify_signature(last)
             signed = last["data"].get("signed", {})
@@ -2755,7 +2977,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             out += ' <span class="badge overdue">Late</span>'
         by = r.get("done_by") or (r.get("claimed_by") if r["status"] == "sending" else None)
         if by:
-            out += f'<div class="muted">{e(self.member_name(by))}{" · " + self._when(r["done_at"]) if r.get("done_at") else ""}</div>'
+            out += f'<div class="muted">{e(self.member_name(by))}{" · " + self._at(r["done_at"]) if r.get("done_at") else ""}</div>'
         return out
 
     def _deliver_form(self, me, r) -> str:
@@ -2800,7 +3022,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                      f'information you do not read.</div>')
             note = (f'<div class="muted">{"Why" if r["status"] == "failed" else "Note"}: {e(r["note"])}</div>'
                     if r.get("note") and readable else "")
-            body.append(f'<tr id="msg-{r["id"]}"><td class="muted">{e(r["at"][:16].replace("T", " "))}</td>'
+            body.append(f'<tr id="msg-{r["id"]}"><td class="muted">{self._at(r["at"])}</td>'
                         f'<td>{e(r["channel"])}</td><td>{e(r["recipient"])}</td><td>{words}</td>'
                         f'<td>{"<a href=/runs/" + e(r["run_id"]) + ">run</a>" if r["run_id"] else ""}</td>'
                         f'<td>{self._message_status(r)}{note}{self._deliver_form(me, r)}</td></tr>')

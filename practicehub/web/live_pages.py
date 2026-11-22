@@ -318,7 +318,7 @@ class LivePages:
                      f'{e(c["quote"])}</blockquote>'
                      + ('<p class="muted c-gone">On text that was removed.</p>' if gone else ""))
         replies = "".join(f'<li{" class=by-agent" if r.get("agent") else ""}><p class="c-by">{self.who(r["by"])}'
-                          f'{self._agent_mark(r)} <span class="muted">{e(r["at"][:16].replace("T", " "))}'
+                          f'{self._agent_mark(r)} <span class="muted">{self._at(r["at"])}'
                           f'</span></p><p>{self._comment_text(r["body"])}</p>'
                           f'{self._suggestion_html(me, c, r, url=url, may_write=may_write, back=back)}</li>'
                           for r in c["replies"])
@@ -330,7 +330,7 @@ class LivePages:
         return (f'<li class="thread{" resolved" if c["resolved"] else ""}{" by-agent" if c.get("agent") else ""}" '
                 f'id="{e(c["id"])}" data-comment="{e(c["id"])}">'
                 f'{quote}<p class="c-by">{self.who(c["by"])}{self._agent_mark(c)} <span class="muted">'
-                f'{e(c["at"][:16].replace("T", " "))}</span>'
+                f'{self._at(c["at"])}</span>'
                 f'{" <span class=loz>resolved</span>" if c["resolved"] else ""}</p>'
                 f'<p>{self._comment_text(c["body"])}</p>'
                 + (f'<ul class="plain replies">{replies}</ul>' if replies else "")
@@ -440,7 +440,7 @@ class LivePages:
         def pick(name, cur):
             return (f'<label>{"From" if name == "a" else "To"} <select name="{name}">' + "".join(
                 f'<option value="{v["version"]}"{" selected" if v["version"] == cur else ""}>v{v["version"]} · '
-                f'{e(v["at"][:16].replace("T", " "))} · {e(self._member_name(v["actor"]) if v["actor"] else "")}'
+                f'{self._at(v["at"])} · {e(self._member_name(v["actor"]) if v["actor"] else "")}'
                 f'{(" · " + e(v["comment"])) if v.get("comment") else ""}</option>' for v in versions)
                 + "</select></label>")
         out = [f'<form method="get" class="filters" action="{url}/compare">{pick("a", a)}{pick("b", b)}'
