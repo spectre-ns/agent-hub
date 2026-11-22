@@ -35,7 +35,7 @@ echo "$N shards" >&2; out=$(mktemp -d); tag=$$; start=$(date +%s)
 # the hubs the tests start from (a pack installed, its demo...) are built once per run and shared by the shards
 mkdir "$out/snapshots"
 names=""
-cleanup() { [ -n "$names" ] && docker rm -f $names >/dev/null 2>&1; rm -rf "$out/snapshots"; }
+cleanup() { [ -n "$names" ] && docker rm -f -v $names >/dev/null 2>&1; rm -rf "$out/snapshots"; }
 trap cleanup EXIT INT TERM
 for i in $(seq 0 $((N - 1))); do
   name="ph-test-mongo-$tag-$i"; names="$names $name"

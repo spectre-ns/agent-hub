@@ -24,7 +24,7 @@ import secrets
 from pathlib import Path
 
 from .db import Database, utcnow
-from .store import DESC
+from .store import DESC, DuplicateKey, Transient
 
 GENESIS = "0" * 64
 
@@ -150,24 +150,33 @@ class Track:
         ``signed`` makes the event an electronic signature over those fields plus the actor and time."""
         if signed is not None:
             data = {**(data or {}), "signed": signed}
-        with self.db:
-            last = self.head()
-            prev = last["hash"] if last else GENESIS
-            seq = (last["seq"] if last else 0) + 1
-            at = utcnow()
-            body = {"at": at, "actor": actor["id"], "actor_kind": actor["kind"], "action": action, "subject": subject,
-                    "run_id": run_id, "cause": cause, "data": data or {}, "prev": prev}
-            digest = self._hash(body)
-            signature = None
-            if signed is not None:
-                signature = self.sign({**signed, "by": actor["id"], "at": at, "event_hash": digest})
-            # the event's number is the head's plus one, and _id is that number: two writers that read the same
-            # head cannot both append (the second insert is refused), so the chain never forks
+        # outside a transaction, the append is one of its own, run again if another writer got there first; inside
+        # one, a lost race loses that transaction, and the unit of work around it is what is run again
+        return self.db.atomic(self._append, actor, action, subject, run_id, cause, data, signed)
+
+    def _append(self, actor, action, subject, run_id, cause, data, signed) -> int:
+        last = self.head()
+        prev = last["hash"] if last else GENESIS
+        seq = (last["seq"] if last else 0) + 1
+        at = utcnow()
+        body = {"at": at, "actor": actor["id"], "actor_kind": actor["kind"], "action": action, "subject": subject,
+                "run_id": run_id, "cause": cause, "data": data or {}, "prev": prev}
+        digest = self._hash(body)
+        signature = None
+        if signed is not None:
+            signature = self.sign({**signed, "by": actor["id"], "at": at, "event_hash": digest})
+        # the event's number is the head's plus one, and _id is that number: two writers that read the same head
+        # cannot both append (the second insert is refused, as a write conflict or a duplicate _id), so the chain
+        # never forks; the one refused has read a head that is no longer the head, and its transaction is run again
+        try:
             self.db.events.insert({"_id": seq, "seq": seq, "at": at, "actor": actor["id"], "actor_kind": actor["kind"],
                                    "action": action, "subject": subject, "run_id": run_id, "cause": cause,
                                    "data": data or {}, "prev": prev, "hash": digest, "signature": signature,
                                    "mac": self.seal(digest)})
-            return seq
+        except DuplicateKey:
+            self.db._lost()
+            raise Transient(f"event {seq} was appended by another writer") from None
+        return seq
 
     def head(self) -> dict | None:
         """The newest event."""

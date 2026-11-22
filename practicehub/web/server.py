@@ -28,6 +28,7 @@ from .. import workflows as wfmod
 from ..backends import engines
 from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, HubError, Invalid, NotFound, member_ref
+from ..store import Transient
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
@@ -192,6 +193,12 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             if path.startswith("/mcp/"):  # MCP servers, with a member's token (mcp_pages, mcp.py)
                 return self.handle_mcp(method, raw_path, headers, body)
             return self._dispatch(method, path, query, is_api, req, headers)
+        except Transient:  # the database stayed busy past every retry: nothing of this transaction was saved
+            msg = "The hub is busy with other work; try again in a moment."
+            h = {"Retry-After": "2"}
+            if is_api:
+                return 503, {**h, "Content-Type": "application/json"}, _json({"error": msg})
+            return 503, {**h, "Content-Type": "text/plain; charset=utf-8"}, msg.encode()
         except Exception:  # a bug is a 500 with no detail to the client; the traceback goes to stderr
             import traceback
             traceback.print_exc()
@@ -837,9 +844,10 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         tag = f' <span class="badge {m["kind"]}">{m["kind"]}</span>' if m["kind"] != "person" else ""
         return f'<span class="who">{self._av(m)}<a href="/team/{e(m["id"])}">{e(m["name"])}</a>{tag}</span>'
 
-    @staticmethod
-    def _when(ts: str) -> str:
-        return e((ts or "")[:16].replace("T", " "))
+    def _at(self, ts: str) -> str:
+        """A time as pages show it: in the practice's time zone (``clock.shown``; the track keeps instants in UTC)."""
+        from .. import clock
+        return e(clock.shown(ts, self.hub.engine.zone()))
 
     @staticmethod
     def _urgency(it) -> str:
@@ -900,7 +908,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                         f'<td><a href="/runs/{it["run_id"]}">{e(it.get("run_title", ""))}</a></td>'
                         f'<td>{e(it["role"] or "")}</td><td>{self._av(it["claimed_by"]) if it["claimed_by"] else ""}</td>'
                         f'<td>{self._item_loz(it)}</td><td class="muted" style="white-space:nowrap">'
-                        f'{self._when(it["created_at"])}</td></tr>')
+                        f'{self._at(it["created_at"])}</td></tr>')
         return ('<table class="list"><tr><th>Key</th><th>Work</th><th>About</th><th>Role</th><th>Assignee</th>'
                 f'<th>Status</th><th>Created</th></tr>{"".join(rows)}</table>')
 
@@ -1129,7 +1137,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                         f'<td>{e(wf.title if wf else r["workflow_id"])} <span class="muted">v{r["version"]}</span></td>'
                         f'<td>{e(", ".join(now))}</td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'
                         f'<td>{self._av(r["started_by"])}</td><td class="muted" style="white-space:nowrap">'
-                        f'{self._when(r["updated_at"])}</td></tr>')
+                        f'{self._at(r["updated_at"])}</td></tr>')
         opts = "".join(f'<option value="{e(k)}"{" selected" if k == wid else ""}>{e(w.title)}</option>' for k, w in wfs.items())
         sopts = "".join(f'<option value="{v}"{" selected" if v == status else ""}>{t}</option>'
                         for v, t in (("running", "In progress"), ("completed", "Done"), ("cancelled", "Cancelled"), ("", "Any status")))
@@ -1270,7 +1278,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             dl += [("Step", e(step.title)), ("Agent risk", risk),
                    ("Agents", "may do this" if step.agents_may and not item["persons_only"] else "people only")]
             if step.kind == "gate":
-                dl.append(("Signer", "a person" if step.signer == "person" else "a person, or an agent within criteria"))
+                dl.append(("Decided by", "a person, who signs" if step.signer == "person" else
+                           "a person, who signs; or an agent within criteria, whose decision is its attestation, not a signature"))
         rec = ""
         if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
             subj = self._may_read(me, self.subj["type"]) and self.hub.records.read(*run["record"].split("/", 1))
@@ -1292,7 +1301,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             dl.append((rt.label if rt else "Record", rec))
         dl += [("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}'),
                ("Run", f'<a href="/runs/{e(run["id"])}">{e(self.hub.run_title(req["me"], run))}</a>'),
-               ("Created", self._when(item["created_at"])), ("Updated", self._when(item["updated_at"]))]
+               ("Created", self._at(item["created_at"])), ("Updated", self._at(item["updated_at"]))]
         details = ('<aside class="details"><h3>Details</h3><dl>'
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
         note = f'<div class="note card">Note: {e(item["note"])}</div>' if item.get("note") else ""
@@ -1395,16 +1404,26 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                          f'class="card">{fields}<button>Done</button></form></div>')
         return "".join(parts)
 
+    def _signed_badge(self, ev) -> str:
+        """A person's signature, or an agent's attested decision, which is never a signature."""
+        if ev.get("signature"):
+            return ' <span class="badge signed">signed</span>'
+        att = (ev.get("data") or {}).get("attested")
+        if att:
+            return (f' <span class="badge">decided by {e(self.member_name(att.get("agent") or ev["actor"]))} (an agent)'
+                    f', not a signature</span>')
+        return ""
+
     def _activity(self, events, me) -> str:
         """Events as an activity feed, redacted for this viewer."""
         rows = []
         for ev in Viewer(self.hub, me).events(events):
-            signed = ' <span class="badge signed">signed</span>' if ev.get("signature") else ""
-            data = {k: v for k, v in ev["data"].items() if k != "signed"}
+            signed = self._signed_badge(ev)
+            data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             cause = f' · because of <a href="/track/{ev["cause"]}">#{ev["cause"]}</a>' if ev["cause"] else ""
             rows.append(f'<li>{self._av(ev["actor"])}<div class="body"><div><b>{e(self.member_name(ev["actor"]))}</b> '
                         f'{e(ev["action"].replace(".", " "))}{signed}</div><div class="meta">'
-                        f'<a href="/track/{ev["seq"]}">#{ev["seq"]}</a> · {self._when(ev["at"])}{cause}</div>'
+                        f'<a href="/track/{ev["seq"]}">#{ev["seq"]}</a> · {self._at(ev["at"])}{cause}</div>'
                         + (f'<details><summary class="meta">details</summary><pre>{e(json.dumps(data, indent=1))}</pre>'
                            f'</details>' if data else "") + "</div></li>")
         return f'<ul class="activity">{"".join(rows)}</ul>' if rows else '<p class="muted">No activity yet.</p>'
@@ -1445,7 +1464,9 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             if st["state"] == "done" and isinstance(out, dict):
                 ok, missing = viewer.step_visible(wf, s.id)
                 if ok:
-                    shown = {k: v for k, v in out.items() if k not in ("by", "by_kind", "event")}
+                    shown = {k: v for k, v in out.items() if k not in ("by", "by_kind", "event", "signature")}
+                    if out.get("by_kind") == "agent" and s.kind == "gate":
+                        shown = {"decided by": f"{self.member_name(out['by'])} (an agent)", **shown}
                     detail = f"<details><summary class='muted'>result</summary>{self._values(shown)}</details>"
                 else:
                     detail = f'<div class="muted">result needs access to: {e(", ".join(missing))}</div>'
@@ -1470,8 +1491,8 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
         if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
             dl.append((self.subj["label"], self.subject_link(run["record"])))
-        dl += [("Started by", self.who(run["started_by"])), ("Created", self._when(run["created_at"])),
-               ("Updated", self._when(run["updated_at"]))]
+        dl += [("Started by", self.who(run["started_by"])), ("Created", self._at(run["created_at"])),
+               ("Updated", self._at(run["updated_at"]))]
         if run.get("root_event"):
             dl.append(("Caused by", f'<a href="/track/{run["root_event"]}">event #{run["root_event"]}</a>'))
         details = ('<aside class="details"><h3>Details</h3><dl>'
@@ -1995,7 +2016,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
     def _confirm_signer(self, req, f) -> None:
         """A signature is made with the signer's own credential, given for it: on a page, their passphrase typed again;
         over the API, the call's ``Authorization: Bearer`` (sent with that request, never ambient like a cookie).
-        Agents never sign: the engine refuses them whatever they send."""
+        Agents never sign: the engine records their decisions as proposals or attestations, whatever they send."""
         given = str(f.get("passphrase", "") or "")
         if (not given and req["path"].startswith("/api/")
                 and req.get("headers", {}).get("authorization", "").lower().startswith("bearer ")):
@@ -2044,6 +2065,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         subs = self.hub.search_records(me, st, limit=SHOWN + 1, text=q or None)  # in the store: none is missed
         more = len(subs) > SHOWN
         subs = subs[:SHOWN]
+        self.hub.note_list(me, subs, how="search" if q else "list", what=f"records:{st}", text=q or None)
         heads = list(self.hub.facts(subs[0]).keys()) if subs else []
         rows = "".join(f'<tr><td>{self.subject_link(f"{st}/{p["id"]}", self.hub.title(p))}</td>'
                        + "".join(f"<td>{self._fact(v)}</td>" for v in self.hub.facts(p).values()) + "</tr>"
@@ -2125,7 +2147,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         runs = self.hub.engine.runs(record=ref)
         parts.append(f"<h2 id='work'>Work about this {e(self.subj['label'].lower())}</h2>" + (
             "<table>" + "".join(f'<tr><td><a href="/runs/{r["id"]}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
-                                f'<td class="muted">{e(r["created_at"][:16].replace("T", " "))}</td></tr>' for r in runs)
+                                f'<td class="muted">{self._at(r["created_at"])}</td></tr>' for r in runs)
             + "</table>" if runs else "<p class='muted'>None.</p>"))
         starts = self.start_buttons(me, st, ref)
         if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
@@ -2145,12 +2167,14 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
         raise Redirect(f"/runs/{rid}")
 
     def _events(self, events, me) -> str:
-        rows = []
+        rows, who = [], {}
         for ev in Viewer(self.hub, me).events(events):
-            signed = ' <span class="badge signed">signed</span>' if ev.get("signature") else ""
-            data = {k: v for k, v in ev["data"].items() if k != "signed"}
+            if ev["actor"] not in who:  # one look-up per member on the page, not one per event
+                who[ev["actor"]] = self.who(ev["actor"])
+            signed = self._signed_badge(ev)
+            data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
             rows.append(f'<tr><td><a href="/track/{ev["seq"]}">#{ev["seq"]}</a></td>'
-                        f'<td class="muted">{e(ev["at"][11:19])}</td><td>{self.who(ev["actor"])}</td>'
+                        f'<td class="muted">{e(ev["at"][11:19])}</td><td>{who[ev["actor"]]}</td>'
                         f'<td>{e(ev["action"])}{signed}</td><td>{e(ev["subject"])}</td>'
                         f'<td class="muted">{"#" + str(ev["cause"]) if ev["cause"] else ""}</td>'
                         f'<td><details><summary>data</summary><pre>{e(json.dumps(data, indent=1))}</pre></details></td></tr>')
@@ -2502,7 +2526,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                      f'<pre>{e(new_token)}</pre></div>')
         if setup:  # shown in this response only, like a new token; only its hash is stored
             token += (f'<div class="card"><p>A one-time setup code for {e(m["name"])}, shown once. Give it to them in '
-                      f'person or by phone, not by email. It works once, until {e(setup["expires_at"][:16].replace("T", " "))} '
+                      f'person or by phone, not by email. It works once, until {self._at(setup["expires_at"])} '
                       f'UTC, at <a href="/setup?member={e(urllib.parse.quote(mid))}">/setup</a>:</p>'
                       f'<pre>{e(setup["code"])}</pre></div>')
         if empty:
@@ -2586,7 +2610,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             creds = []
         live = [c for c in creds if not c["revoked"]]
         if live:
-            rows = "".join(f'<tr><td>{e(c["label"] or "—")}</td><td class="muted">{self._when(c["created_at"])}</td>'
+            rows = "".join(f'<tr><td>{e(c["label"] or "—")}</td><td class="muted">{self._at(c["created_at"])}</td>'
                            f'<td>{self.who(c["issued_by"]) if c["issued_by"] else ""}</td><td><form method="post" '
                            f'action="/team/{e(mid)}/revoke" class="inline"><input type="hidden" name="credential" '
                            f'value="{e(c["id"])}"><button class="danger" data-confirm="Revoke this credential? Anything '
@@ -2635,10 +2659,26 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                   f'signature valid.{checked}</div>' if v["ok"] else
                   '<div class="error"><p>The track does not verify:</p><ul>'
                   + "".join(f"<li>{e(p)}</li>" for p in v["problems"]) + "</ul></div>")
-        actor = req["query"].get("actor")
+        q = req["query"]
+        actor = q.get("actor")
+        flt: dict = {"actor": actor} if actor else {}
+        before = int(q["before"]) if str(q.get("before") or "").isdigit() else None
+        if before:
+            flt["seq"] = {"$lt": before}
+        page = self.hub.db.events.find(flt, sort=[("seq", -1)], limit=self.TRACK_PAGE + 1)  # one page, by index
+        more, page = len(page) > self.TRACK_PAGE, page[:self.TRACK_PAGE]
+        nav = []
+        if before:
+            nav.append(f'<a href="/track{"?actor=" + urllib.parse.quote(actor) if actor else ""}">Newest</a>')
+        if more:
+            nav.append(f'<a href="/track?{"actor=" + urllib.parse.quote(actor) + "&" if actor else ""}'
+                       f'before={page[-1]["seq"]}">Older events</a>')
+        nav_html = f'<p class="muted">{" · ".join(nav)}</p>' if nav else ""
         return self.layout(req, "Track", banner + "<p class='muted'>Every action, by whom, and what caused it. Open an "
                            "event to see its whole chain of causes. <a href='/access'>Who accessed a file</a></p>"
-                           + self._events(self.hub.track.list(actor=actor, limit=300), req["me"]))
+                           + self._events(page, req["me"]) + nav_html)
+
+    TRACK_PAGE = 100  # events on one page of the track
 
     def page_access(self, req):
         """Who saw or changed a subject's file: the privacy officer's report, on screen or as CSV."""
@@ -2686,7 +2726,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                      "Content-Disposition": f'attachment; filename="access-{name}.csv"'}, buf.getvalue().encode())
         what = {"record.viewed": "Opened", "exported": "Exported", "created": "Created", "updated": "Changed", "transitioned": "Moved on",
                 "signed": "Signed"}
-        trs = "".join(f'<tr><td class="muted">{self._when(r["at"])}</td><td>{self.who(r["who"])}</td>'
+        trs = "".join(f'<tr><td class="muted">{self._at(r["at"])}</td><td>{self.who(r["who"])}</td>'
                       f'<td>{e(what.get(r["action"].split(".")[-1], what.get(r["action"], self.human(r["action"]))))}'
                       f'</td><td>{self.record_link(r["record"]) if r["record"] else ""}</td><td>{self._how(r["how"])}</td>'
                       f'<td><a href="/track/{r["seq"]}">#{r["seq"]}</a></td></tr>' for r in rows)
@@ -2721,6 +2761,11 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             raise NotFound(f"there is no event {seq}")
         last = chain[-1]
         sig = ""
+        att = (last.get("data") or {}).get("attested")
+        if att and not last.get("signature"):
+            sig = (f'<div class="muted">Decided by {self.who(att.get("agent") or last["actor"])} (an agent) at '
+                   f'{e(last["at"])}: “{e(str(att.get("meaning", "")))}”. This is the agent\'s attested decision, '
+                   f'not a signature: agents never sign.</div>')
         if last.get("signature"):
             okay = self.hub.track.verify_signature(last)
             signed = last["data"].get("signed", {})
@@ -2755,7 +2800,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
             out += ' <span class="badge overdue">Late</span>'
         by = r.get("done_by") or (r.get("claimed_by") if r["status"] == "sending" else None)
         if by:
-            out += f'<div class="muted">{e(self.member_name(by))}{" · " + self._when(r["done_at"]) if r.get("done_at") else ""}</div>'
+            out += f'<div class="muted">{e(self.member_name(by))}{" · " + self._at(r["done_at"]) if r.get("done_at") else ""}</div>'
         return out
 
     def _deliver_form(self, me, r) -> str:
@@ -2800,7 +2845,7 @@ class App(CalendarPages, RecordPages, DefinitionPages, OfficePages, LivePages, M
                      f'information you do not read.</div>')
             note = (f'<div class="muted">{"Why" if r["status"] == "failed" else "Note"}: {e(r["note"])}</div>'
                     if r.get("note") and readable else "")
-            body.append(f'<tr id="msg-{r["id"]}"><td class="muted">{e(r["at"][:16].replace("T", " "))}</td>'
+            body.append(f'<tr id="msg-{r["id"]}"><td class="muted">{self._at(r["at"])}</td>'
                         f'<td>{e(r["channel"])}</td><td>{e(r["recipient"])}</td><td>{words}</td>'
                         f'<td>{"<a href=/runs/" + e(r["run_id"]) + ">run</a>" if r["run_id"] else ""}</td>'
                         f'<td>{self._message_status(r)}{note}{self._deliver_form(me, r)}</td></tr>')

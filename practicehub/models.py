@@ -27,6 +27,8 @@ import urllib.request
 
 ANTHROPIC_VERSION = "2026-10-21"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
+# Models that take the server-side refusal fallback; others (Haiku) get a plain request and escalate on a refusal.
+ANTHROPIC_FALLBACK_MODELS = ("claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5")
 
 
 class ModelError(Exception):
@@ -166,7 +168,7 @@ class Anthropic:
     """Claude through the Messages API, over urllib (the hub's runtime is the standard library only).
 
     Structured output (``output_config.format``) makes the reply valid JSON for the schema. Server-side fallbacks
-    re-run a refused request on another model inside the same call.
+    re-run a refused request on another model inside the same call, on the models that offer them.
     """
 
     external = True
@@ -181,12 +183,14 @@ class Anthropic:
     def __call__(self, model, system, prompt, schema, ctx):
         if not self.api_key:
             raise ModelError("ANTHROPIC_API_KEY is not set")
-        body = {"model": model or DEFAULT_ANTHROPIC_MODEL, "max_tokens": 16000, "system": system,
+        model = model or DEFAULT_ANTHROPIC_MODEL
+        body = {"model": model, "max_tokens": 16000, "system": system,
                 "messages": [{"role": "user", "content": prompt}],
-                "output_config": {"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
-                "fallbacks": "default"}
-        headers = {"x-api-key": self.api_key, "anthropic-version": ANTHROPIC_VERSION,
-                   "anthropic-beta": "server-side-fallback-2026-07-01"}
+                "output_config": {"effort": self.effort, "format": {"type": "json_schema", "schema": schema}}}
+        headers = {"x-api-key": self.api_key, "anthropic-version": ANTHROPIC_VERSION}
+        if model in ANTHROPIC_FALLBACK_MODELS:
+            body["fallbacks"] = "default"
+            headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
         resp = _post(self.base + "/v1/messages", body, headers, self.timeout)
         stop = resp.get("stop_reason")
         if stop == "refusal":

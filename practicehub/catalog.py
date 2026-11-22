@@ -209,7 +209,7 @@ class CatalogMixin:
         if rt is not None and rt.classed_fields:
             from .visibility import strip
             rec = strip(rec, rt.classed_fields)
-        got = self.pack.facts(rec) if self.pack else None
+        got = self.pack.facts(rec, today=self.engine.now().date()) if self.pack else None
         if got is not None:
             return got
         if rt is None:
@@ -464,7 +464,7 @@ class CatalogMixin:
             if broken:
                 raise Invalid(f"approving this {noun} would break workflows the practice runs", broken)
         if kind == "type":  # a pack upgrade that waited for this type (records of a merged type become this one)
-            self.run_pack_upgrades(actor)
+            self._upgrades_after(actor)
         return {f"{kind}_id": did, "version": version}
 
     def withdraw(self, actor: dict, kind: str, did: str, version: int, reason: str = "") -> None:
