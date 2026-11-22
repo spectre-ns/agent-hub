@@ -129,6 +129,15 @@ class Restrictions:
         from .records import subject_of
         return subject_of(rec, frozenset(self._subjects))
 
+    def subject_of_ref(self, ref: str | None) -> str | None:
+        """The subject whose file ``ref`` belongs to: itself for a subject, else its record's subject."""
+        if not ref or "/" not in ref or not self._load():
+            return None
+        if ref.split("/", 1)[0] in self._subjects:
+            return ref
+        rec = self.hub.records.read(*ref.split("/", 1))
+        return self.subject_of(rec) if rec else None
+
     # ------------------------------------------------------------------ who is allowed
     def _allowed(self, member: dict | None, d: dict) -> bool:
         if not member or member.get("status", "active") != "active":
@@ -379,7 +388,17 @@ class Restrictions:
             raise Invalid("nothing in this file is withheld from you: there is nothing to override")
         from .engine import _item_doc, _new_id
         from .store import utcnow
-        title = hub.title(hub.records.read(*subject.split("/", 1)) or {}) or subject
+        # a short title (a name, never a card number): it travels in notice titles and lists
+        title = hub.short_title(hub.records.read(*subject.split("/", 1)) or {}) or "a file"
+        what = hub.short_title(rec) or "a record"
+        start, until = _now(), _now() + OVERRIDE_WINDOW
+        try:
+            from . import clock
+            tz = hub.engine.zone()
+            window = f"{clock.local(start, tz):%Y-%m-%d %H:%M} to {clock.local(until, tz):%H:%M}"
+        except Exception:  # noqa: BLE001 - a zone problem never stops an emergency access
+            window = f"{_iso(start)} to {_iso(until)}"
+        who = member.get("name") or member["id"]
         with hub.db:
             seq = hub.track.append(member, "record.viewed", ref,
                                    data={"how": "override", "reason": reason, "subject": subject,
@@ -402,8 +421,10 @@ class Restrictions:
                 hub.db.items.insert(_item_doc(
                     hub, id=_new_id("item"), run_id=run_id, step_id="review", kind="notice", role=None,
                     assignee=o["id"], persons_only=1, status="open", cause=seq, priority="urgent",
-                    title=f"Review: {member['name']} used emergency access to {title}'s withheld information",
-                    output={"about": subject, "opened by": member["name"],
+                    title=f"Review: {who} used emergency access to {title}'s withheld information",
+                    output={"summary": f"{who} used emergency access to {title}'s file, open from {window}.",
+                            "about": subject, "member": member["id"], "subject_ref": subject,
+                            "from": _iso(start), "until": _iso(until), "opened by": who,
                             "why": "not shown to you: the file's directive keeps what it withholds from you too. "
                                    "Ask them, or the server holder can read it on the track"}))
             for o in owners:
@@ -412,8 +433,11 @@ class Restrictions:
                 hub.db.items.insert(_item_doc(
                     hub, id=_new_id("item"), run_id=run_id, step_id="review", kind="notice", role=None,
                     assignee=o["id"], persons_only=1, status="open", cause=seq, priority="urgent",
-                    title=f"Review: {member['name']} used emergency access to {title}'s withheld information",
-                    output={"about": subject, "record": ref, "reason": reason}))
+                    title=f"Review: {who} used emergency access to {title}'s withheld information",
+                    output={"summary": f"{who} opened {what} in {title}'s file with emergency access, open from "
+                                       f"{window}.",
+                            "about": subject, "record": ref, "member": member["id"], "subject_ref": subject,
+                            "from": _iso(start), "until": _iso(until), "reason": reason}))
         self._over.pop((member["id"], subject), None)
-        return {"seq": seq, "subject": subject, "run": run_id, "until": _iso(_now() + OVERRIDE_WINDOW),
+        return {"seq": seq, "subject": subject, "run": run_id, "until": _iso(until),
                 "told": [o["id"] for o in owners + blind]}

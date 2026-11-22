@@ -26,6 +26,10 @@ SESSION_LIFETIME = timedelta(hours=12)
 SETUP_LIFETIME = timedelta(hours=72)
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I: read aloud or copied by hand
 SIGN_IN = {"id": "sign-in", "kind": "automation", "name": "Sign-in"}  # who records an attempt nobody is signed in for
+ACCOUNT_WORKFLOW = "account-notice"  # the home of a notice to a member about their own account
+ACCOUNT_SOURCE = (f'id = "{ACCOUNT_WORKFLOW}"\ntitle = "About your account"\n'
+                  'summary = "Something was done to a member\'s own account that they should know of at once."\n'
+                  '[[steps]]\nid = "look"\ntitle = "Check that you expected it"\nkind = "wait"\nuntil = "false"\n')
 
 
 def hash_passphrase(passphrase: str, salt: bytes | None = None, n: int = SCRYPT_N, r: int = SCRYPT_R,
@@ -191,7 +195,12 @@ class CredentialsMixin:
     def issue_setup_code(self, actor: dict, mid: str) -> dict:
         """A one-time code with which a person sets their passphrase (a first one, or a forgotten one). A member admin
         issues it, never for themselves; the CLI issues it as the installer. Only its hash is kept, and any earlier
-        unused code for the member stops working."""
+        unused code for the member stops working. The member is told at once (a notice on their work), so a code
+        they did not ask for is noticed before it is used, not only at their next sign-in."""
+        with self.reach_memo():  # reach is asked of the issuer and of every policy owner: read it once each
+            return self._issue_setup_code(actor, mid)
+
+    def _issue_setup_code(self, actor: dict, mid: str) -> dict:
         from .hub import Denied, Invalid
         target = self.member(mid)
         if actor.get("kind") != "installer":
@@ -230,8 +239,33 @@ class CredentialsMixin:
             code_hash = _sha(_norm_code(code))
             self.db.setup_codes.insert({"_id": code_hash, "code_hash": code_hash, "member": mid, "issued_by": actor["id"],
                                         "created_at": utcnow(), "expires_at": expires, "used_at": None})
-            self.track.append(actor, "credential.setup_issued", f"member:{mid}", data={"expires_at": expires})
+            seq = self.track.append(actor, "credential.setup_issued", f"member:{mid}", data={"expires_at": expires})
+            if actor.get("kind") != "installer":  # a first code from the command line is the member's own start
+                self._tell_member(actor, target, seq)
         return {"member": mid, "code": code, "expires_at": expires}
+
+    def _tell_member(self, actor: dict, target: dict, cause: int) -> str:
+        """A notice to the member that a setup code for their account was issued, and by whom: whoever holds it can
+        set their passphrase and sign in as them, and it ends their sessions once used."""
+        from .engine import _item_doc, _new_id
+        who = actor.get("name") or actor["id"]
+        run_id, item_id = _new_id("run"), _new_id("item")
+        self.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": ACCOUNT_WORKFLOW, "version": 0,
+                             "title": "A setup code for your account", "record": None, "status": "completed",
+                             "ctx": {"setup_issued": cause}, "steps": {"look": {"state": "skipped"}},
+                             "started_by": actor["id"], "root_event": cause, "created_at": utcnow(),
+                             "updated_at": utcnow()})
+        self.db.items.insert(_item_doc(
+            self, id=item_id, run_id=run_id, step_id="look", kind="notice", role=None, assignee=target["id"],
+            persons_only=1, status="open", cause=cause, priority="urgent",
+            title=f"A setup code for your account was issued by {who}",
+            output={"summary": f"{who} issued a setup code for your account. Whoever uses it sets your passphrase "
+                               f"and can sign in as you; your sessions end when it is used. If you did not ask for "
+                               f"it, tell a policy owner now.",
+                    "member": target["id"], "issued_by": actor["id"]}))
+        self.track.append(actor, "credential.member_told", f"member:{target['id']}", cause=cause,
+                          data={"item": item_id, "what": "setup code issued"})
+        return item_id
 
     def redeem_setup_code(self, mid: str, code: str, new: str) -> dict:
         """Set a passphrase with a setup code. Wrong codes count as failed attempts for the member."""
