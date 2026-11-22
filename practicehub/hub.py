@@ -109,6 +109,25 @@ def _refs_in(value) -> list[str]:
     return sorted(out)
 
 
+def _counted(got: dict) -> dict:
+    """A batch's result for the track: a list by its length (each record it names has an event of its own)."""
+    return {k: len(v) if isinstance(v, (list, tuple)) else v for k, v in got.items()}
+
+
+def _merge_upgrade_results(so_far: dict, got: dict) -> dict:
+    """What an upgrade's batches did, together: numbers (and lists, by their length) add up, a yes stays yes."""
+    out = dict(so_far)
+    for k, v in _counted(got).items():
+        old = out.get(k)
+        if isinstance(v, bool) or isinstance(old, bool):
+            out[k] = bool(old) or bool(v)
+        elif isinstance(v, (int, float)) and isinstance(old, (int, float)):
+            out[k] = old + v
+        else:
+            out[k] = v
+    return out
+
+
 def _how(data: dict) -> str:
     """How a record was seen, for an access report: 'export (csv)' when it went out in a file."""
     how = data.get("how", "")
@@ -152,18 +171,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self._subjects()
         if self.pack and pack is None:
             self._everyone_holds_everyone()
+            self._search_ready(self.db.records.distinct("type"))  # records written before their words were kept
         from .models import ModelGateway
         self.models = models or ModelGateway(self)
         from .engine import Engine
         self.engine = Engine(self)
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
         if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:
-            try:  # an upgrade whose definitions were approved before this pack.py was running
-                self.run_pack_upgrades()
-            except Exception as exc:  # noqa: BLE001 - the hub still opens; the track says what did not happen
-                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
-                                  f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
-                                  data={"error": str(exc)[:500]})
+            # an upgrade whose definitions were approved before this pack.py was running, or one a restart stopped
+            # part way: the hub still opens if it fails, and the track says what did not happen
+            self._upgrades_after(None)
 
     # ------------------------------------------------------------------ the practice pack, under change control
     PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants")
@@ -312,47 +329,101 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     proposed.append({"kind": kind, "id": did, **self._propose(
                         kind, actor, did, src, f"The practice pack {p.version} changes this", module=None)})
             self._defs_reset()
-            self.run_pack_upgrades(actor)  # what this process's pack.py can do now (the new one runs after the restart)
+        # what this process's pack.py can do now (the new one runs after the restart), in batches of their own: the
+        # upgrade stands whether or not they finish here, and what they did not finish goes on at the next start
+        self._upgrades_after(actor)
         return {"pack": p.id, "version": p.version, "restart": True, "added": added_defs, "proposed": proposed}
+
+    UPGRADE_BATCH = 200       # records a pack upgrade converts in one transaction
+    upgrade_state: dict = {}  # the running upgrade's own place, kept with each batch (run_pack_upgrades)
+
+    def _upgrades_after(self, actor: dict | None) -> None:
+        if self.db.in_transaction():
+            return  # never inside another transaction: they run on their own, at the next call or the next start
+        try:
+            self.run_pack_upgrades(actor)
+        except Exception as exc:  # noqa: BLE001 - what was approved stands; the upgrade goes on at the next start
+            self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
+                              f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                              data={"error": str(exc)[:500]})
+
+    UPGRADE_PROGRESS = "pack_upgrade_progress"  # setting: {upgrade id: {"batches": n, "state": {...}, "done": {...}}}
 
     def run_pack_upgrades(self, actor: dict | None = None) -> list[dict]:
         """Run what the practice pack's ``UPGRADES`` (pack.py) do to records an older version left: each once, when it
         can (a function returns None while what it needs is not in force yet, such as a record type still proposed),
-        in one transaction, written to the track. Called when a pack is upgraded, when a definition is approved, and
-        when the hub opens, so the upgrade happens whichever of these comes last."""
+        written to the track. Called when a pack is upgraded, when a definition is approved, and when the hub opens,
+        so the upgrade happens whichever of these comes last.
+
+        An upgrade works in batches: a function that returns ``{"more": True, ...}`` did one batch and is called
+        again. Each call is a transaction of its own (run again if another writer got in first), and with it the hub
+        keeps where the upgrade is (``pack_upgrade_progress``: the batches done, what they did so far, and
+        ``hub.upgrade_state``, a dict the function keeps its own place in), so an upgrade stopped part way (a restart, a
+        failure) goes on from the last batch that was written, and never runs as one transaction of unbounded size.
+        Every batch is an event on the track (``practice.upgrade_progress``); the last is ``practice.upgrade_applied``
+        with what all the batches did. A function must leave every record whole after each batch: a record is
+        converted, or not yet, never half."""
         ups = dict(self.pack.upgrades) if self.pack else {}
         if not ups:
             return []
+        if self.db.in_transaction():
+            raise RuntimeError("pack upgrades run in batches, each its own transaction: call this outside one")
         # the hub writes what the upgrade changes (the approver may not write every record it touches); the track says
         # whose approval or upgrade set it off
         by = (actor or {}).get("id")
         actor = {"id": "hub", "kind": "automation", "name": "Practice Hub"}
-        done, out = list(self.db.get_setting("pack_upgrades_done") or []), []
+        practice = f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}"
+        out = []
         for uid, fn in ups.items():
-            if uid in done:
-                continue
-            self._upgrading = True
-            try:
-                with self.db:
+            while True:
+                def batch():
+                    if uid in (self.db.get_setting("pack_upgrades_done") or []):
+                        return "done"
+                    progress = dict((self.db.get_setting(self.UPGRADE_PROGRESS) or {}).get(uid) or {})
+                    self.upgrade_state = dict(progress.get("state") or {})
                     got = fn(self, actor)
                     if got is None:
-                        continue
-                    done.append(uid)
-                    self.db.set_setting("pack_upgrades_done", done)
-                    self.track.append(actor, "practice.upgrade_applied",
-                                      f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
-                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by, **dict(got)})
-                    out.append({"upgrade": uid, **dict(got)})
-            finally:
-                self._upgrading = False
-                self._defs_reset()
+                        return None
+                    got = dict(got)
+                    more = bool(got.pop("more", False))
+                    so_far = _merge_upgrade_results(progress.get("done") or {}, got)
+                    n = int(progress.get("batches") or 0) + 1
+                    every = dict(self.db.get_setting(self.UPGRADE_PROGRESS) or {})
+                    if more:
+                        every[uid] = {"batches": n, "state": self.upgrade_state, "done": so_far}
+                        self.db.set_setting(self.UPGRADE_PROGRESS, every)
+                        self.track.append(actor, "practice.upgrade_progress", practice,
+                                          data={"upgrade": uid, "batch": n, "pack_version": self.pack.version,
+                                                "after": by, **_counted(got)})
+                        return "more"
+                    every.pop(uid, None)
+                    self.db.set_setting(self.UPGRADE_PROGRESS, every)
+                    self.db.set_setting("pack_upgrades_done", [*(self.db.get_setting("pack_upgrades_done") or []),
+                                                               uid])
+                    self.track.append(actor, "practice.upgrade_applied", practice,
+                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by,
+                                            "batches": n, **so_far})
+                    out.append({"upgrade": uid, **so_far})
+                    return "done"
+                self._upgrading = True
+                try:
+                    step = self.db.atomic(batch)
+                finally:
+                    self._upgrading = False
+                    self.upgrade_state = {}
+                    self._defs_reset()
+                if step != "more":
+                    break
         return out
 
-    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None) -> dict:
+    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None,
+                       repoint: bool = True) -> dict:
         """Turn a record into one of another type (a pack upgrade that merges two types): a new record with the same
         id, or, with ``into``, the existing record of ``rtype`` it already stood for, rewritten as ``data``. The record
         written is checked as any other, every record that pointed at the old one points at it instead, and the old one
-        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere."""
+        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere: open workflow
+        runs, work items and queued messages that name it name the new record (``repoint_work``; ``repoint=False``
+        leaves that to a caller converting many records, which repoints them all at once)."""
         old_type, rid = ref.split("/", 1)
         rt = self._type(rtype)
         new_id = into.split("/", 1)[1] if into else rid
@@ -392,9 +463,40 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.db.records.delete({"_id": ref})
             self.db.links.delete({"from_ref": ref})
             self.db.titles.delete({"_id": ref})
+            if repoint:
+                self.repoint_work({ref: new_ref})
             self.track.append(actor, "record.converted", new_ref,
                               data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec)})
         return rec
+
+    REPOINT = (("runs", {"status": "running"}),
+               ("items", {"status": {"$in": ["open", "claimed", "held"]}}),
+               ("outbox", {"status": {"$in": ["queued", "sending"]}}))
+
+    def repoint_work(self, refs: dict[str, str]) -> int:
+        """Work still under way that names a record by a ref in ``refs`` (a run's record and context, an item's
+        output, a queued message) names its new ref instead: after a conversion, a run goes on with the new record
+        rather than failing on one that is gone. Finished work keeps what it named, as the track does."""
+        if not refs:
+            return 0
+
+        def swap(v):
+            if isinstance(v, str):
+                return refs.get(v, v)
+            if isinstance(v, dict):
+                return {k: swap(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [swap(x) for x in v]
+            return v
+        n = 0
+        with self.db:
+            for coll, flt in self.REPOINT:
+                for row in self.db[coll].find(flt):
+                    fixed = swap(row)
+                    if fixed != row:
+                        self.db[coll].replace(fixed)
+                        n += 1
+        return n
 
     # ------------------------------------------------------------------ modules
     def installed_modules(self) -> list[str]:
@@ -560,6 +662,39 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.pack.types_fn = self.type_ids
         if hasattr(self.records, "subject_fn"):
             self.records.subject_fn = self.subject_of
+        if hasattr(self.records, "parts_fn"):
+            self.records.parts_fn = self._search_parts
+        self._indexed_types: dict[str, str] = {}
+
+    SEARCH_INDEX = "w1"  # bump when the words a record is found by are built differently: every record is redone
+
+    def _search_stamp(self, rt) -> str:
+        """What a record's search words were built from: the index's version and its type's classed fields."""
+        import hashlib
+        classed = sorted((f["path"], f["data_class"]) for f in (rt.classed_fields if rt is not None else []))
+        return self.SEARCH_INDEX + ":" + (hashlib.sha1(json.dumps(classed).encode()).hexdigest()[:12] if classed else "")
+
+    def _search_parts(self, rec: dict):
+        """A record as each reader sees it, for its search words (``LocalRecordStore.parts_fn``)."""
+        rt = self.record_type_for_reading(rec.get("resourceType") or "")
+        classed = rt.classed_fields if rt is not None else []
+        if not classed:
+            return [], self._search_stamp(rt)
+        parts = [("_", visibility.strip(rec, classed))]
+        for dc in sorted({f["data_class"] for f in classed}):
+            parts.append((dc, visibility.strip(rec, [f for f in classed if f["data_class"] != dc])))
+        return parts, self._search_stamp(rt)
+
+    def _search_ready(self, types) -> None:
+        """Before a search: the records of these types are indexed by their type as it is now (a type whose fields'
+        classes changed since has its records' words rewritten, once)."""
+        if not hasattr(self.records, "reindex"):
+            return
+        for t in types:
+            stamp = self._search_stamp(self.record_type_for_reading(t))
+            if self._indexed_types.get(t) != stamp:
+                self.records.reindex(t, stamp)
+                self._indexed_types[t] = stamp
 
     def install(self, pack_name: str, *, demo: bool = False) -> None:
         """Install a practice pack into an empty hub: roles, data classes, grants, members, and the first version of
@@ -1701,23 +1836,40 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def search_records(self, member: dict, rtype: str | None = None, *, text: str | None = None,
                        limit: int | None = 200, subject: str | None = None, field: str | None = None,
-                       since: str | None = None, until: str | None = None) -> list[dict]:
-        """Records as the member may see them (the store's search, then ``redact``). A search by words matches only
-        what the member sees of each record; a range over a field they may not read is refused."""
+                       since: str | None = None, until: str | None = None, offset: int = 0) -> list[dict]:
+        """Records as the member may see them (the store's search, then ``redact``), a page of them (``limit`` from
+        ``offset``), counted in the database. A search by words matches only what the member may read of each
+        record: the database looks for each word in the parts of the record whose data classes they read, so a
+        hidden field's value never matches and nothing is read into the hub to be filtered. A range over a field
+        they may not read is refused."""
         if field and rtype and visibility.hides_path(self, member, rtype, field):
             raise Denied(f"{member.get('name', '')} may not search {rtype} records by {field}")
-        types = [rtype] if rtype else None
-        guarded = bool(text) and (
-            any(visibility.hidden_fields(self, member, self.record_type_for_reading(t)) for t in types)
-            if types else any(visibility.hidden_fields(self, member, rt) for rt in self.record_types().values()))
-        recs = self.records.search(rtype, subject=subject, limit=None if guarded else limit, text=text or None,
-                                   field=field, since=since, until=until)
-        recs = self.redact_all(member, recs)
-        if guarded:
+        if not text:
+            return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, field=field,
+                                                               since=since, until=until, offset=offset))
+        types = {rtype: self.record_type_for_reading(rtype)} if rtype else self.record_types()
+        guarded = {t for t, rt in types.items() if visibility.hidden_fields(self, member, rt)}
+        if guarded and hasattr(self.records, "reindex"):
+            self._search_ready(guarded)
+            classes = {f["data_class"] for rt in types.values() if rt is not None for f in rt.classed_fields}
+            visible = {dc for dc in classes if member and self.can(member, "reader", f"data_class:{dc}")}
+            plain = [t for t, rt in types.items() if rt is None or not rt.classed_fields]
+            recs = self.records.search(rtype, subject=subject, limit=limit, text=text, field=field, since=since,
+                                       until=until, offset=offset, visible=visible, plain=plain)
+            return self.redact_all(member, recs)
+        if guarded:  # a store that cannot look in parts (a FHIR server): match what the member sees, here
             from .records import search_text, words_of
             words = words_of(text)
-            recs = [r for r in recs if all(w in search_text(r) for w in words)][:limit]
-        return recs
+            recs = self.redact_all(member, self.records.search(rtype, subject=subject, limit=None, text=text,
+                                                               field=field, since=since, until=until))
+            recs = [r for r in recs if all(w in search_text(r) for w in words)]
+            return recs[offset:][:limit] if limit is not None else recs[offset:]
+        if hasattr(self.records, "reindex"):
+            self._search_ready(types)
+            return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, text=text,
+                                                               field=field, since=since, until=until, offset=offset))
+        return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, text=text,
+                                                           field=field, since=since, until=until))
 
     VIEW_WINDOW = timedelta(minutes=15)
 
@@ -1735,20 +1887,34 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return
         self.track.append(member, "record.viewed", ref, data={"how": how})
 
-    def note_views(self, member: dict, refs: list[str], *, how: str) -> None:
-        """``note_view`` for every record a list showed a member (a search's titles name patients too): one query for
-        those seen lately, then one ``record.viewed`` each for the rest, so a patient's access report shows it."""
-        refs = list(dict.fromkeys(r for r in refs if r))
-        if not refs or member.get("kind") not in ("person", "agent", "service"):
-            return
+    def note_list(self, member: dict | None, recs, *, how: str = "list", what: str = "",
+                  text: str | None = None) -> int | None:
+        """Write down that a member was shown a list of records (a list page, a search, a dashboard widget, an MCP
+        search): one ``records.listed`` event naming every record shown that is about a subject (a patient's), so
+        the access report for each of them names this list. A list is what its rows show (titles, a name and birth
+        date); opening one is a ``record.viewed`` of its own, and an export records each record it holds. The same
+        member shown the same records again within ``VIEW_WINDOW`` is one listing. Returns the event, if written."""
+        if not member or member.get("kind") not in ("person", "agent", "service"):
+            return None
+        subjects = self.subject_types()
+        refs = []
+        for r in recs or []:
+            if not isinstance(r, dict) or not r.get("id") or not r.get("resourceType"):
+                continue
+            ref = f"{r['resourceType']}/{r['id']}"
+            if r["resourceType"] in subjects or self.subject_of(r):
+                refs.append(ref)
+        if not refs:
+            return None
+        refs = list(dict.fromkeys(refs))
+        digest = hashlib.sha256("\n".join(sorted(refs)).encode()).hexdigest()
         since = (datetime.now(timezone.utc) - self.VIEW_WINDOW).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        seen = {r["subject"] for r in self.db.events.find({"subject": {"$in": refs}, "action": "record.viewed",
-                                                           "actor": member["id"], "data.how": {"$ne": "file"},
-                                                           "at": {"$gte": since}}, fields=["subject"])}
-        with self.db:
-            for ref in refs:
-                if ref not in seen:
-                    self.track.append(member, "record.viewed", ref, data={"how": how})
+        if self.db.events.find_one({"action": "records.listed", "actor": member["id"], "data.refs_sha256": digest,
+                                    "data.how": how, "at": {"$gte": since}}, fields=["seq"]):
+            return None
+        return self.track.append(member, "records.listed", what or "records",
+                                 data={"how": how, "count": len(refs), "refs": refs, "refs_sha256": digest,
+                                       **({"search": text} if text else {})})
 
     # ------------------------------------------------------------------ files (attachments), in GridFS
     MAX_FILE = 25 * 1024 * 1024
@@ -1802,7 +1968,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 for r in self.db.events.find({"subject": ref, "action": "record.viewed"}, sort=[("seq", DESC)],
                                              limit=limit)]
 
-    ACCESS_ACTIONS = ("record.viewed", "records.exported", "record.created", "record.updated", "record.transitioned", "record.signed")
+    ACCESS_ACTIONS = ("record.viewed", "records.exported", "record.created", "record.updated", "record.transitioned",
+                      "record.signed")
+    LISTED = "records.listed"  # a list or search that showed the record among others: found by data.refs
 
     def access_report(self, member: dict, subject: str) -> list[dict]:
         """Everyone (people, agents, services) who saw or changed anything in a subject's file, oldest first: what
@@ -1815,13 +1983,28 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         # and every record that was ever about the subject, even if it is about someone else now
         refs |= {f"{r['type']}/{r['id']}" for r in self.db.record_versions.find({"refs": subject},
                                                                                 fields=["type", "id"])}
-        rows = self.db.events.find({"subject": {"$in": sorted(refs)}, "action": {"$in": list(self.ACCESS_ACTIONS)}},
-                                   sort=[("seq", ASC)])
+        ordered = sorted(refs)
+        rows = self.db.events.find({"$or": [{"subject": {"$in": ordered}, "action": {"$in": list(self.ACCESS_ACTIONS)}},
+                                            {"action": self.LISTED, "data.refs": {"$in": ordered}}]},
+                                   sort=[("seq", ASC)], fields=["seq", "at", "actor", "actor_kind", "action", "subject",
+                                                                "data.how", "data.format", "data.refs", "data.search"])
         names = {m["id"]: m["name"] for m in self.db.members.find({}, fields=["id", "name"])}
         self.track.append(member, "access.reported", subject, data={"events": len(rows)})
+
+        def record_of(r):
+            if r["action"] != self.LISTED:
+                return r["subject"]
+            shown = [x for x in (r.get("data") or {}).get("refs", []) if x in refs]
+            return subject if subject in shown else (shown[0] if shown else r["subject"])
+
+        def how_of(r):
+            d = r.get("data") or {}
+            if r["action"] == self.LISTED:
+                return f"in a list ({d.get('how', 'list')}" + (f", search {d['search']!r}" if d.get("search") else "") + ")"
+            return _how(d)
         return [{"seq": r["seq"], "at": r["at"], "who": r["actor"], "name": names.get(r["actor"], r["actor"]),
-                 "kind": r["actor_kind"], "action": r["action"].split(".", 1)[1], "record": r["subject"],
-                 "how": _how(r.get("data") or {})} for r in rows]
+                 "kind": r["actor_kind"], "action": r["action"].split(".", 1)[1], "record": record_of(r),
+                 "how": how_of(r)} for r in rows]
 
     def record_history(self, member: dict, ref: str) -> list[dict]:
         rtype, rid = ref.split("/", 1)
@@ -2406,10 +2589,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def attest(self, actor: dict, ref: str, run: dict, step_id: str) -> int:
         """Record that ``ref``, as filed now, is what a signing gate earlier in the run signed: the physician signed
-        the draft, and this is the note filed from it. The signature stays the signer's own event; this links it."""
+        the draft, and this is the note filed from it. The signature stays the signer's own event; this links it.
+        An agent's decision is not a signature: it counts here only when a person signed their approval of it."""
         got = (run.get("ctx") or {}).get(step_id) or {}
-        ev = self.db.events.find_one({"_id": got.get("event"), "action": "gate.decided", "run_id": run["id"]}) \
-            if got.get("event") else None
+        sig = got.get("signature") or got.get("event")
+        ev = self.db.events.find_one({"_id": sig, "action": {"$in": ["gate.decided", "hold.decided"]},
+                                      "run_id": run["id"]}) if sig else None
         if not ev or not ev["signature"]:
             raise Invalid(f"attest: the step {step_id} is not a signed decision in this run")
         rec = self.records.read(*ref.split("/", 1))
@@ -2426,15 +2611,18 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         now = self._record_digest(rec)
         out = []
         rows = self.db.events.find({"$or": [{"action": "record.signed", "subject": ref},
-                                            {"action": "gate.decided", "data.signed.record": ref}]},
+                                            {"action": {"$in": ["gate.decided", "hold.decided"]},
+                                             "data.signed.record": ref}]},
                                    sort=[("seq", DESC)])
         for e in rows:
             d = e["data"]
             sg = d.get("signed", {})
-            if sg.get("record") != ref:
+            if sg.get("record") != ref or not e.get("signature"):  # an agent's attested decision is not a signature
                 continue
             who = self.db.members.get(e["actor"])
-            gate = e["action"] == "gate.decided"
+            if not who or who.get("kind") != "person":
+                continue
+            gate = e["action"] in ("gate.decided", "hold.decided")
             current = bool(sg.get("record_sha256")) and sg.get("record_sha256") == now
             if gate and not current and sg.get("record_sha256") and sg.get("version"):
                 # A decision's own run carries it out (publishes, dates it): it covers the record while every change
@@ -2444,7 +2632,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 current = bool(later) and all(v["run_id"] == sg.get("run") for v in later)
             out.append({"seq": e["seq"], "at": e["at"], "by": e["actor"], "name": who["name"] if who else e["actor"],
                         "meaning": sg.get("meaning"), "version": sg.get("version"), "comment": d.get("comment", ""),
-                        "outcome": sg.get("outcome") if gate else None, "run": sg.get("run") if gate else None,
+                        "outcome": (sg.get("decision") or sg.get("outcome")) if gate else None,
+                        "run": sg.get("run") if gate else None,
                         "current": current,
                         "valid": self.track.verify_signature({**e, "data": d})})
         for a in self.db.events.find({"action": "record.attested", "subject": ref}, sort=[("seq", DESC)]):
@@ -2581,6 +2770,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         last = self.db.get_setting("track_verified") if not full else None
         if last and not hmac_ok(self.track, last):
             last = None  # a result not sealed by this hub is not one to build on
+        if last and not last["problems"]:
+            newest = self.db.events.find_one({}, sort=[("seq", DESC)], fields=["seq", "hash"])
+            if newest and newest["seq"] == last["head"]["seq"] and newest["hash"] == last["head"]["hash"]:
+                # nothing since the last check: its sealed result stands, and nothing is recomputed or rewritten
+                # (anchors are checked whenever there are new events, and by 'practicehub verify')
+                v = {"ok": True, "events": last["events"], "problems": [], "head": last["head"],
+                     "from": last["head"]["seq"], "at": last["at"], "full": False}
+                defs = self.definitions_problems()
+                return {**v, "ok": False, "problems": defs} if defs else v
         if last:
             v = self.track.verify(since=last["head"])
             v = {**v, "events": last["events"] + v["events"], "from": last["head"]["seq"],

@@ -5,6 +5,12 @@
 # contend for one server's locks; every test still gets a database of its own inside it.
 # Each shard's server is on a free port docker picks, so several runs at once never collide.
 set -u
+# One run at a time on the machine: several agents or terminals queue here instead of starving each other.
+lock="${XDG_RUNTIME_DIR:-/tmp}/practicehub-tests.lock"
+if [ -z "${PH_TEST_LOCKED:-}" ]; then
+  echo "waiting for other test runs on this machine to finish" >&2
+  PH_TEST_LOCKED=1 exec flock "$lock" "$0" "$@"
+fi
 N=${1:-auto}; [ $# -gt 0 ] && shift
 if [ "$N" = auto ]; then
   mem=$(awk '/MemAvailable/ {print int($2 / 1024 / 700)}' /proc/meminfo); cpu=$(nproc)

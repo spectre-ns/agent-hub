@@ -464,15 +464,29 @@ def print_html(title: str, blocks: list[tuple]) -> str:
 
 
 # ================================================================================================ the rules
+LOG_BATCH = 500  # record.viewed events written per transaction by an export (about a second's work)
+
+
 def _log(hub, member, refs: list[str], fmt: str, *, what: str | None = None, data: dict | None = None) -> None:
     """Each record exported is a read on the track, every time (an export is not folded into an earlier view); an
-    export of a list or a file is an event of its own."""
-    with hub.db:
-        for ref in refs:
-            hub.track.append(member, "record.viewed", ref, data={"how": "export", "format": fmt})
-        if what is not None:
-            hub.track.append(member, "records.exported", what,
-                             data={"how": "export", "format": fmt, "count": len(refs), **(data or {})})
+    export of a list or a file is an event of its own.
+
+    The reads are written LOG_BATCH at a time, each batch a transaction of its own (run again if another writer got
+    in first), so an export of the whole hub never becomes one transaction past MongoDB's time limit, and other work
+    goes on between batches. Every read is on the track before the export is handed out; an export that stops part
+    way leaves the reads it wrote (more recorded than was seen, never less), and the event for the export, written
+    last, says it was whole. Each read is an event of its own, as any other read is, so a patient's access report
+    finds it by the record."""
+    for i in range(0, len(refs), LOG_BATCH):
+        batch = refs[i:i + LOG_BATCH]
+
+        def write(batch=batch):
+            for ref in batch:
+                hub.track.append(member, "record.viewed", ref, data={"how": "export", "format": fmt})
+        hub.db.atomic(write)
+    if what is not None:
+        hub.track.append(member, "records.exported", what,
+                         data={"how": "export", "format": fmt, "count": len(refs), **(data or {})})
 
 
 def _check_format(fmt: str, allowed: list[str], what: str) -> None:

@@ -1826,3 +1826,24 @@ def test_a_type_that_is_not_a_fhir_resource_has_no_fhir_export_on_the_web(server
     assert fetch(server, f"/records/{t}/{rid}/export?format=fhir", tok)[0] == 422
     st, h, body = fetch(server, f"/api/records/{t}/{rid}?format=json", tok)
     assert st == 200 and h["content-type"] == "application/json" and json.loads(body)["id"] == rid
+
+
+def test_the_track_page_shows_one_page_at_a_time_and_verifies_only_what_is_new(hub, server):
+    """The Track page lists the newest events a page at a time, with a link to older ones (read by index, not the
+    whole track), and its check of the chain reads nothing more when no event was added since the last."""
+    from practicehub.web.server import App
+    rana = token(hub, "rana")
+    total = hub.db.events.count({})
+    assert total > App.TRACK_PAGE, "the demo has more events than one page"
+    code, body = call(server, "GET", "/track", rana)
+    assert code == 200 and "Older events" in body
+    newest = hub.db.events.find_one({}, sort=[("seq", -1)])
+    oldest_shown = hub.db.events.find({}, sort=[("seq", -1)], limit=App.TRACK_PAGE)[-1]["seq"]
+    assert f"before={oldest_shown}" in body
+    code, older = call(server, "GET", f"/track?before={oldest_shown}", rana)
+    assert code == 200 and "Newest" in older and f"/track/{newest['seq']}\"" not in older
+    first = hub.verify(full=False)
+    before = hub.db.get_setting("track_verified")
+    again = hub.verify(full=False)
+    assert again["ok"] and again["head"] == first["head"]
+    assert hub.db.get_setting("track_verified") == before  # nothing new: the sealed result stands, not rewritten

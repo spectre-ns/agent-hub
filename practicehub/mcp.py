@@ -38,6 +38,7 @@ from . import schema, visibility
 from . import views as viewmod
 from .db import utcnow
 from .hub import Denied, HubError, Invalid, NotFound
+from .store import Transient
 
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")  # newest first; what initialize may agree on
 LATEST = VERSIONS[0]
@@ -678,6 +679,24 @@ def call_tool(hub, sid: str, member: dict, name: str, args: dict, *, ts: list[di
         text = str(exc) + (": " + "; ".join(problems) if problems else "")
         return {"content": [{"type": "text", "text": text}],
                 "structuredContent": {"error": kind, "reason": str(exc), "problems": problems}, "isError": True}
+    except Exception as exc:  # noqa: BLE001 - a failure of the hub (a lost transaction, the database): the agent is
+        # told the call failed, and the track keeps that it was tried; the detail goes to the server's log, not out
+        import traceback
+        traceback.print_exc()
+        busy = isinstance(exc, Transient)
+        try:
+            hub.track.append(member, "mcp.failed", f"mcp:{sid}", cause=seq,
+                             data={"how": "mcp", "server": sid, "tool": name, "error": type(exc).__name__,
+                                   "reason": str(exc)[:300]})
+        except Exception:  # noqa: BLE001 - the database is what failed: the call still gets an answer
+            traceback.print_exc()
+        text = ("the hub was busy with other work and could not finish this call: look at the item or record "
+                "before trying again" if busy else
+                "the hub could not finish this call (an internal error, logged): look at the item or record "
+                "before trying again")
+        return {"content": [{"type": "text", "text": text}],
+                "structuredContent": {"error": "busy" if busy else "failed", "reason": text, "problems": []},
+                "isError": True}
 
 
 def _conn_data(conn: dict | None) -> dict:
