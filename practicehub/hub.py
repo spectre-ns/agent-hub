@@ -63,6 +63,16 @@ class Conflict(Invalid):
     status = 409
 
 
+class Duplicate(Conflict):
+    """Another open run of the workflow already has the value its ``trigger.one_open_per`` names. ``run`` is that run;
+    ``allowed``: the trigger lets the starter confirm and start another anyway (``allow_duplicate``)."""
+
+    def __init__(self, message: str, run: dict, allowed: bool):
+        super().__init__(message)
+        self.run = run
+        self.allowed = allowed
+
+
 EVERYONE = "everyone"  # a role every person holds, and nobody assigns: [grants.everyone] gives it read access only
 
 
@@ -1436,6 +1446,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def is_policy_owner(self, member: dict) -> bool:
         return self.can(member, "policy_owner", "practice:main")
+
+    def subject_word(self) -> str:
+        """The practice's own word for whom its work is about, in lower case, for sentences (the pack's
+        ``[subject] label``); "person" without a pack."""
+        label = ((self.pack.subject or {}).get("label") if self.pack else None) or "person"
+        return label if label[:2].isupper() else label.lower()
 
     def _create_member(self, actor: dict, m: dict, cause: int | None = None) -> dict:
         kind = m.get("kind", "person")

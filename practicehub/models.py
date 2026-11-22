@@ -117,7 +117,7 @@ class Standin:
         fn = (self.standins.get(f"block:{step.get('block')}") if step.get("block") else None) \
             or self.standins.get(step.get("skill") or "") or self.standins.get(f"{step['kind']}:{step['id']}")
         if fn is None:
-            return {"answer": {}, "escalate": True, "reason": f"no stand-in answer for step {step['id']!r}"}
+            return {"answer": {}, "escalate": True, "reason": "No agent can do this step; a person must"}
         out = fn(ctx)
         if "answer" not in out:
             out = {"answer": out, "escalate": False, "reason": "stand-in answer"}

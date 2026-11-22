@@ -167,6 +167,8 @@ class Workflow:
     where: str | None = None         # trigger.where: a condition over ``record`` for for_each
     deadline: str | None = None      # [deadline] within: a run still open this long after it started is late
     deadline_escalate_to: str | None = None  # [deadline] escalate_to: the role told when it is
+    one_open_per: str | None = None  # trigger.one_open_per: "record" or "input.<name>": one open run per value
+    allow_duplicate: bool = False    # trigger.allow_duplicate: the starter may confirm another one anyway
 
     def step(self, sid: str) -> Step:
         for s in self.steps:
@@ -224,6 +226,19 @@ def parse(source: str, catalog=None) -> Workflow:
                             "it takes longer)")
         if duration_seconds(deadline.get("within", "")) is None:
             problems.append("deadline: within is how long a run may take, a duration like '4h', '5d' or '2w'")
+    one = trig.get("one_open_per")
+    if one is not None and not (isinstance(one, str) and (one == "record" or one.startswith("input."))):
+        problems.append("trigger.one_open_per: \"record\" or \"input.<name>\", the value only one open run may "
+                        "have at a time")
+        one = None
+    if one == "record" and not doc.get("record"):
+        problems.append("trigger.one_open_per: \"record\" needs a record the workflow is about")
+    if one and one.startswith("input.") and one[6:] not in {str(i.get("name")) for i in doc.get("input", []) or []}:
+        problems.append(f"trigger.one_open_per: {one[6:]!r} is not one of the workflow's inputs")
+    if "allow_duplicate" in trig and not isinstance(trig["allow_duplicate"], bool):
+        problems.append("trigger.allow_duplicate: true or false")
+    if trig.get("allow_duplicate") is True and not one:
+        problems.append("trigger.allow_duplicate: lets a starter start another run anyway; it needs one_open_per")
     if trig.get("for_each") and not trig.get("schedule"):
         problems.append("trigger.for_each: needs a schedule (one run per record each time it fires)")
     if trig.get("where") and not trig.get("for_each"):
@@ -437,7 +452,8 @@ def parse(source: str, catalog=None) -> Workflow:
                   record=doc.get("record"), starters=list(trig.get("starters", []) or []), event=trig.get("event"),
                   inputs=inputs, steps=steps, source=source, when=trig.get("when"), schedule=trig.get("schedule"),
                   for_each=trig.get("for_each"), where=trig.get("where"),
-                  deadline=deadline.get("within") or None, deadline_escalate_to=deadline.get("escalate_to") or None)
+                  deadline=deadline.get("within") or None, deadline_escalate_to=deadline.get("escalate_to") or None,
+                  one_open_per=one or None, allow_duplicate=trig.get("allow_duplicate") is True)
     if catalog is not None:  # report every problem at once, so an author fixes them in one go
         try:
             problems += [p for p in catalog.check_workflow(wf) if p not in problems]

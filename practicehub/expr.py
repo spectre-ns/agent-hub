@@ -226,3 +226,71 @@ def paths(src: str) -> list[str]:
 
     walk(Parser(src).parse())
     return out
+
+
+def words(src: str, name=None) -> str:
+    """A condition as a plain sentence for people reading a page, never the code: ``input.flag == 'critical'`` reads
+    "flag is critical". ``name(path)`` says a path in words (a field's label); by default its last part, as words.
+    A condition that cannot be read is "a condition is met"."""
+    def say_path(p: str) -> str:
+        got = name(p) if name else None
+        if got:
+            return got
+        last = p.split(".")[-1]
+        return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", last).replace("_", " ").replace("-", " ").lower()
+
+    def lit(v) -> str:
+        if v is True:
+            return "yes"
+        if v is False:
+            return "no"
+        if v is None:
+            return "empty"
+        return str(v).replace("-", " ") if isinstance(v, str) else str(v)
+
+    def say(n) -> str:
+        op = n[0]
+        if op == "lit":
+            return lit(n[1])
+        if op == "list":
+            items = [say(x) for x in n[1]]
+            if not items:
+                return "nothing"
+            return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " or " + items[-1]
+        if op == "path":
+            return say_path(n[1])
+        if op == "shift":
+            unit = {"d": "day", "w": "week", "m": "month", "y": "year"}[n[4]]
+            return f"{n[3]} {unit}{'s' if n[3] != 1 else ''} {'after' if n[2] == '+' else 'before'} {say(n[1])}"
+        if op == "truthy":
+            return say(n[1])
+        if op == "not":
+            inner = n[1]
+            if inner[0] == "truthy" and inner[1][0] != "path":
+                inner = inner[1]
+            if inner[0] == "or":
+                return f"neither {say(inner[1])} nor {say(inner[2])}"
+            if inner[0] == "cmp" and inner[1] in ("==", "in"):
+                return say(("cmp", "!=" if inner[1] == "==" else "not in", inner[2], inner[3]))
+            return f"not {say(inner)}" if inner[0] in ("truthy", "path") else f"not ({say(inner)})"
+        if op in ("and", "or"):
+            return f"{say(n[1])} {op} {say(n[2])}"
+        if op == "cmp":
+            sym, a, b = n[1], n[2], n[3]
+            left = say(a)
+            if b[0] == "lit" and isinstance(b[1], bool) and sym in ("==", "!="):
+                return left if (sym == "==") == b[1] else f"not {left}"
+            if (b[0] == "lit" and b[1] is None) or (b[0] == "list" and not b[1] and sym in ("==", "!=")):
+                return f"{left} is {'empty' if sym == '==' else 'given'}"
+            verb = {"==": "is", "!=": "is not", "<": "is under", "<=": "is at most", ">": "is over",
+                    ">=": "is at least", "in": "is one of", "not in": "is not one of"}[sym]
+            if sym in ("in", "not in") and (b[0] != "list" or len(b[1]) == 1):
+                verb = ("is" if sym == "in" else "is not") if b[0] == "list" else (
+                    "is in" if sym == "in" else "is not in")
+            return f"{left} {verb} {say(b)}"
+        return "a condition is met"
+
+    try:
+        return say(Parser(src).parse())
+    except (ExprError, KeyError, IndexError):
+        return "a condition is met"

@@ -580,7 +580,7 @@ def test_who_opened_what_is_hidden_from_everyone_but_the_privacy_officer(hub, se
         assert (call(server, "GET", f"/api/events/{view}/chain", tok)[0] == 200) is sees
         assert (call(server, "GET", f"/track/{view}", tok)[0] == 200) is sees
         team = call(server, "GET", "/team/dr-amara", tok)[1]
-        assert ("record.viewed" in team) is sees
+        assert ("Record viewed" in team) is sees  # the action in words
     sam = token(hub, "sam")
     assert call(server, "GET", "/outbox", sam)[0] == 403  # billing reads no messages to patients
     noor = M(hub, "noor")
@@ -1451,6 +1451,13 @@ def _ellen(hub):
     return f"Patient/{p['id']}"
 
 
+
+def _another(hub):
+    """A patient other than Ellen with nothing withheld: for a second request while Ellen's is still open."""
+    p = next(r for r in hub.records.search("Patient", limit=None)
+             if r["name"][0]["family"] not in ("MacLeod", "Rahimi"))
+    return f"Patient/{p['id']}"
+
 def _book(server, hub, who="dr-amara", at=f"{DAY}T09:00", member="dr-amara", subject=None, reason="Sore throat"):
     """A booking made by a physician, who may write its reason (it is clinical); the front desk books without one."""
     return call(server, "POST", "/schedule/new", token(hub, who),
@@ -1608,8 +1615,9 @@ def test_a_routine_request_from_the_start_form_shows_what_went_to_the_patient_ap
     sent = page.split("Sent to the patient", 1)[1]
     # the message read the reason (clinical), so the desk sees that it went, not what it says
     assert "We have your request" in sent and "not shown to you" in sent and "within one working day" not in sent
+    # another patient: one open request per patient (Ellen's is still open)
     assert "within one working day" in call(server, "POST", "/start", token(hub, "noor"), form={
-        "_workflow": "appointment-request", "_record": _ellen(hub), "reason": "a form for my employer",
+        "_workflow": "appointment-request", "_record": _another(hub), "reason": "a form for my employer",
         "kind": "forms", "urgency": "routine"})[1].split("Sent to the patient", 1)[1]
 
 

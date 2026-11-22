@@ -21,6 +21,7 @@ patient back: no reason goes unread because the screen failed.
 [trigger]
 starters = ["front-desk", "scheduler", "nurse", "physician", "patient-portal"]
 event = "appointment.requested"
+one_open_per = "record"   # one open request per patient: pressing twice, or two people taking one call, starts one
 
 [[input]]
 name = "reason"

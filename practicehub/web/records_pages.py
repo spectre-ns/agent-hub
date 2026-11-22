@@ -1719,7 +1719,7 @@ class RecordPages:
                     f'&amp;b={v["version"]}">Compare</a>') if i + 1 < len(versions) else ""
             rows.append(f'<tr><td>v{v["version"]}</td><td>{self.who(v["actor"]) if v["actor"] else ""}{via}</td>'
                         f'<td>{e(", ".join(changed) or "—")}{note}{cmp_}</td><td class="muted">{self._at(v["at"])}</td>'
-                        f'<td><details><summary>record</summary><pre>{e(json.dumps(v["data"], indent=1))}</pre></details></td></tr>')
+                        f'<td><details><summary>Details</summary><pre>{e(json.dumps(v["data"], indent=1))}</pre></details></td></tr>')
         out = ("<div class='tablewrap'><table><tr><th>Version</th><th>By</th><th>Changed</th><th>When</th><th><span class='visually-hidden'>Record</span></th></tr>"
                + "".join(rows) + "</table></div>") if rows else "<p class='muted'>No history.</p>"
         if self.hub.is_policy_owner(me):  # the privacy officer answers "who looked at my chart?"
