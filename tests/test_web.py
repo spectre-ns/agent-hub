@@ -1887,6 +1887,8 @@ def test_the_visit_list_names_the_patient_and_says_codes_in_words(hub, server):
     heads = re.findall(r"<th>(.*?)</th>", page)
     assert heads[:3] == ["Visit", "Status", "Patient"]
     assert ">In clinic<" in page and ">AMB<" not in page and "(born " in page
+    assert '<span class="loz' in page and ">in-progress<" not in page and ">planned<" not in page  # states in words
+    assert re.search(r'<span class="loz [a-z]+">(Planned|In progress|Finished)</span>', page)
 
 
 def test_a_board_says_its_columns_in_the_lifecycles_words(hub, server):
