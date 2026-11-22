@@ -13,14 +13,12 @@ import re
 import urllib.parse
 
 from .. import pack as packmod
+from .. import export as exportmod
 from .. import schema
 from ..hub import Conflict, HubError, Denied, Invalid
 
 e = html.escape
-SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?")  # a field a form can edit: a top-level key, or a list of them
-# or one plain value inside a structure, by keys and list positions (name.0.given.0, telecom.0.value)
-NESTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.([0-9]+|[A-Za-z_][A-Za-z0-9_]*))+")
-SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "boolean")
+SIMPLE, NESTED, SCALAR = schema.FORM_SIMPLE, schema.FORM_NESTED, schema.SCALAR  # what a form can edit
 # shown in the browser; anything else is downloaded. Every file is served sandboxed, with no scripts.
 INLINE = {"application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain"}
 
@@ -100,6 +98,8 @@ class RecordPages:
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)", self.post_record_create)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/new", self.page_record_new)
         R("GET", r"/create", self.page_create)
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/export", self.page_export_list)  # before a record's own page
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/export", self.page_export_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)", self.page_record)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>edit|move|sign)", self.post_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/move", self.page_move)
@@ -115,6 +115,108 @@ class RecordPages:
         R("POST", r"/modules", self.post_module)
         R("GET", r"/modules/(?P<mid>[a-z][a-z0-9-]*)", self.page_module)
         R("POST", r"/modules/(?P<mid>[a-z][a-z0-9-]*)/(?P<verb>upgrade|remove|review-code)", self.post_module_verb)
+
+    # ------------------------------------------------------------------------------------------ export
+    # Each is a small dialog (``data-modal``) listing the formats in plain words; choosing one downloads the file
+    # (``?format=``). What goes out is a read on the track, as opening it is (practicehub/export.py).
+    def _export_pick(self, items: list[tuple[str, str, str]]) -> str:
+        """``items``: (href, format, hint). The print view opens in a tab of its own, the rest download."""
+        out = []
+        for href, fmt, hint in items:
+            label, _, ext, what = exportmod.FORMATS[fmt]
+            how = ' target="_blank" rel="noopener"' if fmt == "print" else " download"
+            out.append(f'<li><a href="{e(href)}"{how} data-export="{e(fmt)}"><b>{e(label)}</b>'
+                       f'<span class="muted">{e(hint or what)}</span></a></li>')
+        return f'<ul class="pick">{"".join(out)}</ul>'
+
+    def _export_page(self, req, title: str, intro: str, picks: str, crumbs, note: str = "") -> str:
+        body = (f'<div data-modal-body><p>{intro}</p>{picks}'
+                + (f'<p class="muted" role="note">{e(note)}</p>' if note else "")
+                + '<p class="muted">Each record in the file is recorded as read by you, as opening it is. Keep the '
+                  'file as safely as the record itself.</p></div>')
+        return self.layout(req, title, body, crumbs=crumbs)
+
+    @staticmethod
+    def _download(x) -> Download:
+        return Download((x.headers(), x.body))
+
+    def _format(self, req) -> str | None:
+        return (req["query"].get("format") or "").strip().lower() or None
+
+    def page_export_record(self, req, rtype, rid):
+        me, hub = req["me"], self.hub
+        ref = f"{rtype}/{rid}"
+        fmt = self._format(req)
+        if fmt:
+            return self._download(exportmod.record(hub, me, ref, fmt))
+        rt = hub.record_type(rtype)
+        if not rt or rtype in hub.member_types():
+            raise NotFound(f"there is no {ref}")
+        hub.require(me, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
+        rec = hub.records.read(rtype, rid)
+        if not rec:
+            raise NotFound(f"there is no {ref}")
+        base = f"/records/{rtype}/{urllib.parse.quote(rid)}/export?format="
+        hints = {"json": "This kind of record is not a FHIR resource: its fields as JSON, for another system"}
+        picks = self._export_pick([(base + f, f, hints.get(f, "")) for f in exportmod.offered(hub, rtype, "record")])
+        return self._export_page(req, "Export", f"Export <b>{e(hub.title(rec))}</b> ({e(self._lower(rt.label))}):",
+                                 picks, [("/records", "Records"), (f"/records/{rtype}", rt.plural),
+                                         (self.record_href(ref), hub.title(rec)), (None, "Export")])
+
+    def page_export_list(self, req, rtype):
+        me, hub, q = req["me"], self.hub, req["query"]
+        from .server import SHOWN
+        text = (q.get("q") or "").lower() or None
+        every = q.get("all") in ("1", "true", "yes")
+        fmt = self._format(req)
+        if fmt:
+            return self._download(exportmod.records_list(hub, me, rtype, fmt, text=text, limit=SHOWN, every=every))
+        rt = hub.record_type(rtype)
+        if not rt or rt.abstract or rtype in hub.member_types():
+            raise NotFound(f"there is no record type {rtype}")
+        hub.require(me, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
+        n = len(hub.records.search(rtype, limit=SHOWN, text=text))
+        qs = f"q={urllib.parse.quote(text)}&" if text else ""
+        fmts = exportmod.offered(hub, rtype, "list")
+        hints = {"ndjson": "One FHIR resource a line, for another clinic's system (FHIR Bulk Data)"}
+        what = (f'the {n} {e(self._lower(rt.plural if n != 1 else rt.label))} matching “{e(text)}”' if text
+                else f'the {n} {e(self._lower(rt.plural if n != 1 else rt.label))} this list shows')
+        picks = self._export_pick([(f"/records/{rtype}/export?{qs}format={f}", f, hints.get(f, "")) for f in fmts])
+        if hub.is_policy_owner(me):  # a bulk export: every record of the type, for the privacy officer
+            total = hub.db.records.count({"type": rtype})
+            picks += (f'<h2 class="pick-head">Every {e(self._lower(rt.label))} record ({total})</h2>'
+                      f'<p class="muted">A bulk export, which a policy owner may make. It is recorded as one.</p>'
+                      + self._export_pick([(f"/records/{rtype}/export?all=1&format={f}", f, hints.get(f, ""))
+                                           for f in fmts if f != "print"]))
+        return self._export_page(req, f"Export {self._lower(rt.plural)}", f"Export {what}, with the list's columns, "
+                                 "id, status and dates:", picks,
+                                 [("/records", "Records"), (f"/records/{rtype}", rt.plural), (None, "Export")])
+
+    def page_export_subject(self, req, pid):
+        """A subject's whole file: what a person asks for under PHIA, or what goes to the clinic taking over care."""
+        me, hub = req["me"], self.hub
+        st = self.subj["type"]
+        ref = f"{st}/{pid}"
+        fmt = self._format(req)
+        if fmt:
+            return self._download(exportmod.subject_file(hub, me, ref, fmt))
+        recs, hidden = exportmod.gather(hub, me, ref)
+        word = self.subj["label"].lower()
+        base = f"/{self.subj['path']}/{urllib.parse.quote(pid)}/export?format="
+        others = sum(1 for r in recs if not exportmod.is_fhir(hub.record_type(r["resourceType"])))
+        hints = {"fhir": f"A FHIR Bundle of the whole file, for the clinic taking over care"
+                         + (f" ({others} record{'s' if others != 1 else ''} of other kinds go in the document only)"
+                            if others else ""),
+                 "odt": "Every record's fields as a labelled table, to give to the person who asked",
+                 "json": "The whole file as JSON, for another system"}
+        picks = self._export_pick([(base + f, f, hints.get(f, "")) for f in exportmod.offered(hub, st, "file")])
+        name = hub.title(recs[0])
+        return self._export_page(req, f"Export this {word}'s file",
+                                 f"The whole file of <b>{e(name)}</b>: {len(recs)} record{'s' if len(recs) != 1 else ''}"
+                                 f" — the {e(word)}, what is part of the file and what links to it.", picks,
+                                 [(f"/{self.subj['path']}", self.subj["plural"]),
+                                  (f"/{self.subj['path']}/{pid}", name), (None, "Export")],
+                                 note=exportmod.left_out_words(hidden))
 
     # ------------------------------------------------------------------------------------------ helpers
     @staticmethod
@@ -208,11 +310,7 @@ class RecordPages:
 
     @staticmethod
     def _editable(rt) -> list[dict]:
-        return [f for f in rt.fields if (SIMPLE.fullmatch(f["path"]) or (NESTED.fullmatch(f["path"])
-                                                                          and f["type"] in (*SCALAR, "reference")))
-                and f.get("show", True) is not False and f.get("by") != "workflow"
-                and f["type"] != "attachment" and not (rt.lifecycle and f["path"] == rt.lifecycle["path"])
-                and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields))]
+        return schema.form_fields(rt)
 
     def _value_html(self, f, rec) -> str:
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "", [], {})]
@@ -637,10 +735,7 @@ class RecordPages:
         recs = hub.records.search(rtype, limit=SHOWN + 1, text=q or None)
         more, recs = len(recs) > SHOWN, recs[:SHOWN]
         lc = rt.lifecycle
-        heads = [f for f in self._editable(rt) if f["type"] in ("string", "choice", "date", "member", "number")][:3]
-        owner = self._owner_field(rt)  # a part: which record it is part of, first
-        if owner:
-            heads = [owner] + [f for f in heads if f is not owner][:2]
+        heads = schema.list_columns(rt)  # a part: which record it is part of, first; the export has the same
         rows = "".join(
             f'<tr><td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
             + (f'<td>{self._state_loz(schema.first(r, lc["path"]))}</td>' if lc else "")
@@ -660,9 +755,12 @@ class RecordPages:
                   f'<button class="secondary">Search</button></form>')
         note = (f"<p class='muted'>The {SHOWN} most recently changed are shown: search to find any other.</p>"
                 if more else "")
+        qs = f"?q={urllib.parse.quote(q)}" if q else ""
+        export = (f'<a class="btn secondary" href="/records/{e(rtype)}/export{e(qs)}" data-modal>Export</a>'
+                  if recs or hub.is_policy_owner(me) else "")
         return self.layout(req, rt.plural, search + table + note,
                            crumbs=[("/records", "Records"), (None, rt.plural)], subnav=self.navigator(me, rtype),
-                           actions=create)
+                           actions=export + create)
 
     def page_record_new(self, req, rtype, kept: dict | None = None, error: Exception | None = None):
         """A record type's create form, on its own: the Create dialog shows it over the page (``data-modal``), and
@@ -1106,8 +1204,9 @@ class RecordPages:
         refused = (f'<div class="flash error" role="alert"><p>{e(str(error))}</p></div>'
                    if editing and error else "")
         is_page = rt.layout == "page"
-        edit_btn = (f'<a class="btn primary" href="{url}?edit=1#edit" accesskey="e" aria-keyshortcuts="Alt+E">Edit</a>'
-                    if editable and not editing else "")
+        edit_btn = (f'<a class="btn secondary" href="{url}/export" data-modal>Export</a>' if not editing else "") + (
+            f'<a class="btn primary" href="{url}?edit=1#edit" accesskey="e" aria-keyshortcuts="Alt+E">Edit</a>'
+            if editable and not editing else "")
         rail: list = []
         if tab == "details":
             used = hub.in_use_version(me, ref) if not is_page else None  # a page says so in its banner

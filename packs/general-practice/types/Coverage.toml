@@ -3,6 +3,7 @@ id = "Coverage"
 label = "Coverage"
 plural = "Coverage"
 data_class = "demographics"
+standard = "fhir-r4"
 strict = true
 date = "period"
 active = "record.status == 'active'"

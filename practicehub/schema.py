@@ -22,6 +22,7 @@ answer that becomes a record, an engine calling the API.
     [navigator]                   # with a tree: a second navigation column, its tops (spaces) and the open one's tree
     tops = "Spaces"               #   what the records at the top of the tree are called
     hide = ["archived"]           #   lifecycle states left out of it (a record in one still shows when it is open)
+    standard = "fhir-r4"          # its records are resources of a standard (FHIR R4): exported as such (practicehub/export.py)
     layout = "page"               # "record" (the default) or "page": its formatted text is the page, read first, with
                                   #   the other fields and the controls in a bar above it, and edited in place
     alert = false                 # show active records of this type in a banner on the subject's page
@@ -126,6 +127,7 @@ class RecordType:
     part_of: dict | None = None  # {"field", "path", "target"}: the reference to the one record that owns it
     navigator: dict | None = None  # {"tops": words, "hide": [states]}: a second navigation column for the tree
     layout: str = "record"   # "page": its formatted text is the page, with its fields and controls in a bar above
+    standard: str | None = None  # "fhir-r4": its records are FHIR R4 resources (exported as FHIR); None: its own shape
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -164,7 +166,7 @@ KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "screen", "parent",
          "part_of",
-         "navigator", "layout"},
+         "navigator", "layout", "standard"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use"},
@@ -557,6 +559,11 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         problems.append("layout: a page is formatted text; give the type a field of type markdown")
     else:
         rt.layout = layout
+    std = doc.get("standard")
+    if std is not None:
+        problems += _check_standard(rt, std)
+        if std in STANDARDS:
+            rt.standard = std
     if catalog is not None:
         try:
             problems += [p for p in catalog.check_type(rt) if p not in problems]
@@ -565,6 +572,26 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
     if problems:
         raise DefinitionError(problems)
     return rt
+
+
+STANDARDS = {"fhir-r4": "FHIR R4"}   # what ``standard`` may say: the standard its records are resources of
+FHIR_NAME = re.compile(r"[A-Z][A-Za-z]+")       # a FHIR resource type: letters, capital first
+FHIR_ELEMENT = re.compile(r"[a-z][A-Za-z0-9]*")  # a FHIR element: camelCase, small first
+
+
+def _check_standard(rt: RecordType, std) -> list[str]:
+    """A type that says its records are FHIR resources must be able to be one: a resource name, and no keys beyond
+    its fields (strict). A field whose key is not a FHIR element name is exported as an extension."""
+    if std not in STANDARDS:
+        return [f"standard: {std!r} is not a standard the hub exports ({', '.join(sorted(STANDARDS))})"]
+    out = []
+    if rt.abstract:
+        out.append("standard: a base type has no records of its own; the type that extends it says its standard")
+    if not FHIR_NAME.fullmatch(rt.id):
+        out.append(f"standard: {rt.id!r} is not a FHIR resource name (letters only, a capital first)")
+    if not rt.strict:
+        out.append("standard: a FHIR resource holds only FHIR's elements; say strict = true")
+    return out  # a field of the practice's own (plan_code) goes out as a FHIR extension
 
 
 def _screens(doc: dict, fields: list[dict], base_map: dict, lc: dict | None, problems: list) -> dict:
@@ -1085,6 +1112,32 @@ def links(rt: RecordType, rec: dict) -> list[tuple[str, str]]:
                 if ref:
                     out.append((f["rel"], ref))
     return out
+
+
+FORM_SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?")  # a field a form can edit: a top-level key, or a list of them
+# or one plain value inside a structure, by keys and list positions (name.0.given.0, telecom.0.value)
+FORM_NESTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.([0-9]+|[A-Za-z_][A-Za-z0-9_]*))+")
+SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "boolean")
+
+
+def form_fields(rt: RecordType) -> list[dict]:
+    """The fields a person edits in a form: plain values at a path a form can write, not the lifecycle's state, not
+    a workflow's, not files, not a list whose items are a field of their own."""
+    return [f for f in rt.fields if (FORM_SIMPLE.fullmatch(f["path"]) or (FORM_NESTED.fullmatch(f["path"])
+                                                                         and f["type"] in (*SCALAR, "reference")))
+            and f.get("show", True) is not False and f.get("by") != "workflow"
+            and f["type"] != "attachment" and not (rt.lifecycle and f["path"] == rt.lifecycle["path"])
+            and not (f["type"] == "list" and any(g["path"] == f["path"] + ".*" for g in rt.fields))]
+
+
+def list_columns(rt: RecordType) -> list[dict]:
+    """The fields a list of a type's records shows beside its title and status: for a part, its owner first; then a
+    few short values. A list's export has the same columns."""
+    heads = [f for f in form_fields(rt) if f["type"] in ("string", "choice", "date", "member", "number")][:3]
+    owner = rt.field(rt.part_of["field"]) if rt.part_of else None
+    if owner:
+        heads = [owner] + [f for f in heads if f is not owner][:2]
+    return heads
 
 
 def record_date(rt: RecordType | None, rec: dict) -> str:

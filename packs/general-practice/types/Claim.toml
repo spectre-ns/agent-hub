@@ -3,6 +3,7 @@ id = "Claim"
 label = "Claim"
 plural = "Claims"
 data_class = "billing"
+standard = "fhir-r4"
 strict = true
 date = "created"
 active = "record.status == 'active'"

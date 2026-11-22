@@ -1530,3 +1530,135 @@ def test_the_work_boards_move_to_form_works_without_the_script(hub, server):
     assert code == 303  # what the step needs is asked on the item's page
     code, _ = call(server, "POST", "/board/move", jo, form={"item": iid, "to": "todo", "_back": "/board"})
     assert code == 303 and hub.engine.item(iid)["status"] == "open"
+
+
+# ------------------------------------------------------------------------------------------- exports
+def fetch(base, path, tok):
+    """(status, headers, bytes): a download as it is."""
+    req = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {tok}"})
+    try:
+        with opener.open(req) as r:
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read()
+
+
+def _odf_ok(body, mimetype):
+    import io
+    import zipfile
+    z = zipfile.ZipFile(io.BytesIO(body))
+    first = z.infolist()[0]
+    assert first.filename == "mimetype" and first.compress_type == zipfile.ZIP_STORED
+    assert z.read("mimetype").decode() == mimetype
+    assert body[30:38] == b"mimetype" and body[38:38 + len(mimetype)] == mimetype.encode()  # readable as magic
+    assert {"content.xml", "META-INF/manifest.xml"} <= set(z.namelist())
+    import xml.dom.minidom
+    xml.dom.minidom.parseString(z.read("content.xml"))  # well-formed
+    return z.read("content.xml").decode()
+
+
+def test_a_record_exports_from_the_api_and_its_page(server, hub):
+    tok = token(hub, "dr-amara")
+    rec = hub.records.search("MedicationRequest")[0]
+    st, h, body = fetch(server, f"/api/records/MedicationRequest/{rec['id']}?format=fhir", tok)
+    assert st == 200 and h["content-type"] == "application/fhir+json"
+    assert f'filename="MedicationRequest-{rec["id"]}.json"' in h["content-disposition"]
+    res = json.loads(body)
+    assert res["resourceType"] == "MedicationRequest" and res["id"] == rec["id"]
+    st, h, body = fetch(server, f"/records/MedicationRequest/{rec['id']}/export?format=odt", tok)
+    assert st == 200 and h["content-type"] == "application/vnd.oasis.opendocument.text"
+    content = _odf_ok(body, "application/vnd.oasis.opendocument.text")
+    assert "<table:table " in content and rec["medicationCodeableConcept"]["text"] in content
+    st, h, body = fetch(server, f"/records/MedicationRequest/{rec['id']}/export?format=print", tok)
+    assert st == 200 and h["content-type"].startswith("text/html") and b"window.print()" in body
+    assert "default-src 'none'" in h["content-security-policy"]
+    # the dialog: plain words, a button opening it on the record's page
+    st, page = call(server, "GET", f"/records/MedicationRequest/{rec['id']}", tok)
+    assert f'href="/records/MedicationRequest/{rec["id"]}/export" data-modal>Export</a>' in page
+    st, dlg = call(server, "GET", f"/records/MedicationRequest/{rec['id']}/export", tok)
+    assert st == 200 and "data-modal-body" in dlg and 'type="radio"' not in dlg
+    for words in ("FHIR (for another clinic&#x27;s system)", "Document (.odt)", "Print / save as PDF"):
+        assert words in dlg
+    reads = [x for x in hub.db.events.find({"action": "record.viewed", "subject": f"MedicationRequest/{rec['id']}"})
+             if (x.get("data") or {}).get("how") == "export"]
+    assert [x["data"]["format"] for x in reads] == ["fhir", "odt", "print"]
+
+
+def test_a_list_exports_as_csv_with_formulas_guarded_and_as_a_spreadsheet(server, hub):
+    jo = M(hub, "jo")
+    hub.create_record(jo, "Patient", {"name": [{"given": ["=HYPERLINK(\"http://x\")"], "family": "@Sum"}],
+                                      "birthDate": "1990-01-01", "gender": "other"})
+    tok = token(hub, "jo")
+    st, page = call(server, "GET", "/records/Patient", tok)
+    assert 'href="/records/Patient/export" data-modal>Export</a>' in page
+    st, h, body = fetch(server, "/records/Patient/export?format=csv", tok)
+    assert st == 200 and h["content-type"] == "text/csv; charset=utf-8"
+    assert re.fullmatch(r'attachment; filename="Patient-list-\d{4}-\d\d-\d\d\.csv"', h["content-disposition"])
+    import csv
+    import io
+    rows = list(csv.reader(io.StringIO(body.decode())))
+    assert rows[0][-4:] == ["id", "Date", "Last updated", "Version"]
+    cells = [c for r in rows for c in r]
+    assert not any(c[:1] in ("=", "+", "-", "@") for c in cells), "a spreadsheet must not run a cell"
+    assert any(c.startswith("'=HYPERLINK") for c in cells) and any(c == "'@Sum" for c in cells)
+    assert len(rows) - 1 == len(hub.records.search("Patient")) == int(h["x-records"])
+    st, h, body = fetch(server, "/records/Patient/export?format=ods", tok)
+    assert st == 200 and h["content-type"] == "application/vnd.oasis.opendocument.spreadsheet"
+    content = _odf_ok(body, "application/vnd.oasis.opendocument.spreadsheet")
+    assert "of:=" not in content and "table:formula" not in content
+    st, h, body = fetch(server, "/records/Patient/export?format=ndjson", tok)
+    assert h["content-type"] == "application/fhir+ndjson"
+    assert all(json.loads(line)["resourceType"] == "Patient" for line in body.decode().splitlines())
+    ev = hub.db.events.find({"action": "records.exported", "subject": "records:Patient"})
+    assert [x["data"]["format"] for x in ev] == ["csv", "ods", "ndjson"] and ev[0]["actor"] == "jo"
+    # a bulk export of every record is a policy owner's: the front desk is refused, on the page and the API
+    st, dlg = call(server, "GET", "/records/Patient/export", tok)
+    assert "all=1" not in dlg and "A bulk export" not in dlg
+    assert fetch(server, "/records/Patient/export?all=1&format=csv", tok)[0] == 403
+    assert fetch(server, "/api/records/Patient/$export?all=1", tok)[0] == 403
+    st, dlg = call(server, "GET", "/records/Patient/export", token(hub, "rana"))
+    assert "all=1&amp;format=csv" in dlg
+    st, h, body = fetch(server, "/api/records/Patient/$export?all=1", token(hub, "rana"))
+    assert st == 200 and h["content-type"] == "application/fhir+ndjson"
+
+
+def test_a_subjects_file_exports_as_a_bundle_leaving_out_what_the_member_may_not_read(server, hub):
+    sub = hub.pack.subject
+    ref = max((f"{sub['type']}/{p['id']}" for p in hub.records.search(sub["type"])),
+              key=lambda r: len(hub.records.search(subject=r, limit=None)))
+    pid = ref.split("/", 1)[1]
+    tok = token(hub, "jo")
+    st, page = call(server, "GET", f"/{sub['path']}/{pid}", tok)
+    assert f"Export this {sub['label'].lower()}&#x27;s file</a>" in page or \
+        f"Export this {sub['label'].lower()}'s file</a>" in page
+    st, dlg = call(server, "GET", f"/{sub['path']}/{pid}/export", tok)
+    assert st == 200 and "records you may not read were left out" in dlg
+    st, h, body = fetch(server, f"/api/records/{ref}/$everything", tok)
+    assert st == 200 and h["content-type"] == "application/fhir+json" and int(h["x-left-out"]) > 0
+    b = json.loads(body)
+    assert b["resourceType"] == "Bundle" and b["type"] == "collection"
+    assert b["entry"][0]["resource"]["id"] == pid
+    st, h, body = fetch(server, f"/{sub['path']}/{pid}/export?format=fhir", token(hub, "dr-amara"))
+    full = json.loads(body)
+    assert len(full["entry"]) > len(b["entry"]) and h["x-left-out"] == "0"
+    st, h, body = fetch(server, f"/{sub['path']}/{pid}/export?format=odt", token(hub, "dr-amara"))
+    _odf_ok(body, "application/vnd.oasis.opendocument.text")
+    ev = hub.db.events.find({"action": "records.exported", "subject": ref})
+    assert [(x["actor"], x["data"]["format"]) for x in ev] == [("jo", "fhir"), ("dr-amara", "fhir"),
+                                                               ("dr-amara", "odt")]
+    assert ev[0]["data"]["left_out"] > 0 and ev[1]["data"]["left_out"] == 0
+
+
+def test_a_type_that_is_not_a_fhir_resource_has_no_fhir_export_on_the_web(server, hub):
+    from practicehub import export
+    t = next((t for t, rt in hub.record_types().items() if not rt.abstract and not export.is_fhir(rt)
+              and t not in hub.member_types() and hub.records.search(t)), None)
+    if t is None:
+        pytest.skip("every type with records here is a FHIR resource")
+    rid = hub.records.search(t)[0]["id"]
+    tok = token(hub, "dr-amara")
+    st, dlg = call(server, "GET", f"/records/{t}/{rid}/export", tok)
+    assert st == 200 and "format=fhir" not in dlg and "FHIR (for another" not in dlg and "JSON" in dlg
+    assert fetch(server, f"/records/{t}/{rid}/export?format=fhir", tok)[0] == 422
+    st, h, body = fetch(server, f"/api/records/{t}/{rid}?format=json", tok)
+    assert st == 200 and h["content-type"] == "application/json" and json.loads(body)["id"] == rid

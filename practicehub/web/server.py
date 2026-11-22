@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tomllib
 
 from .. import blocks as blockmod
+from .. import export as exportmod
 from .. import schema
 from .. import workflows as wfmod
 from ..backends import engines
@@ -91,6 +92,9 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
         R("GET", r"/api/events", self.api_track)
         R("GET", r"/api/events/(?P<seq>\d+)/chain", self.api_chain)
         R("GET", r"/api/track/verify", self.api_verify)
+        # FHIR-style operations: a subject's whole file (Patient/<id>/$everything) and a bulk export (Type/$export)
+        R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)/(?:\$|%24)everything", self.api_everything)
+        R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?:\$|%24)export", self.api_export_list)
         R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)", self.api_record)
         R("POST", r"/api/records/(?P<rtype>[A-Za-z]+)", self.api_create_record)
         R("PATCH", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)", self.api_update_record)
@@ -129,6 +133,7 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
         R("GET", rf"/{sp}", self.page_subjects)
         R("POST", rf"/{sp}", self.post_subject)
         R("GET", rf"/{sp}/(?P<pid>[\w.-]+)", self.page_subject)
+        R("GET", rf"/{sp}/(?P<pid>[\w.-]+)/export", self.page_export_subject)
         R("GET", r"/runs", self.page_runs)
         R("GET", r"/start", self.page_start)
         R("POST", r"/start", self.post_start_any)
@@ -374,7 +379,29 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
         return self.hub.verify(full=(req.get("query") or {}).get("full") in ("1", "true", "yes"))
 
     def api_record(self, req, rtype, rid):
+        """A record as the hub keeps it; ``?format=fhir`` (or json, odt, print) exports it (a read with how=export)."""
+        fmt = (req["query"].get("format") or "").lower()
+        if fmt:
+            x = exportmod.record(self.hub, req["me"], f"{rtype}/{rid}", fmt)
+            return Download((x.headers(), x.body))
         return self.hub.read_record(req["me"], f"{rtype}/{rid}")
+
+    def api_everything(self, req, rtype, rid):
+        """A subject's whole file, as FHIR's ``$everything``: a Bundle (type collection) of what the caller may read;
+        the records left out are counted in the X-Left-Out header. ``?format=`` json, odt or print instead."""
+        x = exportmod.subject_file(self.hub, req["me"], f"{rtype}/{rid}", (req["query"].get("format") or "fhir").lower())
+        return Download((x.headers(), x.body))
+
+    def api_export_list(self, req, rtype):
+        """A type's records: ``?format=`` ndjson (FHIR Bulk Data, the default for a FHIR type), csv or ods; ``_text``
+        searches; ``all=1`` is every record, a bulk export a policy owner may make."""
+        q = req["query"]
+        rt = self.hub.record_type(rtype)
+        fmt = (q.get("format") or q.get("_outputFormat") or ("ndjson" if exportmod.is_fhir(rt) else "csv")).lower()
+        fmt = {"application/fhir+ndjson": "ndjson", "text/csv": "csv"}.get(fmt, fmt)
+        x = exportmod.records_list(self.hub, req["me"], rtype, fmt, text=q.get("_text") or None, limit=SHOWN,
+                                   every=q.get("all") in ("1", "true", "yes"))
+        return Download((x.headers(), x.body))
 
     def api_update_record(self, req, rtype, rid):
         """Change a record. The ``If-Match`` header (or ``_version`` in the body) names the version the caller read;
@@ -2083,9 +2110,12 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
         if chart["hidden"] or hidden:
             parts.append(f'<p class="muted">{max(chart["hidden"], hidden)} record(s) in classes you may not read are '
                          f'not shown.</p>')
+        word = self.subj["label"].lower()
+        tools = f'<a class="btn secondary" href="/{e(self.subj["path"])}/{e(pid)}/export" data-modal>Export this {e(word)}\'s file</a>'
         if self.hub.is_policy_owner(me):
-            parts.append(f'<p><a class="btn secondary" href="/access?subject={urllib.parse.quote(ref)}">'
-                         f'Who opened or changed this file</a></p>')
+            tools += (f'<a class="btn secondary" href="/access?subject={urllib.parse.quote(ref)}">'
+                      f'Who opened or changed this file</a>')
+        parts.insert(1, f'<div class="file-tools" role="group" aria-label="This file">{tools}</div>')
         runs = self.hub.engine.runs(record=ref)
         parts.append(f"<h2 id='work'>Work about this {e(self.subj['label'].lower())}</h2>" + (
             "<table>" + "".join(f'<tr><td><a href="/runs/{r["id"]}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
@@ -2093,7 +2123,7 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
             + "</table>" if runs else "<p class='muted'>None.</p>"))
         starts = self.start_buttons(me, st, ref)
         if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
-            parts.insert(1, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
+            parts.insert(2, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
         extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))]
         return self.layout(req, self.hub.title(p), "".join(parts), heading=False,
                            crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.title(p))],
@@ -2642,15 +2672,13 @@ class App(RecordPages, DefinitionPages, OfficePages, LivePages):
             buf = io.StringIO()
             w = csv.writer(buf)
             w.writerow(["when", "who", "name", "kind", "action", "record", "how", "event"])
-            def cell(v):  # a spreadsheet must not read a name as a formula
-                v = str(v if v is not None else "")
-                return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+            from ..export import csv_cell as cell  # a spreadsheet must not read a name as a formula
             for r in rows:
                 w.writerow([cell(r[k]) for k in ("at", "who", "name", "kind", "action", "record", "how", "seq")])
             name = re.sub(r"[^\w.-]", "_", subject)
             return ({"Content-Type": "text/csv; charset=utf-8",
                      "Content-Disposition": f'attachment; filename="access-{name}.csv"'}, buf.getvalue().encode())
-        what = {"record.viewed": "Opened", "created": "Created", "updated": "Changed", "transitioned": "Moved on",
+        what = {"record.viewed": "Opened", "exported": "Exported", "created": "Created", "updated": "Changed", "transitioned": "Moved on",
                 "signed": "Signed"}
         trs = "".join(f'<tr><td class="muted">{self._when(r["at"])}</td><td>{self.who(r["who"])}</td>'
                       f'<td>{e(what.get(r["action"].split(".")[-1], what.get(r["action"], self.human(r["action"]))))}'
