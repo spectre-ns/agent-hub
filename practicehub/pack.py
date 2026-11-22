@@ -9,7 +9,8 @@ A pack is a directory:
     skills/*.toml      what agents know how to do: instructions and the shape of their answer
     blocks/*.toml      reusable, parameterised steps: python code, injected prompts, external engine calls
     views/*.toml       screens and dashboards (``practicehub/views.py``)
-    pack.py            optional: deterministic actions, context providers, stand-in answers, summaries
+    pack.py            optional: deterministic actions, context providers, stand-in answers, summaries, and
+                       ``UPGRADES``: what a new version does to the records an older one left (``Hub.run_pack_upgrades``)
 
 A **module** (``modules/<id>/module.toml``: document control, quality, product lifecycle...) has the same layout with
 ``[module]`` in place of ``[practice]``. It adds roles, data classes, grants, events, types, workflows, blocks, skills
@@ -66,6 +67,7 @@ class Pack:
     providers: dict = field(default_factory=dict)
     standins: dict = field(default_factory=dict)
     guards: dict = field(default_factory=dict)
+    upgrades: dict = field(default_factory=dict)   # id -> fn(hub, actor): None until it can run, then what it did
     block_sources: dict = field(default_factory=dict)
     type_sources: dict = field(default_factory=dict)
     view_sources: dict = field(default_factory=dict)
@@ -363,6 +365,7 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
         pack.providers = dict(getattr(mod, "PROVIDERS", {}))
         pack.standins = dict(getattr(mod, "STANDINS", {}))
         pack.guards = dict(getattr(mod, "GUARDS", {}))
+        pack.upgrades = dict(getattr(mod, "UPGRADES", {}))
     for m in pack.modules:
         add_module(pack, m)
     return pack

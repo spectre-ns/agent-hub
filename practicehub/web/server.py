@@ -30,6 +30,7 @@ from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..visibility import Viewer
 from .assets import CSS, ICONS, JS
 from .definitions_pages import DefinitionPages
+from .calendar_pages import CalendarPages
 from .records_pages import Download, RecordPages, a_an
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
@@ -64,7 +65,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(RecordPages, DefinitionPages):
+class App(CalendarPages, RecordPages, DefinitionPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -159,7 +160,7 @@ class App(RecordPages, DefinitionPages):
         R("GET", r"/track/(?P<seq>\d+)", self.page_chain)
         R("GET", r"/outbox", self.page_outbox)
         R("POST", r"/outbox/(?P<oid>\d+)/delivered", self.post_outbox_delivered)
-        R("GET", r"/schedule", self.page_schedule)
+        self.calendar_routes(R)
         self.record_routes(R)
         self.definition_routes(R)
 
@@ -679,7 +680,7 @@ class App(RecordPages, DefinitionPages):
         parts = ['<aside class="side" id="side">',
                  '<nav aria-label="Main">', nav("/", "Your work", "inbox", len(mine)), nav("/board", "Board", "board"), nav("/runs", "All work", "list"),
                  '<div class="sec">Practice</div>', nav(sp, self.subj["plural"], "people")]
-        if me and any(self._may_read(me, t) for t in self.hub.of_base("Booking")):
+        if me and self.hub.of_base("Booking"):  # everyone opens the calendar; what they may not read shows as Busy
             parts.append(nav("/schedule", "Schedule", "calendar"))
         for t in self.shortcuts(me):  # the record types the pack and its modules work in most
             parts.append(nav(f"/records/{t}", self.hub.record_type(t).plural, "records"))
@@ -1960,7 +1961,7 @@ class App(RecordPages, DefinitionPages):
         p = self.hub.read_record(me, ref)
         chart = self.hub.chart(me, ref)  # the view of the whole file, as the access report counts it
         sections, rail, hidden = self.owner_sections(me, ref)
-        parts = [self.subject_banner(me, ref, heading=True), sections]
+        parts = [self.subject_banner(me, ref, heading=True), self.upcoming_section(me, ref), sections]
         if not sections:
             parts.append("<p class='muted'>Nothing recorded yet.</p>")
         if chart["hidden"] or hidden:
@@ -2685,48 +2686,6 @@ class App(RecordPages, DefinitionPages):
         if verb == "sent":
             return self.hub.outbox_sent(me, oid, str(d.get("reference", "") or ""))
         return self.hub.outbox_failed(me, oid, str(d.get("reason", "") or ""))
-
-    def page_schedule(self, req):
-        """Every booking the member may read, of any type extending the core's Booking (an appointment, a meeting)."""
-        from ..engine import bookings
-        from ..hub import NotFound
-        me = req["me"]
-        kinds = self.hub.of_base("Booking")
-        if not kinds:
-            raise NotFound("this practice keeps no calendar")
-        readable = {t for t in kinds if self.hub.may_read(me, t)}
-        if not readable:
-            raise Denied(f"{me['name']} may not read the schedule")
-        today = date.today().isoformat()
-        appts = sorted((b for b in bookings(self.hub, active_only=False, since=today) if b["type"] in readable),
-                       key=lambda b: b["start"])
-        by_day: dict = {}
-        for b in appts:
-            by_day.setdefault(b["start"][:10], []).append(b)
-        several = len(readable) > 1
-        parts = []
-        for day, items in by_day.items():
-            rows = []
-            for b in items:
-                subj = b["subject"] or ""
-                staff = ", ".join(self.member_name(m) for m in b["with"])
-                name = subj
-                if subj and self.hub.may_read(me, subj.split("/")[0]):
-                    rec = self.hub.records.read(*subj.split("/", 1))
-                    name = self.hub.title(rec) if rec else subj
-                what = b["reason"] or ""
-                if several:
-                    what = f'{self.hub.record_type(b["type"]).label}{": " + what if what else ""}'
-                ref = f'{b["type"]}/{b["record"]["id"]}'
-                state = "Cancelled" if b["cancelled"] else (b["record"].get("status") or "")
-                rows.append(f'<tr{" class=muted" if b["cancelled"] else ""}><td><a href="/records/{e(ref)}">'
-                            f'{e(b["start"][11:16])}</a></td><td>{e(staff)}</td>'
-                            f'<td>{self.subject_link(subj, name) if subj else ""}</td>'
-                            f'<td>{e(what)}</td><td>{e(str(state))}</td></tr>')
-            label = datetime.fromisoformat(day).strftime("%A %B %d")
-            parts.append(f"<h2>{label}</h2><table><tr><th>Time</th><th>With</th><th>{e(self.subj['label'])}</th>"
-                         f"<th>What</th><th>Status</th></tr>{''.join(rows)}</table>")
-        return self.layout(req, "Schedule", "".join(parts) or "<p class='muted'>Nothing booked.</p>")
 
 NEW_BLOCKS = {
     "python": """id = "my-block"

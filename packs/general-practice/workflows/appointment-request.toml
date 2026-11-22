@@ -139,15 +139,15 @@ context = ["record:demographics", "provider:free-slots", "input.urgency", "input
 
 [[steps]]
 id = "book"
-title = "Book the appointment"
+title = "Book the visit"
 kind = "automation"
 after = ["propose"]
-action = "booking.book"          # the core's: written through the Booking fields Appointment keeps
+action = "booking.book"          # the core's: written through the Booking fields a visit keeps
 [steps.params]
 slot = "{{propose.slot}}"
 subject = "{{run.record}}"
 reason = "{{input.reason}}"
-defaults = { status = "booked" }
+defaults = { status = "planned", class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" } }   # a booked visit
 
 [[steps]]
 id = "confirm"

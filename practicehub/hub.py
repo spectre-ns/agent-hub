@@ -143,6 +143,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         from .engine import Engine
         self.engine = Engine(self)
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
+        if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:
+            try:  # an upgrade whose definitions were approved before this pack.py was running
+                self.run_pack_upgrades()
+            except Exception as exc:  # noqa: BLE001 - the hub still opens; the track says what did not happen
+                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
+                                  f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                                  data={"error": str(exc)[:500]})
 
     # ------------------------------------------------------------------ the practice pack, under change control
     PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants")
@@ -291,7 +298,89 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     proposed.append({"kind": kind, "id": did, **self._propose(
                         kind, actor, did, src, f"The practice pack {p.version} changes this", module=None)})
             self._defs_reset()
+            self.run_pack_upgrades(actor)  # what this process's pack.py can do now (the new one runs after the restart)
         return {"pack": p.id, "version": p.version, "restart": True, "added": added_defs, "proposed": proposed}
+
+    def run_pack_upgrades(self, actor: dict | None = None) -> list[dict]:
+        """Run what the practice pack's ``UPGRADES`` (pack.py) do to records an older version left: each once, when it
+        can (a function returns None while what it needs is not in force yet, such as a record type still proposed),
+        in one transaction, written to the track. Called when a pack is upgraded, when a definition is approved, and
+        when the hub opens, so the upgrade happens whichever of these comes last."""
+        ups = dict(self.pack.upgrades) if self.pack else {}
+        if not ups:
+            return []
+        # the hub writes what the upgrade changes (the approver may not write every record it touches); the track says
+        # whose approval or upgrade set it off
+        by = (actor or {}).get("id")
+        actor = {"id": "hub", "kind": "automation", "name": "Practice Hub"}
+        done, out = list(self.db.get_setting("pack_upgrades_done") or []), []
+        for uid, fn in ups.items():
+            if uid in done:
+                continue
+            self._upgrading = True
+            try:
+                with self.db:
+                    got = fn(self, actor)
+                    if got is None:
+                        continue
+                    done.append(uid)
+                    self.db.set_setting("pack_upgrades_done", done)
+                    self.track.append(actor, "practice.upgrade_applied",
+                                      f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                                      data={"upgrade": uid, "pack_version": self.pack.version, "after": by, **dict(got)})
+                    out.append({"upgrade": uid, **dict(got)})
+            finally:
+                self._upgrading = False
+                self._defs_reset()
+        return out
+
+    def convert_record(self, actor: dict, ref: str, rtype: str, data: dict, *, into: str | None = None) -> dict:
+        """Turn a record into one of another type (a pack upgrade that merges two types): a new record with the same
+        id, or, with ``into``, the existing record of ``rtype`` it already stood for, rewritten as ``data``. The record
+        written is checked as any other, every record that pointed at the old one points at it instead, and the old one
+        is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere."""
+        old_type, rid = ref.split("/", 1)
+        rt = self._type(rtype)
+        new_id = into.split("/", 1)[1] if into else rid
+        new_ref = f"{rtype}/{new_id}"
+        with self.db:
+            before = self.records.read(old_type, rid)
+            if not before:
+                raise NotFound(f"there is no {ref}")
+            there = self.records.read(rtype, new_id)
+            if bool(there) != bool(into):
+                raise Invalid(f"there is a {new_ref} already" if there else f"there is no {new_ref}")
+            body = {k: v for k, v in data.items() if k not in ("resourceType", "meta")}
+            body["id"] = new_id
+            self._check_record(rt, {"resourceType": rtype, **body})
+            rec = self.records.update(rtype, new_id, body) if into else self.records.create(rtype, body)
+            self._write_version(rt, rec, actor, None)
+
+            def swap(v):
+                if isinstance(v, str):
+                    return new_ref if v == ref else v
+                if isinstance(v, dict):
+                    return {k: swap(x) for k, x in v.items()}
+                if isinstance(v, list):
+                    return [swap(x) for x in v]
+                return v
+            for row in self.db.links.find({"to_ref": ref}):
+                ft, fid = row["from_ref"].split("/", 1)
+                other = self.records.read(ft, fid)
+                if not other or ft == old_type and fid == rid:
+                    continue
+                fixed = swap({k: v for k, v in other.items() if k != "meta"})
+                if fixed != {k: v for k, v in other.items() if k != "meta"}:
+                    ort = self.record_type_for_reading(ft)
+                    upd = self.records.update(ft, fid, fixed)
+                    if ort is not None:
+                        self._write_version(ort, upd, actor, None)
+            self.db.records.delete({"_id": ref})
+            self.db.links.delete({"from_ref": ref})
+            self.db.titles.delete({"_id": ref})
+            self.track.append(actor, "record.converted", new_ref,
+                              data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec)})
+        return rec
 
     # ------------------------------------------------------------------ modules
     def installed_modules(self) -> list[str]:
@@ -378,6 +467,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                            "modules": [m.id for m in p.modules]})
             self._install_part(installer, p, "", root)
             self.db.set_setting("modules", [m.id for m in p.modules])  # installed with the practice: they are its
+            # a practice that starts on this version has nothing an older one left: its upgrades are done
+            self.db.set_setting("pack_upgrades_done", list(p.upgrades))
             for m in p.modules:
                 mroot = self.track.append(installer, "module.installed", f"module:{m.id}", cause=root,
                                           data={"module": m.id, "version": m.version,
@@ -1765,6 +1856,69 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             up, hops = (self.parent_of(rt, above) if above else None), hops + 1
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
+        clashes = self.booking_clashes(rt, rec)
+        if clashes:
+            raise Invalid(f"the {rt.label.lower()} clashes with another booking",
+                          [self._clash_text(c, who) for c, who in clashes])
+
+    # ------------------------------------------------------------------ the calendar: no member booked twice
+    @staticmethod
+    def booking_span(seen: dict, slot_minutes: int = 15) -> tuple[datetime, datetime] | None:
+        """When a booking (as ``schema.project`` reads it through ``Booking``) holds its members: start to end, or one
+        slot when it has no end. None when its start is not a time."""
+        try:
+            start = datetime.fromisoformat(str(seen.get("start") or "")[:16])
+        except ValueError:
+            return None
+        try:
+            end = datetime.fromisoformat(str(seen.get("end") or "")[:16])
+        except ValueError:
+            end = None
+        if end is None or end <= start:
+            end = start + timedelta(minutes=slot_minutes)
+        return start, end
+
+    def slot_minutes(self) -> int:
+        return int(((self.pack.calendar if self.pack else None) or {}).get("slot_minutes", 15))
+
+    def booking_clashes(self, rt: schema.RecordType, rec: dict) -> list[tuple[dict, str]]:
+        """The other bookings that hold a member this one holds at an overlapping time, as ``(booking, member id)``.
+        Only bookings that still hold time count: not cancelled, and active by their type (a finished visit filed
+        afterwards clashes with nothing). Records carried over by a pack upgrade are taken as they were."""
+        if not rt.is_a("Booking") or getattr(self, "_upgrading", False):
+            return []
+        seen = schema.project(rt, rec, self.member_types())
+        if seen.get("cancelled") or not seen.get("with") or not schema.is_active(rt, rec):
+            return []
+        span = self.booking_span(seen, self.slot_minutes())
+        if span is None:
+            return []
+        from .engine import bookings
+        out = []
+        for b in bookings(self, since=(span[0] - timedelta(days=1)).isoformat(timespec="minutes"),
+                          until=span[1].isoformat(timespec="minutes")):
+            if b["type"] == rt.id and b["record"].get("id") == rec.get("id"):
+                continue
+            if not schema.is_active(self.record_type(b["type"]), b["record"]):
+                continue
+            other = self.booking_span(b, self.slot_minutes())
+            if other is None or not (other[0] < span[1] and span[0] < other[1]):
+                continue
+            for who in seen["with"]:
+                if who in b["with"]:
+                    out.append((b, who))
+                    break
+        return out
+
+    def _clash_text(self, b: dict, who: str) -> str:
+        """Which member is booked when: never whom for (the person booking may not read the other booking)."""
+        try:
+            name = self.member(who)["name"]
+        except Exception:  # noqa: BLE001 - a member since removed is still named by id
+            name = who
+        start, end = self.booking_span(b, self.slot_minutes())
+        return (f"{name} is already booked on {start.strftime('%a %b %d')} from {start.strftime('%H:%M')} to "
+                f"{end.strftime('%H:%M')}: choose another time or another member")
 
     def _workflow_fields(self, rt, member: dict, run_id: str | None, before: dict, after: dict) -> None:
         """A field marked ``by = "workflow"`` (stock on hand) changes only in a workflow step: a person who could set it

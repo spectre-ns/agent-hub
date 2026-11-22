@@ -2,6 +2,10 @@
 #
 # The practice and its people are fictional.
 
+# 2: appointments and visits are one record, the Visit (an Encounter from booking to the end). pack.py's UPGRADES turns
+# the appointments of a practice on version 1 into visits.
+version = "2"
+
 [practice]
 requires_core = "1.0"
 id = "harbourview"
@@ -12,7 +16,7 @@ privacy_law = "PHIA (Personal Health Information Act)"
 data_residency = "Canada"
 timezone = "America/Halifax"
 escalation_role = "practice-manager"
-shortcuts = ["start:appointment-request", "Encounter", "Appointment"]   # the top bar and sidebar
+shortcuts = ["start:appointment-request", "Encounter"]   # the top bar and sidebar
 member_types = ["Practitioner"]   # a reference to Practitioner/<id> names a member of the practice
 message_class = "correspondence"  # the outbox shows a message to those who read this class...
 free_text_class = "clinical"      # ...and this one too when it quotes a patient's words or a clinician's answer
@@ -126,18 +130,13 @@ name = "Demographics and contact"
 record_types = ["Patient", "RelatedPerson", "Coverage"]
 
 [[data_classes]]
-id = "scheduling"
-name = "Appointments"
-record_types = ["Appointment"]
-
-[[data_classes]]
 id = "intake"
 name = "Intake forms"
 record_types = ["QuestionnaireResponse"]
 
 [[data_classes]]
 id = "visits"
-name = "Visit summaries (what billing needs)"
+name = "Visits: bookings, and what billing needs"
 record_types = ["Encounter"]
 
 [[data_classes]]
@@ -160,24 +159,24 @@ record_types = ["ChargeItem", "Claim"]
 # Writing a class implies reading it.
 
 [grants.physician]
-write = ["clinical", "visits", "scheduling", "correspondence"]
+write = ["clinical", "visits", "correspondence"]
 read = ["demographics", "intake", "billing"]
 
 [grants.nurse]
-write = ["clinical", "visits", "scheduling", "correspondence", "intake"]   # a nurse checks patients in and triages
+write = ["clinical", "visits", "correspondence", "intake"]   # a nurse checks patients in and triages
 read = ["demographics"]
 
 [grants.front-desk]
-write = ["demographics", "scheduling", "correspondence"]
+write = ["demographics", "visits", "correspondence"]
 read = ["intake"]
 
 [grants.scheduler]
-write = ["scheduling"]
+write = ["visits"]
 read = ["demographics"]          # never clinical: a scheduling agent does not read notes
 
 [grants.intake-coordinator]
 write = ["intake"]
-read = ["demographics", "scheduling"]
+read = ["demographics", "visits"]
 
 [grants.documentation-assistant]
 read = ["clinical", "intake", "demographics", "visits"]   # drafts go back to the physician, never into the chart
@@ -191,7 +190,7 @@ write = ["billing"]
 read = ["visits", "demographics"]
 
 [grants.practice-manager]
-read = ["demographics", "scheduling", "billing", "visits"]
+read = ["demographics", "billing", "visits"]
 policy_owner = true
 member_admin = true
 
@@ -206,9 +205,9 @@ write = ["demographics", "intake", "correspondence"]
 write = ["clinical"]
 
 # --------------------------------------------------------------------------------------------------------- calendar
-# What the free-slots provider and the Schedule page read: which record type is a booking, and where in it the
-# time, status and participants are. A practice without one has no schedule.
-# The calendar is the practice's Booking types (Appointment extends Booking); here only when and with whom.
+# What the free-slots provider and the Schedule calendar read. The calendar is the practice's Booking types (a Visit
+# extends Booking: its booked start and end, the patient, the physicians); here only the hours, the slot size, and
+# whose time is booked (provider_role: one column each on the calendar).
 [calendar]
 provider_role = "physician"
 slot_minutes = 15
@@ -222,7 +221,6 @@ hours = { mon = ["09:00", "17:00"], tue = ["09:00", "17:00"], wed = ["09:00", "1
 Patient = "Patient"
 RelatedPerson = "Related person"
 Coverage = "Coverage"
-Appointment = "Appointment"
 QuestionnaireResponse = "Intake form"
 Encounter = "Visit"
 Composition = "Note"

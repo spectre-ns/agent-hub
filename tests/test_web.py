@@ -1138,10 +1138,10 @@ def test_a_policy_owner_changes_the_practice_on_its_settings_page(hub, server):
     assert 'name="data_residency"' not in page and 'name="privacy_law"' not in page
     form = {"name": "Harbourview Family Health", "code": "HFH", "phone": "902-555-0100", "email": "front@example.org",
             "address": "1 Harbour St", "website": "https://example.org", "timezone": "America/Halifax",
-            "escalation_role": "practice-manager", "_shortcuts": "1", "shortcuts": "Appointment"}
+            "escalation_role": "practice-manager", "_shortcuts": "1", "shortcuts": "Observation"}
     status, page = call(server, "POST", "/settings/practice", rana, form=form)
     assert status == 200 and "are saved" in page
-    assert hub.practice["name"] == "Harbourview Family Health" and hub.practice["shortcuts"] == ["Appointment"]
+    assert hub.practice["name"] == "Harbourview Family Health" and hub.practice["shortcuts"] == ["Observation"]
     home = call(server, "GET", "/", rana)[1]
     assert "Harbourview Family Health" in home and '<span class="mark">HFH</span>' in home
     assert 'href="/records/Encounter"' not in home.split('<nav class="sidebar"')[-1].split("</nav>")[0]
@@ -1261,3 +1261,122 @@ def test_a_refused_start_from_a_record_keeps_the_record_chosen(hub, server):
     code, page = call(server, "POST", "/start", rana, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}",
                                                           "_fixed": "1"})
     assert code == 422 and f'name="_record" value="CAPA/{capa["id"]}"' in page and 'name="_fixed"' in page
+
+
+# ------------------------------------------------------------------------------------------- the calendar
+DAY = "2030-01-07"  # a Monday, clear of the demo's bookings
+
+
+def _ellen(hub):
+    (p,) = hub.records.search("Patient", text="Ellen MacLeod")
+    return f"Patient/{p['id']}"
+
+
+def _book(server, hub, who="jo", at=f"{DAY}T09:00", member="dr-amara", subject=None, reason="Sore throat"):
+    return call(server, "POST", "/schedule/new", token(hub, who),
+                form={"with": member, "at": at, "subject": subject or _ellen(hub), "reason": reason})
+
+
+def test_every_member_opens_the_calendar(hub, server):
+    """Day and week, one column per physician, for everyone; and only their own column when they ask for theirs."""
+    for mid in ("rana", "dr-amara", "jo", "noor", "sam"):
+        status, page = call(server, "GET", f"/schedule?date={DAY}", token(hub, mid))
+        assert status == 200, (mid, page)
+        assert 'href="/schedule"' in page.split('<aside class="side"')[1].split("</aside>")[0]
+        assert page.count('class="cal-who-h"') == 2 and "Dr. Amara Okafor" in page and "Dr. Liam Fraser" in page
+        assert "Monday January 7, 2030" in page and f"date=2030-01-08" in page and f"date=2030-01-06" in page
+    week = call(server, "GET", f"/schedule?view=week&date={DAY}", token(hub, "noor"))[1]
+    assert "Week of January 7, 2030" in week and week.count('class="cal-who-h"') == 10  # five open days, two each
+    mine = call(server, "GET", f"/schedule?date={DAY}&who=mine", token(hub, "dr-amara"))[1]
+    assert mine.count('class="cal-who-h"') == 1 and "Dr. Liam Fraser</div>" not in mine
+    assert 'class="cal-day today"' in call(server, "GET", "/schedule?view=week", token(hub, "jo"))[1] or \
+        hub.engine.now().weekday() >= 5  # a weekend's week view starts the coming week's open days
+
+
+def test_a_free_slot_opens_the_booking_form_with_the_member_and_time(hub, server):
+    page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
+    href = f'/schedule/new?with=dr-amara&amp;at={DAY}T09%3A00'
+    assert f'href="{href}" data-modal' in page
+    status, form = call(server, "GET", html.unescape(href), token(hub, "jo"))
+    assert status == 200 and "data-modal-body" in form
+    assert 'name="with" value="dr-amara"' in form and f'name="at" value="{DAY}T09:00"' in form
+    assert "Monday January 7 at 09:00" in form and 'name="subject"' in form and 'name="reason"' in form
+    assert 'name="plannedStartDate"' not in form and "It starts as <b>planned</b>" in form
+
+
+def test_booking_a_slot_makes_a_visit_in_its_first_state(hub, server):
+    status, _ = _book(server, hub)
+    assert status == 303
+    (v,) = [v for v in hub.records.search("Encounter", limit=None) if v.get("plannedStartDate", "").startswith(DAY)]
+    assert v["status"] == "planned" and v["plannedStartDate"] == f"{DAY}T09:00"
+    assert v["plannedEndDate"] == f"{DAY}T09:15" and v["subject"]["reference"] == _ellen(hub)
+    assert v["participant"][0]["individual"]["reference"] == "Practitioner/dr-amara"
+    assert v["reasonCode"][0]["text"] == "Sore throat"
+    page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
+    assert "Ellen MacLeod" in page and f'href="/records/Encounter/{v["id"]}"' in page
+    assert f'with=dr-amara&amp;at={DAY}T09%3A00' not in page  # the slot is taken
+    assert call(server, "GET", f"/schedule/new?with=dr-amara&at={DAY}T09:00", token(hub, "sam"))[0] == 403
+
+
+def test_a_double_booking_is_refused_in_the_dialog(hub, server):
+    assert _book(server, hub)[0] == 303
+    (other,) = hub.records.search("Patient", text="Omar Haddad")
+    status, page = _book(server, hub, at=f"{DAY}T09:00", subject=f"Patient/{other['id']}", reason="Kept reason")
+    assert status == 422 and "data-modal-body" in page and 'role="alert"' in page
+    assert "Dr. Amara Okafor is already booked on Mon Jan 07 from 09:00 to 09:15" in page
+    alert = page.split('role="alert"', 1)[1].split("</div>", 1)[0]
+    assert "Kept reason" in page and "Ellen" not in alert  # what was typed is kept; whom the other is for is not said
+    assert f'value="Patient/{other["id"]}" selected' in page
+    assert _book(server, hub, member="dr-liam", subject=f"Patient/{other['id']}")[0] == 303  # someone else is free
+
+
+def test_moving_a_visit(hub, server):
+    _book(server, hub)
+    (v,) = [v for v in hub.records.search("Encounter", limit=None) if v.get("plannedStartDate", "").startswith(DAY)]
+    url = f"/records/Encounter/{v['id']}"
+    page = call(server, "GET", url, token(hub, "jo"))[1]
+    assert f'href="{url}/reschedule" data-modal>Move</a>' in page
+    status, form = call(server, "GET", f"{url}/reschedule", token(hub, "jo"))
+    assert status == 200 and "data-modal-body" in form and f'value="{DAY}T09:00"' in form
+    _book(server, hub, at=f"{DAY}T11:00", member="dr-liam", reason="Flu shot")
+    status, page = call(server, "POST", f"{url}/reschedule", token(hub, "jo"),
+                        form={"at": f"{DAY}T11:00", "with": "dr-liam", "_from": "dr-amara"})
+    assert status == 422 and "Dr. Liam Fraser is already booked" in page and "data-modal-body" in page
+    status, _ = call(server, "POST", f"{url}/reschedule", token(hub, "jo"),
+                     form={"at": f"{DAY}T10:00", "with": "dr-liam", "_from": "dr-amara"})
+    assert status == 303
+    moved = hub.records.read("Encounter", v["id"])
+    assert (moved["plannedStartDate"], moved["plannedEndDate"]) == (f"{DAY}T10:00", f"{DAY}T10:15")
+    assert moved["participant"][0]["individual"]["reference"] == "Practitioner/dr-liam"
+    assert moved["subject"] == v["subject"] and moved["status"] == "planned"
+    hub.update_record(M(hub, "jo"), f"Encounter/{v['id']}", {"status": "cancelled"})
+    page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
+    assert 'class="cal-ev cancelled"' in page  # struck through, and its time is free again
+    assert f'with=dr-liam&amp;at={DAY}T10%3A00' in page
+    assert "/reschedule" not in call(server, "GET", url, token(hub, "jo"))[1]
+
+
+def test_a_member_who_may_not_read_the_booking_sees_busy(hub, server):
+    _book(server, hub)
+    hub.add_member(M(hub, "rana"), {"id": "kim", "kind": "person", "name": "Kim Lee", "roles": []})
+    assert not hub.may_read(M(hub, "kim"), "Patient")
+    status, page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "kim"))
+    assert status == 200 and "Busy" in page and "Ellen" not in page and "Sore throat" not in page
+    assert "/schedule/new" not in page and "/records/Encounter/" not in page  # nothing to book, nothing to open
+
+
+def test_a_patients_page_shows_their_upcoming_visits(hub, server):
+    _book(server, hub)
+    pid = _ellen(hub).split("/")[1]
+    page = call(server, "GET", f"/{App(hub).subj['path']}/{pid}", token(hub, "jo"))[1]
+    up = page.split('id="upcoming"', 1)[1].split("</section>", 1)[0]
+    assert "Mon Jan 07, 09:00" in up and "Dr. Amara Okafor" in up and "Sore throat" in up
+    assert f'/schedule/new?subject=Patient%2F{pid}' in up
+
+
+def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
+    """Version 2 of the clinic pack merged Appointment into Visit (tests/test_rules.py upgrades a version 1)."""
+    assert hub.pack.version == "2" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
+    assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
+    assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do

@@ -1102,6 +1102,8 @@ class RecordPages:
         is_page = rt.layout == "page"
         edit_btn = (f'<a class="btn primary" href="{url}?edit=1#edit" accesskey="e" aria-keyshortcuts="Alt+E">Edit</a>'
                     if editable and not editing else "")
+        if editable and not editing and rt.is_a("Booking") and schema.is_active(rt, rec):  # another time, member
+            edit_btn = (f'<a class="btn secondary" href="{url}/reschedule" data-modal>Move</a>' + edit_btn)
         rail: list = []
         if tab == "details":
             used = hub.in_use_version(me, ref)

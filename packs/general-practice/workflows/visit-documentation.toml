@@ -15,7 +15,7 @@ event = "visit.ended"
 name = "appointment"
 type = "reference"
 target = ["Booking"]
-help = "The visit this note is for (an appointment of this patient)"
+help = "The booked visit this note is for (it is finished with the note); none files a visit that was never booked"
 
 [[input]]
 name = "visit_type"
@@ -118,11 +118,31 @@ start = "{{input.start}}"
 end = "{{input.end}}"
 minutes = "{{input.minutes}}"
 
+# The note is for a booked visit: that visit is finished, with when it took place. A visit nobody booked (a walk-in,
+# a call) is filed as finished; its booked time is when it took place. One of the two runs, never both.
+[[steps]]
+id = "finish-visit"
+title = "Finish the booked visit"
+kind = "automation"
+after = ["timing"]
+when = "input.appointment"
+action = "record.update"
+[steps.params]
+ref = "{{input.appointment}}"
+[steps.params.set]
+status = "finished"
+participant = [{ individual = { reference = "Practitioner/{{sign.by}}" } }]
+type = [{ text = "{{input.visit_type}}" }]
+period = { start = "{{timing.start}}", end = "{{timing.end}}" }
+length = { value = "{{input.minutes}}", unit = "min" }
+reasonCode = [{ text = "ICD-9 {{edit.diagnosis_codes}}" }]
+
 [[steps]]
 id = "file-visit"
 title = "Record the visit"
 kind = "automation"
 after = ["timing"]
+when = "not input.appointment"
 action = "record.create"
 [steps.params]
 type = "Encounter"
@@ -130,9 +150,10 @@ type = "Encounter"
 status = "finished"
 class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" }
 subject = { reference = "{{run.record}}" }
-appointment = [{ reference = "{{input.appointment}}" }]
 participant = [{ individual = { reference = "Practitioner/{{sign.by}}" } }]
 type = [{ text = "{{input.visit_type}}" }]
+plannedStartDate = "{{timing.start}}"
+plannedEndDate = "{{timing.end}}"
 period = { start = "{{timing.start}}", end = "{{timing.end}}" }
 length = { value = "{{input.minutes}}", unit = "min" }
 reasonCode = [{ text = "ICD-9 {{edit.diagnosis_codes}}" }]
@@ -141,7 +162,7 @@ reasonCode = [{ text = "ICD-9 {{edit.diagnosis_codes}}" }]
 id = "file-note"
 title = "File the note in the chart"
 kind = "automation"
-after = ["file-visit"]
+after = ["finish-visit", "file-visit"]
 action = "record.create"
 [steps.params]
 type = "Composition"
@@ -152,7 +173,7 @@ type = { text = "Visit note" }
 title = "Visit note"
 date = "{{timing.now}}"
 subject = { reference = "{{run.record}}" }
-encounter = { reference = "{{file-visit.reference}}" }
+encounter = { reference = "{{finish-visit.reference}}{{file-visit.reference}}" }
 author = [{ reference = "Practitioner/{{sign.by}}" }]
 attester = [{ mode = "legal", time = "{{timing.now}}", party = { reference = "Practitioner/{{sign.by}}" } }]
 section = [
@@ -170,7 +191,7 @@ kind = "task"
 role = "billing"
 due = "5d"
 escalate_to = "practice-manager"
-after = ["file-visit"]
+after = ["finish-visit", "file-visit"]
 skill = "visit-coding"
 risk = "medium"
 context = ["record:visits", "input.visit_type", "input.minutes", "edit.diagnosis_codes"]
@@ -205,6 +226,6 @@ status = "billable"
 subject = { reference = "{{run.record}}" }
 code = { text = "{{code.fee_code}}" }
 occurrenceDateTime = "{{timing.now}}"
-context = { reference = "{{file-visit.reference}}" }
+context = { reference = "{{finish-visit.reference}}{{file-visit.reference}}" }
 quantity = { value = "{{code.units}}" }
 priceOverride = { value = "{{code.amount}}", currency = "CAD" }

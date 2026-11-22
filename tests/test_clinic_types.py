@@ -18,10 +18,8 @@ FORMS = {
     "AllergyIntolerance": ("dr-amara", {"patient": "{patient}", "code.text": "Penicillin", "type": "allergy",
                                         "criticality": "high", "reaction.0.manifestation.0.text": "Hives",
                                         "clinicalStatus.text": "active", "verificationStatus.text": "confirmed"}),
-    "Appointment": ("jo", {"participant.0.actor": "{patient}", "participant.1.actor": "Practitioner/dr-liam",
-                           "start": WHEN, "minutesDuration": "15", "description": "Sore throat"}),
     "Encounter": ("noor", {"subject": "{patient}", "participant.0.individual": "Practitioner/dr-amara",
-                           "type.0.text": "minor", "class.code": "AMB", "period.start": WHEN, "length.value": "15",
+                           "type.0.text": "minor", "class.code": "AMB", "plannedStartDate": WHEN,
                            "reasonCode.0.text": "Sore throat"}),
     "Observation": ("dr-amara", {"subject": "{patient}", "code.text": "HbA1c", "effectiveDateTime": WHEN,
                                  "valueQuantity.value": "6.6", "valueQuantity.unit": "%",
@@ -43,8 +41,7 @@ FORMS = {
 # what each one's words land as in the record
 LANDS = {
     "AllergyIntolerance": [("code.text", "Penicillin"), ("reaction.0.manifestation.0.text", "Hives")],
-    "Appointment": [("participant.1.actor", "Practitioner/dr-liam"), ("minutesDuration", 15)],
-    "Encounter": [("type.0.text", "minor"), ("length.value", 15), ("length.unit", "min"),
+    "Encounter": [("type.0.text", "minor"), ("plannedStartDate", WHEN),
                   ("participant.0.individual", "Practitioner/dr-amara")],
     "Observation": [("code.text", "HbA1c"), ("valueQuantity.value", 6.6), ("valueQuantity.unit", "%")],
     "MedicationRequest": [("medicationCodeableConcept.text", "Ramipril 5 mg"), ("dispenseRequest.quantity.value", 90)],
@@ -55,7 +52,7 @@ LANDS = {
 }
 
 # where a new one starts (the types without a lifecycle say their status on the form, or keep none)
-STARTS = {"Appointment": "proposed", "Encounter": "planned", "Observation": "registered",
+STARTS = {"Encounter": "planned", "Observation": "registered",
           "MedicationRequest": "draft", "Composition": "preliminary", "ServiceRequest": "draft",
           "Immunization": "completed"}
 
@@ -100,8 +97,7 @@ def test_every_clinic_type_says_what_it_is():
 
 
 # The core's forms edit a reference only at the top of a record (subject, author.*), not one inside a list
-# (participant.0.actor): records_pages._editable leaves those out. Until it edits them, an appointment's form has no
-# patient picker (so it cannot be created from the form), and the other pickers below are missing.
+# (participant.0.actor): records_pages._editable leaves those out. Until it edits them, the pickers below are missing.
 CORE_GAP = "core: a form does not edit a reference inside a list (records_pages._editable)"
 
 
@@ -109,8 +105,7 @@ def _nested_ref(f) -> bool:
     return f["type"] == "reference" and "." in f["path"].removesuffix(".*")
 
 
-@pytest.mark.parametrize("rtype", [pytest.param(t, marks=pytest.mark.xfail(strict=True, reason=CORE_GAP))
-                                   if t == "Appointment" else t for t in sorted(FORMS)])
+@pytest.mark.parametrize("rtype", sorted(FORMS))
 def test_a_create_form_is_plain_inputs_and_starts_the_record(clinic, rtype):
     hub, base, patient, visit = clinic
     who, sent = FORMS[rtype]
@@ -124,8 +119,7 @@ def test_a_create_form_is_plain_inputs_and_starts_the_record(clinic, rtype):
     assert 'class="mono"' not in form and "<small>JSON</small>" not in form  # nothing typed as JSON
     shown = [n for t in rt.screen("create") for n in t["fields"]]
     nested = {rt.field(n)["path"] for n in shown if _nested_ref(rt.field(n))}
-    if rtype != "Appointment":  # its patient is required: without the picker it cannot be created (CORE_GAP)
-        sent = {k: v for k, v in sent.items() if k not in nested}
+    sent = {k: v for k, v in sent.items() if k not in nested}  # no picker for these yet (CORE_GAP)
     for name in shown:
         f = rt.field(name)
         assert not f["advanced"] and f["type"] not in ("object", "json"), f"{rtype}.{name}"
@@ -151,7 +145,7 @@ def test_a_create_form_is_plain_inputs_and_starts_the_record(clinic, rtype):
         assert rec["status"] == STARTS[rtype]
 
 
-NESTED = [("Appointment", "patient"), ("Appointment", "practitioner"), ("Encounter", "practitioner"),
+NESTED = [("Encounter", "practitioner"),
           ("Immunization", "given_by"), ("MedicationRequest", "priorPrescription")]
 
 
@@ -177,7 +171,7 @@ def test_a_person_starts_a_record_where_its_lifecycle_starts(clinic):
 def test_a_nurse_checks_a_patient_in(clinic):
     hub, base, patient, visit = clinic
     noor = hub.member("noor")
-    visit = hub.create_record(noor, "Encounter", {"subject": {"reference": patient}})
+    visit = hub.create_record(noor, "Encounter", {"subject": {"reference": patient}, "plannedStartDate": WHEN})
     ref = f"Encounter/{visit['id']}"
     for st in ("arrived", "triaged", "in-progress", "finished"):
         hub.update_record(noor, ref, {"status": st})
