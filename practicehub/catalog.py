@@ -564,7 +564,7 @@ class CatalogMixin:
             if not uses:
                 continue
             try:
-                self.check_workflow(w["row"]["source"], approving=True)
+                self.check_workflow(w["row"]["source"], approving=True, stored=True)  # as it was approved
             except DefinitionError as exc:
                 problems += [f"{wf.title}: {p}" for p in exc.problems]
         return problems

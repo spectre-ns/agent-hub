@@ -3867,16 +3867,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                   {"$set": {"status": "withdrawn"}})
             self.track.append(actor, f"{kind}.withdrawn", f"{kind}:{did}", data={"version": version, "reason": reason})
 
-    def check_workflow(self, source: str, *, approving: bool = False) -> wfmod.Workflow:
+    def check_workflow(self, source: str, *, approving: bool = False, stored: bool = False) -> wfmod.Workflow:
         """Parse a workflow and check it against this practice: the pack's roles, skills and actions, and the blocks
-        it uses. Raises DefinitionError with every problem."""
+        it uses. Raises DefinitionError with every problem. ``stored``: a version already approved, checked by the
+        rules it was approved under (see ``workflows.parse``)."""
         problems: list[str] = []
         try:
-            wf = wfmod.parse(source, self.pack)
+            wf = wfmod.parse(source, self.pack, stored=stored)
         except wfmod.DefinitionError as exc:
             problems = exc.problems
             try:
-                wf = wfmod.parse(source, None)
+                wf = wfmod.parse(source, None, stored=stored)
             except wfmod.DefinitionError:
                 raise exc from None
         problems += [p for p in self._block_problems(wf, approving=approving) if p not in problems]

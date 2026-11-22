@@ -1304,6 +1304,8 @@ def test_a_version_approved_before_a_new_rule_still_reads_and_runs_as_approved(h
     wf, _ = hub.workflow("appointment-request")
     assert any("when" in s.params for s in wf.steps)  # read as it was approved: a parameter, as it ran
     assert "appointment-request" in [w["workflow"].id for w in hub.workflows()]
+    # nor does it stop a change to what it uses: the in-force version is re-checked as it was approved
+    assert hub._workflows_broken_by("type", wf.record) == []
     from practicehub.workflows import DefinitionError, parse
     with pytest.raises(DefinitionError, match="step setting, not a parameter"):
         parse(bad)  # proposed or installed anew, it is refused
