@@ -196,7 +196,7 @@ class CalendarPages:
         """Day or week: one column per member per day, rows of slots; free slots are links to book them."""
         heads, colsh = [], []
         times = "".join(f'<div class="cal-time" style="grid-row:{i + 1}">'
-                        f'{(datetime.combine(date.today(), first) + timedelta(minutes=i * slot)):%H:%M}</div>'
+                        f'{(datetime.combine(days[0], first) + timedelta(minutes=i * slot)):%H:%M}</div>'
                         if (i * slot) % 60 == 0 or i == 0 else "" for i in range(rows))
         for d in days:
             row0 = datetime.combine(d, first)

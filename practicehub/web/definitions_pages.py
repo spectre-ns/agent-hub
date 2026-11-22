@@ -14,6 +14,7 @@ import tomllib
 from html import escape as e
 
 from .. import schema
+from .. import views as viewmod
 
 KINDS = {"types": ("type", "Record types", "record type"), "views": ("view", "Views", "view"),
          "skills": ("skill", "Skills", "skill")}
@@ -26,8 +27,12 @@ HELP = {
              '<code>label</code> and <code>by = "workflow"</code> for moves only a workflow makes.</li>'
              '<li><code>[[signature]]</code>: a <code>meaning</code> people sign with, the <code>roles</code> and '
              '<code>states</code> it is allowed in, and <code>moves_to</code> to move the record when signed.</li>'),
-    "view": ('<li><code>kind</code>: board, list or dashboard; <code>record</code>: the type it shows; '
-             '<code>group_by</code>, <code>[[column]]</code> or <code>[[widget]]</code>.</li>'),
+    "view": ('<li><code>id</code>, <code>title</code>, <code>summary</code>, <code>nav</code> (in the sidebar) and '
+             '<code>roles</code> (who sees it there).</li><li><code>[[widget]]</code>: <code>kind</code> (count, '
+             'table, list, board, chart, tree, links), <code>source</code> (records, items, runs), <code>type</code>, '
+             '<code>where</code> (a condition over <code>record</code> or <code>row</code>), <code>columns</code>, '
+             '<code>group_by</code>, <code>sort</code> and <code>descending</code>, <code>limit</code>, '
+             '<code>links</code> and <code>grid</code> (<code>{ x, y, w, h }</code> on 12 columns).</li>'),
     "skill": ('<li><code>instructions</code>: what an agent with this skill does; <code>[[output]]</code>: the shape of '
               'its answer, checked like any answer.</li>'),
 }
@@ -65,7 +70,9 @@ class DefinitionPages:
                 what = f"{len(df.fields)} fields" + (f", {len(df.lifecycle['states'])} states" if df.lifecycle else "") \
                     + (f", {len(df.signatures)} signatures" if df.signatures else "")
             elif kind == "view":
-                what = f"{getattr(df, 'kind', '')} of {getattr(df, 'record', '') or 'work'}"
+                n = len(getattr(df, "widgets", []))
+                what = f"{n} widget{'' if n == 1 else 's'}: " + ", ".join(
+                    sorted({viewmod.KINDS.get(w["kind"], {}).get("label", w["kind"]).lower() for w in df.widgets}))
             pending = f' <span class="loz moved">{d["proposed"]} proposed</span>' if d["proposed"] else ""
             module = f'<span class="muted">{e(row.get("module") or "the practice")}</span>'
             rows.append(f'<tr><td><a href="/define/{kinds}/{e(d["id"])}">{e(label)}</a>{pending}<br>'
@@ -214,6 +221,9 @@ class DefinitionPages:
                  + "".join(f"<li>{e(p)}</li>" for p in problems) + "</ul></div>") if problems else ""
         to_form = ('<button class="secondary" formaction="/define/types/build" formnovalidate name="op" value="form">'
                    'Edit in the form</button>') if kind == "type" else ""
+        if kind == "view":
+            to_form = ('<button class="secondary" formaction="/define/views/design-from-text" formnovalidate>'
+                       'Edit on the canvas</button>')
         editor = (f'<form method="post" action="/define/{kinds}/propose" class="card"><label>{e(noun.capitalize())} '
                   f'(TOML) *<textarea name="source" rows="28" class="code" spellcheck="false" required '
                   f'data-check="/api/define/{kinds}/check" data-status="def-status" aria-describedby="def-status">'
