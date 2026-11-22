@@ -7,6 +7,7 @@
     practicehub agents run --agent scribe-agent --url http://127.0.0.1:8200 --token-file agent.token
     practicehub token scribe-agent --as dr-amara        issue an API token (an agent's comes from its sponsor)
     practicehub verify                                  check the hash chain and signatures of the track
+    practicehub analytics --as rana --days 30          where time goes in each workflow (a policy owner)
     practicehub backup /backups/2026-11-21              a consistent copy of the database, its files and the anchors (not the secret)
     practicehub restore /backups/2026-11-21 --force     put a backup back; then `track restored` records what was lost
     practicehub export --as rana --type Patient --format csv --out patients.csv   every record of a type (a policy owner)
@@ -691,6 +692,14 @@ def cmd_tick(args):
           f"escalated {len(late)} undelivered message(s)")
 
 
+def cmd_analytics(args):
+    """Process analytics for a policy owner: counts and times per workflow and step, never who the work is about."""
+    from . import analytics
+    hub = build_hub(args)
+    rep = analytics.report(hub, _person(hub, args.as_member), days=args.days)
+    print(json.dumps(rep, indent=1) if args.json else "\n".join(analytics.lines(rep)))
+
+
 def cmd_openfga_init(args):
     import urllib.request
     from .authz import OpenFGAAuthorizer, model_json
@@ -939,6 +948,13 @@ def main(argv=None):
 
     p = sub.add_parser("tick", help="run scheduled workflows and flag overdue work (run it from cron)")
     p.set_defaults(fn=cmd_tick)
+
+    p = sub.add_parser("analytics", help="how work moves: runs, step times, overdue work and the bottleneck, per "
+                       "workflow (a policy owner)")
+    p.add_argument("--as", dest="as_member", required=True, help="the policy owner reading it")
+    p.add_argument("--days", type=int, choices=[7, 30, 90], default=30, help="the period (default 30 days)")
+    p.add_argument("--json", action="store_true", help="print JSON, as /api/analytics gives it")
+    p.set_defaults(fn=cmd_analytics)
 
     fg = sub.add_parser("openfga", help="OpenFGA").add_subparsers(dest="sub", required=True)
     p = fg.add_parser("init", help="create a store and model, copy the hub's tuples into it")

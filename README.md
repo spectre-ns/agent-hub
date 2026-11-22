@@ -239,6 +239,14 @@ The hub checks the workflow as you edit it and lists every problem, in words. Sa
 owner approves it, after seeing the diff and what agents may now do. Runs that have already started finish on the
 version they started with.
 
+To see where a workflow loses time, a policy owner opens **Settings → Process analytics** (`/settings/analytics`;
+`/api/analytics?days=30` as JSON; `practicehub analytics --as <policy owner> --days 30` on the command line). For
+the last 7, 30 or 90 days it shows, per workflow: runs started, finished, cancelled and still open; how long
+finished runs took (median and 90th percentile); per step, the median time waiting to be taken and from taken to
+done, how often it was overdue and escalated; the step where most time goes, in a sentence; the work open now by
+age; and missed deadlines. It is counts and times only: no records, no names, no inputs, no item ids. It reads at
+most 20,000 runs of the period and says so when there were more.
+
 - **Blocks** in the sidebar lists the blocks and the engines under the hub; create or change one there.
 - `docs/workflows.md` is the reference.
 - `docs/packs.md` explains how to set up another kind of practice: its roles, data classes, subject (Patient, Client,
