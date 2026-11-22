@@ -251,7 +251,7 @@ def test_connections_are_off_until_a_second_policy_owner_approves_on_the_page(hu
     page = call(server, "GET", "/settings/connections", rana)[1]
     assert "Data stays in" in page and "Ask to switch it on" in page and 'class="loz success">on' not in page
     assert "No server is switched on" in page
-    form = {"roles": "front-desk", "reason": "desk", "acknowledged": "1"}
+    form = {"roles": "front-desk", "reason": "desk", "acknowledged": "1", "clients": "Desk app | Canada"}
     code, page = call(server, "POST", "/settings/connections/practice/ask", rana, form={**form, "acknowledged": ""})
     assert code == 200 and "confirm that you checked" in page  # the residency check is not skipped
     assert call(server, "POST", "/settings/connections/practice/ask", jo, form=form)[0] in (200, 403)
@@ -262,8 +262,11 @@ def test_connections_are_off_until_a_second_policy_owner_approves_on_the_page(hu
     assert "/practice/approve" in call(server, "GET", "/settings/connections", amara)[1]
     assert call(server, "POST", "/settings/connections/practice/approve", amara)[0] == 303
     code, page = call(server, "POST", "/settings/connections/token", jo,
-                      form={"member": "jo", "servers": "practice", "client": "Desk app", "runs_in": "Canada"})
+                      form={"member": "jo", "servers": "practice", "client": "Desk app"})
     assert code == 200 and "The new MCP token" in page
+    code, page = call(server, "POST", "/settings/connections/token", jo,  # an app nobody named is refused
+                      form={"member": "jo", "servers": "practice", "client": "Cloud chat", "runs_in": "Canada"})
+    assert "The new MCP token" not in page and "not one a policy owner named" in page
 
 
 def test_a_module_not_running_says_so_alike_on_every_page(hub, server):
@@ -1544,6 +1547,9 @@ def test_the_front_desk_red_flag_goes_to_a_nurse_not_the_calendar(hub, server):
         "with": "dr-amara", "at": f"{DAY}T11:00", "subject": _ellen(hub), "req_kind": "new-concern",
         "req_reason": "chest pain and short of breath", "req_urgency": "routine"})
     assert status == 200 and "Not booked yet" in page and "Nurse" in page and "/runs/" in page
+    # the desk is still on the phone: the screen's advice is in front of them, first, not only sent to the portal
+    tell = page.index("Tell the caller now:")
+    assert tell < page.index("<b>Not booked yet.</b>") and "call 911" in page[tell:tell + 300] and 'role="alert"' in page
     assert not [v for v in hub.records.search("Encounter", limit=None)
                 if v.get("plannedStartDate") == f"{DAY}T11:00"]
 

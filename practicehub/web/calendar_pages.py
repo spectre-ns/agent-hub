@@ -72,7 +72,8 @@ class CalendarPages:
         """A booking as this member sees it: whom for and why only when they may read both its type and its subject's;
         else Busy (the time is held, nothing more)."""
         subj = b.get("subject") or ""
-        sees = self._may_read(me, b["type"]) and (not subj or self._may_read(me, subj.split("/", 1)[0]))
+        sees = (self._may_read(me, b["type"]) and (not subj or self._may_read(me, subj.split("/", 1)[0]))
+                and not b.get("withheld"))  # a visit a patient's directive withholds is Busy to those it excludes
         span = self.hub.booking_span(b, self._slot())
         out = {"ref": f'{b["type"]}/{b["record"]["id"]}', "start": span[0] if span else None,
                "end": span[1] if span else None, "with": b["with"], "cancelled": b["cancelled"], "sees": sees,
@@ -506,7 +507,20 @@ class CalendarPages:
         waiting = [it for it in self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})]
         roles = sorted({it.get("role") or "" for it in waiting} - {""})
         names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r)) or "someone"
-        body = (f'<div data-modal-body><div class="flash warning" role="status"><p><b>Not booked yet.</b> '
+        # The member is still talking to the caller: what the run's checks say to tell them now (a step output's
+        # ``advice``, e.g. to call 911) comes first, in the open, above what was sent on, never only by message.
+        ctx = (self.hub.db.runs.get(run["id"]) or {}).get("ctx") or {}
+        outs = [o for o in ctx.values() if isinstance(o, dict)]
+        advice = list(dict.fromkeys(str(o["advice"]) for o in outs if isinstance(o.get("advice"), str) and o["advice"]))
+        urgent = any(it.get("priority") == "urgent" for it in waiting)
+        flagged = [str(x) for o in outs if o.get("red_flag") for x in (o.get("flags") or [])]
+        tell = ""
+        if advice:
+            tell = (f'<div class="flash {"error" if urgent else "warning"}" role="alert"><p><b>Tell the caller now:</b> '
+                    + " ".join(e(a) for a in advice) + "</p>"
+                    + (f'<p>They mentioned {e(", ".join(dict.fromkeys(flagged)))}. Stay on the line until they know '
+                       "what to do; the request is marked urgent.</p>" if flagged else "") + "</div>")
+        body = (f'<div data-modal-body>{tell}<div class="flash warning" role="status"><p><b>Not booked yet.</b> '
                 f'{e(self.member_name(who))}, {start:%A %B} {start.day} at {start:%H:%M} is still free: the reason '
                 f'went to {e(names)} first.</p></div><div class="card stack"><ul>'
                 + "".join(f'<li>{e(it.get("title") or it.get("step_id") or "")}</li>' for it in waiting)

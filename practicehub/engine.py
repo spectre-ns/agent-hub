@@ -197,9 +197,14 @@ def bookings(hub, *, active_only: bool = True, since: str | None = None, until: 
         ranged = bool((since or until) and start_path and "*" not in start_path and schema.FIELD_PATH.fullmatch(start_path))
         for rec in hub.records.search(rtype, limit=None, field=start_path if ranged else None,
                                       since=since if ranged else None, until=until if ranged else None):
+            raw = schema.project(rt, rec, hub.member_types())
             if member is not None:
                 rec = hub.redact(member, rec)
             seen = schema.project(rt, rec, hub.member_types())
+            hidden = bool((visibility.withheld(rec) or {}).get("whole"))
+            # the time is held whoever may read what it is for: when and with whom come from the booking itself, so a
+            # visit a directive withholds still holds its slot (shown as Busy), never shows as free time
+            seen.update({k: raw.get(k) for k in ("start", "end", "with", "cancelled")})
             start = str(seen.get("start") or "")
             if not ranged and ((since and start < since) or (until and start >= until)):
                 continue
@@ -209,7 +214,7 @@ def bookings(hub, *, active_only: bool = True, since: str | None = None, until: 
                         "reason": seen.get("reason") or "", "subject": seen.get("subject"),
                         "with": list(seen.get("with") or []), "cancelled": bool(seen.get("cancelled")),
                         "kind": seen.get("kind") or "", "priority": seen.get("priority") or "",
-                        "overbooked": seen.get("overbooked") or ""})
+                        "overbooked": seen.get("overbooked") or "", "withheld": hidden})
     return out
 
 

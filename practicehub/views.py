@@ -531,8 +531,9 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
         rows.sort(key=lambda r: schema.record_date(rt, r), reverse=True)
         return rows, note
     if w["source"] == "items":
+        from .visibility import Viewer
         statuses = w["status"] or ["open", "claimed"]
-        rows = []
+        rows, viewer, hidden = [], Viewer(hub, member), 0
         for r in hub.db.items.find({"status": {"$in": list(statuses)}}, sort=[("created_at", -1)], limit=1000,
                                    fields=["id"]):
             it = hub.engine.item(r["id"])
@@ -541,10 +542,26 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
                 continue
             if w["role"] and it["role"] != w["role"]:
                 continue
+            # that an item exists is the audit; what a step wrote is shown as the item's page shows it: only to a
+            # member who may read every class it carries, and never past a patient's directive
+            if it["kind"] == "notice":
+                ok = it.get("assignee") == member.get("id") or it.get("role") in (member.get("roles") or [])
+            else:
+                wf = viewer.workflow_of_run(run["id"])
+                ok = bool(wf) and viewer.step_visible(wf, it["step_id"])[0]
+            if ok and hub.restrictions.withholds_from(member, run.get("record")):
+                ok = False
+            if not ok:
+                hidden += 1
+                it = {k: v for k, v in it.items() if k not in ("output", "inputs", "note", "context")}
+                if it["kind"] == "notice":
+                    it["title"] = "A notice for someone else"
             row = {**it, "workflow": run["workflow_id"], "run_title": hub.run_title(member, run), "record": run["record"]}
             if w["where"] and not expr.holds(w["where"], {"row": row, "today": hub.engine.now().date().isoformat()}):
                 continue
             rows.append(row)
+        if hidden:
+            note = f"what {hidden} of these hold is not shown: it needs access you do not have"
         return rows, note
     statuses = w["status"] or list(RUN_STATUS)
     runs = [r for r in hub.engine.runs(limit=1000) if r["status"] in statuses

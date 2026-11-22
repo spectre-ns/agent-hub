@@ -172,3 +172,24 @@ def test_a_draft_that_is_not_a_view_is_refused_in_plain_words(hub, server):
     assert code in (400, 422)
     code, page = call(server, "POST", "/define/views/design-from-text", rana, form={"source": "title = [", "note": ""})
     assert code == 200 and "not valid TOML" in page and "dash-editor" not in page  # the text editor, with why
+
+
+def test_an_item_widget_shows_what_a_step_wrote_only_to_who_may_read_it(hub, server):
+    """The draft preview (and every dashboard) lists work items; their content follows the item page's rule."""
+    from conftest import item_for
+    patient = "Patient/" + next(r for r in hub.records.search() if r["resourceType"] == "Patient")["id"]
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=patient, inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")
+    hub.db.items.set(iid, {"status": "done", "output": {"answer": "SECRET-CLINICAL-NOTE"}})
+    source = ('id = "x"\ntitle = "x"\n[[widget]]\nkind = "table"\nsource = "items"\nstatus = ["done"]\n'
+              'columns = ["title", "output.answer"]\nlimit = 500\n')
+    seen = {}
+    for who in ("jo", "dr-amara"):
+        _, o = call(server, "POST", "/api/views/draft", token(hub, who), body={"source": source})
+        seen[who] = json.loads(o)["widgets"][0]
+    assert "SECRET-CLINICAL-NOTE" not in json.dumps(seen["jo"]) and seen["jo"]["note"]
+    assert "SECRET-CLINICAL-NOTE" in seen["dr-amara"]["html"]
+    # nor is a filter on the content a way to learn it
+    probe = source.replace('limit = 500', 'limit = 500\nwhere = "row.output.answer == \'SECRET-CLINICAL-NOTE\'"')
+    _, o = call(server, "POST", "/api/views/draft", token(hub, "jo"), body={"source": probe})
+    assert json.loads(o)["widgets"][0].get("total", 0) == 0

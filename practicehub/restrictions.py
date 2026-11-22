@@ -140,6 +140,14 @@ class Restrictions:
             roles = self.hub.roles_of(member["id"])
         return bool(set(roles or []) & d["roles"])
 
+    def withholds_from(self, member: dict | None, subject: str | None) -> bool:
+        """Whether some directive on the subject's file withholds anything from the member now (no emergency access
+        in force): copies of that file's content made elsewhere (a step's output, a draft) are then not shown."""
+        if not subject or (member or {}).get("kind") == "automation":
+            return False
+        ds = [d for d in self.of_subject(subject) if not self._allowed(member, d)]
+        return bool(ds) and not self.override(member, subject)
+
     def override(self, member: dict | None, subject: str) -> dict | None:
         """The member's emergency access to the subject's file still in force: the track's event, or None."""
         if not member or member.get("kind") != "person" or not subject:

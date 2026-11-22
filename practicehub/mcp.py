@@ -129,7 +129,7 @@ def _clean_clients(clients) -> list[dict]:
     for c in clients or []:
         name, where = str(c.get("name") or "").strip()[:80], str(c.get("runs_in") or "").strip()[:80]
         if not name or not where:
-            raise Invalid("each client outside the practice's data residency is named, with where it runs")
+            raise Invalid("each client is named, with where it sends what it reads (where its model runs)")
         if (name.casefold(), where.casefold()) not in {(x["name"].casefold(), x["runs_in"].casefold()) for x in out}:
             out.append({"name": name, "runs_in": where})
     return out
@@ -242,16 +242,18 @@ def may_connect(policy: dict | None, member: dict) -> bool:
     return member["id"] in policy.get("members", []) or bool(set(member.get("roles") or []) & set(policy.get("roles", [])))
 
 
+def attested(policy: dict | None, name: str) -> dict | None:
+    """The client of this name that a policy owner named for the server (and a second approved), or None."""
+    name = str(name or "").strip().casefold()
+    return next((c for c in (policy or {}).get("clients", []) if c["name"].casefold() == name), None)
+
+
 def client_allowed(hub, policy: dict | None, client: dict) -> bool:
-    """A client runs where the practice keeps its data, or a policy owner attested it (and a second approved)."""
-    home = residency(hub)
+    """Only a client a policy owner named, with where it sends what it reads, and a second approved: never one the
+    token's holder says runs at home (where an AI app runs is not where its model reads the chart)."""
+    c = attested(policy, client.get("name"))
     where = str(client.get("runs_in") or "").strip()
-    if not where:
-        return False
-    if not home or where.casefold() == home.casefold():
-        return True
-    return any(c["name"].casefold() == str(client.get("name") or "").strip().casefold()
-               and c["runs_in"].casefold() == where.casefold() for c in (policy or {}).get("clients", []))
+    return bool(c) and (not where or where.casefold() == c["runs_in"].casefold())
 
 
 def admit(hub, sid: str, member: dict, cred: dict) -> tuple[int, str] | None:
@@ -267,12 +269,12 @@ def admit(hub, sid: str, member: dict, cred: dict) -> tuple[int, str] | None:
         return 403, f"{member['name']} is not one of those a policy owner let connect to the {sid} server"
     client = cred.get("client") or {}
     if not client_allowed(hub, s["policy"], client):
-        return 403, (f"the client {client.get('name') or '?'} runs in {client.get('runs_in') or 'a place not named'}: "
-                     f"the practice's data stays in {residency(hub)}, and no policy owner attested this client")
+        return 403, (f"the client {client.get('name') or '?'} is not one a policy owner named for the {sid} server "
+                     f"(the practice's data stays in {residency(hub) or 'the practice'}: every client is attested)")
     return None
 
 
-def issue_token(hub, actor: dict, mid: str, *, servers_: list[str], client: str, runs_in: str,
+def issue_token(hub, actor: dict, mid: str, *, servers_: list[str], client: str, runs_in: str = "",
                 label: str = "") -> str:
     """A credential for MCP only, for named servers and one named client, issued as any credential is (to the
     person themselves, or an agent's sponsor). Refused when it could not connect now, so nobody holds a token for a
@@ -280,9 +282,15 @@ def issue_token(hub, actor: dict, mid: str, *, servers_: list[str], client: str,
     want = sorted(dict.fromkeys(servers_ or []))
     if not want:
         raise Invalid("name the servers the client connects to")
-    cl = {"name": str(client or "").strip()[:80], "runs_in": str(runs_in or "").strip()[:80]}
-    if not cl["name"] or not cl["runs_in"]:
-        raise Invalid("name the client (the AI app or program) and where it runs: the track keeps both")
+    name = str(client or "").strip()[:80]
+    if not name:
+        raise Invalid("name the client (the AI app or program): one a policy owner named for these servers")
+    # where it runs is what the policy owners attested, not what the holder says
+    first = server(hub, want[0])
+    known = attested(first and first["policy"], name)
+    cl = {"name": known["name"] if known else name, "runs_in": known["runs_in"] if known else str(runs_in or "").strip()[:80]}
+    if runs_in and known and str(runs_in).strip().casefold() != known["runs_in"].casefold():
+        raise Denied(f"{known['name']} was attested as sending what it reads to {known['runs_in']}, not {runs_in}")
     target = hub.member(mid)
     for sid in want:
         why = admit(hub, sid, target, {"scope": "mcp", "servers": want, "client": cl})

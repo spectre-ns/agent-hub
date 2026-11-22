@@ -164,7 +164,7 @@ class McpPages:
         warn = (f'<div class="flash warning" role="note"><p><b>Data stays in {e(home or "the practice")}.</b> An MCP client '
                 f'reads and changes whatever its member may, the most private records included, and many AI apps send what '
                 f'they read to servers elsewhere. Every server starts switched off. A policy owner names who may '
-                f'connect{" and attests any client that runs outside " + e(home) if home else ""}; a second policy '
+                f'connect and which AI apps (clients) they may use, with where each sends what it reads; a second policy '
                 f'owner approves. Every connection, call and record read is on the track.</p></div>')
         token = f'<div class="flash error" role="alert"><p>{e(error)}</p></div>' if error else ""
         if new_token:  # shown in this response only: never put in a URL, where history and logs keep it
@@ -210,13 +210,14 @@ class McpPages:
                 f'<form method="post" action="/settings/connections/{sid}/ask">'
                 f'<fieldset class="choices options"><legend>Roles that may connect</legend>{roles}</fieldset>'
                 f'<fieldset class="choices options"><legend>Members who may connect</legend>{members}</fieldset>'
-                f'<label>Clients that run outside {where} <small class="help">one per line: name | where it runs. '
-                f'Leave empty to allow only clients that run in {where}.</small>'
+                f'<label>Clients (AI apps or programs) that may connect <small class="help">one per line: name | '
+                f'where it sends what it reads (where its model runs). No client connects until it is named here.'
+                f'</small>'
                 f'<textarea name="clients" rows="2">{e(clients)}</textarea></label>'
                 f'<label>Why *<input name="reason" required value="{e(pol.get("reason", ""))}"></label>'
                 f'<label class="radio multi"><input type="checkbox" class="opt-input" name="acknowledged" value="1" '
-                f'required> I checked where these clients send what they read: only to {where}, or to the clients '
-                f'attested above</label>'
+                f'required> I checked where each client above sends what it reads, and any outside {where} is '
+                f'one the practice agreed to</label>'
                 f'<button>{"Change who may connect" if s["enabled"] else "Ask to switch it on"}</button></form>'
                 f'{off}</details>')
 
@@ -227,6 +228,12 @@ class McpPages:
         sample = next((s for s in reachable if s["id"] != mcp.CORE), reachable[0])
         who = "".join(f'<option value="{e(m["id"])}">{e(m["name"])}{" (you)" if i == 0 else ""}</option>'
                       for i, m in enumerate(everyone))
+        names = {}
+        for s in reachable:
+            for c in (s.get("policy") or {}).get("clients", []):
+                names.setdefault(c["name"].casefold(), c)
+        apps = "".join(f'<option value="{e(c["name"])}">{e(c["name"])} (sends to {e(c["runs_in"])})</option>'
+                       for c in names.values()) or '<option value="">No client named yet</option>'
         boxes = "".join(f'<label class="radio multi"><input type="checkbox" class="opt-input" name="servers" '
                         f'value="{e(s["id"])}"> {e(s["name"])}</label>' for s in reachable)
         http_cfg = {"mcpServers": {f"practicehub-{sample['id']}": {
@@ -235,13 +242,12 @@ class McpPages:
             "command": "practicehub", "args": ["mcp", sample["id"], "--url", base],
             "env": {"PRACTICEHUB_TOKEN": "ph_YOUR_TOKEN"}}}}
         return ("<div class='section'><h2>Connect a client</h2><p>An MCP token opens only the servers it names, for "
-                "the one client it names; any other token is refused there. Say where the client runs: the hub "
-                f"refuses one outside {e(home or 'the practice')} unless a policy owner attested it.</p>"
+                "the one client it names, from those the policy owners named for the server; any other is "
+                "refused there. An API token is not for an AI app: it is for the practice's own programs.</p>"
                 '<form method="post" action="/settings/connections/token" class="card">'
                 f'<label>For<select name="member">{who}</select></label>'
                 f'<fieldset class="choices options"><legend>Servers</legend>{boxes}</fieldset>'
-                '<label>The AI app or program *<input name="client" required></label>'
-                f'<label>Where it runs *<input name="runs_in" required value="{e(home)}"></label>'
+                f'<label>The AI app or program *<select name="client" required>{apps}</select></label>'
                 '<button>Issue an MCP token</button></form>'
                 "<p>Then, over HTTP:</p>"
                 f"<pre>{e(json.dumps(http_cfg, indent=2))}</pre>"

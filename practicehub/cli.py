@@ -226,8 +226,8 @@ def cmd_token(args):
     actor = hub.member(args.as_member)
     if args.mcp:
         from . import mcp
-        if not args.client or not args.runs_in:
-            raise SystemExit("an MCP token names its client (--client) and where it runs (--runs-in)")
+        if not args.client:
+            raise SystemExit("an MCP token names its client (--client), one the policy owners named for the servers")
         print(mcp.issue_token(hub, actor, args.member, servers_=[x for x in args.mcp.split(",") if x],
                               client=args.client, runs_in=args.runs_in, label=args.label or ""))
         return
@@ -776,8 +776,8 @@ def main(argv=None):
     p.add_argument("--label")
     p.add_argument("--mcp", metavar="SERVERS", help="an MCP token for these servers (comma separated), not an API token")
     p.add_argument("--client", help="with --mcp: the client (AI app or program) that will use it")
-    p.add_argument("--runs-in", dest="runs_in", help="with --mcp: where that client runs (refused outside the "
-                   "practice's data residency unless a policy owner attested the client)")
+    p.add_argument("--runs-in", dest="runs_in", default="", help="with --mcp: optional; must match where the policy "
+                   "owners attested the client sends what it reads")
     p.set_defaults(fn=cmd_token)
 
     mb = sub.add_parser("member", help="members: add, roles, sponsors, credentials").add_subparsers(dest="sub",

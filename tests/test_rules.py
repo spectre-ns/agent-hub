@@ -1430,6 +1430,31 @@ def test_pack_data_classes_and_roles_are_under_change_control(tmp_path, monkeypa
     assert hub.pack.data_classes == before
 
 
+def test_a_reviewed_pack_upgrade_takes_break_glass_away(tmp_path, monkeypatch):
+    """Overriding a patient's directive is a grant like any other: a pack that no longer gives it takes it away."""
+    import shutil
+    from practicehub import pack as packmod
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    copy = tmp_path / "packs" / "general-practice"
+    shutil.copytree(packmod.find("general-practice"), copy, ignore=shutil.ignore_patterns("__pycache__"))
+    state = tmp_path / "state"
+    Hub(state, pack=str(copy)).install(str(copy))
+    hub = Hub(state)
+    assert hub.restrictions.may_override(M(hub, "noor"))
+    toml = copy / "pack.toml"
+    text = toml.read_text()
+    assert text.count("break_glass = true") == 2
+    toml.write_text(text.replace("break_glass = true", "", 2))
+    hub = Hub(state)
+    hub.review_pack(M(hub, "rana"))
+    out = hub.upgrade_pack(M(hub, "dr-amara"))
+    assert not hub.restrictions.may_override(M(hub, "noor"))
+    assert not hub.restrictions.may_override(M(hub, "dr-liam"))
+    ev = hub.db.events.find_one({"action": "practice.upgraded"}, sort=[("seq", -1)])
+    assert any("break_glass" in str(t) for t in ev["data"]["grants_revoked"]), out
+
+
 def test_a_forged_event_is_never_sealed_or_trusted(tmp_path, monkeypatch):
     """Someone who can write the database but does not hold the secret cannot add a trusted event."""
     import hashlib
@@ -1730,9 +1755,9 @@ def test_when_someone_leaves_their_work_and_their_agents_approvals_are_not_stran
     moved = hub.engine.item(hold)
     assert moved["assignee"] != "dr-amara"
     assert hub.engine.eligibility(M(hub, "rana"), moved)[0] or moved["role"]
-    hub.set_sponsor(M(hub, "rana"), "clinical-admin-agent", "rana")
-    assert hub.engine.item(hold)["assignee"] == "rana"
-    assert hub.engine.eligibility(M(hub, "rana"), hub.engine.item(hold))[0]
+    hub.set_sponsor(M(hub, "rana"), "clinical-admin-agent", "dr-liam")
+    assert hub.engine.item(hold)["assignee"] == "dr-liam"
+    assert hub.engine.eligibility(M(hub, "dr-liam"), hub.engine.item(hold))[0]
 
 
 def test_an_overdue_item_whose_escalation_role_is_empty_reaches_someone(hub):
@@ -2232,6 +2257,18 @@ def test_only_its_sponsor_issues_an_agents_credentials(hub):
     with pytest.raises(Denied):
         hub.issue_token(M(hub, "rana"), "intake-agent", "puppet")  # a member admin, not the sponsor
     assert hub.issue_token(M(hub, "jo"), "intake-agent", "t")
+
+
+def test_nobody_makes_themselves_an_agents_sponsor(hub):
+    """A member admin who named themselves sponsor could issue the agent's token and read what it reads, alone."""
+    rana = M(hub, "rana")
+    with pytest.raises(Denied):
+        hub.set_sponsor(rana, "scribe-agent", "rana")
+    assert M(hub, "scribe-agent")["sponsor"] != "rana"
+    with pytest.raises(Denied):
+        hub.issue_token(rana, "scribe-agent", "puppet")
+    hub.set_sponsor(rana, "scribe-agent", "dr-liam")  # naming someone else is still the member admin's to do
+    assert M(hub, "scribe-agent")["sponsor"] == "dr-liam"
 
 
 # ------------------------------------------------------------------------- retiring takes two; no event lost
@@ -3767,7 +3804,8 @@ def test_no_mcp_server_is_reachable_until_a_second_policy_owner_approves(hub):
 def test_an_mcp_token_is_not_an_api_token_and_an_agent_still_cannot_sign(hub):
     from practicehub import mcp
     roles = [r["id"] for r in hub.roles()]
-    mcp.ask_access(hub, M(hub, "rana"), "core", roles=roles, reason="agents", acknowledged=True)
+    mcp.ask_access(hub, M(hub, "rana"), "core", roles=roles, reason="agents", acknowledged=True,
+                   clients=[{"name": "runner", "runs_in": mcp.residency(hub)}])
     mcp.approve_access(hub, M(hub, "dr-amara"), "core")
     agent = M(hub, "intake-agent")
     tok = mcp.issue_token(hub, M(hub, agent["sponsor"]), agent["id"], servers_=["core"], client="runner",
@@ -4147,3 +4185,24 @@ def test_pages_show_track_times_in_the_practices_zone():
     assert clock.shown("2026-11-23T09:30", hfx) == "2026-11-23 09:30"      # a wall time: already the practice's
     assert clock.shown("2026-11-23", hfx) == "2026-11-23" and clock.shown("", hfx) == ""
     assert clock.stamp(clock.local(_utc(2026, 3, 8, 7, 0), hfx), hfx) == "2026-03-08T07:00:00Z"
+
+
+def test_a_visit_a_directive_withholds_still_holds_its_time_on_the_calendar(hub):
+    """Withholding visits hides what and whom for, never that the time is taken: it is Busy, not free."""
+    from practicehub.engine import bookings
+    ref, _ = _ellen_and_her_result(hub)
+    v = hub.create_record(M(hub, "jo"), "Encounter", _visit(ref, "dr-liam", "2031-05-05T10:00", "2031-05-05T10:15"))
+    _lockbox(hub, ref, withhold_classes=["visits"], allow_members=[{"reference": "Practitioner/dr-amara"}])
+    for who, sees in (("jo", False), ("noor", False), ("dr-amara", True)):
+        mine = [b for b in bookings(hub, member=M(hub, who), since="2031-05-05", until="2031-05-06")
+                if b["record"]["id"] == v["id"]]
+        assert len(mine) == 1 and mine[0]["start"].startswith("2031-05-05T10:00"), who
+        assert mine[0]["with"] and mine[0]["withheld"] == (not sees), who
+
+
+def test_the_access_report_listing_check_uses_an_index_not_a_scan_of_the_track(hub):
+    """Every list page asks whether this member was just shown the same records: that must not read the track."""
+    q = {"action": "records.listed", "actor": "jo", "data.refs_sha256": "0" * 64, "data.how": "list",
+         "at": {"$gte": "2026-01-01"}}
+    plan = hub.db.events.c.find(q).sort([("_id", 1)]).limit(1).explain()["queryPlanner"]["winningPlan"]
+    assert "refs_sha256" in json.dumps(plan) and "COLLSCAN" not in json.dumps(plan)

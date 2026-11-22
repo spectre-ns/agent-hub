@@ -12,6 +12,7 @@ import pytest
 
 from conftest import M
 from practicehub import mcp
+from practicehub.hub import Denied
 from practicehub.web.server import App, make_handler
 
 
@@ -23,6 +24,7 @@ def install_dms(hub):
 def enable(hub, sid, *, roles=None, members=(), clients=()):
     """Rana asks, Dr Amara (a second policy owner) approves: the server is on for these roles (every role if none)."""
     roles = [r["id"] for r in hub.roles()] if roles is None else roles
+    clients = list(clients) or [{"name": "test client", "runs_in": mcp.residency(hub)}]
     mcp.ask_access(hub, M(hub, "rana"), sid, roles=roles, members=members, clients=clients, reason="test",
                    acknowledged=True)
     if mcp.request_of(hub, sid):
@@ -37,7 +39,7 @@ def token(hub, mid, servers=("core", "practice"), *, client="test client", runs_
             if not mcp.server(hub, sid):
                 enable(hub, sid)
     return mcp.issue_token(hub, M(hub, by), mid, servers_=list(servers), client=client,
-                           runs_in=runs_in or mcp.residency(hub), label="test")
+                           runs_in=runs_in or "", label="test")
 
 
 @pytest.fixture
@@ -180,8 +182,8 @@ def test_a_client_outside_the_residency_is_refused_unless_attested(hub, server):
     enable(hub, "practice")
     with pytest.raises(Exception):
         token(hub, "jo", ["practice"], client="Cloud chat", runs_in="Elsewhere")
-    with pytest.raises(Exception):  # where it runs is declared
-        mcp.issue_token(hub, M(hub, "jo"), "jo", servers_=["practice"], client="Cloud chat", runs_in="")
+    with pytest.raises(Denied):  # saying it runs at home does not let an app in: every client is named
+        token(hub, "jo", ["practice"], client="Cloud chat", runs_in=home)
     mcp.ask_access(hub, M(hub, "rana"), "practice", roles=[r["id"] for r in hub.roles()],
                    clients=[{"name": "Cloud chat", "runs_in": "Elsewhere"}], reason="vendor agreement",
                    acknowledged=True)

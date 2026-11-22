@@ -86,7 +86,7 @@ INDEXES = {
     "runs": ["status", "record", "workflow_id", "refs"],
     "items": ["status", "run_id", ("assignee", "status"), ("role", "status"), "n"],
     "events": [{"fields": ["hash"], "unique": True}, "run_id", ("subject", "action"), ("action", "seq"), "actor",
-               ("action", "data.refs")],
+               ("action", "data.refs"), ("data.refs_sha256", "actor"), ("data.subject", "actor")],
     "outbox": ["status", "channel"],
     "sessions": ["member"],
     "setup_codes": ["member"],

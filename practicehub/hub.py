@@ -284,7 +284,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                                  *(x["id"] for x in (self.pack.roles if self.pack else []))]}
         old_grants = {tuple(t) for t in self.authz.read() if t[2] in roles and (
             (t[0].startswith("data_class:") and t[1] in ("reader", "writer")) or
-            (t[0] == "practice:main" and t[1] in ("policy_owner", "member_admin")))}
+            (t[0] == "practice:main" and t[1] in ("policy_owner", "member_admin", "break_glass")))}
         new_roles = [r for r in p.roles if not self.db.roles.exists({"_id": r["id"]})]
         new_classes = [d for d in p.data_classes if not self.db.data_classes.exists({"_id": d["id"]})]
         with self.db:
@@ -1840,6 +1840,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid("people do not have sponsors")
         if sp["kind"] != "person" or sp["status"] != "active":
             raise Invalid("a sponsor is an active person")
+        # whoever sponsors an agent issues its credentials, and so can act through it: nobody makes themselves one
+        # (a member admin who could would reach everything the agent reads with no second person involved)
+        if sponsor == actor["id"] and target["sponsor"] != sponsor:
+            raise Denied(f"{actor['name']} may not make themselves {target['name']}'s sponsor: another member admin "
+                         "names them, so no one gains what the agent may read on their own say")
         if target["sponsor"]:
             self.authz.delete([(member_ref(mid), "sponsor", member_ref(target["sponsor"]))])
         self.authz.write([(member_ref(mid), "sponsor", member_ref(sponsor))])
