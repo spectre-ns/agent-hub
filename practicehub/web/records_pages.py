@@ -517,7 +517,11 @@ class RecordPages:
             options, many = [], False
             members = self.hub.member_types()
             for t in self.hub.concrete(f["target"]):
-                if t in members:  # a reference to a member of the practice: the people on the team
+                if t in members and f.get("roles"):  # only the people who hold one of the field's roles
+                    held = {f"{t}/{m['id']}": m["name"] for rid in f["roles"]
+                            for m in self.hub.active_holders(rid, persons_only=True)}
+                    options += sorted(held.items(), key=lambda o: o[1])
+                elif t in members:  # a reference to a member of the practice: the people on the team
                     options += [(f"{t}/{m['id']}", m["name"]) for m in self.hub.members("person")
                                 if m["status"] == "active"]
                 elif t != "*" and self.hub.record_type(t) and self._may_read(me, t):

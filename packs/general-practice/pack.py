@@ -270,7 +270,53 @@ def act_patient_details(engine, run, step, params, actor):
     return out
 
 
+def act_notice_send(engine, run, step, params, actor):
+    """A notice on the board, at once: to each person on duty holding ``role`` (each by name, so one acknowledging
+    does not clear it for the others), or to the member ``to``. ``text`` is the notice's title, which a notice shows
+    even where the record is withheld: it never carries clinical detail. ``outbox`` (a message id) ties the notice to
+    a message, whose status the notice then shows; ``link`` (a record reference) is linked from it. The output says,
+    in words, who was told and what became of the message."""
+    hub = engine.hub
+    text = str(params.get("text") or "").strip()[:200]
+    if not text:
+        raise ValueError("notice.send: no text")
+    prio = "urgent" if params.get("priority") == "urgent" else "normal"
+    page, link = str(params.get("outbox") or ""), str(params.get("link") or "")
+    about = f"outbox:{page}" if page else None
+    told: list[str] = []
+    if params.get("role"):
+        rid = str(params["role"])
+        people = hub.active_holders(rid, persons_only=True)
+        for m in people:
+            engine.alert(run, step, text, assignee=m["id"], priority=prio, about=about)
+            told.append(m["name"])
+        if not people:  # nobody on duty holds it: the practice's escalation role, as for any late work
+            engine.alert(run, step, text, role=rid, priority=prio, about=about)
+    elif params.get("to"):
+        m = hub.db.members.find_one({"_id": str(params["to"])}, fields=["status", "kind", "name"])
+        if m and m["status"] == "active" and m["kind"] == "person":  # an agent or a feed reads no board
+            iid = engine._notice(run, step, text, assignee=str(params["to"]), priority=prio, about=about)
+            if link and not about:
+                hub.db.items.set(iid, {"output": {"summary": text, "visit": link}})
+            told.append(m["name"])
+    out: dict = {"told": told}
+    who = ", ".join(told) if told else "the people next in line (nobody on duty holds the role)"
+    if page:
+        try:
+            r = hub._message(page)
+        except Exception:  # noqa: BLE001 - a message that is gone: say it was queued, as the page step did
+            r = None
+        state = {"queued": "is waiting to be sent", "sending": "is being sent", "sent": "was sent",
+                 "failed": "failed", "delivered": "was delivered by hand"}.get((r or {}).get("status"), "was queued")
+        out["summary"] = f"Told {who} on the board at once; the page (message #{page}) {state}."
+        out["page"] = f"message #{page}"
+    else:
+        out["summary"] = f"Told {who} on the board." if params.get("role") or told else "Nobody to tell on the board."
+    return out
+
+
 ACTIONS = {"clock.now": act_clock_now,
+           "notice.send": act_notice_send,
            "patient.details": act_patient_details}
 PROVIDERS: dict = {}
 

@@ -181,6 +181,31 @@ def test_a_lab_value_out_of_range_is_never_filed_as_normal(hub):
     assert item["priority"] == "urgent" and item["role"] == "physician"
 
 
+def test_a_critical_result_reaches_every_physician_on_the_board_at_once(hub):
+    """The page waits for its connector; meanwhile each physician on duty has an urgent notice of their own, which
+    names no test, value or patient and shows the page's status; the run says who was told and where the page is."""
+    pat = _pat(hub)
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=pat, inputs={
+        "test": "Potassium", "value": "7.1", "unit": "mmol/L", "range": "3.5-5.0", "flag": "critical"})
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["tell-physicians"]["state"] == "done"
+    page = run["ctx"]["page"]["message_id"]
+    notices = hub.db.items.find({"run_id": run["id"], "kind": "notice", "step_id": "tell-physicians"})
+    physicians = {m["id"] for m in hub.active_holders("physician", persons_only=True)}
+    assert physicians and {n["assignee"] for n in notices} == physicians and len(notices) == len(physicians)
+    for n in notices:
+        assert n["priority"] == "urgent" and n["status"] == "open"
+        assert n["output"] == {"about": f"outbox:{page}"}
+        assert "Potassium" not in n["title"] and "7.1" not in n["title"] and pat.split("/")[1] not in n["title"]
+    said = run["ctx"]["tell-physicians"]["summary"]
+    assert f"message #{page}" in said and "waiting to be sent" in said
+    assert all(hub.member(p)["name"] in said for p in physicians)
+    # a result that is not critical tells nobody this way
+    calm = hub.engine.run(hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=pat, inputs={
+        "test": "Potassium", "value": "4.1", "unit": "mmol/L", "range": "3.5-5.0", "flag": "normal"})["id"])
+    assert calm["steps"]["tell-physicians"]["state"] == "skipped"
+
+
 def test_a_patient_nobody_could_reach_goes_to_a_physician(hub):
     pat = _pat(hub)
     run = hub.engine.start(M(hub, "jo"), "appointment-request", record=pat,

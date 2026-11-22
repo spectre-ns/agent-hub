@@ -1496,16 +1496,17 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             rt = self.hub.record_type(wf.record)
             raise Invalid(f"choose {a_an((rt.label if rt else wf.record).lower())} to start this about")
         run = self.hub.engine.start(req["me"], wid, record=rec, inputs=f)
-        tell = self.tell_the_caller(run["id"])
-        if not tell:
+        tell = self.tell_the_caller(run["id"], me=req["me"])
+        booked = self.booked_confirmation(run["id"])
+        if not tell and not booked:
             raise Redirect(f"/runs/{run['id']}")
         # what the checks say to tell the caller is the page itself, not a link on a run page that may show nothing
         waiting = self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})
         roles = sorted({it.get("role") or "" for it in waiting} - {""})
         names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r))
         sent = (f'<div class="flash warning" role="status"><p><b>Sent on to {e(names)}.</b> Nothing is booked '
-                f'yet.</p></div>' if names else "")
-        body = (f'<div data-modal-body data-modal-stay>{tell}{sent}<div class="filters"><a class="btn primary" '
+                f'yet.</p></div>' if names and not booked else "")
+        body = (f'<div data-modal-body data-modal-stay>{booked}{tell}{sent}<div class="filters"><a class="btn primary" '
                 f'href="/runs/{e(run["id"])}">See the request</a></div></div>')
         raise Rendered(200, self.layout(req, f"{wf.title}: started", body,
                                         crumbs=[("/start", "Start"), (None, wf.title)]))

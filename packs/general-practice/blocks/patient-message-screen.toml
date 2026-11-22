@@ -106,9 +106,18 @@ def run(input):
         advice = ("We have your message and will reply within one working day. Messages are not read around the "
                   "clock: if you think this is an emergency, call 911 or go to the nearest emergency department. "
                   "For urgent advice any time, call 811.")
+    # what the member taking a call reads out, in one voice (to the caller); empty when nothing needs saying now
+    if found:
+        say_now = ("If this is an emergency, call 911 or go to the nearest emergency department now. "
+                   "A nurse from the practice will call you back as soon as possible. Please keep your phone with you.")
+    elif mentioned:
+        say_now = ("A nurse from the practice will read what you told us and call you back as soon as possible. "
+                   "If it gets worse, or you think it is an emergency, call 911 or go to the nearest emergency department.")
+    else:
+        say_now = ""
     routine = not found and not mentioned and bool(ADMIN.search(text)) and not SYMPTOM.search(text)
     return {"red_flag": bool(found), "flags": found, "unsure": bool(mentioned) and not found,
-            "mentioned": mentioned, "routine": routine, "advice": advice,
+            "mentioned": mentioned, "routine": routine, "advice": advice, "say_now": say_now,
             "admin_reason": str(input.get("question") or "")[:300] if routine else ""}
 '''
 
@@ -143,6 +152,12 @@ help = "true only for a plainly administrative message that names nothing like a
 [[output]]
 name = "advice"
 type = "string"
+help = "to the patient, in a message: what to do in an emergency, and when the practice replies"
+
+[[output]]
+name = "say_now"
+type = "string"
+help = "for staff taking a call to read out to the caller, in the caller's voice; empty when nothing needs saying now"
 
 [[output]]
 name = "admin_reason"

@@ -266,6 +266,7 @@ to = "onleave"
 [[lifecycle.transition]]
 from = ["in-progress", "onleave"]
 to = "finished"
+by = "workflow"
 [[lifecycle.transition]]
 from = ["planned", "arrived", "triaged"]
 to = "finished"
