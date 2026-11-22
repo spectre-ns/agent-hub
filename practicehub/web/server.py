@@ -331,7 +331,12 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             wf = viewer.workflow_of_run(run["id"])
             ok = item.get("assignee") == me.get("id") or (bool(wf) and viewer.step_visible(wf, item["step_id"])[0])
         if item["kind"] == "notice" and item.get("assignee") == me.get("id"):
-            return True  # told by name (a break-glass review goes to the privacy officer the directive excludes)
+            return True  # told by name (a break-glass review goes to whom it is for)
+        if item["kind"] != "notice" and (item.get("assignee") == me.get("id")
+                                         or (item.get("role") and item["role"] in (me.get("roles") or []))):
+            # who may take it opens it, directive or not: an urgent call-back for a patient with a lockbox must not
+            # dead-end. What the directive withholds is already reduced to stubs in what the step shows
+            return True
         return ok and not self.hub.restrictions.withholds_from(me, run.get("record"))
 
     # ================================================================================================ API
@@ -1393,8 +1398,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r))
         sent = (f'<div class="flash warning" role="status"><p><b>Sent on to {e(names)}.</b> Nothing is booked '
                 f'yet.</p></div>' if names else "")
-        body = (f'{tell}{sent}<div class="filters"><a class="btn primary" href="/runs/{e(run["id"])}">See the '
-                f'request</a></div>')
+        body = (f'<div data-modal-body data-modal-stay>{tell}{sent}<div class="filters"><a class="btn primary" '
+                f'href="/runs/{e(run["id"])}">See the request</a></div></div>')
         raise Rendered(200, self.layout(req, f"{wf.title}: started", body,
                                         crumbs=[("/start", "Start"), (None, wf.title)]))
 

@@ -1518,6 +1518,20 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         return (self.privileged_roles() | self.beyond_roles(actor)
                 | (self.data_roles() if kind != "person" else set()))
 
+    def reach_beyond(self, actor: dict, mid: str, roles: set | None = None) -> list[str]:
+        """What the member reaches that the actor does not themselves, as names: their roles (or ``roles``, say a
+        change waiting for approval too) beyond the actor's reach, and restricted data granted to them directly.
+        Whoever issues a member's credential, or sponsors an agent, can act as it: they must reach as far."""
+        target = self.member(mid)
+        held = set(target["roles"]) if roles is None else set(roles)
+        out = [self.role(r)["name"] if self._role_known(r) else r for r in sorted(held & self.beyond_roles(actor))]
+        rclasses = self.restricted_classes()
+        for obj, rel, _ in self.authz.read(subject=member_ref(mid)):
+            if (rel in ("reader", "writer") and obj.startswith("data_class:")
+                    and obj.removeprefix("data_class:") in rclasses and not self.can(actor, rel, obj)):
+                out.append(f"{rel} of {obj.removeprefix('data_class:')}")
+        return list(dict.fromkeys(out))
+
     def _request_for(self, actor: dict, mid: str, **change) -> dict:
         """Put a change into the member's waiting role request, keeping everyone who asked: none of them approves
         it."""
@@ -1606,9 +1620,39 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.authz.write([(f"role:{r}", "assignee", member_ref(mid)) for r in after - before])
             self._keep_a_policy_owner(owners)
             self._keep_a_member_admin(admins)
+            if after - before:
+                self._credentials_within_reach(actor, mid, after - before)
             self.track.append(actor, "member.roles_changed", member_ref(mid),
                               data={"added": sorted(after - before), "removed": sorted(before - after),
                                     **({"asked_by": approved_from} if approved_from else {})})
+
+    def _credentials_within_reach(self, actor: dict, mid: str, added: set) -> None:
+        """A member given roles that reach further than whoever issued their credential: that credential ends.
+        A person's passphrase set with a setup code from such an issuer is cleared (and unused codes from them
+        superseded), so a policy owner who reaches as far issues a fresh one; an agent's sponsor must reach as far
+        as the agent, so its tokens end and the approval is refused while its sponsor does not."""
+        target = self.member(mid)
+
+        def short(who):
+            if not who or who == mid:
+                return False
+            m = self.db.members.get(who)
+            return bool(m) and bool(added & self.beyond_roles(m))
+        if target["kind"] != "person":
+            if short(target.get("sponsor")):
+                raise Invalid(f"{target['name']}'s sponsor does not reach what those roles reach: name a sponsor who "
+                              f"does first (whoever sponsors it issues its credentials and can act through it)")
+            return
+        for row in self.db.setup_codes.find({"member": mid, "used_at": None}):
+            if short(row.get("issued_by")):
+                self.db.setup_codes.set(row["code_hash"], {"used_at": "superseded " + utcnow()})
+        row = self.db.passphrases.get(mid)
+        if row and short(row.get("issued_by")):
+            self.db.passphrases.delete({"_id": mid})
+            self.end_sessions(mid)
+            self.track.append(actor, "credential.passphrase_cleared", member_ref(mid),
+                              data={"why": "set with a setup code from someone who does not reach the roles now "
+                                           "given: a policy owner who does issues a new one"})
 
     MIN_POLICY_OWNERS = 2  # every change is approved by a second person, so it takes two to approve anything
 
@@ -1716,6 +1760,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             new = self.db.members.get(sp)
             if not new or new["kind"] != "person" or new["status"] != "active" or sp == target["id"]:
                 problems.append(f"{aid}: a new sponsor is a switched-on person other than {target['name']}")
+            elif aid in ids and self.reach_beyond(new, aid):
+                problems.append(f"{aid}: {new['name']} does not reach what it does "
+                                f"({', '.join(self.reach_beyond(new, aid))}): name a sponsor who does")
         undecided = [d for d in deps if d["id"] not in hand_over and d["id"] not in stop]
         for d in undecided:
             what = [f"{d['credentials']} live credential{'s' if d['credentials'] != 1 else ''} end for good"
@@ -1864,6 +1911,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if others:
             raise Denied(f"{', '.join(m['name'] for m in others)} can approve it: the server holder approves only "
                          "when no other policy owner can")
+        asker = self.db.members.get(req["by"])
+        if not asker or asker["status"] != "active" or not self.is_policy_owner(asker):
+            raise Denied("whoever asked is no longer an active policy owner: a policy owner asks again")
+        if req["by"] in (req.get("hand_over") or {}).values():
+            raise Denied("the one who asked hands nothing to themselves on the server holder's say: name another "
+                         "sponsor, or a second policy owner (after owners recover) approves it")
         holder = {"id": "server-holder", "kind": "installer", "name": "the server holder"}
         plan = self._dependents_plan(target, req["hand_over"], req["stop"])
         with self.db:
@@ -1897,9 +1950,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         if sponsor == actor["id"] and target["sponsor"] != sponsor:
             raise Denied(f"{actor['name']} may not make themselves {target['name']}'s sponsor: another member admin "
                          "names them, so no one gains what the agent may read on their own say")
+        beyond = self.reach_beyond(sp, mid)
+        if beyond:
+            raise Denied(f"{sp['name']} does not reach what {target['name']} does ({', '.join(beyond)}): its sponsor "
+                         "issues its credentials and can act through it, so name someone who reaches as far")
         if target["sponsor"]:
             self.authz.delete([(member_ref(mid), "sponsor", member_ref(target["sponsor"]))])
         self.authz.write([(member_ref(mid), "sponsor", member_ref(sponsor))])
+        if target["sponsor"] != sponsor:  # the old sponsor's tokens for it end with the hand-over
+            self._revoke_all(actor, mid, "its sponsor changed")
         self.db.members.set(mid, {"sponsor": sponsor})
         self.track.append(actor, "member.sponsor_changed", member_ref(mid),
                           data={"from": target["sponsor"], "to": sponsor, **({"reason": why} if why else {})})
@@ -2062,6 +2121,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             allowed = actor["id"] == mid or actor.get("kind") == "installer"
         else:
             allowed = target["sponsor"] == actor["id"] or actor.get("kind") == "installer"
+        if allowed and target["kind"] != "person" and actor.get("kind") != "installer":
+            beyond = self.reach_beyond(actor, mid)
+            if beyond:
+                raise Denied(f"{target['name']} reaches what {actor['name']} does not ({', '.join(beyond)}): a token "
+                             "for it comes from a sponsor who reaches as far (a member admin names one)")
         if not allowed:
             raise Denied(f"{actor['name']} may not issue credentials for {target['name']}"
                          + (": a person's credentials are their own" if target["kind"] == "person" else

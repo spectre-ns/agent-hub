@@ -140,7 +140,16 @@ class Restrictions:
             roles = self.hub.roles_of(member["id"])
         return bool(set(roles or []) & d["roles"])
 
-    def withholds_from(self, member: dict | None, subject: str | None) -> bool:
+    def allows_beyond(self, member: dict, other: dict) -> bool:
+        """Whether some directive lets the member see what it keeps from the other member (who could read it
+        otherwise): acting as the member would open that file to them."""
+        for ds in self._load().values():
+            for d in ds:
+                if self._allowed(member, d) and not self._allowed(other, d) and self.reaches_withheld(other, d):
+                    return True
+        return False
+
+    def withholds_from(self, member: dict | None, subject: str | None, reaching: bool = False) -> bool:
         """Whether some directive on the subject's file withholds anything from the member now (no emergency access
         in force): copies of that file's content made elsewhere (a step's output, a draft) are then not shown."""
         if not subject or (member or {}).get("kind") == "automation":
@@ -152,7 +161,8 @@ class Restrictions:
             subject = self.subject_of(rec) if rec else None  # a record about a subject: that subject's file
             if not subject:
                 return False
-        ds = [d for d in self.of_subject(subject) if not self._allowed(member, d)]
+        ds = [d for d in self.of_subject(subject) if not self._allowed(member, d)
+              and (not reaching or self.reaches_withheld(member, d))]  # reaching: only what they would read otherwise
         return bool(ds) and not self.override(member, subject)
 
     def override(self, member: dict | None, subject: str) -> dict | None:
@@ -300,24 +310,34 @@ class Restrictions:
     def may_override(self, member: dict | None) -> bool:
         return bool(member) and member.get("kind") == "person" and self.hub.can(member, "break_glass", "practice:main")
 
+    def reaches_withheld(self, m: dict, d: dict) -> bool:
+        """Whether the member could read some of what the directive withholds, were it not for the directive."""
+        hub = self.hub
+        classes = set(d["classes"]) | {hub.class_of(t) for t in d["types"]} | {
+            hub.class_of(r.split("/", 1)[0]) for r in d["records"] if "/" in r}
+        return any(hub.can(m, "reader", f"data_class:{c}") for c in classes - {None, ""})
+
+    def excluded_by(self, m: dict, ds: list[dict]) -> bool:
+        """Whether a directive keeps from the member something they would otherwise read."""
+        return any(not self._allowed(m, d) and self.reaches_withheld(m, d) for d in ds)
+
     def _reviewers(self, member: dict, ds: list[dict], rtype: str) -> list[dict]:
         """Who reviews an emergency access: the people who record directives (the privacy role), else the policy
-        owners; never the member who used it, and never a reader the directive itself excludes (the review would
-        tell them what the patient asked to keep from them). Someone is always told."""
+        owners, else the member admins; never the member who used it, and never anyone a directive on the file
+        excludes from what it withholds (the review would tell them what the patient asked to keep from them, as
+        the reason often does). When nobody fits, nobody in the practice is told: the track records it unreviewed
+        for the server holder, rather than telling an excluded member."""
         hub = self.hub
         people = [m for m in hub.members("person") if m["status"] == "active" and m["id"] != member["id"]]
         classes = {hub.class_of(t) for t in (hub.of_base(BASE) if BASE in schema.bases() else [])} - {None, ""}
-        reads = f"data_class:{hub.class_of(rtype)}"
-
-        def excluded(m):
-            return hub.can(m, "reader", reads) and not all(self._allowed(m, d) for d in ds)
+        everyone = self.of_subject(ds[0]["subject"]) if ds else []
         for pool in ([m for m in people if any(hub.can(m, "writer", f"data_class:{c}") for c in classes)],
-                     [m for m in people if hub.is_policy_owner(m)]):
-            fit = [m for m in pool if not excluded(m)]
+                     [m for m in people if hub.is_policy_owner(m)],
+                     [m for m in people if hub.can(m, "member_admin", "practice:main")]):
+            fit = [m for m in pool if not self.excluded_by(m, everyone or ds)]
             if fit:
                 return fit
-        return [m for m in people if hub.is_policy_owner(m)] or [m for m in hub.members("person")
-                                                                if m["status"] == "active" and hub.is_policy_owner(m)]
+        return []
 
     def break_glass(self, member: dict, ref: str, reason: str) -> dict:
         """Open what restrictions withhold of ``ref``'s file from the member, in an emergency: on the track with the
@@ -357,6 +377,10 @@ class Restrictions:
                                 "started_by": member["id"], "root_event": seq, "created_at": utcnow(),
                                 "updated_at": utcnow()})
             owners = self._reviewers(member, ds, rtype)
+            if not owners:
+                hub.track.append(member, "access.unreviewed", ref,
+                                 data={"subject": subject, "why": "nobody in the practice may review it without "
+                                                                  "seeing what the subject withheld from them"})
             for o in owners:
                 # the notice names the file, never why it was opened (that can be the very thing withheld): the
                 # reason is on the item's page, which only the reviewer it is for may open

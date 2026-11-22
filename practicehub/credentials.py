@@ -176,10 +176,11 @@ class CredentialsMixin:
             raise Invalid(problem)
         self._store_passphrase(actor, mid, new, how="set by the member")
 
-    def _store_passphrase(self, actor: dict, mid: str, new: str, how: str, cause: int | None = None) -> None:
+    def _store_passphrase(self, actor: dict, mid: str, new: str, how: str, cause: int | None = None,
+                          issued_by: str | None = None) -> None:
         with self.db:
             self.db.passphrases.replace({"_id": mid, "member": mid, "hash": hash_passphrase(new), "set_at": utcnow(),
-                                         "set_by": actor["id"]})
+                                         "set_by": actor["id"], "issued_by": issued_by})
             self.db.sessions.update({"member": mid, "revoked": 0}, {"$set": {"revoked": 1}}, many=True)
             self._clear_failures(mid)
             self.track.append(actor, "credential.passphrase_set", f"member:{mid}", cause=cause, data={"how": how})
@@ -196,16 +197,23 @@ class CredentialsMixin:
                              "or change your passphrase with your current one")
             # whoever issues it can sign in as the member: they must reach as far as the member does. A member admin
             # does for most; for a clinician's account, a policy owner who reads what they read issues it instead
-            beyond = sorted(set(target["roles"]) & self.beyond_roles(actor)) if target["kind"] == "person" else []
+            waiting = set((self.role_request(mid) or {}).get("roles") or []) if target["kind"] == "person" else set()
+            beyond = (self.reach_beyond(actor, mid, set(target["roles"]) | waiting)
+                      if target["kind"] == "person" else [])
+            # and a directive that lets this member see what it keeps from the actor: the actor signing in as them
+            # would open the file the patient kept from them
+            beyond += [f"a file whose directive keeps it from {actor['name']}"
+                       for _ in [1] if target["kind"] == "person" and self.restrictions.allows_beyond(target, actor)]
             if beyond:
                 if not self.can(actor, "member_admin", "practice:main") and not self.is_policy_owner(actor):
                     self.require(actor, "member_admin", "practice:main", "issue a passphrase setup code")
                 self.track.append(actor, "access.denied", f"member:{mid}",
                                   data={"relation": "member_admin", "what": "issue a setup code"})
                 who = [m["name"] for m in self.members("person") if m["status"] == "active" and m["id"] != mid
-                       and self.is_policy_owner(m) and not set(target["roles"]) & self.beyond_roles(m)]
-                raise Denied(f"{target['name']} reaches information {actor['name']} does not (as "
-                             f"{', '.join(self.role(r)['name'] for r in beyond)}): a policy owner who does issues their "
+                       and self.is_policy_owner(m) and not self.reach_beyond(m, mid, set(target["roles"]) | waiting)
+                       and not self.restrictions.allows_beyond(target, m)]
+                raise Denied(f"{target['name']} reaches information {actor['name']} does not ("
+                             f"{', '.join(beyond)}): a policy owner who does issues their "
                              f"setup code" + (f" ({', '.join(who)})" if who else ""))
             if not self.can(actor, "member_admin", "practice:main") and not (
                     self.is_policy_owner(actor) and target["kind"] == "person"
@@ -246,7 +254,8 @@ class CredentialsMixin:
             raise Invalid(problem)
         with self.db:
             self.db.setup_codes.set(row["code_hash"], {"used_at": utcnow()})
-            self._store_passphrase(member, mid, new, how=f"with a setup code issued by {row['issued_by']}")
+            self._store_passphrase(member, mid, new, how=f"with a setup code issued by {row['issued_by']}",
+                                   issued_by=row["issued_by"])
         return member
 
     # ------------------------------------------------------------------ sessions (the pages' cookie)

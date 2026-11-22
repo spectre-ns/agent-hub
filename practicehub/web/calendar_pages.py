@@ -526,7 +526,7 @@ class CalendarPages:
         roles = sorted({it.get("role") or "" for it in waiting} - {""})
         names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r)) or "someone"
         tell = self.tell_the_caller(run["id"], waiting)
-        body = (f'<div data-modal-body>{tell}<div class="flash warning" role="status"><p><b>Not booked yet.</b> '
+        body = (f'<div data-modal-body data-modal-stay>{tell}<div class="flash warning" role="status"><p><b>Not booked yet.</b> '
                 f'{e(self.member_name(who))}, {start:%A %B} {start.day} at {start:%H:%M} is still free: the reason '
                 f'went to {e(names)} first.</p></div><div class="card stack"><ul>'
                 + "".join(f'<li>{e(it.get("title") or it.get("step_id") or "")}</li>' for it in waiting)

@@ -734,7 +734,7 @@ def test_the_team_page_adds_members_and_changes_roles_and_sponsors(hub):
         app.post_member(req("roles=physician&roles=nurse"), "dr-chen", "roles")
     hub.approve_roles(M(hub, "dr-amara"), "dr-chen")
     assert set(hub.member("dr-chen")["roles"]) >= {"physician", "nurse"}
-    page = app.post_member(req("label=interface"), "lab-feed", "token")
+    page = app.post_member({**req("label=interface"), "me": M(hub, "jo")}, "portal", "token")
     assert "shown once" in page
     assert "token=" not in page and "/revoke" in page
     with pytest.raises(Denied):
@@ -814,36 +814,38 @@ def test_screens_arrange_the_forms_and_a_move_asks_what_it_needs(hub, server):
 
 # ------------------------------------------------------------------------------------------- passphrases on the pages
 def test_a_person_sets_a_passphrase_with_a_setup_code_from_a_member_admin(hub, server):
-    rana = token(hub, "dr-amara")  # a policy owner who reads what he reads (the practice manager does not)
+    rana = token(hub, "rana")
     assert call(server, "POST", "/team/dr-liam/setup-code", token(hub, "jo"))[0] == 403  # not a member admin
-    assert call(server, "POST", "/team/dr-liam/setup-code", token(hub, "rana"))[0] == 403  # beyond her reach
-    assert "a policy owner who does issues" in call(server, "GET", "/team/dr-liam", token(hub, "rana"))[1]
-    page = call(server, "GET", "/team/dr-liam", rana)[1]
+    assert call(server, "POST", "/team/dr-liam/setup-code", rana)[0] == 403  # beyond her reach
+    assert "a policy owner who does issues" in call(server, "GET", "/team/dr-liam", rana)[1]
+    assert call(server, "POST", "/team/dr-liam/setup-code", token(hub, "dr-amara"))[0] == 403  # a directive keeps from her
+    hub.add_member(M(hub, "rana"), {"id": "locum", "name": "Dr. Locum", "roles": []})  # reaches nothing she does not
+    page = call(server, "GET", "/team/locum", rana)[1]
     assert "Issue a setup code" in page and "has no passphrase yet" in page
-    code, page = call(server, "POST", "/team/dr-liam/setup-code", rana)
+    code, page = call(server, "POST", "/team/locum/setup-code", rana)
     assert code == 200 and "shown once" in page
     setup = re.search(r"<pre>([A-Z2-9]{5}(?:-[A-Z2-9]{5}){3})</pre>", page).group(1)
     assert setup not in json.dumps(hub.track.list(limit=10000))
     b = browser(server)
-    assert b("GET", "/setup?member=dr-liam")[0] == 200
+    assert b("GET", "/setup?member=locum")[0] == 200
     words = "the tide comes in at noon"
-    code, page = b("POST", "/setup", {"member": "dr-liam", "code": setup, "new": words, "again": words + "x"})
-    assert code == 422 and "not the same" in page and 'value="dr-liam"' in page and words not in page
-    code, page = b("POST", "/setup", {"member": "dr-liam", "code": "AAAAA-BBBBB-CCCCC-DDDDD", "new": words, "again": words})
+    code, page = b("POST", "/setup", {"member": "locum", "code": setup, "new": words, "again": words + "x"})
+    assert code == 422 and "not the same" in page and 'value="locum"' in page and words not in page
+    code, page = b("POST", "/setup", {"member": "locum", "code": "AAAAA-BBBBB-CCCCC-DDDDD", "new": words, "again": words})
     assert code == 403 and b.jar["cookie"] is None
-    code, _ = b("POST", "/setup", {"member": "dr-liam", "code": setup, "new": words, "again": words})
+    code, _ = b("POST", "/setup", {"member": "locum", "code": setup, "new": words, "again": words})
     assert code == 303 and b.jar["cookie"]  # set, and signed in
     assert b("GET", "/")[0] == 200
-    assert b("POST", "/setup", {"member": "dr-liam", "code": setup, "new": words, "again": words})[0] == 403  # once
+    assert b("POST", "/setup", {"member": "locum", "code": setup, "new": words, "again": words})[0] == 403  # once
     # changing it asks for the current one, and keeps this browser signed in
     code, page = b("POST", "/me/passphrase", {"current": "wrong words here", "new": "low tide at six", "again": "low tide at six"})
     assert code == 403 and "Your passphrase" in page
     code, page = b("POST", "/me/passphrase", {"current": words, "new": "low tide at six", "again": "low tide at six"})
     assert code == 200 and "is set" in page and b("GET", "/")[0] == 200
-    assert call(server, "POST", "/login", form={"member": "dr-liam", "passphrase": words})[0] == 403
-    assert call(server, "POST", "/login", form={"member": "dr-liam", "passphrase": "low tide at six"})[0] == 303
+    assert call(server, "POST", "/login", form={"member": "locum", "passphrase": words})[0] == 403
+    assert call(server, "POST", "/login", form={"member": "locum", "passphrase": "low tide at six"})[0] == 303
     # an access token no longer signs a person in on the sign-in form
-    assert call(server, "POST", "/login", form={"token": token(hub, "dr-liam")})[0] == 403
+    assert call(server, "POST", "/login", form={"token": token(hub, "locum")})[0] == 403
 
 
 def test_an_error_page_links_back_without_history(hub, server):
@@ -1569,6 +1571,10 @@ def test_the_front_desk_red_flag_from_the_start_form_tells_the_caller_too(hub, s
     assert status == 200, page[:400]
     tell = page.index("Tell the caller now:")
     assert "call 911" in page[tell:tell + 300] and 'role="alert"' in page and "Nothing is booked" in page
+    # the form dialog shows this reply in place (it does not reload it away), and reloads once it is closed
+    assert "data-modal-stay" in page
+    from practicehub.web.assets import JS
+    assert "data-modal-stay" in JS
 
 
 def test_an_item_page_is_for_who_may_see_it(hub, server):
@@ -1585,6 +1591,16 @@ def test_an_item_page_is_for_who_may_see_it(hub, server):
     for who in ("jo", "dr-amara", "dr-liam"):
         status, page = call(server, "GET", f"/items/{review['id']}", token(hub, who))
         assert status == 404 and "Collapsed" not in page and "emergency" not in page.lower(), who
+    # an urgent call-back about her is opened by the nurse who must make it: the directive masks what it holds,
+    # it does not dead-end the work
+    status, _ = call(server, "POST", "/start", token(hub, "jo"), form={
+        "_workflow": "appointment-request", "_record": ellen, "reason": "crushing chest pain since an hour",
+        "kind": "new-concern", "urgency": "routine"})
+    run = hub.db.runs.find_one({"workflow_id": "appointment-request", "record": ellen}, sort=[("created_at", -1)])
+    calls = [i for i in hub.db.items.find({"run_id": run["id"], "status": "open"}) if i.get("role") == "nurse"]
+    assert calls
+    for it in calls:
+        assert call(server, "GET", f"/items/{it['id']}", token(hub, "noor"))[0] == 200
 
 def test_moving_a_visit(hub, server):
     _book(server, hub)

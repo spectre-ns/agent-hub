@@ -2056,7 +2056,11 @@ function kindFields(root) {
 function formModal() {
   let dlg = null, dirty = false, busy = false, downOnBackdrop = false;
   const DISCARD = "Discard what you typed?";
-  function close() { if (dlg) { dlg.close(); dlg.remove(); dlg = null; } dirty = false; back = ""; }
+  let stayed = false;  // the dialog shows a reply that stays (advice for the caller): the page reloads after it
+  function close() {
+    if (dlg) { dlg.close(); dlg.remove(); dlg = null; } dirty = false; back = "";
+    if (stayed) { stayed = false; location.reload(); }
+  }
   function mayLeave() { return !dirty || confirm(DISCARD); }
   function tryClose() { if (mayLeave()) close(); }
   function frame(title) {
@@ -2134,8 +2138,13 @@ function formModal() {
       const data = new URLSearchParams(new FormData(f, ev.submitter || undefined));
       const res = await fetch(f.action, { method: "POST", body: data, credentials: "same-origin" });
       if (res.ok && res.redirected) { dirty = false; location.href = res.url; return; }
+      const text = await res.text();
+      if (res.ok && text.indexOf("data-modal-stay") >= 0) {  // what to tell the caller now: shown, not reloaded away
+        const said = extract(text);
+        show(said.html, said.title, false, true); stayed = true; return;
+      }
       if (res.ok) { dirty = false; location.reload(); return; }
-      const got = extract(await res.text());
+      const got = extract(text);
       show(got.html || "<p>That did not work.</p>", dlg ? dlg.querySelector("#fm-title").textContent : got.title, true);
     } catch (e) {
       if (btn) btn.disabled = false;

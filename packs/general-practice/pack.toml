@@ -370,12 +370,12 @@ profile = { model = "standin", max_risk = "medium", skills = ["visit-coding", "c
 id = "portal"
 kind = "service"
 name = "Patient portal"
-sponsor = "rana"
+sponsor = "jo"
 roles = ["patient-portal"]
 
 [[members]]
 id = "lab-feed"
 kind = "service"
 name = "Lab results feed"
-sponsor = "rana"
+sponsor = "dr-amara"
 roles = ["lab-interface"]

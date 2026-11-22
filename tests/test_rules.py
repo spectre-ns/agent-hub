@@ -1799,7 +1799,7 @@ def test_a_persons_credentials_are_their_own_and_can_be_revoked(hub):
     with pytest.raises(Denied):
         hub.issue_token(rana, "dr-amara", "for her")   # whoever holds it could sign as her
     tok = hub.issue_token(M(hub, "dr-amara"), "dr-amara", "laptop")
-    feed = hub.issue_token(rana, "lab-feed", "lab interface")
+    feed = hub.issue_token(M(hub, "dr-amara"), "lab-feed", "lab interface")
     assert hub.authenticate(tok) and hub.authenticate(feed)
     tid = hub.tokens(rana, "lab-feed")[0]["id"]
     hub.revoke_token(rana, "lab-feed", tid)
@@ -2123,13 +2123,19 @@ def test_the_server_holder_recovers_a_second_policy_owner(hub):
 # ------------------------------------------------------------------------------------------- no puppets
 def test_giving_an_agent_restricted_data_waits_for_a_second_policy_owner(hub):
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    hub.set_roles(rana, "intake-agent", ["intake-coordinator", "billing"])
-    assert "billing" not in M(hub, "intake-agent")["roles"]
-    assert "billing" in hub.role_request("intake-agent")["roles"]
+    hub.set_roles(rana, "intake-agent", ["intake-coordinator", "scheduler"])
+    assert "scheduler" not in M(hub, "intake-agent")["roles"]
+    assert "scheduler" in hub.role_request("intake-agent")["roles"]
     with pytest.raises(Denied):
         hub.approve_roles(rana, "intake-agent")  # who asked does not approve
     hub.approve_roles(amara, "intake-agent")
-    assert "billing" in M(hub, "intake-agent")["roles"]
+    assert "scheduler" in M(hub, "intake-agent")["roles"]
+    # its sponsor (the front desk) issues its credentials: nobody gives it what she does not reach herself
+    hub.set_roles(rana, "intake-agent", ["intake-coordinator", "scheduler", "billing"])
+    with pytest.raises(Invalid, match="sponsor"):
+        hub.approve_roles(amara, "intake-agent")
+    with pytest.raises(Denied, match="reach"):
+        hub.set_sponsor(rana, "scribe-agent", "jo")  # a clinical agent goes only to someone who reads as far
 
 
 def test_raising_an_agents_max_risk_waits_for_a_second_policy_owner(hub):
@@ -2153,7 +2159,7 @@ def test_the_practice_always_keeps_someone_who_manages_members(hub):
     with pytest.raises(Denied):  # a policy owner alone does not switch anyone off
         hub.set_status(amara, "rana", "disabled", "left")
     # two policy owners ask and approve; the hub refuses to leave nobody who manages members
-    hub.request_switch_off(amara, "rana", "left the practice", hand_over={"portal": "dr-amara", "lab-feed": "dr-amara"})
+    hub.request_switch_off(amara, "rana", "left the practice")
     with pytest.raises(Denied):
         hub.approve_switch_off(amara, "rana")  # who asked does not approve
     with pytest.raises(Invalid, match="nobody who manages members"):
@@ -2171,7 +2177,7 @@ def test_the_practice_always_keeps_someone_who_manages_members(hub):
     assert M(hub, "lab-feed")["status"] == "active" and M(hub, "lab-feed")["sponsor"] == "dr-amara"
     ev = hub.db.events.find_one({"action": "member.disabled", "subject": "member:rana"})
     assert ev["actor"] == "deputy" and ev["data"]["asked_by"] == "dr-amara"
-    assert ev["data"]["handed_over"] == {"portal": "dr-amara", "lab-feed": "dr-amara"}
+    assert not ev["data"].get("handed_over")  # the pack has her sponsor nothing: the feeds stay with who reaches them
     assert "Jo" in hub.member_admin_warning()
     # taking the role from the last one who manages members is refused, whoever asks
     hub.set_roles(amara, "jo", ["front-desk"])  # asked by a policy owner: it waits
@@ -2192,7 +2198,7 @@ def test_switching_off_a_sponsor_asks_what_becomes_of_their_agents(hub):
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
     token = hub.issue_token(amara, "scribe-agent", "dictation")
     deps = {d["id"]: d for d in hub.dependents("dr-amara")}
-    assert set(deps) == {"scribe-agent", "clinical-admin-agent"} and deps["scribe-agent"]["credentials"] == 1
+    assert set(deps) == {"scribe-agent", "clinical-admin-agent", "lab-feed"} and deps["scribe-agent"]["credentials"] == 1
     assert "documentation-assistant" in deps["scribe-agent"]["only_holder_of"]
     with pytest.raises(Invalid) as exc:
         hub.set_status(rana, "dr-amara", "disabled", "left the practice")
@@ -2200,18 +2206,23 @@ def test_switching_off_a_sponsor_asks_what_becomes_of_their_agents(hub):
     assert M(hub, "dr-amara")["status"] == "active" and hub.authenticate(token)
     with pytest.raises(Invalid):  # the new sponsor is someone staying
         hub.set_status(rana, "dr-amara", "disabled", "left", hand_over={"scribe-agent": "dr-amara"},
-                       stop=["clinical-admin-agent"])
+                       stop=["clinical-admin-agent", "lab-feed"])
     with pytest.raises(Invalid):  # every one is decided
         hub.set_status(rana, "dr-amara", "disabled", "left", hand_over={"scribe-agent": "dr-liam"})
-    out = hub.set_status(rana, "dr-amara", "disabled", "left the practice", hand_over={"scribe-agent": "dr-liam"},
-                         stop=["clinical-admin-agent"])
+    with pytest.raises(Invalid) as exc:  # and goes to someone who reaches what it does
+        hub.set_status(rana, "dr-amara", "disabled", "left", hand_over={"scribe-agent": "jo", "lab-feed": "dr-liam"},
+                       stop=["clinical-admin-agent"])
+    assert any("reach" in p for p in exc.value.problems)
+    out = hub.set_status(rana, "dr-amara", "disabled", "left the practice",
+                         hand_over={"scribe-agent": "dr-liam", "lab-feed": "dr-liam"}, stop=["clinical-admin-agent"])
     assert out["status"] == "disabled"
     scribe = M(hub, "scribe-agent")
     assert scribe["status"] == "active" and scribe["sponsor"] == "dr-liam"
-    assert hub.authenticate(token)["id"] == "scribe-agent"  # handed over: the dictation feed keeps working
+    assert hub.authenticate(token) is None  # the one who left issued it: it ends; the new sponsor issues another
+    assert hub.authenticate(hub.issue_token(M(hub, "dr-liam"), "scribe-agent", "dictation"))["id"] == "scribe-agent"
     assert M(hub, "clinical-admin-agent")["status"] == "disabled"
     ev = hub.db.events.find_one({"action": "member.disabled", "subject": "member:dr-amara"})
-    assert ev["data"]["handed_over"] == {"scribe-agent": "dr-liam"} and ev["data"]["stopped"] == ["clinical-admin-agent"]
+    assert ev["data"]["handed_over"] == {"scribe-agent": "dr-liam", "lab-feed": "dr-liam"} and ev["data"]["stopped"] == ["clinical-admin-agent"]
     moved = hub.db.events.find_one({"action": "member.sponsor_changed", "subject": "member:scribe-agent"})
     assert moved["data"]["to"] == "dr-liam" and "switched off" in moved["data"]["reason"]
     stopped = hub.db.events.find_one({"action": "member.disabled", "subject": "member:clinical-admin-agent"})
@@ -2432,9 +2443,11 @@ def test_a_member_admin_issues_a_one_time_setup_code(hub):
         hub.issue_setup_code(rana, "scribe-agent")  # agents use tokens
     with pytest.raises(Denied):
         hub.issue_setup_code(rana, "dr-liam")  # he reaches what she does not: a policy owner who does issues it
-    amara = M(hub, "dr-amara")
-    first = hub.issue_setup_code(amara, "dr-liam")
-    second = hub.issue_setup_code(amara, "dr-liam")
+    with pytest.raises(Denied, match="directive keeps"):
+        hub.issue_setup_code(M(hub, "dr-amara"), "dr-liam")  # a patient's directive lets him see what it keeps from her
+    holder = {"id": "installer", "kind": "installer", "name": "the installer"}
+    first = hub.issue_setup_code(holder, "dr-liam")
+    second = hub.issue_setup_code(holder, "dr-liam")
     issued = hub.db.events.find({"action": "credential.setup_issued", "subject": "member:dr-liam"})
     assert len(issued) == 2 and all(second["code"] not in json.dumps(r["data"]) for r in issued)
     assert second["code"] not in json.dumps(hub.db.setup_codes.find(), default=str)  # kept as a hash only
@@ -3942,6 +3955,24 @@ def test_breaking_the_glass_needs_the_grant_and_a_reason_and_the_privacy_officer
     report = hub.access_report(M(hub, "rana"), ref)
     assert any(r.get("how") == "override" or (r.get("data") or {}).get("how") == "override" for r in report)
     assert "valueQuantity" not in hub.read_record(M(hub, "dr-liam"), obs), "only for the one who broke the glass"
+
+
+
+def test_an_emergency_access_from_the_chart_is_never_told_to_whom_the_directive_excludes(hub):
+    """Broken on the patient (the nurse's usual path) or on a result: the review goes to the privacy role, never to
+    the medical director the directive leaves out, and the track keeps the reason from her too."""
+    from practicehub.visibility import Viewer
+    ref, obs = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-liam"}])
+    noor, amara = M(hub, "noor"), M(hub, "dr-amara")
+    assert hub.restrictions.withholds_from(amara, ref)
+    for where in (ref, obs):
+        got = hub.break_glass(noor, where, "Collapsed; suspected overdose of sertraline, unresponsive")
+        assert "dr-amara" not in got["told"] and got["told"]
+    seen = Viewer(hub, amara).events(hub.db.events.find({"action": "record.viewed", "actor": "noor"}))
+    assert seen and all("sertraline" not in json.dumps(e["data"]) for e in seen)
+    assert "sertraline" in json.dumps(Viewer(hub, M(hub, "rana")).events(
+        hub.db.events.find({"action": "record.viewed", "actor": "noor"})))  # the privacy officer reviews it
 # ------------------------------------------------------------------------------------------- agents never sign
 def _agent_check(hub, risk="low"):
     """A gate an agent may decide on its own (signer any, within criteria), about a patient record."""
@@ -4253,11 +4284,24 @@ def test_a_member_admin_gives_nobody_more_than_they_reach_on_their_own(hub):
     assert M(hub, "locum")["roles"] == [] and hub.role_request("locum")
     with pytest.raises(Denied, match="policy owner who does"):
         hub.issue_setup_code(rana, "dr-liam")
-    assert hub.issue_setup_code(rana, "locum")["code"]  # no role yet: reaches nothing she does not
+    with pytest.raises(Denied, match="Physician"):
+        hub.issue_setup_code(rana, "locum")  # the role still waiting counts: she would hold a physician's account
     with pytest.raises(Denied):
         hub.issue_setup_code(rana, "jo")  # the front desk reads intake and messages, which she does not
-    assert hub.issue_setup_code(amara, "dr-liam")["code"]  # a policy owner who reads what he reads
     with pytest.raises(Denied):
         hub.issue_setup_code(amara, "rana")  # never into the account that manages members
+    assert hub.issue_setup_code(amara, "locum")["code"]  # a policy owner who reads what a physician reads
     hub.approve_roles(amara, "locum")
     assert M(hub, "locum")["roles"] == ["physician"]
+    # taking the roles away first, then a code, then asking for them back: the passphrase her code set ends
+    hub.set_roles(rana, "locum", [])
+    code = hub.issue_setup_code(rana, "locum")["code"]
+    hub.redeem_setup_code("locum", code, WORDS)
+    assert hub.sign_in("locum", WORDS)
+    hub.set_roles(rana, "locum", ["physician"])
+    hub.approve_roles(amara, "locum")
+    assert not hub.has_passphrase("locum")
+    assert hub.db.events.find_one({"action": "credential.passphrase_cleared", "subject": "member:locum"})
+    # an agent's sponsor issues its token only for what they reach themselves (the lab feed writes the chart)
+    with pytest.raises(Denied):
+        hub.issue_token(rana, "lab-feed")

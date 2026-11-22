@@ -248,6 +248,9 @@ class Viewer:
         self._reads: dict[str, bool] = {}
         self._gone: dict[str, set] = {}
         self._by_event: dict[str, set] = {}
+        self._withheld: dict[str, bool] = {}
+        self._withheld_subject: str | None = None
+        self._run_record: dict[str, str | None] = {}
 
     def reads(self, dc: str) -> bool:
         if dc not in self._reads:
@@ -385,10 +388,47 @@ class Viewer:
             if not self.may_read_classes(classes) and any(k in data for k in ("note", "reason", "reference")):
                 hidden = self.missing(classes)
         if hidden is None:
+            if data and self._file_withheld(ev, data):
+                keep = {k: data[k] for k in ("step", "action", "workflow", "version", "how", "status", "signed")
+                        if k in data}
+                return {**ev, "data": {**keep, "hidden": self.hub.restrictions.note(self._withheld_subject).lower()}}
             return ev
         keep = {k: data[k] for k in ("step", "action", "workflow", "version", "title", "type", "signed", "message",
                                      "channel", "how", "status", "with", "over") if k in data}
         return {**ev, "data": {**keep, "hidden": f"content needs access to: {', '.join(hidden)}"}}
+
+
+    def _file_withheld(self, ev: dict, data: dict) -> bool:
+        """Whether the event is about a file a directive withholds from the member: then what it says of it (a
+        break-glass reason, a step's output, a change) is not shown, on the track as anywhere else."""
+        r = self.hub.restrictions
+        if not r.any():
+            return False
+        refs = []
+        if isinstance(data.get("subject"), str):
+            refs.append(data["subject"])
+        subj = ev.get("subject") or ""
+        if "/" in subj and ":" not in subj.split("/", 1)[0]:
+            refs.append(subj)
+        if ev.get("run_id"):
+            rid = ev["run_id"]
+            if rid not in self._run_record:
+                try:
+                    self._run_record[rid] = self.hub.engine.run(rid).get("record")
+                except Exception:  # noqa: BLE001
+                    self._run_record[rid] = None
+            if self._run_record[rid]:
+                refs.append(self._run_record[rid])
+        for ref in refs:
+            if ref not in self._withheld:
+                try:
+                    self._withheld[ref] = bool(r.withholds_from(self.me, ref, reaching=True))
+                except Exception:  # noqa: BLE001
+                    self._withheld[ref] = False
+            if self._withheld[ref]:
+                self._withheld_subject = data.get("subject") if isinstance(data.get("subject"), str) else None
+                return True
+        return False
 
     ACCESS_EVENTS = frozenset({"record.viewed", "records.exported", "records.listed", "access.reported"})
 
