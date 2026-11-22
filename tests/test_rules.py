@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import M, item_for, quiet, run_of, snapshot_onto
+from conftest import M, item_for, quiet, run_of, snapshot_onto, visit_run
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid, NotFound
 from practicehub.models import ModelError, ModelGateway
@@ -137,7 +137,7 @@ def test_agents_never_take_person_gates(worked):
 
 def test_the_scribe_drafts_and_the_physician_signs(worked):
     hub = worked
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     assert hub.engine.run(run["id"])["steps"]["draft"]["by"] == "scribe-agent"
     # the draft is not in the chart
     assert not hub.records.search("Composition")
@@ -160,7 +160,7 @@ def test_the_scribe_drafts_and_the_physician_signs(worked):
 
 def test_agent_gate_decisions_stay_within_criteria_and_separation_of_duties(worked):
     hub = worked
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     amara = M(hub, "dr-amara")
     hub.engine.complete(amara, item_for(hub, run, "edit"), {
         "subjective": "s", "assessment": "a", "plan": "p", "diagnosis_codes": "034"})
@@ -180,7 +180,7 @@ def test_agent_gate_decisions_stay_within_criteria_and_separation_of_duties(work
 # ----------------------------------------------------------------------------------------------- guards
 def test_guards_reject_a_wrong_claim_amount(worked):
     hub = worked
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     amara = M(hub, "dr-amara")
     hub.engine.complete(amara, item_for(hub, run, "edit"), {
         "subjective": "s", "assessment": "a", "plan": "p", "diagnosis_codes": "034"})
@@ -247,8 +247,9 @@ def test_every_action_links_to_its_cause(worked):
     # the scribe's draft chains back to the visit that ended
     done = [e for e in hub.track.list(limit=5000) if e["action"] == "item.completed" and e["actor"] == "scribe-agent"]
     chain = hub.track.chain(done[0]["seq"])
-    assert chain[0]["action"] in ("event.received", "run.started")
-    assert any(e["action"] == "run.started" for e in chain)
+    # (the visit's run waits on its record: the chain reaches the physician ending the visit)
+    assert chain[0]["action"] in ("event.received", "run.started", "record.created", "record.updated")
+    assert any(e["action"] == "item.completed" and e["actor"] == "dr-amara" for e in chain)
     assert roots  # (documented above: these may start a chain)
 
 
@@ -901,7 +902,7 @@ def test_overdue_work_is_escalated_once_per_time_allowed(quality):
 
 def test_a_released_item_must_have_been_claimed(worked):
     hub = worked
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     amara = M(hub, "dr-amara")
     iid = item_for(hub, run, "edit")
     d = hub.engine.context(amara, iid)["draft"]
@@ -2389,10 +2390,6 @@ def test_a_lab_review_never_files_another_patients_result(hub):
         with pytest.raises(Invalid) as err:
             hub.engine.start(nurse, "lab-result-review", record=record, inputs={**lab, "observation": ref})
         assert any(says in p for p in err.value.problems), err.value.problems
-    with pytest.raises(Invalid) as err:
-        hub.engine.start(M(hub, "dr-liam"), "visit-documentation", record=own,
-                         inputs={"appointment": "tuesday 10am", "transcript": "x"})
-    assert any("is not a record" in p for p in err.value.problems)
     assert hub.engine.start(nurse, "lab-result-review", record=own, inputs={**lab, "observation": obs})["id"]
 
 
@@ -2916,7 +2913,7 @@ def test_increment_and_decrement_take_amounts_and_for_each_takes_one_reference(h
 def test_a_gate_signs_the_sentence_for_the_outcome_chosen(worked):
     """Discarding a draft note never signs "I am the author of this note and it is accurate"."""
     hub = worked
-    run = run_of(hub, "visit-documentation")
+    run = visit_run(hub)
     amara = M(hub, "dr-amara")
     d = hub.engine.context(amara, item_for(hub, run, "edit"))["draft"]
     hub.engine.complete(amara, item_for(hub, run, "edit"), {
@@ -3134,8 +3131,8 @@ def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub, mon
     upgrades gets the codes moved off the reason, and the reason it was booked with back."""
     amara = M(hub, "dr-amara")
     pat = _pat(hub)
-    wf = hub.workflow("visit-documentation")[0]
-    finish = next(st for st in wf.steps if st.id == "finish-visit")
+    wf = hub.workflow("appointment-request")[0]  # the visit's own workflow finishes it
+    finish = next(st for st in wf.steps if st.id == "finish")
     assert "diagnosis" in finish.params["set"] and "reasonCode" not in finish.params["set"]
     # a visit finished by version 2, which wrote the codes over the reason it was booked with
     v = hub.create_record(amara, "Encounter", {**_visit(pat, "dr-amara", "2026-03-09T09:00"),
@@ -3161,8 +3158,9 @@ def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub, mon
 
 
 def test_the_visit_a_note_is_for_is_one_of_this_patients_active_visits(hub):
-    """The visit-documentation start form offers only this patient's visits that are still under way (by time and
-    physician, the one in progress chosen); a finished one, or another patient's, is refused at the start."""
+    """A start-form input that takes an active record (``active = true``) offers only this patient's visits that are
+    still under way (by time and physician, the one in progress chosen). (The visit's note is now written on the
+    visit's own run, so no pack workflow asks for one; the input kind stays for packs that do.)"""
     from practicehub.web.server import App
     amara = M(hub, "dr-amara")
     pat, other = _pat(hub), _pat(hub, "Omar", "Haddad")
@@ -3174,16 +3172,11 @@ def test_the_visit_a_note_is_for_is_one_of_this_patients_active_visits(hub):
         hub.update_record(amara, f"Encounter/{here['id']}", {"status": st})
     done = hub.records.create("Encounter", _visit(pat, "dr-amara", at(-3000), status="finished"))
     theirs = hub.create_record(amara, "Encounter", _visit(other, "dr-amara", at(1440 * 4)))
-    wf = hub.workflow("visit-documentation")[0]
-    (f,) = [i for i in wf.inputs if i["name"] == "appointment"]
+    f = {"name": "appointment", "path": "appointment", "label": "Visit", "type": "reference",
+         "target": ["Encounter"], "active": True}
     page = App(hub)._active_ref_input(amara, f, pat, None)
     assert f'value="Encounter/{here["id"]}" selected' in page and f'value="Encounter/{later["id"]}"' in page
     assert done["id"] not in page and theirs["id"] not in page and "Dr. Liam Fraser" in page
-    for bad in (done, theirs):
-        with pytest.raises(Invalid) as err:
-            hub.engine.start(amara, "visit-documentation", record=pat,
-                             inputs={"appointment": f"Encounter/{bad['id']}", "transcript": "x"})
-        assert re.search("no longer active|someone else|another|not about", " ".join(err.value.problems)), err.value.problems
 
 
 def _practice_on_version_1(tmp_path, monkeypatch):
@@ -4633,3 +4626,81 @@ def test_a_field_with_roles_names_only_a_member_holding_one(hub):
     hub.records.update("Patient", pat["id"], {**kept, "generalPractitioner": [{"reference": "Practitioner/noor"}]})
     hub.update_record(jo, ref, {"birthDate": "1990-02-04"})  # what was there is not checked again
     assert hub.records.read("Patient", pat["id"])["birthDate"] == "1990-02-04"
+
+
+# --------------------------------------------------------------------------------------- a record's own workflow
+def test_a_record_type_names_its_workflow_and_a_step_names_the_state_it_puts_the_record_in(hub):
+    """A type's ``workflow`` is started about each new record of it (only where its ``when`` holds); a moved record
+    has a lifecycle. A step's ``state`` is a state of the record's lifecycle, and needs a record to move. A workflow
+    that makes its record (``[new_record]``) says which type; ``one_open_while`` goes with ``one_open_per``.
+    ``required_unless`` lets a required field be empty while a condition over the record holds."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError, parse
+
+    def job(top="", fields="", life=True):
+        return ('id = "Job"\ndata_class = "x"\n' + top + '[[field]]\nname = "status"\ntype = "choice"\n'
+                'choices = ["asked", "done"]\n' + fields
+                + ('[lifecycle]\ninitial = "asked"\nabandoned = { asked = "done" }\n'
+                   '[[lifecycle.transition]]\nfrom = ["asked"]\nto = "done"\nby = "workflow"\n' if life else ""))
+    for bad, says in ((job('workflow = "job-flow"\n', life=False), "has a lifecycle"),
+                      (job('workflow = { id = "job-flow", when = "record.status ==" }\n'), "workflow.when"),
+                      (job('workflow = 3\n'), "the id of a workflow"),
+                      (job(fields='[[field]]\nname = "due"\nrequired_unless = "record.status == \'asked\'"\n'),
+                       "for a required field")):
+        with pytest.raises(DefinitionError, match=says):
+            schema.parse(bad)
+    rt = schema.parse(job('workflow = { id = "job-flow", when = "record.status == \'asked\'" }\n',
+                          '[[field]]\nname = "due"\nrequired = true\nrequired_unless = "record.status == \'asked\'"\n'))
+    assert schema.starts_workflow(rt, {"status": "asked"}) == "job-flow"
+    assert schema.starts_workflow(rt, {"status": "done"}) is None  # filed closed: nothing to walk
+    assert not any("due" in p for p in schema.validate(rt, {"status": "asked"}))
+    assert any("due" in p.lower() for p in schema.validate(rt, {"status": "done"}))
+    wf = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["front-desk"]\n'
+          '[[steps]]\nid = "a"\ntitle = "A"\nkind = "automation"\nstate = "done"\n')
+    for bad, says in ((wf, "the workflow is about none"),
+                      (wf + '[new_record]\nstatus = "asked"\n', "say which type"),
+                      (wf.replace('starters = ["front-desk"]\n', 'starters = ["front-desk"]\n'
+                                  'one_open_while = "record.status == \'asked\'"\n'), "with one_open_per")):
+        with pytest.raises(DefinitionError) as exc:
+            parse(bad)
+        assert any(says in p for p in exc.value.problems), (says, exc.value.problems)
+    # against the practice: a step's state is one of its record's states
+    visit = wf.replace('[trigger]', 'record = "Encounter"\n[trigger]').replace('state = "done"', 'state = "shelved"')
+    with pytest.raises(DefinitionError) as exc:
+        hub.check_workflow(visit)
+    assert any("'shelved' is not a state of a Encounter" in p for p in exc.value.problems), exc.value.problems
+    assert hub.check_workflow(visit.replace('"shelved"', '"cancelled"'))
+    # the practice's visit names its workflow, and the walk is the visit's own lifecycle
+    enc = hub.record_type("Encounter")
+    assert enc.workflow["id"] == "appointment-request" and "requested" in enc.states()
+    states = {s.state for s in hub.workflow("appointment-request")[0].steps if s.state}
+    assert states <= set(enc.states()) and {"cancelled", "finished"} <= states
+
+
+def test_a_step_lists_the_moves_it_waits_on_and_a_trigger_refuses_only_the_same_submission_twice(hub):
+    """``moves`` on a person's step or a wait (of a workflow about a record) lists the states a person may move the
+    record to while it is open. ``one_open_within`` (a duration) and ``one_open_same`` (the workflow's inputs) go with
+    one_open_per and narrow it to the same submission twice."""
+    from practicehub.workflows import DefinitionError, parse
+    head = ('id = "w"\ntitle = "W"\nrecord = "Encounter"\n[trigger]\nstarters = ["front-desk"]\n{trig}'
+            '[[input]]\nname = "reason"\ntype = "text"\n'
+            '[[steps]]\nid = "a"\ntitle = "A"\nkind = "{kind}"\nrole = "front-desk"\n{step}'
+            '[[steps.fields]]\nname = "done"\ntype = "boolean"\n'
+            '[[steps.fields]]\nname = "done"\ntype = "boolean"\n')
+    ok = parse(head.format(trig="", kind="task", step='moves = ["onleave"]\n'))
+    assert ok.steps[0].moves == ["onleave"]
+    for trig, kind, step, says in (
+            ("", "task", 'moves = "onleave"\n', "moves lists the lifecycle states"),
+            ("", "automation", 'action = "message.send"\nmoves = ["onleave"]\n', "moves is for a person's step"),
+            ('one_open_within = "10m"\n', "task", "", "one_open_within"),
+            ('one_open_per = "subject"\none_open_within = "soon"\n', "task", "", "one_open_within"),
+            ('one_open_per = "subject"\none_open_same = ["input.nope"]\n', "task", "", "one_open_same")):
+        with pytest.raises(DefinitionError) as exc:
+            parse(head.format(trig=trig, kind=kind, step=step))
+        assert any(says in x for x in exc.value.problems), (says, exc.value.problems)
+    wf = parse(head.format(trig='one_open_per = "subject"\none_open_within = "10m"\none_open_same = ["input.reason"]\n',
+                           kind="task", step=""))
+    assert wf.one_open_within == "10m" and wf.one_open_same == ["input.reason"]
+    # the practice's request refuses only the same reason a moment ago: any other is a new, screened request
+    req = hub.workflow("appointment-request")[0]
+    assert req.one_open_same == ["input.reason"] and req.one_open_within

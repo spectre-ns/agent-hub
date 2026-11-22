@@ -145,6 +145,7 @@ class RecordType:
     standard: str | None = None  # "fhir-r4": its records are FHIR R4 resources (exported as FHIR); None: its own shape
     consent: dict | None = None  # {"kind", "date", "source", "withdrawn": paths, "lasts": {kind: "2y" or ""}}
     booking: dict = field(default_factory=dict)  # a Booking type's [booking]: see _check_booking
+    workflow: dict | None = None  # {"id", "when"}: the workflow a new record of it starts, about it (_check_workflow)
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -198,10 +199,10 @@ KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
          "part_of",
-         "navigator", "layout", "standard", "consent", "booking"},
+         "navigator", "layout", "standard", "consent", "booking", "workflow"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
-              "roles"},
+              "roles", "required_unless"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use", "labels"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
@@ -303,6 +304,19 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
     elif by == "workflow" and raw.get("required") is True:
         problems.append(f"{where}: a field only a workflow sets cannot be required: a person creating the record "
                         f"could never give it, so every new record would fail")
+    unless = raw.get("required_unless")
+    if unless is not None:
+        if raw.get("required") is not True:
+            problems.append(f"{where}: required_unless is for a required field: when the condition holds it may be "
+                            f"left empty")
+        elif not isinstance(unless, str) or not unless.strip():
+            problems.append(f"{where}: required_unless is a condition over record, e.g. "
+                            f"\"record.status == 'requested'\"")
+        else:
+            try:
+                expr.check(unless)
+            except expr.ExprError as exc:
+                problems.append(f"{where}: required_unless: {exc}")
     path = raw.get("path") or name
     if not isinstance(path, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.([A-Za-z0-9_]+|\*))*", path):
         problems.append(f"{where}: path {path!r} is dotted keys and list positions, e.g. name.0.family")
@@ -317,7 +331,7 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
          "live": raw.get("live", False), "data_class": raw.get("data_class") or None,
-         "roles": list(raw.get("roles") or [])}
+         "roles": list(raw.get("roles") or []), "required_unless": unless or None}
     if typ == "reference" and not f["rel"]:
         f["rel"] = name
     return f, []
@@ -626,6 +640,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         problems += _check_consent(rt, doc["consent"])
     if doc.get("booking") is not None:
         problems += _check_booking(rt, doc["booking"])
+    if doc.get("workflow") is not None:
+        problems += _check_workflow(rt, doc["workflow"])
     std = doc.get("standard")
     if std is not None:
         problems += _check_standard(rt, std)
@@ -639,6 +655,42 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
     if problems:
         raise DefinitionError(problems)
     return rt
+
+
+def _check_workflow(rt: RecordType, w) -> list[str]:
+    """``workflow``: the workflow that moves a record of this type from open to closed. Creating a record starts it,
+    about that record, however it is created (a form, the calendar, the API, another workflow's step); the record's
+    lifecycle state is where that work is. Sets ``rt.workflow`` when sound.
+
+        workflow = "order-handling"
+        workflow = { id = "order-handling", when = "record.status in ['requested', 'booked']" }   # only these start it
+    """
+    if isinstance(w, str):
+        w = {"id": w}
+    if not isinstance(w, dict) or set(w) - {"id", "when"} or not isinstance(w.get("id"), str) \
+            or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", w.get("id") or ""):
+        return ["workflow: the id of a workflow, e.g. \"order-handling\", or { id = ..., when = \"<condition over "
+                "record>\" }"]
+    when = w.get("when")
+    if when is not None:
+        if not isinstance(when, str) or not when.strip():
+            return ["workflow.when: a condition over record, e.g. \"record.status == 'requested'\""]
+        try:
+            expr.check(when)
+        except expr.ExprError as exc:
+            return [f"workflow.when: {exc}"]
+    if not rt.lifecycle:
+        return ["workflow: a record moved by a workflow has a lifecycle: its state is where the work is"]
+    rt.workflow = {"id": w["id"], "when": when}
+    return []
+
+
+def starts_workflow(rt: RecordType, rec: dict) -> str | None:
+    """The workflow a new record of ``rt`` starts (its type's ``workflow``, when its ``when`` holds of it)."""
+    w = rt.workflow
+    if not w or (w.get("when") and not expr.holds(w["when"], {"record": rec})):
+        return None
+    return w["id"]
 
 
 def _check_booking(rt: RecordType, b) -> list[str]:
@@ -1040,6 +1092,11 @@ def compose(rt: RecordType, values: dict, member_ref: str, rec: dict | None = No
     return rec
 
 
+def place(rec: dict, f: dict, value) -> dict:
+    """A copy of ``rec`` with ``value`` written where field ``f`` keeps it (with its siblings; a list field adds it)."""
+    return _place(rec, f, value)
+
+
 def _place(rec: dict, f: dict, value) -> dict:
     parts = f["path"].split(".")
     if "*" in parts:
@@ -1259,6 +1316,15 @@ def _check_value(f: dict, v, members=None, is_a=None) -> str | None:
     return None
 
 
+def is_required(f: dict, rec: dict | None) -> bool:
+    """Whether a field must be filled in on ``rec``: a required field is, except while its ``required_unless`` holds
+    of the record (a booking asked for but not yet given a time has none)."""
+    if not f.get("required"):
+        return False
+    unless = f.get("required_unless")
+    return not (unless and rec is not None and expr.holds(unless, {"record": rec}))
+
+
 def validate(rt: RecordType, rec: dict, *, partial_ok: bool = False, members=None, is_a=None) -> list[str]:
     """Every problem with ``rec`` as a record of type ``rt``. ``is_a(type, target)``: whether a type stands for a
     reference's target (a ``Subject`` target takes a Patient when Patient extends Subject)."""
@@ -1272,7 +1338,7 @@ def validate(rt: RecordType, rec: dict, *, partial_ok: bool = False, members=Non
         vals = get(rec, f["path"])
         vals = [v for v in vals if v not in (None, "", [], {})]
         if not vals:
-            if f["required"] and not partial_ok:
+            if is_required(f, rec) and not partial_ok:
                 problems.append(f"{rt.label}: {f['label']} is required")
             continue
         for v in vals:

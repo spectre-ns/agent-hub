@@ -16,7 +16,7 @@ import re
 from datetime import date, datetime, timedelta
 
 # how a visit's status reads in its one-line label (planned is FHIR's word for booked)
-STATUS_WORDS = {"planned": "booked", "in-progress": "in progress", "onleave": "on leave", "noshow": "no-show",
+STATUS_WORDS = {"planned": "booked", "arrived": "checked in", "in-progress": "in progress", "onleave": "on leave", "noshow": "no-show",
                 "entered-in-error": "entered in error"}
 SETTING_WORDS = {"AMB": "in clinic", "VR": "virtual", "HH": "home visit"}   # the visit's class (v3-ActCode)
 FEES = {"minor-assessment": 35, "complete-assessment": 65, "counselling": 55, "renewal-no-visit": 15}
@@ -146,7 +146,7 @@ def summarize(rec: dict) -> str:
     if t == "Encounter":
         booked = str(rec.get("plannedStartDate") or "")
         when = _date_words((rec.get("period") or {}).get("start") or booked, time=False)
-        if rec.get("status") in ("planned", "arrived", "triaged", "in-progress", "onleave") and booked:
+        if rec.get("status") in ("requested", "planned", "arrived", "triaged", "in-progress", "onleave") and booked:
             when = _date_words(booked)  # a booking is known by its time: Mon Nov 23, 09:00
         reason = _text(rec.get("reasonCode"))  # clinical: a title (read by every reader) is made without it
         if not reason:  # what it is booked for (not clinical), when the reason is not there to read
@@ -466,7 +466,8 @@ SOAP = {"patient": "subjective", "exam": "objective", "assessment": "assessment"
 
 def standin_visit_note_draft(ctx):
     """Sorts a labelled transcript ("Patient: ...", "Exam: ...", "Plan: ...") into a SOAP note."""
-    transcript = str(ctx["context"].get("input.transcript") or "")
+    # the visit's transcript: given when the visit ended (end.transcript), or with a visit filed after the fact
+    transcript = str(next((v for k, v in ctx["context"].items() if k.endswith(".transcript") and v), ""))
     out = {"subjective": [], "objective": [], "assessment": [], "plan": [], "follow_up": []}
     for line in transcript.splitlines():
         label, _, text = line.partition(":")
@@ -756,12 +757,15 @@ def demo(hub):
         "Priya", "Nair", "1984-11-20", "female", card="5555 123 456", phone="902-555-0123",
         street="45 Spring Garden Road", postal="B3J 1E7", contact=("Arjun Nair", "Spouse", "902-555-0124"),
         gp="dr-amara"))
-    # she was booked, arrived and was seen; the note's workflow finishes her visit
+    # she was booked, checked in and seen, on the visit's own page; its workflow waited on each, and now the physician
+    # ends the visit with the transcript, for the note to be drafted, edited and signed before the visit is completed
     visit = _book(hub, jo, priya, "dr-amara", now - timedelta(minutes=15), "Sore throat")
     for st in ("arrived", "in-progress"):
         hub.update_record(amara, f"Encounter/{visit['id']}", {"status": st})
-    hub.engine.emit(amara, "visit.ended", record=f"Patient/{priya['id']}", data={
-        "appointment": f"Encounter/{visit['id']}", "visit_type": "minor", "minutes": 15,
+    run = hub.db.runs.find_one({"record": f"Encounter/{visit['id']}", "status": "running"})
+    end = hub.db.items.find_one({"run_id": run["id"], "step_id": "end", "status": {"$in": ["open", "claimed"]}})
+    hub.engine.complete(amara, end["id"], {
+        "visit_type": "minor", "minutes": 15,
         "start": (now - timedelta(minutes=15)).isoformat(timespec="minutes"),
         "end": now.isoformat(timespec="minutes"),
         "transcript": "\n".join([
