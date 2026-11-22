@@ -32,6 +32,10 @@ from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+APPROVAL_WORKFLOW = "approval-notice"  # the home of a notice that a change waits for a policy owner's approval
+APPROVAL_SOURCE = (f'id = "{APPROVAL_WORKFLOW}"\ntitle = "Waiting for a policy owner"\n'
+                   'summary = "A change someone asked for waits for a second policy owner to approve it."\n'
+                   '[[steps]]\nid = "look"\ntitle = "Approve or decline it"\nkind = "wait"\nuntil = "false"\n')
 
 
 class HubError(Exception):
@@ -767,9 +771,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid(str(exc)) from None
         with self.db:
             data = {"module": m.id, "version": m.version, "digest": m.digest, "pack_py_sha256": m.module_sha256}
-            self.track.append(actor, "module.code_approved", f"module:{m.id}", data=data,
-                              signed={**data, "meaning": f"I have reviewed the {m.practice.get('name', m.id)} module, "
-                                                         f"version {m.version}: its code and its definitions"})
+            seq = self.track.append(actor, "module.code_approved", f"module:{m.id}", data=data,
+                                    signed={**data, "meaning": f"I have reviewed the {m.practice.get('name', m.id)} "
+                                                               f"module, version {m.version}: its code and its "
+                                                               f"definitions"})
+            if m.digest != self._module_digest(m.id):
+                name = m.practice.get("name", m.id)
+                self._tell_approvers(actor, seq, set(self.module_code_reviewers(m.id, m.digest)),
+                                     f"The {name} module waits for a second policy owner",
+                                     f"{actor.get('name') or actor['id']} reviewed the {name} module, version "
+                                     f"{m.version}. A policy owner who did not review it puts it into force (or "
+                                     f"leaves it) on its page under Modules.", f"/modules/{m.id}")
         return {"module": m.id, "version": m.version, "digest": m.digest}
 
     def module_code_reviewers(self, mid: str, digest: str) -> list[str]:
@@ -1489,6 +1501,67 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self.propose_agent_profile(actor, out["id"], asked, "what it was added to do")
         return self.member(out["id"])
 
+    def _role_name(self, rid: str) -> str:
+        return self.role(rid)["name"] if self._role_known(rid) else rid
+
+    def _tell_approvers(self, actor: dict, cause: int, exclude: set, title: str, summary: str, href: str) -> list[str]:
+        """A notice, on their work, to each active policy owner who may approve what is waiting: never the one who
+        asked (``actor``) nor anyone in ``exclude`` (the member it is for, others who asked, reviewers)."""
+        from .engine import _item_doc, _new_id
+        who = [m for m in self.members("person") if m["status"] == "active" and m["id"] != actor.get("id")
+               and m["id"] not in exclude and self.is_policy_owner(m)]
+        if not who:
+            return []
+        run_id = _new_id("run")
+        self.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": APPROVAL_WORKFLOW, "version": 0,
+                             "title": title, "record": None, "status": "completed", "ctx": {"waiting": cause},
+                             "steps": {"look": {"state": "skipped"}}, "started_by": actor["id"], "root_event": cause,
+                             "created_at": utcnow(), "updated_at": utcnow()})
+        items = []
+        for m in who:
+            item_id = _new_id("item")
+            self.db.items.insert(_item_doc(
+                self, id=item_id, run_id=run_id, step_id="look", kind="notice", role=None, assignee=m["id"],
+                persons_only=1, status="open", cause=cause, title=title,
+                output={"summary": summary, "where": href}))
+            items.append(item_id)
+        self.track.append(actor, "approval.owners_told", "practice:main", cause=cause,
+                          data={"told": [m["id"] for m in who], "items": items})
+        return items
+
+    def waiting_approvals(self, actor: dict) -> list[dict]:
+        """What waits for a second policy owner that ``actor`` may approve: role changes, agents' profiles and
+        reviewed modules not yet in force. ``[{"what", "by", "at", "href"}]``, oldest first. Empty for anyone who is
+        not a policy owner."""
+        if actor.get("kind") != "person" or actor.get("status") != "active" or not self.is_policy_owner(actor):
+            return []
+        out = []
+        for row in self.db.settings.find({"_id": {"$regex": "^role_request:"}}):
+            req, mid = row["value"] or {}, row["_id"].removeprefix("role_request:")
+            target = self.db.members.get(mid)
+            if (not target or target["status"] != "active"
+                    or actor["id"] in {req.get("by"), mid, *req.get("asked_by", [])}):
+                continue
+            roles = ", ".join(self._role_name(r) for r in req.get("roles") or []) or "no roles"
+            out.append({"what": f"{target['name']} to hold {roles}", "by": req.get("by"), "at": req.get("at") or "",
+                        "href": f"/team/{mid}"})
+        for row in self.db.agent_profile_versions.find({"status": "proposed"}):
+            target = self.db.members.get(row["agent_id"])
+            if not target or row["author"] == actor["id"]:
+                continue
+            out.append({"what": f"Version {row['version']} of what {target['name']} may do", "by": row["author"],
+                        "at": row["created_at"], "href": f"/team/{row['agent_id']}"})
+        latest: dict = {}
+        for ev in self.track.trusted({"action": "module.code_approved"}, sort=[("seq", ASC)]):
+            latest[ev["data"]["module"]] = ev
+        for mid, ev in latest.items():
+            digest = ev["data"].get("digest")
+            if digest == self._module_digest(mid) or actor["id"] in self.module_code_reviewers(mid, digest):
+                continue
+            out.append({"what": f"The {mid.replace('-', ' ')} module, version {ev['data'].get('version')}, to put into force",
+                        "by": ev["actor"], "at": ev["at"], "href": f"/modules/{mid}"})
+        return sorted(out, key=lambda x: x["at"])
+
     def privileged_roles(self) -> set[str]:
         """Roles whose holders approve changes or manage members."""
         return {t[2].removeprefix("role:").removesuffix("#assignee")
@@ -1694,10 +1767,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 return target
         with self.db:
             if raised:
-                self._request_for(actor, mid, roles=sorted(wanted))
-                self.track.append(actor, "member.roles_requested", member_ref(mid),
-                                  data={"roles": sorted(wanted), "needs_approval": sorted(raised),
-                                        **({} if admin else {"by_policy_owners": True})})
+                req = self._request_for(actor, mid, roles=sorted(wanted))
+                seq = self.track.append(actor, "member.roles_requested", member_ref(mid),
+                                        data={"roles": sorted(wanted), "needs_approval": sorted(raised),
+                                              **({} if admin else {"by_policy_owners": True})})
+                self._tell_approvers(actor, seq, {mid, *req.get("asked_by", [])},
+                                     f"Roles for {target['name']} wait for your approval",
+                                     f"{actor.get('name') or actor['id']} asked that {target['name']} hold "
+                                     f"{', '.join(self._role_name(r) for r in sorted(wanted)) or 'no roles'}. A "
+                                     f"second policy owner approves it, or declines it, on {target['name']}'s page "
+                                     f"in the team.", f"/team/{mid}")
                 if not admin:
                     return self.member(mid)
                 wanted -= raised  # the rest applies now
@@ -2177,7 +2256,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def propose_agent_profile(self, actor: dict, mid: str, changes: dict, note: str = "") -> dict:
         """Propose a new version of an agent's profile (a member admin, or its sponsor). It is in force only once a
-        policy owner other than whoever proposed it approves it. A newer proposal replaces one still waiting."""
+        policy owner other than whoever proposed it approves it. A newer proposal replaces one still waiting.
+        A pure reduction (a lower ``max_risk`` and/or skills taken away, the model and everything else as it is)
+        only ever lets the agent do less: it is in force at once, as a version on the track (``status`` active)."""
         target = self.member(mid)
         if target["kind"] != "agent":
             raise Invalid("only agents have a profile")
@@ -2188,10 +2269,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             raise Invalid(f"an agent's profile holds {', '.join(self.PROFILE_KEYS)}, not {', '.join(extra)}")
         now = {"max_risk": "low", "skills": [], **target["profile"]}
         profile = self._check_profile({**now, **{k: v for k, v in changes.items() if v is not None}})
-        if profile == self._check_profile(now):
+        current = self._check_profile(now)
+        if profile == current:
             raise Invalid("that is the profile in force: there is nothing to propose")
+        reduction = (profile.get("model") == current.get("model")
+                     and RISK_ORDER[profile["max_risk"]] <= RISK_ORDER[current["max_risk"]]
+                     and set(profile["skills"]) <= set(current["skills"]))
         with self.db:
             base = self._profile_in_force(actor, target)
+            if reduction:
+                return self._reduce_profile(actor, target, base, profile, note)
             for old in self.db.agent_profile_versions.find({"agent_id": mid, "status": "proposed"}):
                 self.db.agent_profile_versions.set(old["_id"], {"status": "withdrawn"})
                 self.track.append(actor, "agent.profile_withdrawn", member_ref(mid),
@@ -2202,9 +2289,40 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 "_id": f"{mid}@{version}", "agent_id": mid, "version": version, "status": "proposed",
                 "profile": profile, "source": source, "author": actor["id"], "note": note, "created_at": utcnow(),
                 "approved_by": None, "approved_at": None, "based_on": base["version"]})
-            self.track.append(actor, "agent.profile_proposed", member_ref(mid),
-                              data={"version": version, "note": note, "before": base["profile"], "after": profile})
+            seq = self.track.append(actor, "agent.profile_proposed", member_ref(mid),
+                                    data={"version": version, "note": note, "before": base["profile"],
+                                          "after": profile})
+            self._tell_approvers(actor, seq, {mid}, f"A change to what {target['name']} may do waits for your approval",
+                                 f"{actor.get('name') or actor['id']} proposed version {version} of "
+                                 f"{target['name']}'s profile (its model, highest risk and skills). A policy owner "
+                                 f"other than whoever proposed it approves it on {target['name']}'s page in the "
+                                 f"team.", f"/team/{mid}")
         return {"agent_id": mid, "version": version, "profile": profile, "status": "proposed"}
+
+    def _reduce_profile(self, actor: dict, target: dict, base: dict, profile: dict, note: str) -> dict:
+        """Put a pure reduction of an agent's profile in force at once: a new active version, the last retired, and
+        any proposal still waiting withdrawn (it was based on the version this replaces)."""
+        mid = target["id"]
+        for old in self.db.agent_profile_versions.find({"agent_id": mid, "status": "proposed"}):
+            self.db.agent_profile_versions.set(old["_id"], {"status": "withdrawn"})
+            self.track.append(actor, "agent.profile_withdrawn", member_ref(mid),
+                              data={"version": old["version"], "reason": "the profile was reduced since"})
+        self.db.agent_profile_versions.update({"agent_id": mid, "status": "active"}, {"$set": {"status": "retired"}},
+                                              many=True)
+        version = (self.db.agent_profile_versions.max("version", {"agent_id": mid}) or 0) + 1
+        source = self._profile_source(profile)
+        self.db.agent_profile_versions.insert({
+            "_id": f"{mid}@{version}", "agent_id": mid, "version": version, "status": "active",
+            "profile": profile, "source": source, "author": actor["id"], "note": note, "created_at": utcnow(),
+            "approved_by": None, "approved_at": None, "based_on": base["version"], "reduction": True})
+        self.db.members.set(mid, {"profile": profile})
+        self.track.append(actor, "agent.profile_reduced", member_ref(mid),
+                          data={"version": version, "note": note, "before": base["profile"], "after": profile,
+                                "source_sha256": hashlib.sha256(source.encode()).hexdigest()})
+        self.track.append(actor, "member.profile_changed", member_ref(mid),
+                          data={"before": target["profile"], "after": profile, "version": version,
+                                "reduction": True})
+        return {"agent_id": mid, "version": version, "profile": profile, "status": "active"}
 
     def approve_agent_profile(self, actor: dict, mid: str, version: int, meaning: str = "") -> dict:
         """A policy owner who did not propose it puts a proposed profile in force, signing its text."""
@@ -3394,6 +3512,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return wfmod.parse(ACCOUNT_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
                                                         "source": ACCOUNT_SOURCE, "author": "hub", "note": "",
                                                         "module": "", "approved_by": None, "approved_at": None}
+        if wid == APPROVAL_WORKFLOW and version == 0:  # the home of a notice that a change waits for approval
+            return wfmod.parse(APPROVAL_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
+                                                         "source": APPROVAL_SOURCE, "author": "hub", "note": "",
+                                                         "module": "", "approved_by": None, "approved_at": None}
         from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
         if wid == MENTION_WORKFLOW and version == 0:  # the home of a notice that someone mentioned a member
             return wfmod.parse(MENTION_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",

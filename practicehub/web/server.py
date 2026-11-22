@@ -29,6 +29,26 @@ from ..backends import engines
 from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, HubError, Invalid, NotFound, member_ref
 from ..store import Transient
+
+CLIENT_HEADER = "x-practicehub-client"  # the address a request came from, as the listener saw it (it overwrites any)
+
+
+def client_address(peer: str, headers: dict) -> str:
+    """Where a request came from, for counting failed sign-ins per address: the peer, or, when the peer is this
+    machine or a private network (a reverse proxy in front of the hub), the address that proxy added last to
+    X-Forwarded-For. A client cannot choose it otherwise."""
+    import ipaddress
+    try:
+        near = ipaddress.ip_address(peer)
+    except ValueError:
+        return str(peer)[:64]
+    fwd = [x.strip() for x in str(headers.get("x-forwarded-for", "")).split(",") if x.strip()]
+    if fwd and (near.is_loopback or near.is_private):
+        try:
+            return str(ipaddress.ip_address(fwd[-1]))
+        except ValueError:
+            pass
+    return str(near)
 from ..visibility import Viewer, workflow_classes as visibility_classes
 from .analytics_pages import AnalyticsPages
 from .assets import CSS, ICONS, JS
@@ -51,7 +71,7 @@ SHOWN = 200  # rows a list shows; past this, the store is searched, never a list
 
 
 class Redirect(Exception):
-    def __init__(self, to: str, cookie: str | None = None):
+    def __init__(self, to: str, cookie: str | list[str] | None = None):
         self.to, self.cookie = to, cookie
 
 
@@ -616,9 +636,15 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                  if owner else [])
         if me and (owner or self.hub.can(me, "reader", "data_class:correspondence")):
             audit.append(("/outbox", "Outbox", "messages waiting to go and those sent", "outbox"))
-        return [g for g in (("Set up", setup), ("Audit", audit)) if g[1]]
+        # who does not own policy changes none of the rest at once (a policy owner installs and approves): they are
+        # listed apart, marked view only, so each page does not have to say so; the team stays readable to all
+        view = [] if owner else [x for x in setup if x[0] != "/team"]
+        setup = setup if owner else [x for x in setup if x[0] == "/team"]
+        return [g for g in (("Set up", setup), ("View only", view), ("Audit", audit)) if g[1]]
 
     SETTINGS_GROUPS = {"Set up": "How the practice works: its people, what it keeps and how work moves.",
+                       "View only": "How the practice is set up. A policy owner installs and approves changes to "
+                                    "these; you may read them, and propose a change where a page offers one.",
                        "Audit": "What the practice did, and who may see what."}
     # pages that open in the admin shell (the settings), not in the work layout
     ADMIN_PREFIXES = ("/settings", "/team", "/modules", "/workflows", "/define", "/blocks", "/track", "/access",
@@ -666,7 +692,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5">'
                 f'<path d="M6 9l6 6 6-6"/></svg></button><div role="menu" id="practice-menu" aria-label="Practice" '
                 f'hidden><div class="menu-head"><b>{e(p.get("name", "Practice Hub"))}</b>'
-                f'<span>{e(p.get("kind", "").replace("-", " "))}</span></div>' + item("/settings", "Settings")
+                f'<span>{e(p.get("kind", "").replace("-", " "))}</span></div>' + item("/settings", "Practice settings")
                 + item("/", "Home") + '</div></div>')
 
     def page_admin(self, req):
@@ -772,7 +798,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>'
                 f'</button><div role="menu" id="me-menu" aria-label="Your profile and settings" hidden>'
                 f'<div class="menu-head"><b>{e(me["name"])}</b><span>{e(roles)}</span></div>'
-                + item(f"/team/{me['id']}", "Your profile") + item("/me/settings", "Settings")
+                + item(f"/team/{me['id']}", "Your profile") + item("/me/settings", "My settings")
                 + '<div role="separator"></div>' + item("/logout", "Sign out") + '</div></div>')
 
     def _nav_path(self, req, me) -> str:
@@ -995,8 +1021,17 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'autocapitalize="none" spellcheck="false"></label>'
                 f'<label>Your passphrase<input name="passphrase" type="password" autocomplete="current-password" '
                 f'required></label><button>Sign in</button></form>'
-                f'<p class="muted">No passphrase yet, or forgotten it? A member admin gives you a one-time setup code: '
-                f'<a href="/setup">set your passphrase</a>. Agents, services and API clients use access tokens.</p>')
+                f'<p class="muted">No passphrase yet, or forgotten it? {self._admins_who_help()} gives you a '
+                f'one-time setup code: <a href="/setup">set your passphrase</a>. Agents, services and API clients use '
+                f'access tokens.</p>')
+
+    def _admins_who_help(self) -> str:
+        """Who gives a setup code, by display name ('A member admin (Rana Haddad or Jo Tremblay)'), escaped."""
+        names = [m["name"] for m in self.hub.member_admins()]
+        if not names:
+            return "A member admin"
+        joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+        return f"A member admin ({e(joined)})"
 
     # ------------------------------------------------------------------------------------------ your work
     def _item_rows(self, items, show_reason=False):
@@ -1016,6 +1051,18 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         return ('<table class="list"><tr><th>Key</th><th>Work</th><th>About</th><th>Role</th><th>Assignee</th>'
                 f'<th>Status</th><th>Created</th></tr>{"".join(rows)}</table>')
 
+    def _approvals_section(self, me) -> str:
+        """Changes that wait for a second policy owner and that this member may approve: a role change, what an
+        agent may do, a reviewed module. Empty for anyone who approves none."""
+        waiting = self.hub.waiting_approvals(me)
+        if not waiting:
+            return ""
+        rows = "".join(f'<tr><td><a href="{e(w["href"])}">{e(w["what"])}</a></td><td>{e(self.member_name(w["by"]))}</td>'
+                       f'<td class="muted" style="white-space:nowrap">{self._at(w["at"])}</td></tr>' for w in waiting)
+        return (f'<section class="waiting-approvals"><h2>Waiting for a second policy owner ({len(waiting)})</h2>'
+                f'<p class="muted">Someone asked for these; you may approve or decline each one on its page.</p>'
+                f'<table class="list"><tr><th>Change</th><th>Asked by</th><th>Asked</th></tr>{rows}</table></section>')
+
     def page_inbox(self, req):
         me = req["me"]
         items = self.hub.engine.inbox(me, include_ineligible=True)
@@ -1030,6 +1077,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             parts.append(f'<h2>Waiting for your approval ({len(holds)})</h2>'
                          f'<p class="muted">High-risk work by agents you sponsor. Nothing happens until you decide.</p>'
                          + self._item_rows(holds))
+        parts.append(self._approvals_section(me))
         parts.append(f'<h2>In progress with you ({len(doing)})</h2>{self._item_rows(doing)}')
         parts.append(f'<h2>Ready for you ({len(ready)})</h2>{self._item_rows(ready)}')
         parts.append(f'<h2>Notices ({len(notices)})</h2>{self._item_rows(notices)}')
@@ -1937,7 +1985,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         f = self.form(req)
         mid = str(f.get("member", "")).strip()[:64]
         try:
-            m = self.hub.sign_in(mid, str(f.get("passphrase", "")))
+            m = self.hub.sign_in(mid, str(f.get("passphrase", "")), client=req["headers"].get(CLIENT_HEADER))
         except (Denied, Invalid) as exc:
             raise Rendered(403, self.layout(req, "Sign in", self._login_form(mid, str(exc)))) from None
         raise Redirect("/", self.SESSION_COOKIE.format(self.hub.start_session(m)))
@@ -1946,7 +1994,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         jar = cookies.SimpleCookie(req["headers"].get("cookie", ""))
         if "ph_session" in jar:
             self.hub.end_session(jar["ph_session"].value)
-        raise Redirect("/login", "ph_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
+        # the demo's sign-in-as cookie too: else the next visit is signed in again as the same member
+        raise Redirect("/login", ["ph_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+                                  "ph_as=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"])
 
     # ------------------------------------------------------------------------------------------ passphrases
     def _passphrase_fields(self, current: bool) -> str:
@@ -1961,7 +2011,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
     def _setup_form(self, member: str = "", error: str = "") -> str:
         err = f'<div class="error" role="alert">{e(error)}</div>' if error else ""
         return (f'{err}<form method="post" action="/setup" class="card"><p>Set your passphrase with the one-time setup '
-                f'code a member admin gave you.</p>'
+                f'code you were given. {self._admins_who_help()} gives you one.</p>'
                 f'<label>Your member id<input name="member" value="{e(member)}" autocomplete="username" required '
                 f'autocapitalize="none" spellcheck="false"></label>'
                 f'<label>Setup code<input name="code" autocomplete="one-time-code" required autocapitalize="characters" '
@@ -1978,7 +2028,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         try:
             if f.get("new", "") != f.get("again", ""):
                 raise Invalid("the two passphrases are not the same")
-            m = self.hub.redeem_setup_code(mid, str(f.get("code", "")), str(f.get("new", "")))
+            m = self.hub.redeem_setup_code(mid, str(f.get("code", "")), str(f.get("new", "")),
+                                           client=req["headers"].get(CLIENT_HEADER))
         except (Denied, Invalid) as exc:
             code = 403 if isinstance(exc, Denied) else 422
             raise Rendered(code, self.layout(req, "Set your passphrase", self._setup_form(mid, str(exc)))) from None
@@ -2008,7 +2059,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'<a href="/team/{e(me["id"])}">Your profile</a> shows your roles and what you may do.</p>'
                 f'<form method="post" action="/me/settings" class="card settings">{groups}'
                 f'<button>Save settings</button></form>{sign_in}')
-        return self.layout(req, "Settings", body, crumbs=[("/team/" + me["id"], me["name"]), (None, "Settings")])
+        return self.layout(req, "My settings", body, crumbs=[("/team/" + me["id"], me["name"]), (None, "My settings")])
 
     def post_settings(self, req):
         f = self.form(req)
@@ -2869,8 +2920,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                      f'<pre>{e(new_token)}</pre></div>')
         if setup:  # shown in this response only, like a new token; only its hash is stored
             token += (f'<div class="card"><p>A one-time setup code for {e(m["name"])}, shown once. Give it to them in '
-                      f'person or by phone, not by email. It works once, until {self._at(setup["expires_at"])} '
-                      f'UTC, at <a href="/setup?member={e(urllib.parse.quote(mid))}">/setup</a>:</p>'
+                      f'person or by phone, not by email. It works once, until {self._at(setup["expires_at"])}, '
+                      f'at <a href="/setup?member={e(urllib.parse.quote(mid))}">/setup</a>:</p>'
                       f'<pre>{e(setup["code"])}</pre><p class="muted">It is for {e(m["name"])} alone: once it is '
                       f'used, their other sessions end and their old passphrase stops working. That you issued it is '
                       f'on the track.</p></div>')
@@ -2893,7 +2944,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             own = self._own_passphrase(me, *passphrase)
         body = (self._values(info) + own + token + "".join(actions) + off_form + sp + "<h2>Recent actions</h2>"
                 + self._events(events, me))
-        return self.layout(req, m["name"], body, actions=(f'<a class="btn" href="/me/settings">Settings</a>'
+        return self.layout(req, m["name"], body, actions=(f'<a class="btn" href="/me/settings">My settings</a>'
                                                           if mid == me["id"] else ""))
 
     def _switch_off_form(self, m, verb: str, label: str, note: str = "", me: dict | None = None) -> str:
@@ -3077,8 +3128,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                             f'{" checked" if k in prof.get("skills", []) else ""}> {e(self.human(k))}</label>'
                             for k in skills)
             out.append(f'<h2>What it may do</h2><form method="post" action="/team/{e(mid)}/profile" class="card">'
-                       f'<p class="muted">A change is proposed, not made: it takes effect when a policy owner other '
-                       f'than you approves it, and every version is kept.</p>'
+                       f'<p class="muted">A change that adds (a higher risk, a skill, another model) is proposed, '
+                       f'not made: it takes effect when a policy owner other than you approves it. Lowering the risk '
+                       f'or taking skills away, and nothing else, takes effect at once. Every version is kept, on '
+                       f'the track.</p>'
                        f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
                        f'<fieldset class="choices options"><legend>Highest risk it may take</legend>{risks}</fieldset>'
                        f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset>'
@@ -3126,17 +3179,31 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         owner = me.get("kind") == "person" and hub.is_policy_owner(me)
         if (admin or owner) and m["kind"] == "person" and mid != me["id"] and m["status"] == "active":
             has = hub.has_passphrase(mid)
-            beyond = set(m["roles"]) & hub.beyond_roles(me)
             said = (f'<p>{e(m["name"])} {"has set a passphrase" if has else "has no passphrase yet"}. A one-time '
                     f'setup code lets them set {"a new" if has else "one"}{" (if they forgot it)" if has else ""}; '
                     f'an earlier unused code stops working.</p>')
-            if beyond:  # whoever issues it can sign in as them: someone who reaches as far issues it
+            with hub.reach_memo():  # the very check the action makes, so the card never offers what is refused
+                refusal = hub.setup_code_refusal(me, mid)
+            if refusal and refusal["reach"]:  # whoever issues it can sign in as them: someone who reaches as far
+                beyond = set(m["roles"]) & hub.beyond_roles(me)
                 what = self._role_reach(beyond, me)
                 words = "; ".join(f'as {self._role_words(r)} they {what[r]}' for r in sorted(beyond) if r in what)
-                out.append(f'<h2>Passphrase</h2><div class="card">{said}<p class="muted">{e(m["name"])} reaches '
-                           f'information you do not{" (" + e(words) + ")" if words else ""}, so a policy owner who '
-                           f'does issues their setup code.</p></div>')
-            elif admin or not set(m["roles"]) & hub.privileged_roles():
+                if refusal["beyond"]:
+                    why = (f'{e(m["name"])} reaches information you do not'
+                           f'{" (" + e(words) + ")" if words else ""}, so someone who does issues their setup code.')
+                else:
+                    why = (f'{e(m["name"])} approves changes or manages members, so a member admin issues their '
+                           f'setup code.')
+                if refusal["who"]:
+                    who = ", ".join(e(n) for n in refusal["who"])
+                    todo = f'Ask {who}: they may issue it.'
+                else:
+                    todo = (f'Nobody on the team may issue it, so the server holder (whoever runs the hub\'s '
+                            f'computer) issues it there with <code>{e(hub.holder_setup_command(mid))}</code> and '
+                            f'gives it to {e(m["name"])} in person or by phone.')
+                out.append(f'<h2>Passphrase</h2><div class="card">{said}<p class="muted">{why}</p>'
+                           f'<p>{todo}</p></div>')
+            elif not refusal:
                 out.append(f'<h2>Passphrase</h2><form method="post" action="/team/{e(mid)}/setup-code" class="card">'
                            f'{said}<p class="muted">The code is for {e(m["name"])} alone. Once they use it, their '
                            f'other sessions end and their old passphrase stops working. Issuing it goes on the track, '
@@ -3640,10 +3707,12 @@ def make_handler(app: App, only: str | None = None):
             if not chunked:
                 body = self.rfile.read(n) if n else b""
             headers = {k.lower(): v for k, v in self.headers.items()}
+            headers[CLIENT_HEADER] = client_address(self.client_address[0], headers)  # set here, never by the client
             status, h, payload = app.handle(self.command, self.path, headers, body)
             self.send_response(status)
             for k, v in h.items():
-                self.send_header(k, v)
+                for one in (v if isinstance(v, list) else [v]):  # Set-Cookie may be several: one header each
+                    self.send_header(k, one)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cache-Control", "no-store")

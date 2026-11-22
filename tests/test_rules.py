@@ -528,7 +528,7 @@ def test_an_injected_prompt_goes_only_to_agents_given_it(hub):
     assert hub.engine.eligibility(agent, item) == (True, "")
     rana = M(hub, "rana")
     out = hub.propose_agent_profile(rana, agent["id"], {"skills": ["renewal-prep", "lab-triage", "referral-letter"]})
-    hub.approve_agent_profile(M(hub, "dr-amara"), agent["id"], out["version"])
+    assert out["status"] == "active"  # only skills taken away: in force at once, no approval
     ok, why = hub.engine.eligibility(M(hub, "clinical-admin-agent"), item)
     assert not ok and "patient-reply-draft" in why
 
@@ -2262,8 +2262,8 @@ def test_an_agents_profile_changes_only_through_a_reviewed_version(hub):
     ev = hub.db.events.find_one({"action": "agent.profile_approved", "subject": "member:scribe-agent"})
     assert ev["signature"] and ev["data"]["asked_by"] == "rana"
     # skills too; a newer proposal replaces one still waiting; a withdrawn one changes nothing
-    first = hub.propose_agent_profile(rana, "scribe-agent", {"skills": []})
-    second = hub.propose_agent_profile(rana, "scribe-agent", {"skills": [], "max_risk": "low"})
+    first = hub.propose_agent_profile(rana, "scribe-agent", {"skills": [], "model": "standin"})
+    second = hub.propose_agent_profile(rana, "scribe-agent", {"skills": [], "model": "standin", "max_risk": "low"})
     assert hub.db.agent_profile_versions.get(f"scribe-agent@{first['version']}")["status"] == "withdrawn"
     with pytest.raises(Invalid):
         hub.approve_agent_profile(amara, "scribe-agent", first["version"])
@@ -4296,7 +4296,7 @@ def test_a_member_admin_gives_nobody_more_than_they_reach_on_their_own(hub):
     assert "physician" not in M(hub, "jo")["roles"] and "physician" in hub.role_request("jo")["roles"]
     hub.add_member(rana, {"id": "locum", "name": "Dr. Locum", "roles": ["physician"]})
     assert M(hub, "locum")["roles"] == [] and hub.role_request("locum")
-    with pytest.raises(Denied, match="policy owner who does"):
+    with pytest.raises(Denied, match="someone who does"):
         hub.issue_setup_code(rana, "dr-liam")
     with pytest.raises(Denied, match="Physician"):
         hub.issue_setup_code(rana, "locum")  # the role still waiting counts: she would hold a physician's account
@@ -4447,3 +4447,74 @@ def test_an_agent_is_given_no_role_its_sponsor_does_not_reach_and_nothing_is_wri
     with pytest.raises(Invalid):
         hub.approve_roles(M(hub, "dr-amara"), "portal")
     assert set(hub.authz.read(relation="assignee")) == before and "physician" not in M(hub, "portal")["roles"]
+
+
+def _notices_for(hub, mid):
+    return list(hub.db.items.find({"kind": "notice", "assignee": mid}))
+
+
+def test_a_change_waiting_for_a_second_policy_owner_tells_those_who_may_approve_it(hub):
+    _a_third_policy_owner(hub)
+    rana = M(hub, "rana")
+    before = {m: len(_notices_for(hub, m)) for m in ("rana", "dr-amara", "deputy", "jo")}
+    hub.set_roles(rana, "jo", ["front-desk", "physician"])
+    after = {m: len(_notices_for(hub, m)) for m in before}
+    assert after["dr-amara"] == before["dr-amara"] + 1 and after["deputy"] == before["deputy"] + 1
+    assert after["rana"] == before["rana"] and after["jo"] == before["jo"]  # never the one who asked, nor the subject
+    (n,) = [i for i in _notices_for(hub, "dr-amara") if i["title"] == "Roles for Jo Tremblay wait for your approval"]
+    assert n["output"]["where"] == "/team/jo"
+    assert hub.db.events.exists({"action": "approval.owners_told"})
+    (w,) = hub.waiting_approvals(M(hub, "dr-amara"))
+    assert w["href"] == "/team/jo" and w["by"] == "rana" and "Physician" in w["what"]
+    assert hub.waiting_approvals(rana) == [] and hub.waiting_approvals(M(hub, "jo")) == []
+    out = hub.propose_agent_profile(rana, "scribe-agent", {"max_risk": "high"})
+    assert out["status"] == "proposed"
+    assert any("may do" in i["title"] for i in _notices_for(hub, "dr-amara"))
+    assert [w["href"] for w in hub.waiting_approvals(M(hub, "deputy"))] == ["/team/jo", "/team/scribe-agent"]
+
+
+def test_an_agents_profile_that_only_takes_away_is_in_force_at_once(hub):
+    rana, agent = M(hub, "rana"), M(hub, "clinical-admin-agent")
+    skills = agent["profile"]["skills"]
+    assert len(skills) > 1
+    out = hub.propose_agent_profile(rana, agent["id"], {"skills": skills[:-1]})
+    assert out["status"] == "active" and M(hub, agent["id"])["profile"]["skills"] == skills[:-1]
+    assert hub.db.events.exists({"action": "agent.profile_reduced", "subject": f"member:{agent['id']}"})
+    assert hub.waiting_approvals(M(hub, "dr-amara")) == []
+    out = hub.propose_agent_profile(rana, agent["id"], {"max_risk": "low"})
+    assert out["status"] == "active" and M(hub, agent["id"])["profile"]["max_risk"] == "low"
+    out = hub.propose_agent_profile(rana, agent["id"], {"skills": skills})  # adding one back waits
+    assert out["status"] == "proposed" and M(hub, agent["id"])["profile"]["skills"] == skills[:-1]
+
+
+def test_failed_sign_ins_lock_the_address_first_and_tell_a_locked_member(hub):
+    hub.set_passphrase(M(hub, "noor"), "noor", WORDS)
+    for _ in range(5):
+        with pytest.raises(Denied):
+            hub.sign_in("noor", "not the right words", client="203.0.113.9")
+    with pytest.raises(Denied, match="from here"):
+        hub.sign_in("noor", WORDS, client="203.0.113.9")  # that address waits
+    assert hub.sign_in("noor", WORDS, client="198.51.100.4")["id"] == "noor"  # she is not locked out elsewhere
+    assert not [i for i in _notices_for(hub, "noor") if "locked" in i["title"]]
+    for _ in range(5):
+        with pytest.raises(Denied):
+            hub.sign_in("noor", "still not right")  # no address known: five lock the member
+    with pytest.raises(Denied, match="too many failed attempts") as exc:
+        hub.sign_in("noor", WORDS)
+    assert "UTC" not in str(exc.value)  # practice time
+    assert [i for i in _notices_for(hub, "noor") if "locked" in i["title"]]
+
+
+def test_the_setup_code_refusal_names_who_may_issue_it_or_the_holders_command(hub):
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    why = hub.setup_code_refusal(rana, "dr-liam")
+    assert why and why["reach"] and "practicehub member passphrase-link dr-liam --as dr-liam" in why["why"]
+    for actor in (rana, amara):
+        for target in ("dr-liam", "noor", "jo", "sam", "dr-amara", "rana"):
+            refused = hub.setup_code_refusal(actor, target)
+            try:
+                hub.issue_setup_code(actor, target)
+                ok = True
+            except Denied:
+                ok = False
+            assert ok == (refused is None), (actor["id"], target)
