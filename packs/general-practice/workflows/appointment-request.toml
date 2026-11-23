@@ -50,6 +50,7 @@ reason_text = "{{input.reason}}"
 booking_reason = "{{input.kind}}"
 urgency = "{{input.urgency}}"
 requested_by = "{{run.started_by}}"
+because_of = "{{input.because_of}}"
 
 [[input]]
 name = "reason"
@@ -79,6 +80,14 @@ type = "choice"
 choices = ["routine", "soon", "urgent"]
 default = "routine"
 required = true
+
+[[input]]
+name = "because_of"
+label = "Because of"
+type = "reference"
+target = ["Observation", "Condition"]
+hidden = true   # set by the workflow that asks for the visit (a reviewed result), never typed
+help = "the result or problem the visit was asked for"
 
 [[input]]
 name = "preferences"

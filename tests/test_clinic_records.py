@@ -342,6 +342,26 @@ def test_a_result_with_a_visit_booked_is_not_told_until_a_physician_signs_it_clo
     assert _read(hub, ref)["review"] == "closed"
 
 
+def test_a_result_in_review_is_its_own_work_and_a_visit_booked_from_it_names_it(hub):
+    """A result's review is the result's work: it reads "In review", its work is named for the result (the test and
+    its value), not for the workflow. The physician asking to see the patient asks for a visit that names the result
+    it was asked for, and the result's page lists it."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    ref = hub.engine.run(run["id"])["record"]
+    rt = hub.record_type("Observation")
+    assert _read(hub, ref)["review"] == "received" and rt.state_label("received") == "In review"
+    title = hub.run_title(M(hub, "dr-amara"), hub.engine.run(run["id"]))
+    assert title.startswith(f"Lab result {LAB['test']} 131") and "MacLeod" in title and "review" not in title
+    assert hub.run_title(M(hub, "scheduling-agent"), hub.engine.run(run["id"])).startswith("Lab result · ")  # no value
+    run, ref = _flagged_review(hub, "book-visit")
+    (visit,) = [v for v in hub.records.search("Encounter", limit=None)
+                if (v.get("reasonReference") or [{}])[0].get("reference") == ref]
+    assert visit["status"] in ("requested", "planned") and visit["reasonCode"][0]["text"].startswith("Follow-up on")
+    assert any(x["ref"] == f"Encounter/{visit['id']}" and x["rel"] == "reason"
+               for x in hub.linked(M(hub, "dr-amara"), ref))
+
+
 def test_a_review_cancelled_after_the_physician_reviewed_leaves_the_patient_not_told(hub):
     """Cancelled before anyone told the patient, a reviewed result is "Patient not told", never closed."""
     run, ref = _flagged_review(hub, "call-patient")

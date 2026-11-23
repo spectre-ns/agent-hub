@@ -24,6 +24,8 @@
 # 4.1: a visit is part of its patient (part_of): reached through and listed on their chart, never moved to another
 # patient; the calendar, the schedule and the desk still list every visit.
 # 4.2: a lab result is part of its patient too (Patient > Lab results > Lab result), and is called a lab result.
+# Its review reads "In review", its work is named for the result, and a visit a physician books from it names the
+# result it was booked for (Visit > Because of).
 version = "4.2"
 
 [practice]

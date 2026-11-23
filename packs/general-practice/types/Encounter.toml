@@ -198,6 +198,17 @@ path = "reasonCode.0.text"
 type = "string"
 data_class = "clinical"
 
+# What led to the visit: the result (or problem) a physician asked to see the patient about. The result's page
+# lists the visit it led to; the visit names the result.
+[[field]]
+name = "because_of"
+label = "Because of"
+path = "reasonReference.0"
+type = "reference"
+target = ["Observation", "Condition"]
+rel = "reason"
+data_class = "clinical"
+
 [[field]]
 name = "diagnosis"
 label = "Diagnoses (as JSON)"

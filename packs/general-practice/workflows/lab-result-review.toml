@@ -3,7 +3,7 @@ title = "Lab result review"
 record = "Observation"
 summary = """
 One result, from received to closed: the result is this workflow's record, and its review is where the work is:
-waiting for review (received), reviewed by a physician (reviewed), the patient told (told), closed. A result is closed
+in review (received), reviewed by a physician (reviewed), the patient told (told), closed. A result is closed
 only when the patient was told: a review that ends without that (the patient not reached, a visit booked, the review
 cancelled) leaves it "Patient not told" until a physician signs it closed. A result the lab
 files starts its review; a result the lab sends for a patient (the lab.result event) is filed as one, or, when it names
@@ -309,6 +309,7 @@ record = "{{run.subject}}"
 [steps.params.input]
 reason = "Follow-up on {{input.test}} result"
 urgency = "soon"
+because_of = "{{run.record}}"
 
 [[steps]]
 id = "book-critical"
@@ -323,6 +324,7 @@ record = "{{run.subject}}"
 [steps.params.input]
 reason = "Follow-up on {{input.test}} result"
 urgency = "urgent"
+because_of = "{{run.record}}"
 
 [[steps]]
 id = "told-by-phone"

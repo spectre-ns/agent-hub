@@ -1491,11 +1491,21 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         return row
 
     def run_title(self, member: dict | None, run: dict) -> str:
-        """A run's title as this member may see it: the workflow's title, and who or what it is about only if they
-        may read that record's data class (a name and birth date are themselves personal health information). A run
-        walking a record of its own (a message, an order) is named for whom that record is about: its subject."""
+        """A run's title as this member may see it, and who or what it is about only if they may read that record's
+        data class (a name and birth date are themselves personal health information).
+
+        A run walking a record of its own (a result, an order, a visit) is that record's work, so it is named for the
+        record, as an issue is, then for whom it is about: "Lab result HbA1c 6.6 % · Ellen MacLeod". One who may not
+        read the record's class is told only what kind of record it is ("Lab result"). Any other run is named for its
+        workflow and whom it is about: "Privacy request: Ellen MacLeod"."""
         base = str(run.get("title") or "").split(": ", 1)[0]
-        ref = run.get("subject") or run.get("record") or ""
+        own, subj = run.get("record") or "", run.get("subject") or ""
+        if member and self.pack and "/" in own and "/" in subj and own != subj:
+            name = self._own_record_name(member, own)
+            if name:
+                who = self.run_title(member, {"title": "", "subject": subj}).lstrip(": ")
+                return f"{name} · {who}" if who else name
+        ref = subj or own
         if not member or not ref or not self.pack or "/" not in ref:
             return base
         rtype, _, rid = ref.partition("/")
@@ -1507,6 +1517,26 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         except Exception:  # noqa: BLE001
             rec = None
         return f"{base}: {self.short_title(rec)}" if rec else base
+
+    def _own_record_name(self, member: dict, ref: str) -> str:
+        """What a run walking ``ref`` is called: its type's label and the record's short title ("Lab result HbA1c
+        6.6 %"; a title that already starts with the label, "Visit Mon Nov 23, 09:00", is not said twice), or the
+        label alone to one who may not read its class. "" when the type is unknown."""
+        rtype, _, rid = ref.partition("/")
+        rt = self.record_type_for_reading(rtype)
+        if rt is None:
+            return ""
+        dc = self.class_or_none(rtype)
+        if dc and not self.can(member, "reader", f"data_class:{dc}"):
+            return rt.label
+        try:
+            rec = self.records.read(rtype, rid)
+        except Exception:  # noqa: BLE001
+            rec = None
+        short = self.short_title(rec) if rec else ""
+        if not short:
+            return rt.label
+        return short if short.lower().startswith(rt.label.lower()) else f"{rt.label} {short}"
 
     def active_holders(self, rid: str, *, persons_only: bool = False) -> list[dict]:
         """Members who hold this role and are switched on (people only, for work only a person may do)."""
