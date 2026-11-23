@@ -1446,6 +1446,7 @@ class RecordPages:
                         for k in kids) + "</ul>" if kids else "<p class='muted'>Nothing yet.</p>") + "</section>")
             if not editing:  # what is part of it, then what links to it
                 sections, rail, hidden = self.owner_sections(me, ref) if not is_page else ("", [], 0)
+                main.append(self.started_from(me, ref, rt))  # what was made from it (a visit's referrals, orders)
                 main.append(sections)
                 if hidden:
                     main.append('<p class="muted">Some records are kept from your role and are not shown.</p>')

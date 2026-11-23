@@ -132,31 +132,59 @@ class WorkPanel:
 
     # ---------------------------------------------------------------------------- sub-records and their parent
     def family_panel(self, me, ref: str) -> str:
-        """The record a sub-record was made for (a link back), and the sub-records made for this one (``record.child``:
-        a visit's referrals), each with its state and who holds it now. A type the member may not read is left out."""
-        hub, out = self.hub, []
-        parent = hub.engine.parent_record(ref)
-        if parent and hub.may_read(me, parent.split("/", 1)[0]):
-            out.append(f'<p class="wp-parent"><span class="muted">Made for</span> {self._family_link(parent)}</p>')
-        rows = []
-        for kid in hub.engine.children_of(ref):
+        """The record a sub-record was made for (a link back), in the side panel. The sub-records made from this one
+        are in the page's main column (``started_from``)."""
+        parent = self.hub.engine.parent_record(ref)
+        if parent and self.hub.may_read(me, parent.split("/", 1)[0]):
+            return f'<p class="wp-parent"><span class="muted">Made for</span> {self._family_link(parent)}</p>'
+        return ""
+
+    def started_from(self, me, ref: str, rt=None) -> str:
+        """The sub-records made from this record (``record.child``: a visit's referrals, prescriptions and lab
+        orders), for the main column: each with its state and, in words, where its own work is (Done, Stopped,
+        Stuck: <step> failed, or who holds it and when it is due), stuck, urgent and overdue first. One of a type the
+        member may not read keeps its kind, its state and who holds it, but neither its title nor a link."""
+        hub, rows = self.hub, []
+        viewer = Viewer(hub, me)
+        for n, kid in enumerate(hub.engine.children_of(ref)):
             rtype = kid["ref"].split("/", 1)[0]
-            if not hub.may_read(me, rtype):
-                continue
-            rt = hub.record_type(rtype)
+            krt = hub.record_type(rtype)
             rec = hub.records.read(*kid["ref"].split("/", 1))
-            st = schema.first(rec, rt.lifecycle["path"]) if rec and rt and rt.lifecycle else None
-            state = self._state_loz(st, rt) if st else ""
-            run = kid["run"] or {}
-            item = hub.engine.item(run["item"]) if run.get("status") == "running" and run.get("item") else None
-            holder = self._holder(item) if item and item.get("status") in ("open", "claimed", "held") else \
-                '<span class="muted">nobody: it is done</span>' if run and run.get("status") != "running" else ""
-            rows.append(f"<li>{self._family_link(kid['ref'], rec)} {state} {holder}</li>")
-        if rows:
-            out.append(f'<section class="wp-children" aria-labelledby="wp-children-h"><h2 id="wp-children-h">'
-                       f'Made from this <span class="count">{len(rows)}</span></h2><ul class="plain">{"".join(rows)}'
-                       f'</ul></section>')
-        return "".join(out)
+            st = schema.first(rec, krt.lifecycle["path"]) if rec and krt and krt.lifecycle else None
+            name = self._family_link(kid["ref"], rec) if hub.may_read(me, rtype) else \
+                f'<span class="muted">{e(krt.label if krt else rtype)}</span>'
+            work, rank = self._child_work(kid["run"] or {}, viewer)
+            rows.append((rank, n, f'<li>{name} {self._state_loz(st, krt) if st else ""} {work}</li>'))
+        if not rows:
+            return ""
+        what = rt.label.lower() if rt is not None else "record"
+        rows.sort(key=lambda r: r[:2])
+        return (f'<section class="children started-from" aria-labelledby="started-from-h"><h2 id="started-from-h">'
+                f'Started from this {e(what)} <span class="count">{len(rows)}</span></h2><ul class="plain">'
+                + "".join(r[2] for r in rows) + "</ul></section>")
+
+    def _child_work(self, run: dict, viewer) -> tuple[str, tuple]:
+        """Where a sub-record's own work is, in words, and its rank in the list: stuck first, then urgent, then due
+        soonest (overdue before due); one with no work of its own after those, finished last."""
+        if not run:
+            return "", (3, "")
+        if run.get("status") == "completed":
+            return '<span class="muted">Done</span>', (4, "")
+        if run.get("status") != "running":
+            return '<span class="loz removed">Stopped</span>', (4, "")
+        wf = viewer.workflow_of_run(run["id"])
+        for sid, sst in (run.get("steps") or {}).items():
+            if (sst or {}).get("state") == "failed":
+                shown = wf is not None and viewer.step_state(wf, run, sid) is not None
+                title = wf.step(sid).title if shown else "a step you may not see"
+                return f'<span class="loz removed">Stuck: {e(title)} failed</span>', (0, "")
+        live = [it for sst in (run.get("steps") or {}).values() if (sst or {}).get("item")
+                for it in [self.hub.db.items.get(sst["item"])]
+                if it and it.get("status") in ("open", "claimed", "held") and it.get("kind") != "notice"]
+        if not live:
+            return '<span class="muted">waiting</span>', (3, "")
+        it = min(live, key=lambda i: (i.get("priority") != "urgent", i.get("due_at") or "~"))
+        return self._holder(it) + self._urgency(it), (1 if it.get("priority") == "urgent" else 2, it.get("due_at") or "~")
 
     def _family_link(self, ref: str, rec: dict | None = None) -> str:
         """A link to a parent or sub-record this member was checked for already, named by its title."""

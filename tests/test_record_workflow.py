@@ -666,7 +666,17 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
     from practicehub.web.server import App
     app = App(hub, dev=False)
     page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
-    assert "Made from this" in page and kids[0]["ref"] in page and "Being written" in page
+    # in the page's main column, before the side panel: what was started from the visit, and where each one is
+    started = page.index("Started from this visit")
+    assert started < page.index('class="wp-status"') and kids[0]["ref"] in page[started:] and "Being written" in page
+    from practicehub.visibility import Viewer
+    viewer = Viewer(hub, amara)
+    stuck, rank = app._child_work({**kids[0]["run"], "steps": {"draft": {"state": "failed"}}}, viewer)
+    assert "Stuck: " in stuck and "failed" in stuck and rank[0] == 0  # stuck ones first
+    assert app._child_work({**kids[0]["run"], "status": "completed"}, viewer)[0].endswith("Done</span>")
+    assert "Stopped" in app._child_work({**kids[0]["run"], "status": "cancelled"}, viewer)[0]
+    live, rank = app._child_work(kids[1]["run"], viewer)
+    assert ("Due in" in live or "Overdue" in live) and rank[0] in (1, 2)
     back = app.page_record({"me": amara, "query": {}, "path": "/records/" + kids[0]["ref"]},
                            *kids[0]["ref"].split("/", 1))
     assert "Made for" in back and ref.split("/", 1)[1] in back
