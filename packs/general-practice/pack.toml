@@ -11,7 +11,17 @@
 # practice installed before keeps its own until a policy owner changes them); the red-flag screen catches more ways
 # of saying an emergency; a desk booking from a calendar slot is booked at once only when the reason is plainly
 # routine, anything else goes to a nurse first, and to a nurse too if the screen itself fails.
-version = "3.1"
+# 4.0: each clinic workflow walks a record of its own, and that record's state is where the work is, instead of
+# walking the patient: a renewal is a prescription request (MedicationRequest), a lab review its result
+# (Observation), a patient's question its message (Communication), a referral its ServiceRequest, a registration its
+# QuestionnaireResponse and a privacy request its Consent; the patient is the record's subject and the chart still
+# lists them. Runs open on version 3.1 move onto records of their own on their own (relink), keeping their steps.
+# missed-appointment and visit-documentation are retired: a late cancel or no-show is a step of the visit's own run,
+# and a visit filed after the fact is a visit created in progress. A prescription is issued only by its workflow or
+# by a physician's signature "I prescribe this medication as written", never by setting its status; a renewal for a
+# drug not on the chart is written in full, signed as written, faxed and told to the patient; a second renewal for
+# the same drug is flagged to the physician. A visit note's "Refer to" list makes referrals of their own.
+version = "4.0"
 
 [practice]
 requires_core = "1.0"
