@@ -586,20 +586,31 @@ def _to_the_note(hub, amara, **more):
     return run, ref
 
 
-def test_a_discarded_note_completes_the_visit_without_a_note_and_tells_the_physician(hub):
-    """Discarding the draft never leaves the visit in progress: the visit took place, so it is completed (a workflow
-    has no going back a step); no note is filed, nothing is billed, and the physician is told to write the note."""
+@pytest.mark.parametrize("then,ends", [("i-wrote-it-on-the-visit", "finished"), ("no-note-needed", "undocumented")])
+def test_a_discarded_note_leaves_the_visit_completed_without_a_note_flagged_for_the_physician(hub, then, ends):
+    """Discarding the draft never leaves the visit in progress, and never plain Completed: it is Completed: no note,
+    and the physician has a task to write it (on their work, due); no note is filed from the draft, nothing is
+    billed. Once they have written it, the visit is completed; one that needs none stays Completed: no note."""
+    from practicehub.web.server import App
     amara = M(hub, "dr-amara")
     run, ref = _to_the_note(hub, amara)
     hub.engine.decide(amara, item_for(hub, run, "sign"), "discard", "wrong patient's transcript")
     run_all_local(hub, log=quiet)
     run = hub.engine.run(run["id"])
-    assert _status(hub, ref) == "finished" and run["status"] == "completed"
+    assert _status(hub, ref) == "undocumented" and run["status"] == "running"
+    assert hub.record_type("Encounter").state_label("undocumented") == "Completed: no note"
     assert run["steps"]["file-note"]["state"] == "skipped" and run["steps"]["code"]["state"] == "skipped"
     assert not [c for c in hub.records.search("Composition", limit=None)
                 if (c.get("encounter") or {}).get("reference") == ref]
     told = hub.db.items.find({"run_id": run["id"], "kind": "notice", "assignee": "dr-amara"})
     assert any("has no note" in n["title"] for n in told)
+    task = hub.engine.item(item_for(hub, run, "write-note"))
+    assert task["assignee"] == "dr-amara" and task.get("due_at")
+    page = App(hub, dev=False).page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert "Completed: no note" in page and "Write the note for this visit" in page
+    hub.engine.complete(amara, task["id"], {"done": then, "why": "" if ends == "finished" else "another patient's"})
+    run_all_local(hub, log=quiet)
+    assert _status(hub, ref) == ends and hub.engine.run(run["id"])["status"] == "completed"
 
 
 def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_referral_workflow(hub):

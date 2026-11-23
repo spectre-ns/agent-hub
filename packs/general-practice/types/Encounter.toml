@@ -53,10 +53,10 @@ request_inputs = ["kind", "reason", "urgency"]
 [[field]]
 name = "status"
 type = "choice"
-choices = ["requested", "planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled", "noshow",
+choices = ["requested", "planned", "arrived", "triaged", "in-progress", "onleave", "finished", "undocumented", "cancelled", "noshow",
            "entered-in-error", "unknown"]
 required = true
-help = "planned is booked, arrived checked in, finished completed; requested (asked for, no time yet) and noshow are the practice's own"
+help = "planned is booked, arrived checked in, finished completed; requested (asked for, no time yet), undocumented (completed, its note discarded) and noshow are the practice's own"
 
 [[field]]
 name = "plannedStartDate"
@@ -277,7 +277,7 @@ fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "book
 starts = ["in-progress"]   # a visit filed after the fact: under way, documented, signed and billed like any other
 field = "status"
 initial = "planned"
-labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", onleave = "Patient stepped out", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
+labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", undocumented = "Completed: no note", onleave = "Patient stepped out", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
 abandoned = { requested = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
 [[lifecycle.transition]]
 from = ["requested"]
@@ -325,6 +325,18 @@ by = "workflow"
 from = ["planned", "arrived", "triaged"]
 to = "finished"
 by = "workflow"
+# Its draft note discarded: the visit took place but has no note (Completed: no note, never plain Completed), with
+# the physician asked to write it; once they have, it is completed.
+[[lifecycle.transition]]
+from = ["in-progress", "onleave"]
+to = "undocumented"
+by = "workflow"
+label = "Complete without a note"
+[[lifecycle.transition]]
+from = ["undocumented"]
+to = "finished"
+by = "workflow"
+label = "Note written"
 # Cancelling asks who cancelled, and says how much notice that is: a patient's cancellation with less than 24 hours'
 # notice runs the missed-appointment policy on the visit's own run. Without an answer (the portal: the patient
 # themselves) it is the patient's.

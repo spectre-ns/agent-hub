@@ -505,16 +505,18 @@ start = "{{end.start}}"
 end = "{{end.end}}"
 minutes = "{{end.minutes}}"
 
-# Discarded: the visit still took place, so it is completed (never left in progress, and there is no going back a
-# step: a workflow has no loops). No note is filed and the visit is not billed; the physician is told to write the
-# note on the visit themselves.
+# Discarded: the visit still took place, so it is never left in progress (and there is no going back a step: a
+# workflow has no loops), but it is not plain Completed either: it is Completed: no note, flagged for the physician,
+# who is asked to write the note on the visit (a task on their work, due like the edit). No note is filed and the
+# visit is not billed from the discarded draft. Once the physician has written it, the visit is completed; a visit
+# that needs none (the wrong patient's transcript) stays Completed: no note, with their reason on the track.
 [[steps]]
 id = "discarded"
-title = "Complete the visit without the discarded note"
+title = "Mark the visit completed without a note"
 kind = "automation"
 after = ["sign"]
 when = "sign.outcome == 'discard'"
-state = "finished"
+state = "undocumented"
 
 [[steps]]
 id = "tell-discarded"
@@ -524,8 +526,41 @@ after = ["discarded"]
 action = "notice.send"
 [steps.params]
 to = "{{sign.by}}"
-text = "You discarded the draft note: this visit has no note. Write one on the visit."
+text = "You discarded the draft note: this visit has no note (Completed: no note). Write one on the visit."
 link = "{{run.record}}"
+
+[[steps]]
+id = "write-note"
+title = "Write the note for this visit"
+kind = "task"
+role = "physician"
+assign_to = "{{sign.by}}"
+due = "3d"
+escalate_to = "medical-director"
+after = ["discarded"]
+persons_only = true
+context = ["record:clinical", "end.transcript", "sign"]
+instructions = """You discarded the draft note, so this visit has no note. Write the visit note on the patient's chart
+(a new visit note, linked to this visit), then say so here. If the visit needs no note (the transcript was another
+patient's, the visit did not take place as booked), say why: the visit stays Completed: no note."""
+[[steps.fields]]
+name = "done"
+label = "The note"
+type = "choice"
+choices = ["i-wrote-it-on-the-visit", "no-note-needed"]
+required = true
+[[steps.fields]]
+name = "why"
+type = "string"
+help = "why the visit needs no note (only then)"
+
+[[steps]]
+id = "documented"
+title = "Complete the visit now its note is written"
+kind = "automation"
+after = ["write-note"]
+when = "write-note.done == 'i-wrote-it-on-the-visit'"
+state = "finished"
 
 # Signed: the visit is completed, with when it took place.
 [[steps]]
