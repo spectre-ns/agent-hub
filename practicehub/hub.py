@@ -3312,6 +3312,30 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
                           previous=last["id"] if last else None)
 
+    def _owner_picks_up(self, rt, ref: str, rec: dict, member: dict, cause: int) -> None:
+        """A record filed before its type named a workflow (or before the version that walks it was approved), changed
+        now, is picked up by that workflow where it is: the module upgrade's migration, done record by record as each
+        is next written. It starts only where the type's ``when`` holds, nothing of its workflow is open about it and
+        the active version has never walked it, so it is idempotent; it is retried on every write until it starts; and
+        a start that fails is noted on the track (``trigger.failed``) without failing the write."""
+        owner = rt.workflow["id"]
+        if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner \
+                or schema.starts_workflow(rt, rec) != owner:
+            return
+        last = self.db.runs.find_one({"workflow_id": owner, "record": ref}, sort=[("created_at", DESC)],
+                                     fields=["id", "status", "version"])
+        if last and (last["status"] == "running" or last["version"] >= self.workflow(owner)[1]["version"]):
+            return
+        starter = member if member.get("kind") in ("person", "agent", "service") else \
+            {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
+        try:
+            with self.db:  # a savepoint: a record its workflow cannot pick up is still written
+                self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
+                                  previous=last["id"] if last else None)
+        except Exception as exc:  # noqa: BLE001
+            self.track.append(starter, "trigger.failed", ref, cause=cause,
+                              data={"workflow": owner, "error": f"picking it up: {exc}"})
+
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
 
@@ -3523,6 +3547,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 ev = self._note_overbook(member, rt, ref, clashes, over, cause=ev, run_id=run_id)
             if moved and (rt.workflow or {}).get("id"):
                 self._owner_follows_move(rt, ref, rec, member, run_id, rt.transition(*moved), ev)
+            elif (rt.workflow or {}).get("id"):
+                self._owner_picks_up(rt, ref, rec, member, ev)
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
         if rt.is_a("Restriction"):
             self.restrictions.reset()
