@@ -371,6 +371,10 @@ def guard_renewal_prep(values, ctxview):
     return problems
 
 
+# what a physician signs to issue a prescription written by hand (MedicationRequest.toml [[signature]])
+RX_SIGNED = "I prescribe this medication as written"
+
+
 GUARDS = {"visit-coding": guard_visit_coding, "lab-triage": guard_lab_triage, "renewal-prep": guard_renewal_prep,
           "visit-note-draft": guard_no_signature, "referral-letter": guard_no_signature}
 
@@ -678,7 +682,7 @@ def demo(hub):
         "onsetDateTime": ago(400), "recordedDate": ago(400), "recorder": {"reference": "Practitioner/dr-liam"}})
     rx = hub.create_record(liam, "MedicationRequest", {**_order(nref, "Sertraline 50 mg daily", "1 tablet by mouth daily",
                                                                 30, "tablet", 2, 30, ago(60)), "status": "draft"})
-    hub.update_record(liam, f"MedicationRequest/{rx['id']}", {"status": "active"})
+    hub.sign_record(liam, f"MedicationRequest/{rx['id']}", RX_SIGNED)
     hub.create_record(rana, "Consent", {
         "patient": nref, "status": "active", "received": ago(30),
         "request": "Only Dr. Fraser should see my mental-health care. Not the front desk, not other staff.",
@@ -698,8 +702,8 @@ def demo(hub):
     for order in (_order(subj, "Ramipril 5 mg daily", "1 capsule by mouth once daily", 90, "capsule", 3, 90, ago(170)),
                   _order(subj, "Atorvastatin 20 mg daily", "1 tablet by mouth once daily at bedtime", 90, "tablet", 3,
                          90, ago(170))):
-        rx = hub.create_record(amara, "MedicationRequest", {**order, "status": "draft"})  # written, then issued
-        hub.update_record(amara, f"MedicationRequest/{rx['id']}", {"status": "active"})
+        rx = hub.create_record(amara, "MedicationRequest", {**order, "status": "draft"})  # written, then signed
+        hub.sign_record(amara, f"MedicationRequest/{rx['id']}", RX_SIGNED)  # issued by its prescriber's signature
     hub.create_record(amara, "AllergyIntolerance", {
         "patient": subj, "clinicalStatus": _cc("active", ALLERGY_STATUS),
         "verificationStatus": _cc("confirmed", "http://terminology.hl7.org/CodeSystem/allergyintolerance-verification"),

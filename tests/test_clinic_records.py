@@ -46,21 +46,76 @@ def test_a_renewal_request_is_a_proposal_that_becomes_the_order_it_renews(hub, w
     assert ref in fax and "Ellen MacLeod" in fax
 
 
-def test_nobody_issues_a_renewal_request_by_hand_but_a_hand_written_prescription_is_theirs(hub):
-    from practicehub.hub import Invalid
-    amara = M(hub, "dr-amara")
+def test_nobody_issues_a_renewal_request_by_hand_and_a_hand_written_one_only_by_a_physicians_signature(hub):
+    """A renewal request is issued only by its workflow. An order a physician writes by hand starts no workflow and
+    is issued by their signature, "I prescribe this medication as written", with its directions and quantity: never
+    by setting its status, and never by a nurse's signature."""
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
     run = run_of(hub, "prescription-renewal")
     with pytest.raises((Denied, Invalid)):
         hub.update_record(amara, run["record"], {"status": "active"})
     assert _read(hub, run["record"])["status"] == "draft"
-    # an order the physician writes (not a proposal) starts no renewal, and they issue it themselves
     rx = hub.create_record(amara, "MedicationRequest", {
         "status": "draft", "intent": "order", "subject": {"reference": _pat(hub)},
-        "medicationCodeableConcept": {"text": "Amoxicillin 500 mg"}})
+        "medicationCodeableConcept": {"text": "Amoxicillin 500 mg capsule"}})
     ref = f"MedicationRequest/{rx['id']}"
     assert not hub.engine.runs(record=ref)
-    hub.update_record(amara, ref, {"status": "active"})
+    with pytest.raises((Denied, Invalid)):
+        hub.update_record(amara, ref, {"status": "active"})
+    meaning = "I prescribe this medication as written"
+    with pytest.raises((Denied, Invalid)):  # no directions or quantity yet: nothing to sign for
+        hub.sign_record(amara, ref, meaning)
+    hub.update_record(amara, ref, {"dosageInstruction": [{"text": "1 capsule three times daily for 7 days"}],
+                                   "dispenseRequest": {"quantity": {"value": 21, "unit": "capsule"}}})
+    with pytest.raises(Denied):
+        hub.sign_record(noor, ref, meaning)
+    hub.sign_record(amara, ref, meaning)
     assert _read(hub, ref)["status"] == "active"
+    sig = hub.signatures(amara, ref)
+    assert any(x["meaning"] == meaning and x["by"] == amara["id"] for x in sig)
+
+
+def test_a_renewal_not_on_the_chart_is_written_signed_as_written_sent_and_the_patient_told(hub):
+    """No current order on the chart: the physician chooses to write one, writes it (medication, directions,
+    quantity, repeats, days supply), signs it as written; the request becomes that order, it goes to the pharmacy
+    and the patient is told. Not written, the patient is told too."""
+    amara = M(hub, "dr-amara")
+    pat = _pat(hub)
+    run = hub.engine.start(M(hub, "jo"), "prescription-renewal", record=pat,
+                           inputs={"medication": "Levothyroxine 50 mcg", "pharmacy": "Spring Garden Pharmacy"})
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(amara, item_for(hub, run, "decide"), "renew", "")
+    run_all_local(hub, log=quiet)
+    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"decision": "written", "notes": "new start"})
+    hub.engine.complete(amara, item_for(hub, run, "write-rx"), {
+        "medication": "Levothyroxine 50 mcg tablet", "directions": "1 tablet by mouth every morning",
+        "quantity": 90, "unit": "tablet", "repeats": 3, "days_supply": 90})
+    hub.engine.decide(amara, item_for(hub, run, "sign-new"), "prescribe", "")
+    run_all_local(hub, log=quiet)
+    ref = hub.engine.run(run["id"])["record"]
+    rx = _read(hub, ref)
+    assert rx["status"] == "active" and rx["intent"] == "order"
+    assert rx["dosageInstruction"][0]["text"] == "1 tablet by mouth every morning"
+    assert rx["medicationCodeableConcept"]["text"] == "Levothyroxine 50 mcg tablet"
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    sent = list(hub.db.outbox.find({"run_id": run["id"]}))
+    assert any(m["channel"] == "fax" and "Levothyroxine 50 mcg tablet" in m["body"] for m in sent), sent
+    assert any(m["channel"] == "patient-portal" and "sent to your pharmacy" in m["body"] for m in sent), sent
+
+
+def test_a_renewal_not_on_the_chart_not_written_closes_and_tells_the_patient(hub):
+    amara = M(hub, "dr-amara")
+    run = hub.engine.start(M(hub, "jo"), "prescription-renewal", record=_pat(hub),
+                           inputs={"medication": "Levothyroxine 50 mcg", "pharmacy": "Spring Garden Pharmacy"})
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(amara, item_for(hub, run, "decide"), "renew", "")
+    run_all_local(hub, log=quiet)
+    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"decision": "not-written", "notes": "see me"})
+    run_all_local(hub, log=quiet)
+    assert _read(hub, run["record"])["status"] == "cancelled"
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    sent = list(hub.db.outbox.find({"run_id": run["id"], "channel": "patient-portal"}))
+    assert any("has not written a prescription" in m["body"] for m in sent), sent
 
 
 @pytest.mark.parametrize("outcome", ["decline", "book-visit"])
