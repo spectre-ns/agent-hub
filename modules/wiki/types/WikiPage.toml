@@ -60,6 +60,7 @@ help = "when a wiki owner last confirmed the page is current"
 [lifecycle]
 field = "status"
 initial = "draft"
+abandoned = { "needs-check" = "published" }   # a check cancelled leaves the page as it was before it was flagged; flag it again to have it checked
 
 [[lifecycle.transition]]
 from = ["draft"]
