@@ -5454,6 +5454,77 @@ def test_a_record_s_history_tells_its_edits_moves_and_steps_in_words_folding_wha
     assert sum(e["hidden"] for e in folds) >= 4 and len(folds) < sum(e["hidden"] for e in folds)
 
 
+# ------------------------------------------------------------------ cancelling a run: who may, and who is told
+JOB_CHECK = """id = "job-check"
+title = "Check the job"
+record = "Job"
+cancel_by = ["physician"]
+[trigger]
+starters = ["nurse", "physician"]
+[[steps]]
+id = "check"
+title = "Check the job"
+kind = "task"
+role = "physician"
+[[steps.fields]]
+name = "ok"
+type = "boolean"
+[[on_cancel]]
+id = "tell"
+title = "Tell the physicians"
+action = "message.send"
+[on_cancel.params]
+to = "role:physician"
+subject = "Job check cancelled"
+body = "{{cancel.by}} cancelled the check: {{cancel.reason}}"
+[[on_cancel]]
+id = "fails"
+title = "Tell nobody"
+action = "message.send"
+when = "cancel.reason == 'tell nobody'"
+[on_cancel.params]
+to = ""
+"""
+
+
+def test_on_cancel_actions_run_in_the_cancel_and_cancel_by_gives_cancelling_to_the_role_that_took_it_up(hub):
+    """Rule: a workflow's ``[[on_cancel]]`` actions run in the transaction that cancels a run (placeholders read
+    ``cancel.reason`` and ``cancel.by``); one that fails refuses the cancel, so nothing of it is kept. ``cancel_by``
+    lists roles: once a step for one of them is claimed, only someone holding that role, or a policy owner, may
+    cancel the run; until then, whoever started it or a policy owner (``Engine.cancel_refusal``, in words)."""
+    from practicehub.workflows import DefinitionError, parse
+    for bad, says in ((JOB_CHECK.replace('cancel_by = ["physician"]', 'cancel_by = ["nurse"]'), "no step"),
+                      (JOB_CHECK.replace('action = "message.send"\nwhen', 'when'), "name the action"),
+                      (JOB_CHECK.replace('id = "fails"', 'id = "check"'), "not a step's id")):
+        with pytest.raises(DefinitionError) as exc:
+            parse(bad)
+        assert any(says in p for p in exc.value.problems), (says, exc.value.problems)
+    _jobs(hub, walked=False)
+    rana, amara, liam, noor = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam"), M(hub, "noor")
+    w = hub.propose_workflow(rana, JOB_CHECK, "checks")
+    hub.approve_workflow(amara, "job-check", w["version"])
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    first = hub.engine.start(noor, "job-check", record=ref)
+    assert hub.engine.cancel_refusal(liam, first) == "only whoever started it or a policy owner may cancel a run"
+    hub.engine.cancel(noor, first["id"], "not needed")  # nobody took it up: its starter may
+    msg = hub.db.outbox.find_one({"run_id": first["id"]})
+    assert msg["recipient"] == "role:physician" and msg["body"] == f"{noor['name']} cancelled the check: not needed"
+    run = hub.engine.start(noor, "job-check", record=ref)
+    hub.engine.claim(liam, run["item"])
+    why = hub.engine.cancel_refusal(noor, run)
+    assert why == "its work was taken up by the physician role: only that role or a policy owner may cancel it now"
+    with pytest.raises(Denied, match="taken up by the physician role"):
+        hub.engine.cancel(noor, run["id"], "changed my mind")
+    with pytest.raises(Invalid, match="'Tell nobody' did not go through"):  # a told-nobody cancel keeps nothing
+        hub.engine.cancel(liam, run["id"], "tell nobody")
+    assert hub.engine.run(run["id"])["status"] == "running" and not hub.db.outbox.find_one({"run_id": run["id"]})
+    assert hub.db.items.get(run["item"])["status"] == "claimed"
+    hub.engine.cancel(amara, run["id"], "done another way")  # another physician
+    assert hub.engine.run(run["id"])["status"] == "cancelled"
+    assert hub.db.outbox.find_one({"run_id": run["id"]})["body"].endswith("done another way")
+    assert hub.engine.cancel_refusal(rana, run) is None  # a policy owner always may
+
+
 # ------------------------------------------------------------------------------------------- a record walks its workflow
 def test_a_record_its_type_walks_starts_its_run_on_create_and_only_that_run_moves_it(hub):
     """A record whose type names its workflow starts that workflow when it is made (one run, about its subject), and

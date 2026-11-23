@@ -35,6 +35,32 @@ true` does the form offer **Start another anyway** (the API: `"allow_duplicate":
 link. An event or a schedule always starts its run: a request that came in is never dropped. An empty value is never
 a duplicate. Forms also post once: a second press while one is being sent does nothing.
 
+### Cancelling a run
+
+Whoever started a run, or a policy owner, may cancel it. Two settings change what a cancel does:
+
+```toml
+cancel_by = ["physician"]            # once a step for this role is claimed, only this role or a policy owner cancels
+
+[[on_cancel]]                        # run in the transaction that cancels the run
+id = "tell"
+title = "Tell the patient and the physician"
+action = "message.send"
+when = "cancel.reason != ''"         # optional
+[on_cancel.params]
+to = "{{run.subject}}"
+body = "Your renewal was cancelled: {{cancel.reason}}"
+```
+
+- `cancel_by` lists roles. When someone claims a step for one of them, cancelling passes to that role. From then on,
+  only someone who holds it, or a policy owner, may cancel the run. Before anyone has claimed such a step, the usual
+  rule applies. `Engine.cancel_refusal(actor, run)` gives the reason in words, or None, so a page can leave out a
+  Cancel button that would be refused.
+- `[[on_cancel]]` actions are written like an automation's `action` and `params`. Their placeholders can also read
+  `cancel.reason` and `cancel.by` (the canceller's name). They run inside the cancel. If one fails, the cancel is
+  refused ("it cannot be cancelled now: 'Tell the patient' did not go through (...)") and nothing of it is kept, so
+  nobody is left untold.
+
 ## Steps
 
 ```toml

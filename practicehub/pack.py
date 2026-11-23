@@ -161,6 +161,13 @@ class Pack:
                 problems.append(f"trigger.starters: there is no role {r!r}")
         if getattr(wf, "deadline_escalate_to", None) and wf.deadline_escalate_to not in roles:
             problems.append(f"deadline: there is no role {wf.deadline_escalate_to!r} (roles: {', '.join(sorted(roles))})")
+        for r in getattr(wf, "cancel_by", None) or []:
+            if r not in roles:
+                problems.append(f"cancel_by: there is no role {r!r} (roles: {', '.join(sorted(roles))})")
+        for s in getattr(wf, "on_cancel", None) or []:
+            if s.action and s.action not in CORE_ACTIONS and s.action not in self.actions:
+                known = sorted(set(CORE_ACTIONS) | set(self.actions))
+                problems.append(f"on_cancel {s.id}: there is no action {s.action!r} (actions: {', '.join(known)})")
         for s in wf.steps:
             if s.role and s.role not in roles:
                 problems.append(f"step {s.id}: there is no role {s.role!r} (roles: {', '.join(sorted(roles))})")
