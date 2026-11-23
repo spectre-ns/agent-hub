@@ -67,7 +67,7 @@ field = "status"
 initial = "draft"
 in_use = "approved"   # while a document is revised, staff keep reading its last approved revision
 locked = ["in-review", "approved", "retiring", "obsolete"]   # what was reviewed is what gets approved
-abandoned = { "in-review" = "draft" }  # a review cancelled hands the draft back; a proposal to make it obsolete stays until a controller decides it (cancelling never takes an approved one out of force)
+abandoned = { "in-review" = "draft", "retiring" = "draft" }  # cancelled work hands it back as a draft: never approved or obsolete by a cancel, and no more than Revise already lets a person do
 
 [[lifecycle.transition]]
 from = ["draft"]

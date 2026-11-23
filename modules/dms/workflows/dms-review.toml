@@ -11,9 +11,17 @@ record = "Document"
 # it, since a workflow has no loops), and who wrote a revision never approves it. Nothing else starts it.
 
 [[steps]]
+id = "opened"
+title = "Taken under control"
+kind = "wait"
+until = "true"   # done as the run starts: a revision may start in draft, in review, in force or proposed obsolete
+instructions = "Each revision is walked from where the document is when its run starts."
+
+[[steps]]
 id = "revise"
 title = "Write the revision and send it for review"
 kind = "task"
+after = ["opened"]
 role = "document-author"
 assign_to = "{{record.owner}}"   # the document's owner writes its revisions; anyone with the role when it has none
 when = "record.status == 'draft'"
@@ -34,7 +42,7 @@ help = "for the reviewer, optional: sending it for review on its page does this 
 id = "approve"
 title = "Approve the document for use"
 kind = "gate"
-after = ["revise"]
+after = ["opened", "revise"]   # or a run that starts with it already in review
 when = "record.status == 'in-review'"
 role = "document-controller"
 signer = "person"
@@ -79,7 +87,7 @@ returned_because = "{{approve.comment}}"
 id = "in-force"
 title = "In force until revised or made obsolete"
 kind = "wait"
-after = ["revise", "publish"]
+after = ["opened", "revise", "publish"]   # or a run that starts with it in force
 when = "record.status == 'approved'"
 until = "record.status != 'approved'"   # revised, sent back for review (a CAPA), or proposed obsolete
 instructions = """The approved revision is in force: staff read it and sign that they understood it. Revising it
@@ -100,7 +108,7 @@ increment = ["revision"]
 id = "retire"
 title = "Decide whether to make the document obsolete"
 kind = "gate"
-after = ["revise", "in-force"]
+after = ["opened", "revise", "in-force"]
 when = "record.status == 'retiring'"
 role = "document-controller"
 signer = "person"
