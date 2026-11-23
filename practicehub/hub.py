@@ -3312,6 +3312,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
                           previous=last["id"] if last else None)
 
+    @staticmethod
+    def _filed_before_lifecycle(rt, after: dict, new):
+        """A record filed before its type had a lifecycle has no state: it is in the type's first state, and is
+        written with it the next time it is changed (a module upgrade's migration, record by record, idempotent)."""
+        first = rt.lifecycle["initial"]
+        if new is None:
+            return first, schema.put(after, rt.lifecycle["path"], first), first
+        return first, after, new
+
     def _owner_picks_up(self, rt, ref: str, rec: dict, member: dict, cause: int) -> None:
         """A record filed before its type named a workflow (or before the version that walks it was approved), changed
         now, is picked up by that workflow where it is: the module upgrade's migration, done record by record as each
@@ -3494,6 +3503,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             moved = None
             if rt.lifecycle:
                 old, new = schema.first(before, rt.lifecycle["path"]), schema.first(after, rt.lifecycle["path"])
+                if old is None and rt.lifecycle.get("initial"):
+                    old, after, new = self._filed_before_lifecycle(rt, after, new)
                 if old in rt.lifecycle.get("locked", []) and not self._by_workflow(member, run_id) and _signature is None:
                     strip = lambda r: {k: v for k, v in schema.put(r, rt.lifecycle["path"], None).items() if k != "meta"}
                     if strip(before) != strip(after):
