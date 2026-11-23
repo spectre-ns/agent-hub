@@ -493,3 +493,114 @@ def test_upgrading_the_wiki_hands_a_sop_in_review_on_to_the_new_version(hub, old
     assert new["version"] > old["version"] and step_state(hub, new, "in-use") == "waiting"
     page = _named(hub, "WikiPage", "Booking rules")  # flagged under version 1: its check goes on as it was
     assert runs(hub, "wiki-check", f"WikiPage/{page['id']}", "running")[0]["version"] == 1
+
+
+# ------------------------------------------------------------------------------------------- inventory: StockMove, StockItem
+@pytest.fixture
+def stock(hub):
+    def build(h):
+        install(h, "inventory")
+        for m in h.pack.modules:
+            m.module.demo(h)
+    snapshot_onto(hub, "modwf:stock", build, modules=["inventory"])
+    return hub
+
+
+def _sku(hub, sku):
+    return next(i for i in hub.records.search("StockItem", limit=None) if i["sku"] == sku)
+
+
+def test_a_stock_move_is_walked_from_draft_and_a_rejected_one_is_revised_and_walked_again(stock):
+    hub = stock
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    gloves = _sku(hub, "GL-M")
+    m = hub.create_record(rana, "StockMove", {"kind": "count", "item": f"StockItem/{gloves['id']}", "quantity": 18,
+                                              "reason": "shelf count"})
+    ref = f"StockMove/{m['id']}"
+    first = open_run(hub, "inventory-post", ref)
+    assert step_state(hub, first, "submit") == "waiting"  # with its author until submitted
+    hub.update_record(rana, ref, {"status": "submitted"})
+    with pytest.raises((Denied, Invalid)):  # sent for sign-off: its author does not take it back
+        hub.update_record(rana, ref, {"status": "draft"})
+    with pytest.raises(Denied):
+        hub.engine.claim(rana, item_for(hub, first, "sign-off"))
+    _board(hub, first, "sign-off", amara, "reject", "count it again")
+    assert hub.records.read("StockMove", m["id"])["status"] == "rejected"
+    assert hub.engine.run(first["id"])["status"] == "completed"
+    second = open_run(hub, "inventory-post", ref)  # back with its author: the next pass
+    assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "submit") == "waiting"
+    hub.update_record(rana, ref, {"status": "draft"})  # Revise: a move the open step waits on
+    hub.update_record(rana, ref, {"quantity": 19})
+    hub.update_record(rana, ref, {"status": "submitted"})
+    with pytest.raises(Denied):  # who wrote it never signs it off, on any pass
+        hub.engine.claim(rana, item_for(hub, second, "sign-off"))
+    _board(hub, second, "sign-off", amara, "post")
+    assert hub.records.read("StockMove", m["id"])["status"] == "posted" and _sku(hub, "GL-M")["on_hand"] == 19
+    assert not runs(hub, "inventory-post", ref, "running")  # posted: no one's work
+
+
+def test_a_stock_item_reorder_cycle_is_one_run_and_a_delivery_restocks_it_through_the_wait(stock):
+    hub = stock
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    syr = _sku(hub, "SY-3")
+    ref = f"StockItem/{syr['id']}"
+    first = open_run(hub, "inventory-reorder", ref)
+    assert step_state(hub, first, "watch") == "waiting"
+    with pytest.raises((Denied, Invalid)):  # low and on order are its reorder work's, never typed in
+        hub.update_record(rana, ref, {"status": "low"})
+    issue = hub.create_record(rana, "StockMove", {"kind": "issue", "item": ref, "quantity": 2})
+    hub.update_record(rana, f"StockMove/{issue['id']}", {"status": "submitted"})  # 5 -> 3: at its reorder point
+    assert _sku(hub, "SY-3")["status"] == "low"
+    assert open_run(hub, "inventory-reorder", ref)["id"] == first["id"]  # the same run, now at its order
+    i = item_for(hub, first, "order")
+    hub.engine.claim(amara, i)
+    hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-1"})
+    assert _sku(hub, "SY-3")["status"] == "on-order" and step_state(hub, first, "delivered") == "waiting"
+    rcv = hub.create_record(rana, "StockMove", {"kind": "receive", "item": ref, "quantity": 10})
+    hub.update_record(rana, f"StockMove/{rcv['id']}", {"status": "submitted"})
+    item = _sku(hub, "SY-3")
+    assert item["on_hand"] == 13 and item["status"] == "stocked"
+    post = runs(hub, "inventory-post", f"StockMove/{rcv['id']}")[0]
+    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "stocked"})
+    assert moved["run_id"] == post["id"]  # the delivery's workflow moved it, through the wait the cycle held
+    assert hub.engine.run(first["id"])["status"] == "completed"
+    second = open_run(hub, "inventory-reorder", ref)  # restocked: the next cycle watches it
+    assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "watch") == "waiting"
+    hub.update_record(rana, ref, {"status": "discontinued", "discontinue_reason": "No longer used"})
+    assert not runs(hub, "inventory-reorder", ref, "running")  # no longer kept: no one's work
+
+
+def test_upgrading_inventory_hands_work_under_way_on_and_picks_up_items_on_their_next_write(hub, old_modules):
+    install(hub, "inventory")
+    demo(hub, "inventory")
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    syr, gloves = _sku(hub, "SY-3"), _sku(hub, "GL-M")
+    sref, gref = f"StockItem/{syr['id']}", f"StockItem/{gloves['id']}"
+    w = hub.create_record(rana, "StockMove", {"kind": "write-off", "item": gref, "quantity": 2, "reason": "wet"})
+    wref = f"StockMove/{w['id']}"
+    hub.update_record(rana, wref, {"status": "submitted"})
+    old_post = open_run(hub, "inventory-post", wref)  # version 1, started by its event
+    issue = hub.create_record(rana, "StockMove", {"kind": "issue", "item": sref, "quantity": 2})
+    hub.update_record(rana, f"StockMove/{issue['id']}", {"status": "submitted"})
+    old_reorder = open_run(hub, "inventory-reorder", sref)
+    assert not runs(hub, "inventory-reorder", gref)  # version 1: a stocked item is no one's work
+    proposed = old_modules(hub, "inventory")
+    for key in (("type", "StockMove"), ("type", "StockItem"), ("workflow", "inventory-post"),
+                ("workflow", "inventory-reorder")):
+        assert key in proposed
+    approve_all(hub, proposed, amara)
+    _board(hub, old_post, "sign-off", amara, "post")  # the run under way keeps its version
+    assert hub.records.read("StockMove", w["id"])["status"] == "posted"
+    assert hub.engine.run(old_post["id"])["status"] == "completed" and not runs(hub, "inventory-post", wref, "running")
+    i = item_for(hub, old_reorder, "order")
+    hub.engine.claim(amara, i)
+    hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-2"})
+    assert hub.engine.run(old_reorder["id"])["status"] == "completed"  # version 1 ended at on order
+    new = open_run(hub, "inventory-reorder", sref)  # handed on: version 2 waits for the delivery
+    assert new["version"] > old_reorder["version"] and step_state(hub, new, "delivered") == "waiting"
+    # an item filed before is picked up by its workflow on its next write, once
+    hub.update_record(rana, gref, {"supplier": "Another supplier"})
+    picked = open_run(hub, "inventory-reorder", gref)
+    assert step_state(hub, picked, "watch") == "waiting"
+    hub.update_record(rana, gref, {"supplier": "A third supplier"})
+    assert len(runs(hub, "inventory-reorder", gref)) == 1

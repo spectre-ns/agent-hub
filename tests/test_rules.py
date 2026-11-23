@@ -2864,6 +2864,12 @@ def _move(hub, who, sku, kind, quantity, **more):
     return hub.records.read("StockMove", m["id"])
 
 
+def _post_run(hub, move):
+    """The stock move's own running inventory-post run."""
+    return next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post"
+                and r["record"] == f"StockMove/{move['id']}" and r["status"] == "running")
+
+
 def test_on_hand_is_set_only_by_a_workflow(stock):
     hub, rana = stock, M(stock, "rana")
     gloves = _item(hub, "GL-M")
@@ -2891,7 +2897,7 @@ def test_a_write_off_is_signed_off_by_someone_who_did_not_write_it(stock):
         _move(hub, rana, "GL-M", "issue", -4)
     move = _move(hub, rana, "GL-M", "write-off", 4, reason="a box got wet")
     assert move["status"] == "submitted" and _item(hub, "GL-M")["on_hand"] == 24
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, move)
     i = item_for(hub, run, "sign-off")
     with pytest.raises(Denied):
         hub.engine.claim(rana, i)
@@ -2901,7 +2907,7 @@ def test_a_write_off_is_signed_off_by_someone_who_did_not_write_it(stock):
     assert hub.records.read("StockMove", move["id"])["status"] == "posted"
 
     count = _move(hub, rana, "GL-M", "count", 18, reason="shelf count")
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, count)
     i = item_for(hub, run, "sign-off")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "reject", "count it again")
@@ -2910,14 +2916,14 @@ def test_a_write_off_is_signed_off_by_someone_who_did_not_write_it(stock):
     assert "count it again" in counted["reject_reason"]
 
     big = _move(hub, rana, "GL-M", "write-off", 999, reason="flood")   # more than is on hand: never below zero
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, big)
     i = item_for(hub, run, "sign-off")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "post")
     assert _item(hub, "GL-M")["on_hand"] == 20 and hub.records.read("StockMove", big["id"])["status"] == "rejected"
 
     found = _move(hub, rana, "GL-M", "found", 2, reason="behind the shelf")
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, found)
     i = item_for(hub, run, "sign-off")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "post")
@@ -2933,7 +2939,8 @@ def test_an_item_at_its_reorder_point_is_ordered_and_restocked_by_a_delivery(sto
     _move(hub, rana, "SY-3", "issue", 2)              # 5 -> 3, at or under its reorder point of 4
     item = _item(hub, "SY-3")
     assert item["on_hand"] == 3 and item["status"] == "low"
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-reorder")
+    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-reorder"
+               and r["record"] == f"StockItem/{item['id']}" and r["status"] == "running")
     i = item_for(hub, run, "order")
     hub.engine.claim(amara, i)
     hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-1"})
