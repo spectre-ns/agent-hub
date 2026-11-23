@@ -495,8 +495,11 @@ def test_views_show_in_the_sidebar_and_work_starts_about_any_record(hub, server)
     assert code == 200 and f'name="_record" value="CAPA/{capa["id"]}"' in page and 'class="about"' in page  # fixed
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": "Patient/x"})
     assert code == 422  # a CAPA workflow is about a CAPA
+    code, page = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
+    assert code == 422 and "already under way" in page  # its own workflow walks it: never a second run
+    hub.update_record(hub.member(qm["id"]), f"CAPA/{capa['id']}", {"status": "cancelled", "cancel_reason": "Test"})
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
-    assert code == 303
+    assert code == 303  # nothing of it open: work starts about it
 
 
 def test_the_privacy_officer_reports_who_accessed_a_file(hub, server):
