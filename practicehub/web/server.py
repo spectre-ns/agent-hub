@@ -414,7 +414,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         wf = viewer.workflow_of_run(run["id"])
         steps = viewer.run_steps(wf, run) if wf else run["steps"]  # a step they may not see: not even which ran
         return {**{k: run[k] for k in ("id", "workflow_id", "version", "record", "status", "started_by",
-                                       "created_at", "updated_at")}, "steps": steps, "title": self.hub.run_title(me, run)}
+                                       "created_at", "updated_at")}, "steps": steps, "title": self.hub.run_title(me, run),
+                "href": self.run_href(run)}  # where it is worked on: its record's page, else its own
 
     def _note_run_view(self, me, run) -> None:
         """A run's page shows its record's name, the run's input and its steps' results: what a member sees there
@@ -2258,9 +2259,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                        f'</form></details>')
         dl = [("Status", self._loz(self.RUN_STATUS, run["status"])),
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
-        if run.get("subject") and run["subject"] != run["record"] and run["subject"].startswith(self.subj["type"] + "/"):
+        if run.get("subject") and run["subject"] != run.get("record") and run["subject"].startswith(self.subj["type"] + "/"):
             dl.append((self.subj["label"], self._ref_html(me, run["subject"]) or e(self.subj["label"])))
-        elif run["record"] and run["record"].startswith(self.subj["type"] + "/"):
+        elif run.get("record") and run["record"].startswith(self.subj["type"] + "/"):
             dl.append((self.subj["label"], self._ref_html(me, run["record"]) or e(self.subj["label"])))
         dl += [("Started by", self.who(run["started_by"])), ("Created", self._at(run["created_at"])),
                ("Updated", self._at(run["updated_at"]))]
