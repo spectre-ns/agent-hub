@@ -1005,16 +1005,27 @@ class RecordPages:
         return t["to"] in self.UNDOING or words.startswith(("cancel", "discontinue", "make obsolete", "withdraw",
                                                             "revoke", "retire", "void", "mark entered in error"))
 
-    def _state_loz(self, st, rt=None) -> str:
-        """A status lozenge, in words (the lifecycle's label for it). Its tone comes from common, generic state words;
-        a state it does not know is grey."""
-        if st is None:
-            return ""
+    # a tone the type's lifecycle declares for a state, as the page draws it
+    TONE_CLASS = {"waiting": "default", "active": "inprogress", "attention": "moved", "done": "success",
+                  "ended": "removed"}
+
+    def _state_tone(self, st, rt=None) -> str:
+        """How a state reads at a glance: the tone its type's lifecycle declares for it (``tones``); a type that
+        declares none for it falls back to common, generic state words, and a state it does not know is grey."""
+        declared = ((getattr(rt, "lifecycle", None) or {}).get("tones") or {}).get(str(st))
+        if declared:
+            return self.TONE_CLASS[declared]
         s = str(st).lower()
-        tone = ("success" if s in self.SETTLED else
+        return ("success" if s in self.SETTLED else
                 "removed" if s in self.UNDONE else
                 "inprogress" if "review" in s or s in self.UNDERWAY else
                 "default")
+
+    def _state_loz(self, st, rt=None) -> str:
+        """A status lozenge, in words (the lifecycle's label for it), in its state's tone."""
+        if st is None:
+            return ""
+        tone = self._state_tone(st, rt)
         words = rt.state_label(st) if rt is not None else schema.state_words(st)
         return f'<span class="loz {tone}">{e(words)}</span>'
 

@@ -5057,3 +5057,27 @@ def test_a_person_is_refused_a_move_before_it_opens_and_a_workflow_is_not(hub):
         hub.update_record(jo, ref, {"status": "noshow"})
     hub.engine._now = datetime(2027, 3, 9, 11, 0)
     assert hub.move_not_open_yet(rt, t, visit, jo, None) is None
+
+
+# ============================================================== round 7, clinic visit: state tones the lifecycle declares
+def test_a_lifecycle_declares_how_each_state_reads_not_guessed_from_its_words(hub):
+    """``tones`` on a lifecycle: each state is waiting, active, attention, done or ended, as the type says. A state it
+    declares none for falls back to the generic words; a tone that is not one of those, or a state it does not have,
+    is refused."""
+    from practicehub import schema
+    from practicehub.web.records_pages import RecordPages
+    rt = schema.parse(_TIMED.replace('initial = "booked"',
+                                     'initial = "booked"\ntones = { booked = "waiting", here = "active", missed = "ended" }'))
+    assert rt.lifecycle["tones"] == {"booked": "waiting", "here": "active", "missed": "ended"}
+    for bad in ('tones = { booked = "green" }', 'tones = { gone = "done" }', 'tones = "done"'):
+        with pytest.raises(Exception):
+            schema.parse(_TIMED.replace('initial = "booked"', 'initial = "booked"\n' + bad))
+    tone = RecordPages._state_tone
+    assert tone(RecordPages, "missed", rt) == "removed" and tone(RecordPages, "here", rt) == "inprogress"
+    assert tone(RecordPages, "booked", rt) == "default"
+    assert tone(RecordPages, "completed", schema.parse(_TIMED)) == "success"  # none declared: the words
+    # a referral sent is under way, not done (its code, active, reads as settled); a visit with no note needs action
+    sr, enc = hub.record_type("ServiceRequest"), hub.record_type("Encounter")
+    assert tone(RecordPages, "active", sr) == "inprogress" and tone(RecordPages, "completed", sr) == "success"
+    assert tone(RecordPages, "undocumented", enc) == "moved" and tone(RecordPages, "noshow", enc) == "removed"
+    assert tone(RecordPages, "finished", enc) == "success"

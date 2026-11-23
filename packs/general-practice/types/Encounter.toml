@@ -279,6 +279,8 @@ field = "status"
 initial = "planned"
 labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", undocumented = "Completed: no note", onleave = "Patient stepped out", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
 abandoned = { requested = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
+# How each state reads at a glance: a visit no-showed or cancelled has ended, one with no note needs the physician.
+tones = { requested = "waiting", planned = "waiting", arrived = "active", triaged = "active", "in-progress" = "active", onleave = "active", finished = "done", undocumented = "attention", cancelled = "ended", noshow = "ended", "entered-in-error" = "ended" }
 [[lifecycle.transition]]
 from = ["requested"]
 to = "planned"

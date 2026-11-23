@@ -425,8 +425,7 @@ class WorkPanel:
             p_[0] += gl
         width = gl + inner + gr
         height = PAD + 22 + len(rows) * (H + GY) - GY + PAD
-        tone = lambda s: ("success" if s.lower() in self.SETTLED else "removed" if s.lower() in self.UNDONE else
-                          "inprogress" if "review" in s.lower() or s.lower() in self.UNDERWAY else "default")
+        tone = lambda s: self._state_tone(s, rt)
         edges, any_tabs = [], []
         for t in trans:
             # "a move from here" is per source: only the arrow that leaves the current state, and never one only a
