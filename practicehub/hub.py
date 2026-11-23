@@ -3204,30 +3204,46 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def state_move_refusal(self, rt, ref: str, t: dict, after: dict, run_id: str | None) -> str | None:
         """Why a move of a record whose type names its workflow is refused, or None. That workflow alone moves its
-        state: its own run, or a person (an import, the portal, any other path) only through a move the run is
-        waiting on now (a wait whose ``until`` holds of the record as moved, or a state the open step lists in
-        ``moves``). Another workflow never moves it. A correction open from every state (``from = ["*"]``, entered
-        in error) stays anyone's who may write the record."""
+        state while a run of it walks the record: its own run, or a person or another workflow's run (an import, the
+        portal, a CAPA revising the documents it names) only through a move the run is waiting on now (a wait whose
+        ``until`` holds of the record as moved, or a state the open step lists in ``moves``). A correction open from
+        every state (``from = ["*"]``, entered in error) stays anyone's who may write the record.
+
+        When no run of it walks the record (one filed or approved before its type named a workflow, or one whose
+        run is over), the record is moved as any record is, and its workflow picks it up where it lands
+        (``_owner_follows_move``); a run moving it then must be about what the record is about
+        (``_unwalked_move_refusal``)."""
         owner = (rt.workflow or {}).get("id")
         if not owner or "*" in t["from"]:
             return None
         label = rt.label.lower()
-        if run_id:
-            run = self.db.runs.get(run_id)
-            if run and run["workflow_id"] == owner and run.get("record") == ref:
-                return None
-            if run and not self.state_move_waited_on(rt, ref, after, t["to"]):
-                # another workflow (a CAPA revising the documents it names) moves it only through a move the owner's
-                # open step waits on, as a person would
-                return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
-            if run:
-                return None
+        walked = self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"])
+        run = self.db.runs.get(run_id) if run_id else None
+        if run and run["workflow_id"] == owner and run.get("record") == ref:
+            return None
+        if not walked:
+            return self._unwalked_move_refusal(rt, ref, after, run) if run else None
         if self.state_move_waited_on(rt, ref, after, t["to"]):
             return None
-        if not self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
-            return None  # its workflow is not walking it (filed before the type named one, or its run is over)
+        if run:
+            return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
         return (f"a {label} is moved by its workflow; it is not waiting for "
                 f"{rt.state_label(t['to']).lower()} now")
+
+    def _unwalked_move_refusal(self, rt, ref: str, rec: dict, run: dict) -> str | None:
+        """A run moving a record its type's workflow is not walking (a CAPA opening a document approved before the
+        upgrade, a renewal closing the order it replaces): only one about the same subject as the record, when the
+        record is about one (a renewal run never moves another patient's order)."""
+        about = self.subject_of({**rec, "resourceType": rt.id, "id": ref.split("/", 1)[1]})
+        if not about or about == ref:
+            return None
+        mine = run.get("subject")
+        if not mine and "/" in str(run.get("record") or ""):
+            got = self.records.read(*run["record"].split("/", 1))
+            mine = self.subject_of(got) if got else None
+        if mine != about:
+            return f"this {rt.label.lower()} is about someone else than the work moving it"
+        return None
 
     def state_move_waited_on(self, rt, ref: str, after: dict, new: str) -> str | None:
         """Whether the open run of the type's workflow about ``ref`` is waiting on the record moving to ``new``: how

@@ -3076,6 +3076,49 @@ def test_not_by_keeps_off_whoever_did_the_step_in_any_earlier_pass_of_the_record
     hub.engine.claim(noor, v)
 
 
+def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_up_where_it_lands(hub):
+    """Rule: a record its type's workflow is not walking (approved before an upgrade, or its run is over) is moved
+    by another workflow's run as any record is, rather than refused, and its own workflow starts where it lands; a
+    run moving it must be about what the record is about (a run about one patient never moves another's visit)."""
+    install(hub, "dms")
+    install(hub, "qms")
+    for m in hub.pack.modules:
+        m.module.demo(hub)
+    rana = M(hub, "rana")
+    doc = hub.records.create("Document", {"resourceType": "Document", "title": "Old SOP", "body": "B",
+                                          "status": "approved", "revision": 3, "owner": "rana"})
+    dref = f"Document/{doc['id']}"
+    assert not hub.db.runs.find_one({"record": dref})   # approved before its type named a workflow
+    capa = hub.create_record(rana, "CAPA", {"title": "Old SOP", "kind": "corrective", "problem": "P",
+                                            "documents": [dref]})
+    run = _own_run(hub, f"CAPA/{capa['id']}", "qms-capa")
+    i = item_for(hub, run, "investigate")
+    hub.engine.claim(rana, i)
+    hub.engine.complete(rana, i, {"root_cause": "R", "plan": "P"})
+    assert hub.records.read("Document", doc["id"])["status"] == "draft"
+    assert hub.engine.run(run["id"])["steps"]["revise-documents"]["state"] == "done"
+    walk = _own_run(hub, dref, "dms-review")
+    assert hub.engine.run(walk["id"])["steps"]["revise"]["state"] == "waiting"
+
+    jo = M(hub, "jo")
+    pats = hub.records.search("Patient")
+    a, b = f"Patient/{pats[0]['id']}", f"Patient/{pats[1]['id']}"
+    ra = hub.engine.start(jo, "appointment-request", record=a, inputs={"reason": "knee", "kind": "new-concern"})
+    rb = hub.engine.start(jo, "appointment-request", record=b, inputs={"reason": "back", "kind": "new-concern"})
+    visit = hub.records.read(*hub.engine.run(rb["id"])["record"].split("/", 1))
+    old = {k: v for k, v in visit.items() if k not in ("id", "meta")}
+    old.update(status="triaged", subject={"reference": b}, plannedStartDate="2026-11-20T09:00:00-04:00")
+    rec = hub.records.create("Encounter", old)        # a visit of b's that nothing walks now
+    ref = f"Encounter/{rec['id']}"
+    actor = hub.engine.automation_actor(hub.engine.run(ra["id"]))
+    with pytest.raises((Denied, Invalid)) as exc:
+        hub.update_record(actor, ref, {**rec, "status": "in-progress"}, run_id=ra["id"])
+    assert "someone else" in str(exc.value)
+    hub.update_record(hub.engine.automation_actor(hub.engine.run(rb["id"])), ref, {**rec, "status": "in-progress"},
+                      run_id=rb["id"])
+    assert hub.records.read("Encounter", rec["id"])["status"] == "in-progress"
+
+
 def test_increment_and_decrement_take_amounts_and_for_each_takes_one_reference(hub):
     from practicehub.workflows import parse
     base = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["physician"]\n[[steps]]\nid = "a"\n'
