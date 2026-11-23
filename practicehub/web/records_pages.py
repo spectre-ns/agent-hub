@@ -774,11 +774,22 @@ class RecordPages:
         q = req["query"].get("q", "").lower()
         from .server import SHOWN
         linked = req["query"].get("linked", "")
+        # a booked thing (a visit): in time order, and Today, the day's in the order they come
+        timed = bool(rt.date and "start" in (rt.base_map or {}))
+        today = timed and req["query"].get("when") == "today"
         if linked:  # every one linked to a record ("Show all" under its links): the record's page shows 50
             recs, more = self._linked_records(me, rtype, rt, linked), False
+        elif today:
+            day = hub.engine.now().date().isoformat()
+            recs = [r for r in hub.search_records(me, rtype, limit=None, text=q or None)
+                    if schema.record_date(rt, r)[:10] == day]
+            recs.sort(key=lambda r: schema.record_date(rt, r))
+            more = False
         else:
             recs = hub.search_records(me, rtype, limit=SHOWN + 1, text=q or None)  # without what they may not read
             more, recs = len(recs) > SHOWN, recs[:SHOWN]
+            if timed:
+                recs.sort(key=lambda r: schema.record_date(rt, r), reverse=True)
         hub.note_list(me, recs, how="search" if q else "list", what=f"records:{rtype}", text=q or None)
         lc = rt.lifecycle
         heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
@@ -798,9 +809,19 @@ class RecordPages:
             table = (f'<div class="flash info"><p>Each {e(self._lower(rt.label))} is part of {e(a_an(ol))}: open one '
                      f'from its {e(ol)}, and add one there.</p></div>' + table)
         search = (f'<form class="inline"><input name="q" value="{e(q)}" placeholder="Search {e(self._lower(rt.plural))}" aria-label="Search {e(self._lower(rt.plural))}">'
-                  f'<button class="secondary">Search</button></form>')
+                  + (f'<input type="hidden" name="when" value="today">' if today else "")
+                  + f'<button class="secondary">Search</button></form>')
+        if timed and not linked:  # all of them, latest first, or today's in the order they come
+            qq = f"&q={urllib.parse.quote(q)}" if q else ""
+            search += (f'<nav class="filters when" aria-label="Which ones">'
+                       f'<a class="btn {"secondary" if today else "selected"}" href="/records/{e(rtype)}{"?q=" + e(urllib.parse.quote(q)) if q else ""}"'
+                       f'{"" if today else " aria-current=page"}>All, latest first</a>'
+                       f'<a class="btn {"selected" if today else "secondary"}" href="/records/{e(rtype)}?when=today{e(qq)}"'
+                       f'{" aria-current=page" if today else ""}>Today</a></nav>')
         note = (f"<p class='muted'>The {SHOWN} most recently changed are shown: search to find any other.</p>"
                 if more else "")
+        if today and not recs:
+            table = f"<p class='muted'>No {e(self._lower(rt.plural))} today.</p>"
         qs = f"?q={urllib.parse.quote(q)}" if q else ""
         export = (f'<a class="btn secondary" href="/records/{e(rtype)}/export{e(qs)}" data-modal>Export</a>'
                   if recs or hub.is_policy_owner(me) else "")
@@ -1105,6 +1126,7 @@ class RecordPages:
         out, rail = [], []
         for t, recs in parts.items():
             rt = hub.record_type(t)
+            recs = sorted(recs, key=lambda r: schema.record_date(rt, r), reverse=True)  # by when, latest first
             f = self._owner_field(rt)
             add = (f'<a class="btn secondary" href="/records/{e(t)}/new?{e(f["name"])}={e(q)}" data-modal>'
                    f'Add {e(self._lower(rt.label))}</a>' if self._may_write(me, t) else "")
@@ -1129,22 +1151,31 @@ class RecordPages:
                     g["recs"][rid] = r
                     if not (visibility.withheld(r) or {}).get("whole"):
                         hub.note_view(me, x["ref"], how=f"linked to {ref}")
-        links = []
+        links, own = [], []
+        subject = rtype == self.subj["type"]
         for t in sorted(groups, key=lambda t: (hub.record_type(t).order, t)):
             rt, g = hub.record_type(t), groups[t]
+            # on a subject's chart, what is about them (their results, their prescriptions: linked by the field that
+            # names them as its subject) is a section of the chart, like a part; anything else is "Linked here"
+            about = subject and any(f["type"] == "reference" and not f["path"].endswith(".*")
+                                    and f.get("rel") in g["rels"] and rtype in hub.concrete(f["target"])
+                                    for f in rt.fields)
             recs = sorted(g["recs"].values(), key=lambda r: schema.record_date(rt, r), reverse=True)
             # the field a new one names this record in: a single reference, of a rel seen, that may point here
             fld = next((f for f in rt.fields if f["type"] == "reference" and not f["path"].endswith(".*")
                         and f["rel"] in g["rels"] and rtype in hub.concrete(f["target"])), None)
             new = (f'<a class="btn subtle" href="/records/{e(t)}/new?{e(fld["name"])}={e(q)}" data-modal>'
                    f'New {e(self._lower(rt.label))}</a>' if fld and self._may_write(me, t) else "")
-            links.append(f'<section class="chart-section" id="link-{e(t)}" aria-labelledby="link-{e(t)}-h"><header>'
-                         f'<h3 id="link-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></h3>'
+            hn = "h2" if about else "h3"
+            (own if about else links).append(
+                         f'<section class="chart-section" id="link-{e(t)}" aria-labelledby="link-{e(t)}-h"><header>'
+                         f'<{hn} id="link-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></{hn}>'
                          f'{new}</header>{self._part_rows(rt, recs[:50])}'
                          + (f'<p class="muted body">The 50 most recent of {len(recs)}. <a href="/records/{e(t)}?linked='
                             f'{e(urllib.parse.quote(ref, safe=""))}">Show all {len(recs)}</a></p>' if len(recs) > 50 else "")
                          + '</section>')
             rail.append((f"link-{t}", rt.plural, len(recs)))
+        out += own
         if links:
             out.append('<h2 class="links-head" id="links">Linked here</h2>' + "".join(links))
         hidden += sum(1 for x in hub.db.links.find({"to_ref": ref}, fields=["from_ref"])
@@ -1792,7 +1823,9 @@ class RecordPages:
         url = f"/records/{e(rt.id)}/{e(rec['id'])}"
         screen = hub.transition_screen(me, ref)
         m = next((x for x in screen["may"] if x["to"] == to), None)
-        crumbs = [("/records", "Records"), (f"/records/{rt.id}", rt.plural), (f"/records/{ref}", hub.short_title(rec))]
+        part = self.owner_crumbs(me, rt, rec)  # a part (a visit) sits under its owner (the patient)
+        crumbs = ([*part[:-1], (self.record_href(ref), hub.short_title(rec))] if part else
+                  [("/records", "Records"), (f"/records/{rt.id}", rt.plural), (self.record_href(ref), hub.short_title(rec))])
         here = self._state_loz(screen["state"], rt)
         if m is None:
             no = next((x for x in screen["may_not"] if x["to"] == to), None)

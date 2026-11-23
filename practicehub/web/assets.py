@@ -4839,6 +4839,7 @@ ol.timeline{list-style:none;padding:0;margin:0}
 ol.timeline li{padding:6px 0;border-bottom:1px solid var(--line)}
 .tl-at{display:inline-block;min-width:9em;font-size:13px}
 .tl-versions{margin-top:16px}
+.filters.when{display:inline-flex;gap:4px;margin-left:8px}.filters.when .btn.selected{background:var(--selected-bg);color:var(--selected-fg)}
 """
 
 CSS = CSS + RECWORK_CSS
