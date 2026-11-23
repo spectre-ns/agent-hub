@@ -132,10 +132,18 @@ class Ollama:
         self.timeout = timeout
 
     def __call__(self, model, system, prompt, schema, ctx):
-        body = {"model": model, "stream": False, "format": schema, "options": {"temperature": 0},
+        # Ollama's default context (a few thousand tokens) silently cuts a patient's records off, and a model that
+        # thinks first can spend its whole turn thinking: a window that fits the context, and no thinking by default
+        body = {"model": model, "stream": False, "format": schema,
+                "options": {"temperature": 0, "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX") or 32768)},
+                "think": os.environ.get("OLLAMA_THINK") == "1",
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
         resp = _post(self.url + "/api/chat", body, {}, self.timeout)
-        return parse_answer((resp.get("message") or {}).get("content", ""))
+        msg = resp.get("message") or {}
+        if not (msg.get("content") or "").strip():
+            raise ModelError(f"the model gave no answer (stopped: {resp.get('done_reason') or 'unknown'}, "
+                             f"{resp.get('prompt_eval_count', '?')} tokens read)")
+        return parse_answer(msg["content"])
 
 
 class LiteLLM:
