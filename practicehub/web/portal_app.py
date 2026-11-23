@@ -55,6 +55,7 @@ PORTAL_CSS = """
 .portal .dob>div{flex:1}
 .portal .dob>div.month{flex:2}
 .portal .btn{min-height:44px}
+.portal .limit{display:block;padding:8px 12px;margin:8px 0;border-radius:6px;background:var(--warning-bg);color:var(--fg)}
 """
 
 
@@ -208,8 +209,9 @@ class PortalApp:
                 return 503, {"Content-Type": "text/html; charset=utf-8", "Retry-After": "60", **sec}, \
                     self.bare("Closed for now", f'<p class="warn">{e(words or "")}</p>').encode()
             title = "Not possible here" if exc.status == 403 else "Not found"
+            safety = f'<p class="safety"><strong>{e(self.say("safety"))}</strong></p>' if exc.status == 403 else ""
             return exc.status, {"Content-Type": "text/html; charset=utf-8", **sec}, self.page(
-                req, title, f'<p class="warn" role="alert">{e(str(exc))}</p><p><a href="/">Start again</a></p>'
+                req, title, f'<p class="warn" role="alert">{e(str(exc))}</p>{safety}<p><a href="/">Start again</a></p>'
             ).encode()
         except Exception:  # a bug: no detail to the person; the traceback goes to stderr
             import traceback
@@ -447,9 +449,16 @@ class PortalApp:
         open_ = ("<h2>Open requests</h2><ul>" + "".join(
             f'<li>{e(r["what"])} <span class="muted">(since {e(r["since"])})</span></li>' for r in reqs) + "</ul>"
                  ) if reqs else ""
+        limits = got.get("limits") or {}
+
+        def full(k):
+            lim = limits.get(k["id"]) or {}
+            if lim and lim.get("open", 0) >= lim.get("max", 1):
+                return f'<span class="limit">{e(self.say("at_limit", open=lim["open"]))}</span>'
+            return ""
         kinds = "".join(f'<li><a href="/book/{e(k["id"])}">{e(k["label"])}</a>'
-                        f'{f" <span class=muted>{e(k["description"])}</span>" if k.get("description") else ""}</li>'
-                        for k in self.cfg["kinds"])
+                        f'{f" <span class=muted>{e(k["description"])}</span>" if k.get("description") else ""}'
+                        f'{full(k)}</li>' for k in self.cfg["kinds"])
         return self.page(req, "Your bookings", f'<h2>Coming up</h2>{upcoming}{open_}<h2>Book</h2><ul>{kinds}</ul>')
 
     def cancel_form(self, req) -> str:
@@ -524,16 +533,23 @@ class PortalApp:
         s = self.me(req)
         k = self.kind(kid)
         values = values or {}
-        slots = self.call(req, "slots", kind=kid)["slots"] if slots is None else slots
+        got = self.call(req, "slots", kind=kid)
+        slots = got["slots"] if slots is None else slots
+        lim = got.get("limit") or {}
+        full = bool(lim) and lim.get("open", 0) >= lim.get("max", 1)
         qs = "".join(self._question(q, values.get(q["name"]), problems) for q in k["questions"])
         desc = f'<p>{e(k["description"])}</p>' if k.get("description") else ""
+        note = (f'<p class="limit" role="status">{e(self.say("at_limit", open=lim["open"]))}</p>'
+                f'<p class="safety"><strong>{e(self.say("safety"))}</strong></p>') if full else ""
         no_slot = any("time" in str(p).lower() for p in problems or ())
-        return self.page(req, k["label"], desc + self._problems(problems) + (
+        times = "" if full else self._slots(k, slots, values.get("slot", ""), no_slot)
+        button = "Send to the practice" if full else "Book" if k["mode"] == "book" else "Send my request"
+        return self.page(req, k["label"], desc + note + self._problems(problems) + (
             f'<form method="post" action="/book/{e(kid)}" class="card">'
             f'<input type="hidden" name="_form" value="{e(s["form"])}">'
             f'<input type="hidden" name="_submit" value="{e(values.get("_submit") or secrets.token_urlsafe(16))}">'
-            f'{self._slots(k, slots, values.get("slot", ""), no_slot)}{qs}'
-            f'<p><button class="btn primary">{"Book" if k["mode"] == "book" else "Send my request"}</button></p>'
+            f'{qs}{times}'
+            f'<p><button class="btn primary">{e(button)}</button></p>'
             f'</form>'))
 
     def book(self, req, kid: str) -> str:
@@ -576,7 +592,10 @@ class PortalApp:
         parts = [f'<div class="advice{" alarm" if r.get("alarm") else ""}" role="alert">{e(text)}</div>']
         if r.get("alarm") and r.get("advice"):
             parts.append(f'<p><strong>{e(self.say("emergency"))}</strong></p>')
-        if r.get("when"):
+        if r.get("over_limit"):
+            title = "Not booked: sent to the practice"
+            parts.append(f'<p>{e(self.say("over_limit"))}</p>')
+        elif r.get("when"):
             title = "Booked"
             parts.append(f'<p class="ok">{e(self.say("booked", when=r["when"], **{"with": r.get("with") or ""}))}</p>')
         elif r.get("failed"):

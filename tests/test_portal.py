@@ -101,6 +101,9 @@ def test_the_clinic_portal_is_valid(hub):
     (lambda c: c["kinds"]["forms"].update(max_upcoming=0), "max_upcoming"),
     (lambda c: c.update(public_origin="portal.example.ca"), "public_origin"),
     (lambda c: c["register"].pop("pending"), "pending"),
+    (lambda c: c["over_limit"].update(workflow="no-such-flow"), "no-such-flow"),
+    (lambda c: c["over_limit"].update(input="nope"), "over_limit.input"),
+    (lambda c: c["over_limit"].update(colour="red"), "over_limit.colour"),
 ])
 def test_a_bad_portal_is_refused_with_a_clear_problem(hub, change, says):
     pack = _pack(hub)
@@ -467,9 +470,51 @@ def test_a_kind_allows_only_so_many_open(hub):
     p, ref, token = signed_in(hub)
     for reason in ("my knee", "my elbow"):
         p.book(ref, "new-concern", None, {"reason": reason, "urgency": "routine"})
+    assert p.limits(ref)["new-concern"] == {"open": 2, "max": 2}, "told up front, before they write"
+    before = hub.db.runs.count({"workflow_id": "appointment-request"})
     with pytest.raises(Denied) as many:
-        p.book(ref, "new-concern", None, {"reason": "my shoulder", "urgency": "routine"})
-    assert str(many.value) == p.say("too_many")
+        p.book(ref, "new-concern", None, {"reason": "I need a form filled in for work", "urgency": "routine"})
+    assert str(many.value) == p.say("too_many"), "plainly paperwork: refused, to call"
+    got = p.book(ref, "new-concern", None, {"reason": "my shoulder", "urgency": "routine"})
+    assert got["over_limit"] and got["requested"] and not got["when"] and not got["alarm"]
+    run = _run_of(hub, got)
+    assert run["workflow_id"] == "patient-question" and run["ctx"]["input"]["question"] == "my shoulder", \
+        "not routine: a person reads it, though nothing more is booked"
+    assert hub.db.runs.count({"workflow_id": "appointment-request"}) == before
+
+
+def test_a_red_flag_past_the_limit_is_screened_and_reaches_a_nurse(hub):
+    """Round 7 blocker: a patient at the limit who then writes about chest pain is screened before the limit is
+    applied: the advice is loud, nothing is booked, and the words go to a nurse."""
+    p, ref, token = signed_in(hub)
+    for reason in ("my knee", "my elbow"):
+        p.book(ref, "new-concern", None, {"reason": reason, "urgency": "routine"})
+    got = p.book(ref, "new-concern", None, {"reason": "Since an hour ago my chest feels tight and my left arm is numb",
+                                            "urgency": "soon"})
+    assert got["alarm"] is True and got["advice"] and "chest pain" in got["found"] and got["over_limit"]
+    run = _run_of(hub, got)
+    assert run["workflow_id"] == "patient-question"
+    assert run["ctx"]["screen"]["red_flag"] is True
+    assert run["steps"]["urgent"]["state"] not in ("skipped", None), "a nurse is to call now"
+
+
+def test_the_limit_is_said_on_the_form_and_the_refusal_says_what_to_do_in_an_emergency(hub):
+    app = portal_app(hub)
+    p = Portal(hub, dev=True)
+    ref = person(hub)
+    for reason in ("my knee", "my elbow"):
+        p.book(ref, "new-concern", None, {"reason": reason, "urgency": "routine"})
+    b = Browser(app)
+    _sign_in(b)
+    page = b.go("GET", "/me")[2]
+    assert html.escape(app.say("at_limit", open=2)) in page
+    page = b.go("GET", "/book/new-concern")[2]
+    assert html.escape(app.say("at_limit", open=2)) in page and 'name="slot"' not in page
+    assert html.escape(app.say("safety")) in page
+    status, h, page = b.go("POST", "/book/new-concern", {"_form": _field(page, "_form"),
+                                                         "_submit": _field(page, "_submit"),
+                                                         "reason": "a form for my work", "urgency": "routine"})
+    assert status == 403 and html.escape(app.say("safety")) in page and "811" in page
 
 
 def _booked_forms(hub, p, ref):

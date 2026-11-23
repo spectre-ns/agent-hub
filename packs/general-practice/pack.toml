@@ -249,6 +249,13 @@ intake_workflow = "new-patient-intake"
 [portal.wording]
 booking = "Visit"
 requested = "We have your request. A member of our team reads it and contacts you, usually within one working day."
+safety = "If this is an emergency, call 911 or go to the nearest emergency department now. For health advice at any hour, call 811."
+
+# A person who already has as many open as a kind allows (max_upcoming) may still write: nothing more is booked, but
+# what they wrote is screened at once and, unless it is plainly paperwork, goes to a nurse as a patient question.
+[portal.over_limit]
+workflow = "patient-question"
+input = "question"
 
 [portal.identity]
 born = "birthDate"            # with the health card ([base] identifier) and a code sent to the phone ([base] contact)

@@ -193,7 +193,8 @@ It is checked when the pack loads, and a mistake stops the load with a clear pro
 | `privacy` | required; shown on every page |
 | `public_origin` | the https address people use (behind a proxy) |
 | `per_minute` | sign-ins and registrations from everyone in a minute (default 60) |
-| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many busy failed closed` |
+| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many at_limit over_limit safety busy failed closed` |
+| `over_limit.workflow`, `over_limit.input` | what takes a person's own words once they are at a kind's limit (below) |
 | `identity.born`, `born_label`, `identifier_label`, `inputmode` | the date-of-birth field; the labels; `numeric` for a number card |
 | `code` | `channel`, `minutes` (2 to 30), `length` (6 to 10) |
 | `register.fields`, `register.pending`, `intake_workflow` | the form for someone new, the values that keep them a request, and the workflow that takes them in |
@@ -233,8 +234,12 @@ Each `[portal.kinds.<id>]` takes these keys.
 **Its bookings:**
 
 - `booking_kind`: the bookings' kind, so the person's view can name them.
-- `max_upcoming`: how many open bookings or requests of this kind a person may have (default 2). Past it, they are
-  told to call.
+- `max_upcoming`: how many open bookings or requests of this kind a person may have (default 2). Their page and
+  the form say so up front (`at_limit`), and the form then offers no times. What they write is still screened, with
+  the kind's `screen`, before the limit is applied: anything not plainly routine starts `[portal.over_limit]`'s
+  workflow with their words in its `input` (the clinic's `patient-question`, which screens them again and sends a red
+  flag to a nurse), and the page shows the screen's advice, loudly on a red flag. Plainly routine words, or no
+  `over_limit`, are refused (`too_many`). Every refusal page says what to do in an emergency (`safety`).
 - `cancel_to`, `cancel_before_hours`: cancelling online moves the visit to this state, at least this many hours
   ahead. It must be a state the record type's lifecycle reaches by a move people make.
 
