@@ -197,6 +197,43 @@ def test_upgrading_dms_proposes_the_type_and_workflow_and_work_under_way_goes_on
     assert hub.walk_unwalked() == {}  # once
 
 
+def test_a_module_upgrade_is_rolled_back_and_records_go_back_to_the_older_workflow(hub, old_modules):
+    """Rolling back an upgrade withdraws what it proposed that is not approved yet and proposes again what was in
+    force before what was approved; once the type in force stops naming the workflow its open runs on the type's
+    records stop, and the older version starts as it did (on its events)."""
+    install(hub, "dms")
+    demo(hub, "dms")
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    proposed = old_modules(hub, "dms")
+    hub.approve(amara, "type", "Document", proposed[("type", "Document")])
+    hub.approve_workflow(amara, "dms-review", proposed[("workflow", "dms-review")])
+    d = hub.create_record(rana, "Document", {"title": "Cover rota", "body": "Name cover."})
+    ref = f"Document/{d['id']}"
+    walk = open_run(hub, "dms-review", ref)
+    with pytest.raises(Denied):
+        hub.roll_back_module(hub.engine.automation_actor(walk), "dms")
+    back = hub.roll_back_module(rana, "dms", "the new review is not ready")
+    got = {(p["kind"], p["id"]): p["version"] for p in back["proposed"]}
+    assert set(got) == {("type", "Document"), ("workflow", "dms-review")} and not back["withdrawn"]
+    hub.approve(amara, "type", "Document", got[("type", "Document")])
+    assert hub.engine.run(walk["id"])["status"] == "cancelled"  # its type no longer names it
+    assert hub.db.events.find({"action": "run.stopped", "run_id": walk["id"]})
+    hub.approve_workflow(amara, "dms-review", got[("workflow", "dms-review")])
+    d2 = hub.create_record(rana, "Document", {"title": "Interim"})
+    assert not hub.db.runs.find_one({"record": f"Document/{d2['id']}"})  # as version 1 was: nothing walks a draft
+    hub.update_record(rana, f"Document/{d2['id']}", {"status": "in-review"})
+    assert open_run(hub, "dms-review", f"Document/{d2['id']}")  # started by its event, as before
+
+
+def test_rolling_back_an_upgrade_not_yet_approved_withdraws_what_it_proposed(hub, old_modules):
+    install(hub, "dms")
+    rana = M(hub, "rana")
+    proposed = old_modules(hub, "dms")
+    back = hub.roll_back_module(rana, "dms")
+    assert {(w["kind"], w["id"]) for w in back["withdrawn"]} == set(proposed) and not back["proposed"]
+    assert not hub.db.workflow_versions.find_one({"workflow_id": "dms-review", "status": "proposed"})
+
+
 def approve_all(hub, proposed, by):
     for (kind, did), version in proposed.items():
         if kind == "workflow":

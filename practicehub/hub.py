@@ -202,6 +202,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             # an upgrade whose definitions were approved before this pack.py was running, or one a restart stopped
             # part way: the hub still opens if it fails, and the track says what did not happen
             self._upgrades_after(None)
+        elif self.pack and pack is None and self._pack_in_force() is not None and not self.db.in_transaction():
+            try:  # a sweep a restart cut short goes on (each type's is done once per version of its workflow)
+                self.walk_unwalked(None)
+            except Exception as exc:  # noqa: BLE001 - the hub still opens; each record is picked up when written
+                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.walk_failed",
+                                  f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                                  data={"error": str(exc)[:500]})
 
     # ------------------------------------------------------------------ the practice pack, under change control
     PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants",
@@ -1175,6 +1182,56 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self._modules_noted(new.id)
         return {"module": new.id, "version": new.version, "proposed": proposed, "plan": plan, **reach}
 
+    def roll_back_module(self, actor: dict, name: str, reason: str = "") -> dict:
+        """Undo a module upgrade's definitions: what its last upgrade proposed and is still proposed is withdrawn, and
+        for what was approved the version in force before it is proposed again (``roll_back``), for a policy owner to
+        approve as any change: the type first, then the workflow it no longer names. The module's code stays at the
+        version upgraded to (code goes back by upgrading to the older module). Runs the newer versions started go on
+        as they are; once the type in force stops naming a workflow its open runs on the type's records stop
+        (``_release_runs``), and the older workflow starts as it did."""
+        if actor.get("kind") != "person":
+            raise Denied("a module upgrade is rolled back by a person")
+        self.require(actor, "policy_owner", "practice:main", "roll back module upgrades")
+        up = self.db.events.find_one({"action": "module.upgraded", "subject": f"module:{name}"},
+                                     sort=[("seq", DESC)])
+        if not up:
+            raise Invalid(f"the {name} module has not been upgraded here")
+        mark = f"The {name} module {(up.get('data') or {}).get('version')}"
+        withdrawn, proposed = [], []
+        for kind, (table, col) in self.KINDS.items():
+            for row in self.db[table].find({"note": {"$regex": "^" + re.escape(mark)}}, sort=[(col, ASC)]):
+                did, v = row[col], row["version"]
+                if row["status"] == "proposed":
+                    self._withdraw(kind, actor, did, v, reason or f"Rolling back the {name} module upgrade")
+                    withdrawn.append({"kind": kind, "id": did, "version": v})
+                    continue
+                prev = self.db[table].find_one({col: did, "version": {"$lt": v}, "approved_at": {"$nin": [None]}},
+                                               sort=[("version", DESC)])
+                cur = self.db[table].find_one({col: did, "status": "active"})
+                if not prev or not cur or cur["version"] != v:
+                    continue  # nothing before it, or changed again since: left to the practice
+                got = self.roll_back(actor, kind, did, prev["version"],
+                                     reason or f"Rolling back the {name} module upgrade (back to v{prev['version']})")
+                proposed.append({"kind": kind, "id": did, **got})
+        self.track.append(actor, "module.rolled_back", f"module:{name}", data={
+            "module": name, "upgrade": up["seq"], "withdrawn": withdrawn, "proposed": proposed, "reason": reason})
+        return {"module": name, "withdrawn": withdrawn, "proposed": proposed}
+
+    def _release_runs(self, actor: dict, before, cause: int | None) -> int:
+        """A record type approved that no longer names the workflow it named (or names another): that workflow's open
+        runs on records of the type are stopped (``run.stopped``), so no record is walked by a workflow its type
+        does not name; the sweep after the approval (``walk_unwalked``) starts the one it names now."""
+        old = (before.workflow or {}).get("id") if before is not None else None
+        now = self.record_type(before.id) if before is not None else None
+        if not old or (now is not None and (now.workflow or {}).get("id") == old):
+            return 0
+        n = 0
+        for r in self.db.runs.find({"workflow_id": old, "status": "running",
+                                    "record": {"$regex": f"^{re.escape(before.id)}/"}}, fields=["id"]):
+            self.engine.stop(actor, r["id"], f"the {before.label} record type no longer names this workflow", cause)
+            n += 1
+        return n
+
     def uninstall_module(self, actor: dict, name: str, reason: str = "") -> dict:
         """Take a module out: its workflows, views, blocks, skills and types are retired (records stay, readable,
         with their history and signatures); what it added to other types and views is taken out of them. Roles and
@@ -1196,11 +1253,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         for kind, (table, col) in self.KINDS.items():
             owned[kind] = [r[col] for r in self.db[table].find({"module": name, "version": 1}, sort=[(col, ASC)])]
         running = [r for r in self.engine.runs(status="running", limit=10000) if r["workflow_id"] in owned["workflow"]]
-        if running:
-            raise Invalid(f"its work is under way ({len(running)} running): finish or cancel it first")
+        resting = [r for r in running if r.get("resting")]  # a document in force: nothing is under way
+        if len(running) > len(resting):
+            raise Invalid(f"its work is under way ({len(running) - len(resting)} running): finish or cancel it first")
         with self.db:
             root = self.track.append(actor, "module.removed", f"module:{name}", data={"module": name, "reason": reason},
                                      signed={"module": name, "meaning": f"I remove the {name} module"})
+            for r in resting:
+                self.engine.stop(actor, r["id"], f"the {name} module was removed", root)
             for kind in ("view", "workflow", "block", "skill", "type"):
                 table, col = self.KINDS[kind]
                 for did in owned[kind]:
