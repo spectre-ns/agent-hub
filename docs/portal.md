@@ -193,11 +193,12 @@ It is checked when the pack loads, and a mistake stops the load with a clear pro
 | `privacy` | required; shown on every page |
 | `public_origin` | the https address people use (behind a proxy) |
 | `per_minute` | sign-ins and registrations from everyone in a minute (default 60) |
-| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many at_limit over_limit safety busy failed closed` |
+| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many at_limit over_limit safety busy failed closed visit_next request_next no_cancel_soon no_cancel` |
 | `over_limit.workflow`, `over_limit.input` | what takes a person's own words once they are at a kind's limit (below) |
 | `identity.born`, `born_label`, `identifier_label`, `inputmode` | the date-of-birth field; the labels; `numeric` for a number card |
+| `identity.digits`, `identifier_help`, `born_help` | how many digits the identifier has, and the help lines under the sign-in fields. The form checks the date (day 1 to 31, a month, a 4-digit year from 1900, a day that exists) and the digit count before anything is asked of the hub, and keeps what was typed |
 | `code` | `channel`, `minutes` (2 to 30), `length` (6 to 10) |
-| `register.fields`, `register.pending`, `intake_workflow` | the form for someone new, the values that keep them a request, and the workflow that takes them in |
+| `register.fields`, `register.pending`, `intake_workflow` | the form for someone new, the values that keep them a request, and the workflow that takes them in. A field is a name, or `{field, label, help, required}` in the portal's words (`required = true` only adds to what the type requires) |
 | `session_minutes` | 5 to 120, default 30 |
 
 Each `[portal.kinds.<id>]` takes these keys.

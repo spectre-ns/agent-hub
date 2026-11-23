@@ -58,6 +58,9 @@ PER_MINUTE = 60            # sign-ins and registrations begun, from everyone, in
 MAX_UPCOMING = 2           # a person's open bookings (or requests) of one kind, unless the kind's max_upcoming says
 SUBMIT_HOURS = 24          # how long a form's answer is kept, so a second tap or a refresh lands on the same page
 
+IDENTITY_KEYS = {"born", "born_label", "identifier_label", "inputmode", "digits", "identifier_help", "born_help"}
+REGISTER_FIELD_KEYS = {"field", "label", "help", "required"}
+
 WORDING = {  # what the pages say, unless [portal.wording] says otherwise
     "booking": "Booking",
     "sent": "If what you gave matches our records, we have sent a code to the contact details we have for you. "
@@ -82,6 +85,10 @@ WORDING = {  # what the pages say, unless [portal.wording] says otherwise
     "busy": "Many people are using this just now. Try again in a minute.",
     "failed": "We could not book that time. The practice has been told and will contact you.",
     "closed": "Online booking is closed for now. Call the practice.",
+    "visit_next": "Come to the practice a few minutes before your time.",
+    "request_next": "Someone at the practice contacts you to arrange a time.",
+    "no_cancel_soon": "Less than {hours} hours away: call the practice to cancel or change it.",
+    "no_cancel": "This cannot be cancelled online: call the practice to cancel or change it.",
 }
 
 
@@ -192,8 +199,11 @@ def check_config(pack) -> list[str]:
     if not born or born not in sfields:
         problems.append(f"identity.born: the field of {subject or 'the subject type'} that holds the date of birth, "
                         f"not {born!r}")
-    for key in set(ident) - {"born", "born_label", "identifier_label", "inputmode"}:
-        problems.append(f"identity.{key}: not a setting (born, born_label, identifier_label, inputmode)")
+    for key in set(ident) - IDENTITY_KEYS:
+        problems.append(f"identity.{key}: not a setting ({', '.join(sorted(IDENTITY_KEYS))})")
+    if "digits" in ident and (not isinstance(ident["digits"], int) or isinstance(ident["digits"], bool)
+                              or not 1 <= ident["digits"] <= 30):
+        problems.append("identity.digits: how many digits the identifier has (1 to 30), checked on the sign-in form")
     if ident.get("inputmode") not in (None, "text", "numeric"):
         problems.append("identity.inputmode: text or numeric (the keyboard a phone shows for the identifier)")
     base = sdoc.get("base") or {}
@@ -236,7 +246,15 @@ def check_config(pack) -> list[str]:
         if not isinstance(reg, dict) or not isinstance(reg.get("fields"), list) or not reg.get("fields"):
             problems.append("register.fields: the fields of the subject type a new person gives")
         else:
-            problems += [f"register.fields: {subject} has no field {f!r}" for f in reg["fields"] if f not in sfields]
+            for f in reg["fields"]:
+                if isinstance(f, dict):
+                    problems += [f"register.fields: {x} is not a setting of a field "
+                                 f"({', '.join(sorted(REGISTER_FIELD_KEYS))})" for x in sorted(set(f) - REGISTER_FIELD_KEYS)]
+                    if "required" in f and not isinstance(f["required"], bool):
+                        problems.append(f"register.fields: required is true or false, not {f['required']!r}")
+                    f = f.get("field")
+                if f not in sfields:
+                    problems.append(f"register.fields: {subject} has no field {f!r}")
         pend = reg.get("pending") if isinstance(reg, dict) else None
         if not isinstance(pend, dict) or not pend:
             problems.append("register.pending: the field values a new registration gets so that it cannot sign in or "
@@ -587,9 +605,24 @@ class Portal:
         return out
 
     def register_fields(self) -> list[dict]:
+        """The fields a new person gives: the subject type's, in the portal's words where ``[portal.register]``
+        words them (``{field, label, help, required}``; ``required`` may only add to what the type requires)."""
         rt = self._rt()
         reg = self.cfg.get("register") or {}
-        return [rt.field(n) for n in reg.get("fields") or [] if rt.field(n)]
+        out = []
+        for entry in reg.get("fields") or []:
+            words = entry if isinstance(entry, dict) else {"field": entry}
+            f = rt.field(words.get("field"))
+            if not f:
+                continue
+            f = dict(f)
+            for key in ("label", "help"):
+                if words.get(key):
+                    f[key] = str(words[key])
+            if words.get("required"):
+                f["required"] = True
+            out.append(f)
+        return out
 
     def public(self) -> dict:
         """What the portal's pages show, and nothing more: words, kinds and the questions they ask, the fields a new
@@ -610,7 +643,7 @@ class Portal:
         fields = []
         for f in self.register_fields():
             fields.append({"name": f["name"], "label": f.get("label") or f["name"], "type": f["type"],
-                           "required": bool(f.get("required")),
+                           "required": bool(f.get("required")), "help": f.get("help") or "",
                            "role": "born" if born and f["name"] == born["name"] else
                                    "identifier" if f["name"] == id_name else
                                    "contact" if f["name"] == contact_name else ""})
@@ -622,7 +655,9 @@ class Portal:
                 "identity": {"born_label": ident.get("born_label") or (born or {}).get("label") or "Date of birth",
                              "identifier_label": ident.get("identifier_label") or (id_f or {}).get("label")
                              or "Identifier",
-                             "identifier_inputmode": ident.get("inputmode") or "text"},
+                             "identifier_inputmode": ident.get("inputmode") or "text",
+                             "digits": ident.get("digits"), "identifier_help": ident.get("identifier_help") or "",
+                             "born_help": ident.get("born_help") or ""},
                 "register": bool(self.cfg.get("intake_workflow") and self.cfg.get("register")),
                 "register_fields": fields, "kinds": kinds, "dev": self.dev}
 
@@ -1187,26 +1222,37 @@ class Portal:
                     names.append(self.hub.member(who)["name"])
                 except Exception:  # noqa: BLE001 - someone since removed: no name
                     pass
-            ok = bool(k and k.get("cancel_to")
-                      and start - now >= timedelta(hours=float(k.get("cancel_before_hours", 0)))
-                      and self._may_move(rt, ref, b["record"], k["cancel_to"]))
+            hours = float((k or {}).get("cancel_before_hours", 0))
+            soon = start - now < timedelta(hours=hours)
+            ok = bool(k and k.get("cancel_to") and not soon and self._may_move(rt, ref, b["record"], k["cancel_to"]))
+            why = None if ok else self.say("no_cancel_soon", hours=f"{hours:g}") if k and k.get("cancel_to") and soon \
+                else self.say("no_cancel")
             out.append({"ref": ref, "start": start.isoformat(timespec="minutes"),
                         "when": when_words(start), "with": names,
                         "kind": (k or {}).get("label") or self.say("booking"), "state": state, "can_cancel": ok,
-                        "kind_id": (k or {}).get("id")})
+                        "why_not": why, "next": self.say("visit_next"), "kind_id": (k or {}).get("id")})
         return sorted(out, key=lambda x: x["start"])
+
+    def _local_day(self, stamp) -> str:
+        """A stored instant (UTC, ``...Z``) as the practice's day in words: a request sent at 9 p.m. is that day's,
+        not tomorrow's."""
+        from . import clock
+        raw = str(stamp or "")
+        try:
+            t = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw[:10]
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return day_words(clock.local(t, self.hub.engine.zone()).date())
 
     def open_requests(self, person: str) -> list[dict]:
         """The person's requests still open that the portal sent: what (the kind's words) and since when."""
         out = []
         for k in self.kinds().values():
             for r in self._requests(person, k):
-                since = str(r.get("created_at") or "")[:10]
-                try:
-                    since = day_words(date.fromisoformat(since))
-                except ValueError:
-                    pass
-                out.append({"what": k["label"], "since": since})
+                out.append({"what": k["label"], "since": self._local_day(r.get("created_at")),
+                            "next": self.say("request_next")})
         return out
 
     def _may_move(self, rt, ref: str, rec: dict, to: str) -> bool:

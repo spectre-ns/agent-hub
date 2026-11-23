@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import secrets
 import time
 import urllib.error
@@ -34,6 +35,7 @@ MONTHS = ["January", "February", "March", "April", "May", "June", "July", "Augus
 PORTAL_CSS = """
 .portal{max-width:640px;margin:0 auto;padding:16px;box-sizing:border-box}
 .portal *{box-sizing:border-box}
+.portal header form.inline .linkish{min-height:44px}
 .portal header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line,#ddd)}
 .portal header .spacer{flex:1}
 .portal footer{margin-top:32px;padding-top:12px;border-top:1px solid var(--line,#ddd);font-size:.9em}
@@ -43,22 +45,38 @@ PORTAL_CSS = """
 .portal .advice{font-size:1.2em;font-weight:600;padding:16px;border-radius:8px;border:2px solid currentColor;
   margin:16px 0}
 .portal .advice.alarm{color:var(--danger-fg);background:var(--danger-bg)}
+.portal .advice.calm{font-size:1em;font-weight:400;border-width:1px}
 .portal .advice h2{margin:0 0 8px;font-size:1.25em;color:inherit}
 .portal .advice p{margin:6px 0}
 .portal .dev{border:2px dashed var(--warning-fg);color:var(--warning-fg);padding:10px;border-radius:6px;margin:12px 0}
 .portal form.inline{display:inline}
 .portal fieldset{border:0;padding:0;margin:0 0 12px;min-width:0}
-.portal label.q,.portal legend.q{display:block;margin:12px 0 4px;font-weight:600}
+.portal label,.portal legend{font-size:16px;color:var(--fg)}
+.portal label.q,.portal legend.q{display:block;margin:16px 0 4px;font-weight:600;font-size:18px}
 .portal .req{font-weight:400;color:var(--subtle)}
-.portal .help{display:block;margin:2px 0 4px}
+.portal .help{display:block;margin:2px 0 6px;font-size:16px;color:var(--subtle)}
 .portal .err{display:block;color:var(--danger-fg);font-weight:600;margin:2px 0 4px}
 .portal input[type=text],.portal textarea,.portal select{width:100%;max-width:100%;min-height:44px;font-size:16px}
 .portal .dob{display:flex;gap:8px}
 .portal .dob>div{flex:1}
 .portal .dob>div.month{flex:2}
 .portal .btn{min-height:44px}
-.portal .days{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 12px}
-.portal .days .btn{text-align:left}
+.portal .linkish{background:none;border:0;padding:8px 4px;min-height:44px;color:var(--link,var(--brand));
+  text-decoration:underline;font:inherit;font-size:16px;cursor:pointer}
+.portal .hero{padding:20px;border-radius:10px;border:2px solid var(--success-fg);background:var(--success-bg);
+  color:var(--fg);margin:16px 0}
+.portal .hero .big{font-size:1.5em;font-weight:700;margin:0 0 6px}
+.portal .hero p{margin:6px 0}
+.portal .bookings{list-style:none;padding:0;margin:0;display:grid;gap:10px}
+.portal .booking{border:1px solid var(--border,var(--line));border-radius:8px;padding:12px 14px;background:var(--surface,transparent)}
+.portal .booking .when{font-size:1.1em;font-weight:700;margin:0 0 4px}
+.portal .booking p{margin:4px 0}
+.portal .booking .why{color:var(--subtle)}
+.portal .hi{margin:0 0 8px;font-size:1.1em}
+.portal .days{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:6px;margin:6px 0 12px}
+.portal .days .btn{text-align:left;display:flex;flex-direction:column;align-items:flex-start;padding:8px 10px;height:auto;white-space:normal;line-height:1.3}
+.portal .days .dname{font-weight:inherit}
+.portal .days .dcount{font-size:14px;color:var(--subtle);font-weight:400}
 .portal .days .btn.on{outline:3px solid var(--focus,var(--brand));outline-offset:1px;font-weight:700}
 .portal h4{margin:10px 0 4px;font-size:1em}
 .portal .slot-none{display:flex;gap:6px;align-items:center;min-height:44px}
@@ -312,7 +330,7 @@ class PortalApp:
         out = ""
         if s:
             out = (f'<form class="inline" method="post" action="/sign-out"><input type="hidden" name="_form" '
-                   f'value="{e(s["form"])}"><button class="btn">Sign out</button></form>')
+                   f'value="{e(s["form"])}"><button class="linkish">Sign out</button></form>')
         dev = ('<p class="dev"><strong>Development portal.</strong> No messages go out from here; do not use it '
                'with real people.</p>') if self.dev else ""
         return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -328,8 +346,8 @@ class PortalApp:
     def _problems(problems) -> str:
         if not problems:
             return ""
-        return ('<div class="warn" role="alert" id="problems"><p>Please check:</p><ul>'
-                + "".join(f"<li>{e(str(p))}</li>" for p in problems) + "</ul></div>")
+        return ('<div class="warn" role="alert" id="problems"><p><strong>Error:</strong> please check what is '
+                'marked below.</p><ul>' + "".join(f"<li>{e(str(p))}</li>" for p in problems) + "</ul></div>")
 
     @staticmethod
     def _about(label: str, problems) -> str | None:
@@ -343,16 +361,18 @@ class PortalApp:
         return (f'<label class="q" for="{e(fid)}">{e(label)}'
                 f'{" <span class=req>(required)</span>" if required else ""}</label>')
 
-    def _dob(self, prefix: str, label: str, value: str = "", problem: str | None = None) -> str:
+    def _dob(self, prefix: str, label: str, value: str = "", problem: str | None = None, help: str = "") -> str:
         """A date of birth as day, month and year (the browser fills it from ``bday-*``), never a date picker."""
         y, m, d = (value.split("-") + ["", "", ""])[:3] if value else ("", "", "")
-        err = f'<span class="err" id="{prefix}-err">{e(problem)}</span>' if problem else ""
+        err = f'<span class="err" id="{prefix}-err">Error: {e(problem)}</span>' if problem else ""
+        help_ = f'<span class="help" id="{prefix}-help">{e(help)}</span>' if help else ""
         inv = ' aria-invalid="true"' if problem else ""
-        desc = f' aria-describedby="{prefix}-err"' if problem else ""
+        ids = " ".join(x for x in (f"{prefix}-help" if help else "", f"{prefix}-err" if problem else "") if x)
+        desc = f' aria-describedby="{ids}"' if ids else ""
         months = '<option value="">Month</option>' + "".join(
             f'<option value="{i:02d}"{" selected" if m == f"{i:02d}" else ""}>{n}</option>'
             for i, n in enumerate(MONTHS, 1))
-        return (f'<fieldset><legend class="q">{e(label)} <span class="req">(required)</span></legend>{err}'
+        return (f'<fieldset><legend class="q">{e(label)} <span class="req">(required)</span></legend>{help_}{err}'
                 f'<div class="dob"><div><label for="{prefix}-day">Day</label>'
                 f'<input id="{prefix}-day" type="text" name="{prefix}_day" inputmode="numeric" pattern="[0-9]*" '
                 f'maxlength="2" autocomplete="bday-day" required value="{e(d.lstrip("0"))}"{inv}{desc}></div>'
@@ -370,6 +390,29 @@ class PortalApp:
                    f"{int(f.get(prefix + '_day', '')):02d}"
         except ValueError:
             return ""
+
+    @staticmethod
+    def dob_problem(f: dict, prefix: str) -> str | None:
+        """What is wrong with a date of birth as typed (day 1 to 31, a month, a 4-digit year from 1900 to this
+        year, a day that exists), in words; None when it is a real date."""
+        from datetime import date as _date
+        d, m, y = (str(f.get(f"{prefix}_{x}", "")).strip() for x in ("day", "month", "year"))
+        if not (d or m or y):
+            return "enter your date of birth"
+        if not d.isdigit() or not 1 <= int(d) <= 31:
+            return "the day is a number from 1 to 31"
+        if not m.isdigit() or not 1 <= int(m) <= 12:
+            return "choose the month"
+        this_year = _date.today().year
+        if not (y.isdigit() and len(y) == 4 and 1900 <= int(y) <= this_year):
+            return f"the year has 4 digits, from 1900 to {this_year}, for example 1984"
+        try:
+            born = _date(int(y), int(m), int(d))
+        except ValueError:
+            return f"{MONTHS[int(m) - 1]} {y} has no day {int(d)}"
+        if born > _date.today():
+            return "the date of birth is in the future"
+        return None
 
     # --- home
     def home(self, req) -> str:
@@ -389,18 +432,44 @@ class PortalApp:
         values = values or {}
         ident = self.cfg["identity"]
         mode = ident.get("identifier_inputmode") or "text"
+        bad = dict(values.get("_bad") or {})
+        digits = ident.get("digits")
+        help_ = ident.get("identifier_help") or (f"{digits} digits, as on your card. Spaces are fine." if digits else "")
+        id_err = bad.get("identifier")
+        ids = " ".join(x for x in ("identifier-help" if help_ else "", "identifier-err" if id_err else "") if x)
+        aria = (f' aria-describedby="{ids}"' if ids else "") + (' aria-invalid="true"' if id_err else "")
         return self.page(req, "Sign in", self._problems(problems) + (
             '<p>We send a code to the contact details we have for you.</p>'
             '<form method="post" action="/sign-in" class="card" novalidate>'
-            + self._dob("born", ident["born_label"], values.get("born", ""))
+            + self._dob("born", ident["born_label"], values.get("born", ""), bad.get("born"),
+                        ident.get("born_help") or "For example 3 February 1984.")
             + self._label("identifier", ident["identifier_label"], True)
+            + (f'<span class="help" id="identifier-help">{e(help_)}</span>' if help_ else "")
+            + (f'<span class="err" id="identifier-err">Error: {e(id_err)}</span>' if id_err else "")
             + f'<input id="identifier" type="text" name="identifier" required autocomplete="off" maxlength="40" '
-              f'inputmode="{e(mode)}">'
+              f'inputmode="{e(mode)}" value="{e(values.get("identifier", ""))}"{aria}>'
               '<p><button class="btn primary">Send me a code</button></p></form>'))
 
     def sign_in(self, req) -> str:
         f = self.form(req)
         born = self._dob_value(f, "born")
+        ident = self.cfg["identity"]
+        bad = {}
+        got = self.dob_problem(f, "born")
+        if got:
+            bad["born"] = got
+        card = re.sub(r"[\s-]", "", f.get("identifier", ""))
+        digits = ident.get("digits")
+        if not card:
+            bad["identifier"] = f"enter your {ident['identifier_label'].lower()}"
+        elif digits and (not card.isdigit() or len(card) != int(digits)):
+            bad["identifier"] = f"it has {digits} digits; you typed {sum(c.isdigit() for c in card)}"
+        if bad:
+            names = {"born": ident["born_label"], "identifier": ident["identifier_label"]}
+            raw = "-".join(f.get(f"born_{x}", "") for x in ("year", "month", "day"))
+            raise _Page(422, self.sign_in_form(req, [f"{names[k]}: {v}" for k, v in bad.items()],
+                                               {"born": raw if raw.strip("-") else "", "_bad": bad,
+                                                "identifier": f.get("identifier", "")[:40]})) from None
         try:
             got = self.client.call("sign-in", {"born": born, "identifier": f.get("identifier", ""),
                                                "client": req["client"]})
@@ -452,16 +521,18 @@ class PortalApp:
         req["me"] = {"form": got["form"]}
         rows = []
         for b in got["upcoming"]:
-            cancel = (f' <a class="btn" href="/cancel?{urllib.parse.urlencode({"booking": b["ref"]})}">'
-                      f'Cancel this visit</a>') if b["can_cancel"] else ""
+            act = (f'<p><a class="btn" href="/cancel?{urllib.parse.urlencode({"booking": b["ref"]})}">'
+                   f'Cancel this visit</a></p>') if b["can_cancel"] else \
+                (f'<p class="why">{e(b["why_not"])}</p>' if b.get("why_not") else "")
             state = f' <span class="muted">({e(b["state"])})</span>' if b["state"] else ""
-            rows.append(f'<li><strong>{e(b["when"])}</strong>: {e(b["kind"])}'
-                        f'{" with " + e(", ".join(b["with"])) if b["with"] else ""}{state}{cancel}</li>')
-        upcoming = f'<ul>{"".join(rows)}</ul>' if rows else '<p class="muted">Nothing booked.</p>'
+            rows.append(f'<li class="booking"><p class="when">{e(b["when"])}</p>'
+                        f'<p>{e(b["kind"])}{" with " + e(", ".join(b["with"])) if b["with"] else ""}{state}</p>'
+                        f'{f"<p>{e(b["next"])}</p>" if b.get("next") else ""}{act}</li>')
+        upcoming = f'<ul class="bookings">{"".join(rows)}</ul>' if rows else '<p class="muted">Nothing booked.</p>'
         reqs = got["requests"]
-        open_ = ("<h2>Open requests</h2><ul>" + "".join(
-            f'<li>{e(r["what"])} <span class="muted">(since {e(r["since"])})</span></li>' for r in reqs) + "</ul>"
-                 ) if reqs else ""
+        open_ = ('<h2>Open requests</h2><ul class="bookings">' + "".join(
+            f'<li class="booking"><p class="when">{e(r["what"])}</p><p>Sent {e(r["since"])}.</p>'
+            f'{f"<p>{e(r["next"])}</p>" if r.get("next") else ""}</li>' for r in reqs) + "</ul>") if reqs else ""
         limits = got.get("limits") or {}
 
         def full(k):
@@ -505,8 +576,8 @@ class PortalApp:
         problem = self._about(label, problems)
         ids = [x for x in (f"{fid}-help" if q.get("help") else "", f"{fid}-err" if problem else "") if x]
         aria = (f' aria-describedby="{" ".join(ids)}"' if ids else "") + (' aria-invalid="true"' if problem else "")
-        help_ = f'<span class="muted help" id="{e(fid)}-help">{e(q["help"])}</span>' if q.get("help") else ""
-        err = f'<span class="err" id="{e(fid)}-err">{e(problem)}</span>' if problem else ""
+        help_ = f'<span class="help" id="{e(fid)}-help">{e(q["help"])}</span>' if q.get("help") else ""
+        err = f'<span class="err" id="{e(fid)}-err">Error: {e(problem)}</span>' if problem else ""
         val = "" if value is None else str(value)
         if q.get("choices"):
             opts = "".join(f'<option value="{e(c)}"{" selected" if c == val else ""}>{e(words)}</option>'
@@ -530,8 +601,10 @@ class PortalApp:
         else:
             picker = "".join(
                 f'<button class="btn day{" on" if d["date"] == day else ""}" name="_day" value="{e(d["date"])}" '
-                f'formnovalidate aria-pressed="{"true" if d["date"] == day else "false"}">{e(d["label"])}'
-                f'<span class="muted"> {d["count"]} free</span></button>' for d in days)
+                f'formnovalidate aria-pressed="{"true" if d["date"] == day else "false"}">'
+                + "".join(f'<span class="dname">{e(x)}</span>' for x in d["label"].split(", ", 1)) +
+                f'<span class="dcount">{d["count"]} {"time" if d["count"] == 1 else "times"} free</span></button>'
+                for d in days)
             by: dict[str, list[dict]] = {}
             for s in slots:
                 by.setdefault(s["with"], []).append(s)
@@ -632,12 +705,11 @@ class PortalApp:
             # Loud: no green tick anywhere on this page, a heading of its own, what was found in plain words, and
             # when nobody is at the practice to read it.
             said = (f'<p>You wrote about {e(_and(found))}. That can be serious.</p>' if found else "")
-            shut = (f'<p><strong>The practice is closed now and opens {e(closed)}. Do not wait for us: '
-                    f'{e(self.say("safety"))}</strong></p>' if closed else
-                    f'<p><strong>{e(self.say("safety"))}</strong></p>')
+            shut = ((f'<p>The practice is closed now. It opens {e(closed.rstrip("."))}. Do not wait for us.</p>'
+                     if closed else "") + f'<p><strong>{e(self.say("safety"))}</strong></p>')
             sent = ("We have not booked anything. A nurse has what you wrote and will call you."
                     if r.get("over_limit") or not r.get("when") else "")
-            parts = [f'<div class="advice alarm" role="alert"><h2>Your message needs attention today</h2>{said}'
+            parts = [f'<div class="advice alarm" role="alert"><h2>What to do now</h2>{said}'
                      f'<p>{e(text)}</p>{shut}</div>']
             if sent:
                 parts.append(f'<p>{e(sent)}</p>')
@@ -645,9 +717,17 @@ class PortalApp:
                 parts.append(f'<p>{e(self.say("booked", when=r["when"], **{"with": r.get("with") or ""}))}</p>')
             parts.append('<p><a class="btn" href="/me">Your bookings</a></p>')
             return self.page(req, "Your message needs attention today", "".join(parts))
+        if r.get("when") and not r.get("over_limit"):
+            hero = (f'<div class="hero" role="status"><p class="big">You are booked</p>'
+                    f'<p class="when"><strong>{e(r["when"])}</strong>'
+                    f'{" with " + e(r["with"]) if r.get("with") else ""}</p>'
+                    f'<p>{e(self.say("visit_next"))}</p></div>')
+            return self.page(req, "Booked", hero + f'<div class="advice calm">{e(text)}</div>'
+                             '<p><a class="btn primary" href="/me">Your bookings</a></p>')
         parts = [f'<div class="advice" role="alert">{e(text)}</div>']
         if closed and not r.get("when"):
-            parts.append(f'<p>The practice is closed now. Someone reads your request after it opens {e(closed)}.</p>')
+            parts.append(f'<p>The practice is closed now. Someone reads your request after it opens '
+                         f'{e(closed.rstrip("."))}.</p>')
         if r.get("over_limit"):
             title = "Not booked: sent to the practice"
             parts.append(f'<p>{e(self.say("over_limit"))}</p>')
@@ -674,16 +754,19 @@ class PortalApp:
         for fd in self.cfg["register_fields"]:
             name, label = fd["name"], fd["label"]
             if fd["type"] == "date":
-                rows.append(self._dob(f"r_{name}", label, values.get(name, ""), self._about(label, problems)))
+                rows.append(self._dob(f"r_{name}", label, values.get(name, ""), self._about(label, problems),
+                                      fd.get("help") or "For example 3 February 1984."))
                 continue
             problem = self._about(label, problems)
             fid = f"r-{name}"
             ac = auto.get(fd.get("role") or "") or {"given": "given-name", "family": "family-name"}.get(name, "off")
             mode = (self.cfg["identity"].get("identifier_inputmode") if fd.get("role") == "identifier" else
                     "tel" if fd.get("role") == "contact" else "text")
-            err = f'<span class="err" id="{e(fid)}-err">{e(problem)}</span>' if problem else ""
-            aria = f' aria-invalid="true" aria-describedby="{e(fid)}-err"' if problem else ""
-            rows.append(self._label(fid, label, bool(fd.get("required"))) + err +
+            err = f'<span class="err" id="{e(fid)}-err">Error: {e(problem)}</span>' if problem else ""
+            help_ = f'<span class="help" id="{e(fid)}-help">{e(fd["help"])}</span>' if fd.get("help") else ""
+            ids = " ".join(x for x in (f"{fid}-help" if help_ else "", f"{fid}-err" if problem else "") if x)
+            aria = (f' aria-describedby="{e(ids)}"' if ids else "") + (' aria-invalid="true"' if problem else "")
+            rows.append(self._label(fid, label, bool(fd.get("required"))) + help_ + err +
                         f'<input id="{e(fid)}" type="text" name="{e(name)}" maxlength="200" inputmode="{e(mode)}" '
                         f'autocomplete="{e(ac)}"{" required" if fd.get("required") else ""}{aria} '
                         f'value="{e(values.get(name, ""))}">')
@@ -697,9 +780,17 @@ class PortalApp:
     def new(self, req) -> str:
         f = self.form(req)
         values = {}
+        bad = []
         for fd in self.cfg["register_fields"]:
             values[fd["name"]] = self._dob_value(f, f"r_{fd['name']}") if fd["type"] == "date" else \
                 f.get(fd["name"], "")
+            if fd["type"] == "date":
+                got = self.dob_problem(f, f"r_{fd['name']}")
+                if got and (fd.get("required") or any(f.get(f"r_{fd['name']}_{x}") for x in ("day", "month", "year"))):
+                    bad.append(f"{fd['label']}: {got}")
+                    values[fd["name"]] = "-".join(f.get(f"r_{fd['name']}_{x}", "") for x in ("year", "month", "day"))
+        if bad:
+            raise _Page(422, self.new_form(req, bad, {**values, "_submit": f.get("_submit", "")}))
         try:
             got = self.client.call("register", {"values": values, "client": req["client"],
                                                 "submit": f.get("_submit", "")})
