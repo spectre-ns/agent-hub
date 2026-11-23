@@ -1424,9 +1424,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def run_title(self, member: dict | None, run: dict) -> str:
         """A run's title as this member may see it: the workflow's title, and who or what it is about only if they
-        may read that record's data class (a name and birth date are themselves personal health information)."""
+        may read that record's data class (a name and birth date are themselves personal health information). A run
+        walking a record of its own (a message, an order) is named for whom that record is about: its subject."""
         base = str(run.get("title") or "").split(": ", 1)[0]
-        ref = run.get("record") or ""
+        ref = run.get("subject") or run.get("record") or ""
         if not member or not ref or not self.pack or "/" not in ref:
             return base
         rtype, _, rid = ref.partition("/")
@@ -3325,7 +3326,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             st = schema.first(data, lc["path"])
             if st is None and lc.get("initial"):
                 data = schema.put(data, lc["path"], lc["initial"])
-            elif st is not None and lc.get("initial") and st != lc["initial"] and member.get("kind") != "automation":
+            elif st is not None and lc.get("initial") and st != lc["initial"] and member.get("kind") != "automation" \
+                    and st not in lc.get("starts", []):
                 # people start a record where its lifecycle starts; an automation (a workflow step, an import, a
                 # module's demo) may write one in any of its states
                 t = rt.transition(None, st)
@@ -3407,7 +3409,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if rt.part_of and schema.first(before, rt.part_of["path"]) != schema.first(after, rt.part_of["path"]):
                 raise Invalid(f"a {rt.label.lower()} stays part of the record it was made in: "
                               f"make a new one there instead")
-            moved = None
+            moved, corrected = None, False
             if rt.lifecycle:
                 old, new = schema.first(before, rt.lifecycle["path"]), schema.first(after, rt.lifecycle["path"])
                 if old in rt.lifecycle.get("locked", []) and not self._by_workflow(member, run_id) and _signature is None:
@@ -3431,6 +3433,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
                     moved = (old, new)
+                    corrected = "*" in t["from"]  # a correction from any state (entered in error)
             clashes, over = [], None
             if rt.is_a("Booking"):
                 held, now_held = self._held_time(rt, before), self._held_time(rt, after)
@@ -3461,6 +3464,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                                              **({"comment": comment.strip()} if comment and comment.strip() else {})})
             if clashes:
                 ev = self._note_overbook(member, rt, ref, clashes, over, cause=ev, run_id=run_id)
+            if corrected and (rt.workflow or {}).get("id"):
+                ev = self.engine.stop_corrected(rt, ref, member, moved[1], run_id, ev)
             if moved and (rt.workflow or {}).get("id") and not run_id:
                 # the move its own workflow waited on: that run takes its step in this same transaction, so the
                 # record's state and the run's step change together or not at all (never the savepoint that lets a

@@ -168,7 +168,10 @@ def act_record_create(engine, run, step, params, actor):
 
 def act_record_update(engine, run, step, params, actor):
     # a step that names its record must name one: an empty ref never falls back to the run's record
-    ref = params.get("ref") if "ref" in step.params else run["record"]
+    # no ref: what the run's own steps call its record (``run.record``): for a run moved onto a record of its own
+    # (relink_runs), what its pinned version was written about, never the record it was moved onto
+    ref = params.get("ref") if "ref" in step.params else \
+        ((run.get("ctx") or {}).get("run") or {}).get("record") or run["record"]
     if not ref or "/" not in str(ref):
         raise ValueError(f"record.update: no record to update (ref is {ref!r})")
     rtype, rid = ref.split("/", 1)
@@ -221,9 +224,15 @@ def act_context_set(engine, run, step, params, actor):
     return dict(params)
 
 
+def act_record_child(engine, run, step, params, actor):
+    """record.child: a sub-record of this run's record (see ``Engine.make_child_record``)."""
+    return engine.make_child_record(run, params, actor)
+
+
 CORE_ACTIONS = {
     "message.send": act_message_send,
     "record.create": act_record_create,
+    "record.child": act_record_child,
     "record.update": act_record_update,
     "workflow.start": act_workflow_start,
     "context.set": act_context_set,
@@ -380,6 +389,17 @@ def _queue_key(item: dict):
     """The order work is shown in: urgent first, then by due time (none last), then oldest first."""
     return (0 if item.get("priority") == "urgent" else 1, item.get("due_at") is None, item.get("due_at") or "",
             item.get("created_at") or "", item.get("n") or 0)
+
+
+def _same_value(a, b) -> bool:
+    """Two values a start form gave for the same thing, the same as sent: equal numbers ("6.6" and 6.6), or the same
+    words but for spacing and a trailing unit ("4.0-6.0" and "4.0-6.0 %")."""
+    try:
+        return float(str(a).strip()) == float(str(b).strip())
+    except ValueError:
+        pass
+    x, y = sorted(("".join(str(v).split()).lower() for v in (a, b)), key=len)  # x the shorter
+    return x == y or (bool(x) and y.startswith(x) and not y[len(x)].isalnum() and not y[len(x)] in ".-")
 
 
 def _plain(doc: dict | None) -> dict | None:
@@ -583,6 +603,7 @@ class Engine:
                     record, make = own, None
                     walking = [r for r in self.runs(record=own, status="running") if r["workflow_id"] == wid]
                     if walking:  # the same submission again (the lab sending its result twice): the run walking it
+                        self._same_submission(wf, walking[0], inputs or {})
                         return walking[0]
             elif not record or record.split("/")[0] != wf.record:
                 raise Invalid(f"{wf.title} is about a {wf.record}; say which one")
@@ -672,12 +693,21 @@ class Engine:
             if f["type"] != "reference" or not isinstance(ref, str) or ref.split("/", 1)[0] != wf.record:
                 continue
             rec = self.hub.records.read(*ref.split("/", 1))
-            if rec is None:
-                raise Invalid(f"{f['label']}: there is no {ref}")
-            if self.hub.subject_of(rec) != subject:
-                raise Invalid(f"{f['label']}: {ref} is about someone else, not this {subject.split('/')[0].lower()}")
-            return ref
-        return None
+            if rec is not None and self.hub.subject_of(rec) == subject:
+                return ref
+        return None  # none, or one that is missing or about someone else: the start form's checks refuse it
+
+    def _same_submission(self, wf, run: dict, inputs: dict) -> None:
+        """Started again on the record a run already walks: the same submission again is that run; one that says
+        something else (another value for the same result) is refused out loud, never folded into the open run."""
+        from .hub import Invalid
+        had = (run.get("ctx") or {}).get("input") or {}
+        differ = [f.get("label") or f["name"] for f in wf.inputs
+                  if f["type"] != "reference" and inputs.get(f["name"]) not in (None, "")
+                  and had.get(f["name"]) not in (None, "") and not _same_value(inputs[f["name"]], had[f["name"]])]
+        if differ:
+            raise Invalid(f"{run['record']} is already being worked ({run['id']}) with another "
+                          f"{', '.join(differ).lower()}: change that record, or start this on a new one")
 
     def start_on(self, wf) -> list[str]:
         """The record types a person starts ``wf`` on: its record's type, or, for a workflow that makes its record
@@ -796,21 +826,119 @@ class Engine:
         hub = self.hub
         rt = hub.record_type(wf.record)
         values = wfmod.render(dict(wf.new_record), {"run": ctx["run"], "input": ctx["input"]})
+        rec = self._by_field_names(rt, [(subject_field["name"], subject), *values.items()], "new_record")
+        actor = self.automation_actor({"workflow_id": wf.id, "version": row["version"], "title": wf.title})
+        made = hub.create_record(actor, wf.record, rec, cause=cause, run_id=run_id, start_workflow=False)
+        return f"{wf.record}/{made['id']}"
+
+    def _by_field_names(self, rt, pairs, what: str) -> dict:
+        """A record of ``rt`` from (field name, value) pairs, each written where its field keeps it. An empty value is
+        left out; so is a member that is not one (a run, not a person) and a number given words ("<0.1")."""
         rec: dict = {}
-        for name, val in [(subject_field["name"], subject), *values.items()]:
+        for name, val in pairs:
             if val in (None, "", [], {}):
                 continue
             f = rt.field(name)
             if f is None:
-                raise ValueError(f"new_record: {rt.label} has no field {name!r}")
-            if f["type"] == "member" and isinstance(val, str) and not hub.db.members.get(val):
+                raise ValueError(f"{what}: {rt.label} has no field {name!r}")
+            if f["type"] == "member" and isinstance(val, str) and not self.hub.db.members.get(val):
                 continue  # started by another workflow, not a person: no one to name (its cause says which run)
             if f["type"] == "reference" and isinstance(val, str):
                 val = {"reference": val}
+            if f["type"] == "number" and isinstance(val, str):  # a placeholder fills in words: "6.6" is 6.6
+                try:
+                    val = float(val)
+                    val = int(val) if val.is_integer() else val
+                except ValueError:
+                    continue  # not a number: left out, never a step refused (other fields keep the words)
             rec = schema.place(rec, f, val)
-        actor = self.automation_actor({"workflow_id": wf.id, "version": row["version"], "title": wf.title})
-        made = hub.create_record(actor, wf.record, rec, cause=cause, run_id=run_id, start_workflow=False)
-        return f"{wf.record}/{made['id']}"
+        return rec
+
+    # ------------------------------------------------------------------ sub-records: a record's step makes another
+    def make_child_record(self, run: dict, params: dict, actor: dict) -> dict:
+        """``record.child``: a step makes a record of another type (``type``; ``data`` by its field names) about the
+        same subject as the run's record and linked to it (its parent: the new record's one reference to the
+        parent's type, or the field ``link`` names). The new type's own workflow starts on it in the same
+        transaction, as a run whose parent is this run and whose cause is the record made, with ``input`` as its
+        start form; it walks its own lifecycle. A step that should wait for it waits on its reference (a wait with
+        ``for_each`` and ``until = "each_closed"``); one that should not, does not."""
+        hub = self.hub
+        rtype = params.get("type")
+        rt = hub.record_type(rtype) if rtype else None
+        if rt is None:
+            raise ValueError(f"record.child: there is no record type {rtype!r}")
+        parent = str(run.get("record") or "")
+        subject = str(run.get("subject") or "") or parent
+        if "/" not in parent:
+            raise ValueError("record.child: the run has no record to be the parent")
+        sub_f = self._subject_field(rt, subject.split("/", 1)[0])
+        link_f = self._parent_field(rt, parent.split("/", 1)[0], params.get("link"))
+        if sub_f is None or link_f is None:
+            raise ValueError(f"record.child: a {rt.label.lower()} has no field for "
+                             f"{'its subject' if sub_f is None else 'the record it comes from'}")
+        data = params.get("data") or {}
+        if not isinstance(data, dict):
+            raise ValueError("record.child: data is a table of field = value")
+        pairs = [(sub_f["name"], subject), (link_f["name"], parent)]
+        rec = self._by_field_names(rt, pairs + [(k, v) for k, v in data.items()
+                                                if k not in (sub_f["name"], link_f["name"])], "record.child")
+        made = hub.create_record(actor, rt.id, rec, run_id=run["id"], start_workflow=False)
+        ref = f"{rt.id}/{made['id']}"
+        ev = hub.db.events.find_one({"action": "record.created", "subject": ref}, sort="seq")
+        # the parent's own history says what was made from it (with or without a workflow of its own)
+        seq = hub.track.append(actor, "record.child", parent, run_id=run["id"], cause=ev["seq"] if ev else None,
+                               data={"child": ref, "type": rt.id})
+        child = self._start_child_run(rt, ref, run, params.get("input") or {}, seq)
+        return {"id": made["id"], "reference": ref, **({"run_id": child["id"]} if child else {})}
+
+    def _start_child_run(self, rt, ref: str, parent_run: dict, inputs: dict, cause) -> dict | None:
+        """The sub-record's own workflow (its type's), started on it as a child run of ``parent_run``."""
+        rec = self.hub.records.read(*ref.split("/", 1))
+        wid = schema.starts_workflow(rt, rec) if rec else None
+        if not wid:
+            return None
+        starter = {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
+        return self.start(starter, wid, record=ref, inputs=inputs, cause=cause, via_automation=True,
+                          on_create=True, parent=parent_run["id"])
+
+    def _subject_field(self, rt, subject_type: str) -> dict | None:
+        return next((f for f in rt.fields if f["type"] == "reference" and f.get("rel") == "subject"
+                     and "*" not in f["path"] and subject_type in self.hub.concrete(f["target"])), None)
+
+    def _parent_field(self, rt, parent_type: str, name: str | None) -> dict | None:
+        """The field of ``rt`` that links a sub-record to its parent: the one named, else its one reference to the
+        parent's type (not its subject)."""
+        if name:
+            f = rt.field(name)
+            return f if f and f["type"] == "reference" else None
+        found = [f for f in rt.fields if f["type"] == "reference" and f.get("rel") != "subject"
+                 and parent_type in self.hub.concrete(f["target"])]
+        return found[0] if len(found) == 1 else None
+
+    def children_of(self, ref: str) -> list[dict]:
+        """The sub-records made for a record (``record.child``), oldest first, as ``{ref, run}``: each with the run
+        of its own workflow walking it (None for a type with no workflow), read from the parent's history."""
+        out = []
+        for ev in self.hub.db.events.find({"action": "record.child", "subject": ref}, sort="seq"):
+            child = str((ev.get("data") or {}).get("child") or "")
+            if "/" not in child:
+                continue
+            run = self.hub.db.runs.find_one({"record": child, "ctx.run.parent": ev.get("run_id")}) \
+                if ev.get("run_id") else None
+            out.append({"ref": child, "run": run})
+        return out
+
+    def parent_record(self, ref: str) -> str | None:
+        """The record a sub-record was made for (``record.child``), or None."""
+        ev = self.hub.db.events.find_one({"action": "record.child", "data.child": ref}, sort="seq")
+        return ev["subject"] if ev else None
+
+    def parent_of(self, run: dict) -> str | None:
+        """The record a sub-record's run was made for: the record of its parent run, when that is not its subject."""
+        pid = ((run.get("ctx") or {}).get("run") or {}).get("parent")
+        prow = self.hub.db.runs.get(pid) if pid else None
+        ref = str((prow or {}).get("record") or "")
+        return ref if "/" in ref and ref not in (run.get("record"), run.get("subject")) else None
 
     def _move_record(self, run: dict, step, actor: dict, cause) -> None:
         """``state`` on a step: the run's record moves to that lifecycle state as the step is done, through the
@@ -1061,15 +1189,31 @@ class Engine:
                 each_record = None
                 if isinstance(each, str) and "/" in each:
                     each_record = self.hub.records.read(*each.split("/", 1))
-                if not expr.holds(step.until, {**live, "each": each, "each_record": each_record or {}}):
+                if not expr.holds(step.until, {**live, "each": each, "each_record": each_record or {},
+                                               "each_closed": self._closed(each, each_record)}):
                     return self._timed_out(run, step, cause)
                 waited.append(each)
         elif not expr.holds(step.until, live):
             return self._timed_out(run, step, cause)
-        out = {"waited_for": waited or []}
+        # when it ended, on the practice's clock (as record times are written): a later step can say how long
+        # before a booked time something happened (a cancellation's notice)
+        out = {"waited_for": waited or [], "ended_at": self.now().isoformat(timespec="seconds")}
         if getattr(step, "timeout", None):
             out["timed_out"] = False
         return self._end_wait(run, step, cause, out, "step.done")
+
+    def _closed(self, ref, rec) -> bool:
+        """A record in a state its lifecycle has no move out of (a sub-record done with), or gone."""
+        if not isinstance(ref, str) or "/" not in ref:
+            return False
+        if not rec:
+            return True
+        rt = self.hub.record_type(ref.split("/", 1)[0])
+        lc = rt.lifecycle if rt else None
+        if not lc:
+            return False
+        at = schema.first(rec, lc["path"])
+        return not any(at in t["from"] or "*" in t["from"] for t in lc.get("transition", []))
 
     def _end_wait(self, run, step, cause, output: dict, action: str) -> bool:
         run["ctx"][step.id] = output
@@ -1226,6 +1370,24 @@ class Engine:
             seq = self.hub.track.append(actor, "run.cancelled", run["record"] or "", run_id=run_id,
                                         data={"reason": reason})
             self._abandon(run, seq)
+
+    def stop_corrected(self, rt, ref: str, member: dict, state: str, run_id: str | None, cause: int) -> int:
+        """A record moved by a correction open from every state (entered in error), outside its own workflow's run:
+        that workflow's open run on it stops, its open work with it, and the track says who stopped it and why. The
+        record stays where the correction put it (nothing abandoned moves it again). Returns the last event."""
+        for r in self.hub.db.runs.find({"workflow_id": (rt.workflow or {}).get("id"), "record": ref,
+                                        "status": "running"}, fields=["id"]):
+            if r["id"] == run_id:
+                continue  # its own run made the move: it goes on to its end
+            run = self.run(r["id"])
+            run["status"] = "cancelled"
+            self._save(run)
+            self.hub.db.items.update({"run_id": run["id"], "status": {"$in": ["open", "claimed", "held", "waiting"]}},
+                                     {"$set": {"status": "cancelled", "updated_at": utcnow()}}, many=True)
+            cause = self.hub.track.append(member, "run.stopped", ref, run_id=run["id"], cause=cause,
+                                          data={"reason": f"the {rt.label.lower()} was marked "
+                                                          f"{rt.state_label(state).lower()}", "state": state})
+        return cause
 
     def retry(self, actor: dict, run_id: str, step_id: str, reason: str = "") -> None:
         """Run a failed step again (after its module, block or the record it needed was fixed). Policy owners only:

@@ -203,7 +203,8 @@ KEYS = {
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
               "roles", "required_unless"},
-    "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "ended", "in_use", "labels"},
+    "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "abandoned", "ended", "in_use",
+                  "labels"},
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "screen": {"id", "on", "tab", "fields", "label"},
@@ -500,6 +501,15 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             trans.append({"from": frm, "to": to, "by": by, "label": str(t.get("label") or labels.get(to) or state_words(to)),
                           "screen": t.get("screen") if isinstance(t.get("screen"), str) else None,
                           "fields": list(tf), "require": list(req), "comment": t.get("comment") is True})
+        # further states a person may make a new record in, besides the initial one (a record of work already done,
+        # filed after the fact), each starting whatever the type's workflow starts for it
+        starts = lc.get("starts") or []
+        if not _strings(starts):
+            problems.append("lifecycle.starts: a list of its states")
+            starts = []
+        for st in starts:
+            if st not in states:
+                problems.append(f"lifecycle.starts: {st!r} is not one of its states")
         locked = lc.get("locked") or []  # states in which people change nothing but the state itself
         if not _strings(locked):
             problems.append("lifecycle.locked: a list of its states")
@@ -552,7 +562,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                             grew = True
             revising = [x for x in states if x in reach and x != in_use]
         lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial,
-              "transition": trans, "locked": locked, "abandoned": abandoned, "ended": ended, "in_use": in_use, "revising": revising,
+              "starts": list(starts), "transition": trans, "locked": locked, "abandoned": abandoned, "ended": ended, "in_use": in_use, "revising": revising,
               "labels": labels}
     for key in ("date", "flag"):
         p = doc.get(key)
@@ -699,11 +709,25 @@ def _check_workflow(rt: RecordType, w) -> list[str]:
 
 
 def starts_workflow(rt: RecordType, rec: dict) -> str | None:
-    """The workflow a new record of ``rt`` starts (its type's ``workflow``, when its ``when`` holds of it)."""
+    """The workflow a new record of ``rt`` starts (its type's ``workflow``, when its ``when`` holds of it). The
+    condition reads the record as stored and by its type's field names (``record.category_text`` for a field at
+    ``category.0.text``)."""
     w = rt.workflow
-    if not w or (w.get("when") and not expr.holds(w["when"], {"record": rec})):
+    if not w or (w.get("when") and not expr.holds(w["when"], {"record": {**_named_values(rt, rec), **rec}})):
         return None
     return w["id"]
+
+
+def _named_values(rt: RecordType, rec: dict) -> dict:
+    """The record's values by its type's field names, for a field whose path is not its name (its first value)."""
+    out = {}
+    for f in rt.fields:
+        path = f.get("path")
+        if path and path != f["name"]:
+            vals = get(rec, path)
+            if vals:
+                out[f["name"]] = vals[0]
+    return out
 
 
 def _check_booking(rt: RecordType, b) -> list[str]:
