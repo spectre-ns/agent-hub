@@ -26,7 +26,11 @@ Once the patient is checked in and the visit started on the visit's own page, th
 transcript. The scribe agent drafts the note; the physician edits it and signs it, and only then is the visit completed
 and the note filed in the chart. The visit is coded for billing from the physician's diagnosis codes, and routine
 claims are submitted; anything else waits for billing staff. A patient marked as a no-show is told, under the
-practice's missed-appointment policy.
+practice's missed-appointment policy, and so is a booking cancelled with less than a day's notice: a visit missed or
+cancelled late is the visit's own work, not a workflow of its own.
+
+A visit filed after the fact (a call, a visit at home) is a visit made under way (in progress): it is documented,
+signed, completed and billed like any other.
 """
 
 [trigger]
@@ -213,12 +217,22 @@ persons_only = true
 context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "input.reason"]
 
 # A request the nurse dealt with by phone and did not book (or the physician, for a patient nobody reached) is closed.
+# Not booked, the request closes. Handled on the phone (the nurse, or the physician after her, reached the patient),
+# it is a contact that took place: completed, not cancelled. Nobody reached, it is cancelled.
+[[steps]]
+id = "handled-by-phone"
+title = "Close the request: handled on the phone"
+kind = "automation"
+after = ["nurse-call", "not-reached"]
+when = "nurse-call.book != true and (nurse-call.reached == true or not-reached.action == 'reached-the-patient')"
+state = "finished"
+
 [[steps]]
 id = "not-booked"
 title = "Close the request without a visit"
 kind = "automation"
 after = ["nurse-call", "not-reached"]
-when = "nurse-call.book != true"
+when = "nurse-call.book != true and nurse-call.reached != true and not-reached.action != 'reached-the-patient'"
 state = "cancelled"
 
 [[steps]]
@@ -321,6 +335,34 @@ to = "{{run.subject}}"
 subject = "Your missed appointment"
 body = "We missed you at your appointment. {{no-show.reason}}. Amount due: ${{no-show.amount}}. Reply to rebook."
 
+# Cancelled while booked: late (less than the policy's notice before the time it was booked for), the patient is told
+# under the missed-appointment policy; with notice, nothing is due and nothing is sent.
+[[steps]]
+id = "late-cancel"
+title = "Apply the missed-appointment policy to a cancellation"
+kind = "automation"
+after = ["checked-in"]
+when = "record.status == 'cancelled'"
+block = "missed-appointment-fee"
+[steps.params]
+starts = "{{record.plannedStartDate}}"
+cancelled_at = "{{checked-in.ended_at}}"
+missed_this_year = 0
+fee = 50
+
+[[steps]]
+id = "tell-late-cancel"
+title = "Tell the patient about the late cancellation"
+kind = "automation"
+after = ["late-cancel"]
+when = "late-cancel.late == true"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your cancelled appointment"
+body = "Your appointment was cancelled with less than 24 hours' notice. {{late-cancel.reason}}. Amount due: ${{late-cancel.amount}}. Reply to rebook."
+
 [[steps]]
 id = "seen"
 title = "Wait for the visit to start"
@@ -415,6 +457,11 @@ name = "diagnosis_codes"
 type = "list"
 required = true
 help = "ICD-9 codes for billing, e.g. 401"
+[[steps.fields]]
+name = "referrals"
+label = "Refer to"
+type = "list"
+help = "specialties to refer the patient to, one per line: once you sign, each is a referral of its own"
 
 [[steps]]
 id = "sign"
@@ -442,6 +489,28 @@ action = "clock.now"
 start = "{{end.start}}"
 end = "{{end.end}}"
 minutes = "{{end.minutes}}"
+
+# Discarded: the visit still took place, so it is completed (never left in progress, and there is no going back a
+# step: a workflow has no loops). No note is filed and the visit is not billed; the physician is told to write the
+# note on the visit themselves.
+[[steps]]
+id = "discarded"
+title = "Complete the visit without the discarded note"
+kind = "automation"
+after = ["sign"]
+when = "sign.outcome == 'discard'"
+state = "finished"
+
+[[steps]]
+id = "tell-discarded"
+title = "Tell the physician the visit has no note"
+kind = "automation"
+after = ["discarded"]
+action = "notice.send"
+[steps.params]
+to = "{{sign.by}}"
+text = "You discarded the draft note: this visit has no note. Write one on the visit."
+link = "{{run.record}}"
 
 # Signed: the visit is completed, with when it took place.
 [[steps]]
@@ -486,6 +555,28 @@ section = [
   { title = "Plan", text = "{{edit.plan}}" },
   { title = "Follow-up", text = "{{edit.follow_up}}" },
 ]
+
+# Each referral written in the note is a record of its own (a sub-record of the visit, about the same patient), walked
+# by the referral workflow from draft to the specialist's report. The visit does not wait for them.
+[[steps]]
+id = "refer"
+title = "Make the referrals in the note"
+kind = "automation"
+after = ["finish"]
+for_each = "{{edit.referrals}}"
+action = "record.child"
+[steps.params]
+type = "ServiceRequest"
+[steps.params.data]
+status = "draft"
+intent = "order"
+priority = "routine"
+referral_to = "{{each}}"
+reason_text = "{{edit.assessment}}"
+[steps.params.input]
+specialty = "{{each}}"
+reason = "{{edit.assessment}}"
+urgency = "routine"
 
 [[steps]]
 id = "code"

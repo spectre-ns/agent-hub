@@ -396,7 +396,8 @@ def standin_intake_review(ctx):
     p = _patient(ctx)
     if not p:
         return {"answer": {}, "escalate": True, "reason": "there is no registration to review"}
-    form = next(iter(_recs(ctx, "intake", "QuestionnaireResponse")), None)
+    forms = _recs(ctx, "intake", "QuestionnaireResponse")
+    form = next((f for f in forms if f.get("item")), None)  # the one with answers (a registration may have none)
     a = _answers(form) if form else {}
     missing = []
     if not any(i.get("system", "").endswith("health-card") for i in p.get("identifier", []) or []):
@@ -466,7 +467,7 @@ SOAP = {"patient": "subjective", "exam": "objective", "assessment": "assessment"
 
 def standin_visit_note_draft(ctx):
     """Sorts a labelled transcript ("Patient: ...", "Exam: ...", "Plan: ...") into a SOAP note."""
-    # the visit's transcript: given when the visit ended (end.transcript), or with a visit filed after the fact
+    # the visit's transcript: given when the visit ended (end.transcript), a visit filed after the fact too
     transcript = str(next((v for k, v in ctx["context"].items() if k.endswith(".transcript") and v), ""))
     out = {"subjective": [], "objective": [], "assessment": [], "plan": [], "follow_up": []}
     for line in transcript.splitlines():
@@ -713,8 +714,9 @@ def demo(hub):
     hub.create_record(amara, "Immunization", {
         "status": "completed", "patient": subj, "vaccineCode": {"text": "Influenza vaccine (seasonal)"},
         "occurrenceDateTime": ago(40), "primarySource": True, "performer": [{"actor": {"reference": "Practitioner/dr-amara"}}]})
-    hub.create_record(imported, "Observation", {
-        "status": "final", "category": [{"text": "laboratory"}], "subject": subj, "code": {"text": "HbA1c"},
+    hub.create_record(imported, "Observation", {  # from the old chart: reviewed there long ago
+        "status": "final", "review": "closed", "category": [{"text": "laboratory"}], "subject": subj,
+        "code": {"text": "HbA1c"},
         "effectiveDateTime": ago(200), "valueQuantity": {"value": 5.9, "unit": "%"},
         "referenceRange": [{"low": {"value": 4.0, "unit": "%"}, "high": {"value": 6.0, "unit": "%"}, "text": "4.0-6.0 %"}],
         "interpretation": [{**_cc("N", INTERPRETATION), "text": "normal"}]})
@@ -743,14 +745,14 @@ def demo(hub):
     omar = hub.create_record(portal, "Patient", _patient_rec("Omar", "Haddad", "1990-07-02", "male",
                                                              card="9876 543 210", phone="902-555-0199",
                                                              street="301 Robie Street", postal="B3L 3B9"))
-    hub.create_record(portal, "QuestionnaireResponse", {
+    hub.create_record(portal, "QuestionnaireResponse", {  # his registration: filing it starts the intake
         "status": "completed", "subject": {"reference": f"Patient/{omar['id']}"}, "authored": today.isoformat(),
+        "questionnaire": "registration", "registration": "received",
         "item": [{"linkId": "medications", "answer": [{"valueString": "none"}]},
                  {"linkId": "allergies", "answer": [{"valueString": "none"}]},
                  {"linkId": "current-physician", "answer": [{"valueString": "none"}]},
                  {"linkId": "urgent-concern", "answer": [{"valueString": "no"}]},
                  {"linkId": "privacy-consent", "answer": [{"valueBoolean": True}]}]})
-    hub.engine.emit(portal, "patient.registered", record=f"Patient/{omar['id']}")
 
     # A visit just ended with Dr. Okafor.
     priya = hub.create_record(jo, "Patient", _patient_rec(

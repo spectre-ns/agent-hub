@@ -18,8 +18,10 @@ date = "plannedStartDate"
 active = "record.status in ['requested', 'planned', 'arrived', 'triaged', 'in-progress', 'onleave']"
 # Every visit is worked from open to closed by one workflow: asked for (requested) or booked straight on the calendar
 # (planned) or a walk-in (arrived), it is screened and booked, checked in, seen, documented, signed and completed, or
-# cancelled or a no-show. Its status is where that work is. A visit filed after the fact (finished) is not.
-workflow = { id = "appointment-request", when = "record.status in ['requested', 'planned', 'arrived']" }
+# cancelled (late: under the missed-appointment policy) or a no-show. Its status is where that work is. A visit filed
+# after the fact is filed under way (in-progress): it is documented, signed and billed the same way. One filed already
+# completed (finished, from an old chart) is not walked.
+workflow = { id = "appointment-request", when = "record.status in ['requested', 'planned', 'arrived', 'in-progress']" }
 order = 70
 summary = "A visit, from booking to the end: when and with whom, then what billing needs, never the note itself."
 
@@ -61,7 +63,7 @@ name = "plannedStartDate"
 label = "Booked for"
 type = "datetime"
 required = true
-required_unless = "record.status in ['requested', 'cancelled']"   # asked for: no time yet
+required_unless = "record.status in ['requested', 'cancelled', 'finished']"   # asked for: no time yet; handled on the phone: never booked
 
 [[field]]
 name = "plannedEndDate"
@@ -262,6 +264,7 @@ fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "book
 # not booked after all (cancelled), a booking is cancelled, or the patient does not come (noshow). The appointment
 # workflow makes the moves marked by = "workflow"; people check in, start the visit, cancel and mark a no-show here.
 [lifecycle]
+starts = ["in-progress"]   # a visit filed after the fact: under way, documented, signed and billed like any other
 field = "status"
 initial = "planned"
 labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", onleave = "On leave", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
@@ -271,6 +274,11 @@ from = ["requested"]
 to = "planned"
 by = "workflow"
 label = "Book"
+[[lifecycle.transition]]
+from = ["requested"]
+to = "finished"
+by = "workflow"
+label = "Handled on the phone"
 [[lifecycle.transition]]
 from = ["requested"]
 to = "cancelled"
