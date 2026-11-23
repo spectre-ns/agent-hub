@@ -859,11 +859,15 @@ def test_an_office_document_saved_in_collabora_becomes_a_new_version_by_its_edit
 def test_a_signature_can_be_limited_to_a_role_and_a_state(quality):
     hub = quality
     rana = M(hub, "rana")
-    capa = hub.create_record(rana, "CAPA", {"title": "T", "kind": "preventive", "problem": "P"})
-    with pytest.raises(Invalid):  # only in verification
-        hub.sign_record(rana, f"CAPA/{capa['id']}", "I verify that this action was effective")
+    meaning = "I checked this document against the audit"  # the modules' own meanings are their gates' now
+    src = (hub.record_type("Document").source
+           + f'\n[[signature]]\nmeaning = "{meaning}"\nstates = ["approved"]\nroles = ["quality-manager"]\n')
+    hub.approve(M(hub, "dr-amara"), "type", "Document", hub.propose("type", rana, src, "an audit check")["version"])
+    draft = hub.create_record(rana, "Document", {"title": "T", "body": "B"})
+    with pytest.raises(Invalid):  # only while it is in force
+        hub.sign_record(rana, f"Document/{draft['id']}", meaning)
     with pytest.raises(Denied):  # only a quality manager
-        hub.sign_record(M(hub, "dr-liam"), f"CAPA/{capa['id']}", "I verify that this action was effective")
+        hub.sign_record(M(hub, "dr-liam"), _doc(hub), meaning)
 
 
 def test_a_gate_decision_is_a_signature_on_its_record_and_survives_the_move_it_makes(quality):
@@ -1315,7 +1319,11 @@ def test_staff_keep_the_approved_version_while_a_document_is_revised(quality):
     hub.update_record(rana, dref, {"body": "A half-written revision"})
     used = hub.in_use_version(liam, dref)
     assert used["data"]["status"] == "approved" and used["data"].get("body") == old
-    hub.update_record(rana, dref, {"status": "obsolete"})
+    hub.update_record(rana, dref, {"status": "retiring", "obsolete_reason": "Replaced"})  # proposed obsolete
+    g = item_for(hub, _own_run(hub, dref, "dms-review"), "retire")
+    hub.engine.claim(M(hub, "dr-amara"), g)
+    hub.engine.decide(M(hub, "dr-amara"), g, "obsolete")  # a document controller's signed decision
+    assert hub.records.read(*dref.split("/", 1))["status"] == "obsolete"
     assert hub.in_use_version(liam, dref) is None  # a withdrawn document has no version in use
 
 
@@ -3220,7 +3228,7 @@ def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_
     assert hub.records.read("Document", doc["id"])["status"] == "draft"
     assert hub.engine.run(run["id"])["steps"]["revise-documents"]["state"] == "done"
     walk = _own_run(hub, dref, "dms-review")
-    assert hub.engine.run(walk["id"])["steps"]["revise"]["state"] == "waiting"
+    assert hub.engine.run(walk["id"])["steps"]["revise"]["state"] == "active"  # a task, the revision with its owner
 
     jo = M(hub, "jo")
     pats = hub.records.search("Patient")
