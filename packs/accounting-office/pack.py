@@ -765,7 +765,12 @@ def standin_t1_draft(ctx):
     if not ret:
         return {"answer": {}, "escalate": True, "reason": "the return is not readable"}
     cmp = ctx["context"].get("compare") or {}
-    est = estimate(_year_slips(_recs(ctx, "documents", "TaxSlip"), ret.get("year")))
+    slips = _year_slips(_recs(ctx, "documents", "TaxSlip"), ret.get("year"))
+    if any(s.get("slip_type") == "business-income" for s in slips):
+        return {"answer": {}, "escalate": True,
+                "reason": "Self-employment income: the statement of business activities (T2125), its expenses and "
+                          "CCA, is prepared from the client's books by a person"}
+    est = estimate(slips)
     flags = "\n".join(cmp.get("reasons") or [])
     refund = est["net_refund"]
     summary = (f"Total income {_money(est['total_income'])}, taxable {_money(est['taxable_income'])}; "
@@ -879,11 +884,297 @@ def facts(rec: dict, today: date | None = None) -> dict:
         out["age"] = t.year - b.year - ((t.month, t.day) < (b.month, b.day))
     return out
 
+# =====================================================================================================================
+# Demo (init --demo): each section's step, run in order (DEMO_STEPS). The foundation makes the clients and keeps
+# them in DEMO_CLIENTS (name -> reference), for the sections after it to give work to.
+# =====================================================================================================================
+IMPORTER = {"id": "import:accounting-office", "kind": "automation", "name": "Import from the old practice system",
+            "status": "active"}
+DEMO_CLIENTS: dict = {}
 
-# =====================================================================================================================
-# Demo (init --demo): DEMO_STEPS below, one per section, run in order
-# =====================================================================================================================
+
+def _quiet(*_):
+    pass
+
+
+def _agents_work(hub):
+    """Every agent works its inbox (stand-ins: no model), as `practicehub agents run` would."""
+    from practicehub.agents.runner import run_all_local
+    run_all_local(hub, log=_quiet)
+
+
+# name, kind, birth date or year end, email, extra fields
+DEMO_PEOPLE = [
+    ("Margaret Doucette", "1951-07-19", "margaret.doucette@example.ca", {"marital_status": "widowed"}),
+    ("Sarah MacNeil", "1980-02-03", "sarah.macneil@example.ca", {"marital_status": "single"}),
+    ("Liam Chen", "1987-10-11", "liam@chenphoto.example.ca", {"marital_status": "married", "self_employed": True}),
+    ("Mei Chen", "1989-04-27", "mei@chendesign.example.ca", {"marital_status": "married", "self_employed": True}),
+    ("James Okafor", "1975-12-02", "james.okafor@example.ca", {"marital_status": "married"}),
+    ("Aisha Okafor", "1978-06-14", "aisha.okafor@example.ca", {"marital_status": "married"}),
+    ("Kevin Thibodeau", "1992-03-08", "kevin.thibodeau@example.ca", {"marital_status": "single"}),
+    ("Fatima Haddad", "1984-09-30", "fatima.haddad@example.ca", {"marital_status": "single"}),
+    ("Daniel Boudreau", "1996-01-22", "daniel.boudreau@example.ca", {"marital_status": "single"}),
+    ("Robert Langille", "1960-05-05", "bob.langille@example.ca", {"marital_status": "divorced"}),
+]
+DEMO_BUSINESSES = [
+    ("Harbourview Bakery Ltd.", "12-31", "accounts@harbourviewbakery.example.ca",
+     ["bookkeeping", "t2", "gst-hst", "payroll"]),
+    ("Chen Design Inc.", "06-30", "studio@chendesign.example.ca", ["bookkeeping", "t2", "gst-hst"]),
+]
+DEMO_OWNERS = [("Sarah MacNeil", "Harbourview Bakery Ltd.", "owner", 100), ("Mei Chen", "Chen Design Inc.", "owner", 100),
+               ("Liam Chen", "Chen Design Inc.", "director", None), ("Liam Chen", "Mei Chen", "spouse", None),
+               ("James Okafor", "Aisha Okafor", "spouse", None)]
+
+
+def demo_foundation(hub):
+    """The firm's clients: people and their companies, imported from the practice's old system."""
+    DEMO_CLIENTS.clear()
+    n = 0
+    for name, born, email, extra in DEMO_PEOPLE:
+        n += 1
+        rec = hub.create_record(IMPORTER, "Client", {
+            "kind": "person", "name": name, "client_number": f"TW-{1000 + n}", "email": email, "birth_date": born,
+            "phone": f"902-555-{140 + n:04d}", "address": f"{10 + 7 * n} Spring Garden Road, Halifax NS",
+            "services": ["t1"], "partner_in_charge": "anne", "active": True, **extra})
+        DEMO_CLIENTS[name] = f"Client/{rec['id']}"
+    for name, year_end, email, services in DEMO_BUSINESSES:
+        n += 1
+        rec = hub.create_record(IMPORTER, "Client", {
+            "kind": "business", "name": name, "client_number": f"TW-{1000 + n}", "email": email,
+            "business_type": "ccpc", "fiscal_year_end": year_end, "services": services,
+            "phone": f"902-555-{140 + n:04d}", "address": f"{100 + n} Hollis Street, Halifax NS",
+            "partner_in_charge": "anne", "active": True})
+        DEMO_CLIENTS[name] = f"Client/{rec['id']}"
+    for who, of, kind, pct in DEMO_OWNERS:
+        hub.create_record(IMPORTER, "Relationship", {"client": DEMO_CLIENTS[who], "other": DEMO_CLIENTS[of],
+                                                     "kind": kind, **({"percent": pct} if pct else {})})
+
+
+# ---- T1: last year filed and assessed; this year in every state the T1 goes through
+def slip_text(kind: str, year: int, issuer: str, amount: float, tax: float = 0.0) -> str:
+    """The text of a slip as a scanner reads it (what the documents agent reads)."""
+    head = {"T4": ("T4 Statement of Remuneration Paid", "Employer", "14"),
+            "T5": ("T5 Statement of Investment Income", "Payer", "13"),
+            "T4A-P": ("T4A(P) Statement of Canada Pension Plan Benefits", "Issued by", "20"),
+            "T4A-OAS": ("T4A(OAS) Statement of Old Age Security", "Issued by", "18"),
+            "T4E": ("T4E Statement of Employment Insurance Benefits", "Issued by", "14"),
+            "T5008": ("T5008 Statement of Securities Transactions", "Payer", "21")}
+    if kind in head:
+        title, who, box = head[kind]
+        lines = [title, f"Year: {year}", f"{who}: {issuer}", f"Box {box}: {amount:,.2f}"]
+        if tax:
+            lines.append(f"Box 22: {tax:,.2f}")
+        return "\n".join(lines)
+    title = {"RRSP": "RRSP contribution receipt", "donation": "Official receipt for income tax purposes (donation)",
+             "medical": "Pharmacy receipt for medical expenses", "childcare": "Child care receipt",
+             "business-income": "Statement of business activities (T2125)"}[kind]
+    return "\n".join([title, f"Year: {year}", f"Issued by: {issuer}", f"Amount: {amount:,.2f}"])
+
+
+# client -> [(slip type, issuer, amount last year, tax last year, amount this year (None: did not come), tax)]
+DEMO_SLIPS = {
+    "Margaret Doucette": [("T4A-P", "Service Canada", 9480.0, 0.0, 9760.0, 0.0),
+                          ("T4A-OAS", "Service Canada", 8560.0, 860.0, 8720.0, 870.0),
+                          ("T5", "Bluenose Credit Union", 1210.0, 0.0, 1340.0, 0.0),
+                          ("donation", "IWK Foundation", 400.0, 0.0, 450.0, 0.0)],
+    "Sarah MacNeil": [("T4", "Harbourview Bakery Ltd.", 58000.0, 9100.0, 61000.0, 9600.0),
+                      ("T5", "Scotiabank", 640.0, 0.0, 700.0, 0.0),
+                      ("T5008", "Wealthsimple", None, None, 24000.0, 0.0)],
+    "Liam Chen": [("business-income", "Chen Photography", 41000.0, 0.0, 46500.0, 0.0),
+                  ("RRSP", "Tangerine", 3000.0, 0.0, 3500.0, 0.0)],
+    "Mei Chen": [("T4", "Chen Design Inc.", 72000.0, 14100.0, 74000.0, 14500.0)],
+    "James Okafor": [("T4", "Nova Scotia Health", 88000.0, 19800.0, 90500.0, 20300.0),
+                     ("RRSP", "RBC Royal Bank", 6000.0, 0.0, 6000.0, 0.0)],
+    "Aisha Okafor": [("T4", "Halifax Regional Centre for Education", 67000.0, 13000.0, 69000.0, 13400.0),
+                     ("childcare", "Little Lighthouse Daycare", 7200.0, 0.0, 7400.0, 0.0)],
+    "Kevin Thibodeau": [("T4", "Irving Shipbuilding", 76000.0, 15600.0, 79000.0, 16300.0),
+                        ("T5", "Scotiabank", 310.0, 0.0, None, None)],
+    "Fatima Haddad": [("T4", "Dalhousie University", 54000.0, 9400.0, 41000.0, 7100.0),
+                      ("T4E", "Service Canada", None, None, 6200.0, 620.0)],
+}
+
+
+def _prior_year(hub, name, year, slips):
+    """Last year, as the old system had it: the slips read, the return filed and assessed, the engagement done."""
+    cref = DEMO_CLIENTS[name]
+    made = []
+    for kind, issuer, amount, tax, *_ in slips:
+        if amount is None:
+            continue
+        s = {"client": cref, "year": year, "status": "extracted", "slip_type": kind, "issuer": issuer,
+             "amount": amount, "tax_deducted": tax or 0.0, "source": "portal", "text": slip_text(kind, year, issuer,
+                                                                                                  amount, tax or 0.0),
+             "received_on": f"{year + 1}-03-0{1 + len(made) % 8}", "resourceType": "TaxSlip"}
+        hub.create_record(IMPORTER, "TaxSlip", {k: v for k, v in s.items() if k != "resourceType"})
+        made.append(s)
+    est = estimate(made)
+    se = bool((_read(hub, cref) or {}).get("self_employed"))
+    eng = hub.create_record(IMPORTER, "Engagement", {
+        "client": cref, "client_name": name, "service": "t1", "year": year, "fee": 350 if not se else 650,
+        "fee_basis": "fixed", "status": "closed", "client_signed_on": f"{year + 1}-01-20", "client_signed_how": "portal",
+        "completed_on": f"{year + 1}-05-28"})
+    ret = hub.create_record(IMPORTER, "T1Return", {
+        "client": cref, "client_name": name, "year": year, "engagement": f"Engagement/{eng['id']}",
+        "status": "assessed", "self_employed": se, **_due_dates(hub.pack, year, se),
+        **{k: est[k] for k in ("total_income", "taxable_income", "tax_deducted", "net_refund")},
+        "t183_signed_on": f"{year + 1}-04-0{3 + len(name) % 5}", "t183_how": "portal",
+        "efile_confirmation": "EF" + hashlib.sha256(f"{name}{year}".encode()).hexdigest()[:8].upper(),
+        "filed_on": f"{year + 1}-04-1{len(name) % 9}", "noa_received": True, "noa_date": f"{year + 1}-05-2{len(name) % 9}",
+        "assessed_refund": est["net_refund"], "assessed_taxable_income": est["taxable_income"],
+        "assessment_notes": "Assessed as filed."})
+    hub.update_record(IMPORTER, f"Engagement/{eng['id']}",
+                      {**_read(hub, f"Engagement/{eng['id']}"), "work": f"T1Return/{ret['id']}"})
+    return f"Engagement/{eng['id']}"
+
+
+def _engage(hub, name, year, previous=None, *, sign=True):
+    """This year's T1 engagement, proposed; the agent writes and sends the letter; the client signs on the portal,
+    and the hub opens the year's return. The return's reference (None if not signed)."""
+    sophie, portal = hub.member("sophie"), hub.member("client-portal")
+    cref = DEMO_CLIENTS[name]
+    se = bool((_read(hub, cref) or {}).get("self_employed"))
+    hub.create_record(sophie, "Engagement", {"client": cref, "client_name": name, "service": "t1", "year": year,
+                                             "fee": 350 if not se else 650, "fee_basis": "fixed",
+                                             **({"previous": previous} if previous else {}), "status": "proposed"})
+    _agents_work(hub)
+    if not sign:
+        return None
+    hub.engine.start(portal, "client-sign", record=cref, inputs={"what": "engagement", "answer": "approve"})
+    _agents_work(hub)
+    got = [r for r in hub.records.search("T1Return", subject=cref, limit=None) if r.get("year") == year]
+    return f"T1Return/{got[0]['id']}" if got else None
+
+
+def _upload(hub, name, year, slips, *, only=None):
+    """The client uploads this year's slips on the portal; the documents agent reads each."""
+    portal = hub.member("client-portal")
+    # what the organizer did not expect first: the return is drafted as soon as the expected ones are all in
+    for kind, issuer, _, _, amount, tax in sorted(slips, key=lambda s: s[2] is not None):
+        if amount is None or (only is not None and kind not in only):
+            continue
+        hub.create_record(portal, "TaxSlip", {"client": DEMO_CLIENTS[name], "status": "received", "source": "portal",
+                                              "received_on": hub.engine.now().date().isoformat(),
+                                              "text": slip_text(kind, year, issuer, amount, tax or 0.0)})
+    _agents_work(hub)
+
+
+def _approve_holds(hub, ref):
+    """The sponsor approves what the agent drafted over the risk line (they read the flags)."""
+    rob = hub.member("rob")
+    for row in hub.db.items.find({"kind": "hold", "status": "open", "assignee": "rob"}):
+        held = hub.db.items.get(row["output"]["holds"]) or {}
+        run = hub.engine.run(held.get("run_id")) if held.get("run_id") else None
+        if run and run.get("record") == ref:
+            hub.engine.decide(rob, row["id"], "approve", "Read the flags; the draft explains each.")
+    _agents_work(hub)
+
+
+def _review(hub, ref, notes):
+    hub.move_record(hub.member("rob"), ref, "client-approval", {"review_notes": notes}, signature=REVIEW_MEANING)
+    _agents_work(hub)
+
+
+def _client_approves(hub, name):
+    hub.engine.start(hub.member("client-portal"), "client-sign", record=DEMO_CLIENTS[name],
+                     inputs={"what": "t183", "answer": "approve"})
+    _agents_work(hub)
+
+
+def _file(hub, ref):
+    hub.move_record(hub.member("anne"), ref, "filing", {}, signature=FILE_MEANING)
+    _agents_work(hub)
+
+
+def _notice(hub, name, year, refund, taxable, date_on):
+    portal = hub.member("client-portal")
+    text = "\n".join(["Notice of Assessment", f"Tax year: {year}", "Issued by: Canada Revenue Agency",
+                      f"Date: {date_on}",
+                      f"Refund: {refund:.2f}" if refund >= 0 else f"Balance owing: {-refund:.2f}",
+                      f"Box 26000: {taxable:.2f}"])
+    hub.create_record(portal, "TaxSlip", {"client": DEMO_CLIENTS[name], "status": "received", "source": "portal",
+                                          "received_on": date_on, "text": text})
+    _agents_work(hub)
+
+
+def demo_t1(hub):
+    """Last year's returns, filed and assessed; this year's in every state the T1 goes through, the agents having
+    done what they do: letters, organizers, reading slips, chasing, drafting."""
+    from datetime import timezone
+    year = hub.engine.now().year - 1
+    prev = {name: _prior_year(hub, name, year - 1, slips) for name, slips in DEMO_SLIPS.items()}
+
+    # Kevin: one slip came, last year's T5 did not; the agent chased it, and three weeks on it still had not come:
+    # Ethan (staff) is to call him. Time is moved on for his return alone, before anyone else's work starts.
+    kevin = _engage(hub, "Kevin Thibodeau", year, prev["Kevin Thibodeau"])
+    _upload(hub, "Kevin Thibodeau", year, DEMO_SLIPS["Kevin Thibodeau"])
+    now = datetime.now(timezone.utc)
+    hub.engine.tick(now + timedelta(days=22))
+    _agents_work(hub)
+    hub.engine.tick(now + timedelta(days=37))
+    _agents_work(hub)
+
+    # Margaret: every slip in, like last year: the agent drafted it, within the risk line; Rob reviews it.
+    margaret = _engage(hub, "Margaret Doucette", year, prev["Margaret Doucette"])
+    _upload(hub, "Margaret Doucette", year, DEMO_SLIPS["Margaret Doucette"])
+
+    # Sarah: sold shares this year (a T5008): over the risk line, the draft is held for Rob, the agent's sponsor.
+    sarah = _engage(hub, "Sarah MacNeil", year, prev["Sarah MacNeil"])
+    _upload(hub, "Sarah MacNeil", year, DEMO_SLIPS["Sarah MacNeil"])
+
+    # Liam: self-employed (due June 15): the agent will not draft business income; Priya (senior) prepares it.
+    liam = _engage(hub, "Liam Chen", year, prev["Liam Chen"])
+    _upload(hub, "Liam Chen", year, DEMO_SLIPS["Liam Chen"])
+
+    # Mei: reviewed; the summary is on the portal, waiting for her to approve (T183).
+    mei = _engage(hub, "Mei Chen", year, prev["Mei Chen"])
+    _upload(hub, "Mei Chen", year, DEMO_SLIPS["Mei Chen"])
+    _approve_holds(hub, mei)
+    _review(hub, mei, "T4 agrees with Chen Design's payroll. No changes.")
+
+    # James: reviewed and approved by him on the portal: Anne (partner) signs to file it.
+    james = _engage(hub, "James Okafor", year, prev["James Okafor"])
+    _upload(hub, "James Okafor", year, DEMO_SLIPS["James Okafor"])
+    _approve_holds(hub, james)
+    _review(hub, james, "RRSP receipt matches the contribution room on last year's NOA.")
+    _client_approves(hub, "James Okafor")
+
+    # Aisha: filed (EFILE confirmation, invoiced), waiting for the notice of assessment.
+    aisha = _engage(hub, "Aisha Okafor", year, prev["Aisha Okafor"])
+    _upload(hub, "Aisha Okafor", year, DEMO_SLIPS["Aisha Okafor"])
+    _approve_holds(hub, aisha)
+    _review(hub, aisha, "Childcare claimed by the lower-income spouse, as last year.")
+    _client_approves(hub, "Aisha Okafor")
+    _file(hub, aisha)
+
+    # Fatima: lost her job in the year (EI): filed; the CRA assessed a different refund: Rob looks into it.
+    fatima = _engage(hub, "Fatima Haddad", year, prev["Fatima Haddad"])
+    _upload(hub, "Fatima Haddad", year, DEMO_SLIPS["Fatima Haddad"])
+    _approve_holds(hub, fatima)
+    _review(hub, fatima, "EI repayment threshold checked: none owing.")
+    _client_approves(hub, "Fatima Haddad")
+    _file(hub, fatima)
+    filed = _read(hub, fatima)
+    _notice(hub, "Fatima Haddad", year, round(float(filed["net_refund"]) - 412.0, 2),
+            float(filed["taxable_income"]) + 1800.0, hub.engine.now().date().isoformat())
+
+    # Daniel: a new client: the letter is out, not signed yet; he uploaded a photo the agent could not read
+    # (Ethan types it in). Robert asked a question on the portal instead of signing (Sophie calls him back).
+    _engage(hub, "Daniel Boudreau", year, sign=False)
+    hub.create_record(hub.member("client-portal"), "TaxSlip", {
+        "client": DEMO_CLIENTS["Daniel Boudreau"], "status": "received", "source": "portal",
+        "received_on": hub.engine.now().date().isoformat(), "text": "IMG_2291.jpg (photo, blurred)"})
+    _agents_work(hub)
+    _engage(hub, "Robert Langille", year, sign=False)
+    hub.engine.start(hub.member("client-portal"), "client-sign", record=DEMO_CLIENTS["Robert Langille"],
+                     inputs={"what": "engagement", "answer": "question"})
+    _agents_work(hub)
+    return {"kevin": kevin, "margaret": margaret, "sarah": sarah, "liam": liam, "mei": mei, "james": james,
+            "aisha": aisha, "fatima": fatima}
+
+
+DEMO_STEPS = [demo_foundation, demo_t1]  # BOOKS, T2 and GST-PAYROLL add theirs after these
+
+
 def demo(hub):
     for step in DEMO_STEPS:
         step(hub)
-DEMO_STEPS: list = []

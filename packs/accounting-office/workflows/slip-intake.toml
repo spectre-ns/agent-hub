@@ -20,7 +20,7 @@ skill = "slip-extract"
 risk = "low"
 state = "extracted"
 due = "1d"
-people_role = "admin"
+people_role = "staff"
 context = ["record:documents"]
 
 [[steps]]
