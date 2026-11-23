@@ -226,7 +226,7 @@ ul.admin-cards a:hover,ul.admin-cards a:focus-visible{background:var(--raised-ho
 .crumbs a[aria-current=page]{color:var(--subtle)}
 .crumbs span.sep{margin:0 8px;color:var(--subtlest)}
 .pagehead{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 16px}
-.pagehead h1{flex:1;min-width:min(240px,100%)}
+.pagehead h1{flex:1;min-width:min(420px,100%)}
 .pagehead .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 #proposed-profile .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 #proposed-profile td{overflow-wrap:anywhere}#proposed-profile tbody th{vertical-align:top}

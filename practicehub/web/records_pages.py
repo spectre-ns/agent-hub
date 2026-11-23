@@ -1174,7 +1174,7 @@ class RecordPages:
                          + (f'<p class="muted body">The 50 most recent of {len(recs)}. <a href="/records/{e(t)}?linked='
                             f'{e(urllib.parse.quote(ref, safe=""))}">Show all {len(recs)}</a></p>' if len(recs) > 50 else "")
                          + '</section>')
-            rail.append((f"link-{t}", rt.plural, len(recs)))
+            rail.append((f"link-{t}", rt.plural, len(recs), about))  # about them: listed with the chart's own
         out += own
         if links:
             out.append('<h2 class="links-head" id="links">Linked here</h2>' + "".join(links))
@@ -1189,11 +1189,12 @@ class RecordPages:
             return ""
         a = lambda anchor, words, n: (f'<li><a href="#{e(anchor)}">{e(words)}'
                                       + (f'<span class="count">{n}</span>' if n is not None else "") + '</a></li>')
-        own = [x for x in rail if x[0].startswith("part-")]
-        linked = [x for x in rail if x[0].startswith("link-")]
+        mine = lambda x: x[0].startswith("part-") or (len(x) > 3 and x[3])
+        own = [x for x in rail if mine(x)]
+        linked = [x for x in rail if x[0].startswith("link-") and not mine(x)]
         return (f'<nav class="subnav owner-rail" aria-label="Sections of {e(title)}">'
-                + (f'<div class="sec">On this {e(self._lower(label))}</div><ul>{"".join(a(*x) for x in own)}</ul>' if own else "")
-                + (f'<div class="sec">Linked here</div><ul>{"".join(a(*x) for x in linked)}</ul>' if linked else "")
+                + (f'<div class="sec">On this {e(self._lower(label))}</div><ul>{"".join(a(*x[:3]) for x in own)}</ul>' if own else "")
+                + (f'<div class="sec">Linked here</div><ul>{"".join(a(*x[:3]) for x in linked)}</ul>' if linked else "")
                 + (f'<div class="sec">Work</div><ul>{"".join(a(*x) for x in extra)}</ul>' if extra else "")
                 + "</nav>")
 
@@ -1463,8 +1464,8 @@ class RecordPages:
                                for f in rt.fields if f.get("show", True) is not False
                                and not (lc and f["path"] == lc["path"]) and schema.first(d, schema.locate(d, f["path"], f.get("with"))) not in (None, ""))
                 main.append(f'<section class="card in-use"><h3>In use: the {e(lc["in_use"])} version</h3>'
-                            f'<p class="muted">This {e(rt.label.lower())} is being revised ({e(str(st))}). Until the '
-                            f'revision is {e(lc["in_use"])}, work from this version (saved {e(str(used["at"])[:16])}).'
+                            f'<p class="muted">This {e(rt.label.lower())} is being revised ({e(rt.state_label(st).lower())}). Until the '
+                            f'revision is {e(lc["in_use"])}, work from this version (saved {self._at(used["at"])}).'
                             f'</p><table class="kv">{body}</table></section>')
             if locked:
                 main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(rt.state_label(st))}</b> is not edited. '

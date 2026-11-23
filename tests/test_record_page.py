@@ -170,3 +170,11 @@ def test_visits_are_listed_in_time_order_with_a_today_filter(hub, server):
     day = hub.engine.now().date()
     shown = re.findall(r"<time datetime=\"(\d{4}-\d\d-\d\d)", today.split("<table", 1)[-1])
     assert all(d == day.isoformat() for d in shown)
+
+
+def test_a_patients_results_and_prescriptions_are_sections_of_their_chart(hub, server):
+    pid = _ellen(hub).split("/")[1]
+    page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
+    assert '<h2 id="link-Observation-h">Results' in page and '<h2 id="link-MedicationRequest-h">Prescriptions' in page
+    own = page.split('class="subnav owner-rail"', 1)[1].split("</nav>", 1)[0].split('<div class="sec">Linked here', 1)[0]
+    assert 'href="#link-Observation"' in own and 'href="#link-MedicationRequest"' in own
