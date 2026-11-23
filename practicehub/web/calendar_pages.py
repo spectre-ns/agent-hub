@@ -576,7 +576,7 @@ class CalendarPages:
         if booked:  # said back, with the booking to open, not a silent return to the calendar
             body = (f'<div data-modal-body data-modal-stay>{booked}{tell}<div class="filters">'
                     f'<a class="btn primary" href="/schedule?date={start.date().isoformat()}#cal">Back to the '
-                    f'calendar</a><a class="btn secondary" href="/runs/{e(run["id"])}">See the request</a></div></div>')
+                    f'calendar</a><a class="btn secondary" href="{e(self.run_href(run))}">{e(self._open_words(run))}</a></div></div>')
             return self.layout(req, "Booked", body, crumbs=[("/schedule", "Schedule"), (None, "Booked")])
         roles = sorted({it.get("role") or "" for it in waiting} - {""})
         names = ", ".join(self.hub.role(r)["name"] for r in roles if self.hub._role_known(r)) or "someone"
@@ -584,7 +584,7 @@ class CalendarPages:
                 f'{e(self.member_name(who))}, {start:%A %B} {start.day} at {start:%H:%M} is still free: the reason '
                 f'went to {e(names)} first.</p></div><div class="card stack"><ul>'
                 + "".join(f'<li>{e(it.get("title") or it.get("step_id") or "")}</li>' for it in waiting)
-                + f'</ul><div class="filters"><a class="btn primary" href="/runs/{e(run["id"])}">See the request</a>'
+                + f'</ul><div class="filters"><a class="btn primary" href="{e(self.run_href(run))}">{e(self._open_words(run))}</a>'
                   f'<a class="btn secondary" href="/schedule?date={start.date().isoformat()}" data-modal-close>'
                   f'Back to the calendar</a></div></div></div>')
         return self.layout(req, "Not booked yet", body, crumbs=[("/schedule", "Schedule"), (None, "Not booked yet")])

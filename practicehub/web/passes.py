@@ -108,9 +108,8 @@ class PassPages:
                 said = f": “{e(ended['comment'])}”" if ended["comment"] else ""
                 bits.append(f"the pass before ended at {e(ended['title'])}: <b>{e(self.human(ended['outcome']))}</b> "
                             f"by {e(self.member_name(ended['by']) or 'the workflow')}{when}{said}")
-            bits.append(f'<a href="/runs/{e(prev["id"])}">Previous pass</a>')
         if nxt:
-            bits.append(f'<a href="/runs/{e(nxt["id"])}">Next pass</a>')
+            bits.append(f"pass {self._pass_number(nxt)} has begun")
         return f'<div class="card passes"><p>{" · ".join(bits)}</p></div>'
 
     # ------------------------------------------------------------------------------------------ what is signed
@@ -282,7 +281,7 @@ class PassPages:
                 return ""
             wf = wf_of(run)
             name = wf.title if wf else run["workflow_id"]
-            return f'<a href="/runs/{e(run["id"])}">{e(name)}, pass {self._pass_number(run)}</a>'
+            return f"{e(name)}, pass {self._pass_number(run)}"
 
         def by_whom(actor, run):
             try:
