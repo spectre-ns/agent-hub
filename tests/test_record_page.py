@@ -321,3 +321,48 @@ def test_a_referral_is_linked_by_hand_on_its_page_to_its_patients_records_and_un
     assert call(server, "POST", f"/api/records/{t}/{rid}/link", amara, body={"rel": "report", "to": rep})[0] == 200
     got = json.loads(call(server, "GET", f"/api/records/{t}/{rid}/links", amara)[1])
     assert {x["rel"]: x["linked"] for x in got} == {"sent-with": [], "report": [rep]}
+
+
+def test_the_record_structure_is_drawn_and_each_change_is_a_proposal_another_policy_owner_approves(hub, server):
+    """/define/structure draws every type under the one it is part of, with its hand links as arcs; moving a type
+    under another, adding a link and removing one each propose a version of that type, in force once approved."""
+    amara, rana = token(hub, "dr-amara"), token(hub, "rana")
+    code, page = call(server, "GET", "/define/structure", rana)
+    assert code == 200 and 'class="st-svg"' in page
+    assert 'data-type="ServiceRequest"' in page and 'data-from="ServiceRequest" data-to="DiagnosticReport"' in page
+    panel = call(server, "GET", "/define/structure?type=ServiceRequest", rana)[1].split('id="st-panel"', 1)[1]
+    assert "Specialist&#x27;s report" in panel and 'value="drop-link"' in panel
+    # a type is never made part of its own part
+    code, page = call(server, "POST", "/define/structure", rana, form={"type": "Patient", "op": "owner",
+                                                                        "owner": "Encounter"})
+    assert code == 422 and "its own part" in page
+    code, _ = call(server, "POST", "/define/structure", rana, form={
+        "type": "ServiceRequest", "op": "add-link", "label": "Follow-up visit", "to": "Encounter", "help": "x"})
+    assert code == 303
+    ver = hub.definition_versions("type", "ServiceRequest")[0]
+    assert ver["status"] == "proposed" and "[[link]]" in ver["source"] and 'rel = "follow-up-visit"' in ver["source"]
+    assert "# A referral to a specialist" in ver["source"]  # an added link keeps the text's comments
+    assert hub.record_type("ServiceRequest").link("follow-up-visit") is None  # not before it is approved
+    hub.approve(M(hub, "dr-amara"), "type", "ServiceRequest", ver["version"])
+    x = hub.record_type("ServiceRequest").link("follow-up-visit")
+    assert x["to"] == ["Encounter"] and x["many"] is False
+    code, _ = call(server, "POST", "/define/structure", amara, form={
+        "type": "ServiceRequest", "op": "drop-link", "rel": "follow-up-visit", "note": "not needed"})
+    assert code == 303
+    ver = hub.definition_versions("type", "ServiceRequest")[0]
+    assert ver["status"] == "proposed" and "follow-up-visit" not in ver["source"]
+
+
+def test_moving_a_type_under_another_proposes_a_required_reference_to_its_new_owner(hub, server):
+    import tomllib
+    rana = token(hub, "rana")
+    code, page = call(server, "POST", "/define/structure", rana,
+                      form={"type": "AllergyIntolerance", "op": "owner", "owner": "Encounter"})
+    assert code == 303, page
+    doc = tomllib.loads(hub.definition_versions("type", "AllergyIntolerance")[0]["source"])
+    f = next(x for x in doc["field"] if x["name"] == doc["part_of"])
+    assert f["type"] == "reference" and f["required"] and "Encounter" in str(f["target"])
+    code, page = call(server, "POST", "/define/structure", rana,
+                      form={"type": "Immunization", "op": "owner", "owner": ""})
+    assert code == 303, page
+    assert "part_of" not in tomllib.loads(hub.definition_versions("type", "Immunization")[0]["source"])

@@ -92,8 +92,9 @@ class DefinitionPages:
                 f'<div class="tablewrap"><table><thead><tr><th scope="col">{e(noun.capitalize())}</th>'
                 f'<th scope="col">What it has</th><th scope="col">Active</th><th scope="col">From</th></tr></thead>'
                 f'<tbody>{"".join(rows)}</tbody></table></div>')
-        return self.layout(req, title, body, actions=f'<a class="btn primary" href="/define/{kinds}/new">'
-                                                     f'New {e(noun)}</a>')
+        structure = '<a class="btn secondary" href="/define/structure">Structure</a>' if kind == "type" else ""
+        return self.layout(req, title, body, actions=structure + f'<a class="btn primary" href="/define/{kinds}/new">'
+                                                                 f'New {e(noun)}</a>')
 
     # ------------------------------------------------------------------------------------------ one definition
     def page_definition(self, req, kinds, did):

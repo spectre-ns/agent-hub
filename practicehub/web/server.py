@@ -57,6 +57,7 @@ from .assets import CSS, ICONS, JS
 from .bpmn_pages import BpmnPages
 from .dashboard_pages import DashboardPages
 from .definitions_pages import DefinitionPages
+from .structure_pages import StructurePages
 from .calendar_pages import CalendarPages
 from .work_panel import WorkPanel
 from .mcp_pages import McpPages
@@ -102,7 +103,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages,
+class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, DefinitionPages, StructurePages, OfficePages, LivePages, McpPages,
           AnalyticsPages, BpmnPages, HolderWords, PassPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
@@ -216,6 +217,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         self.work_routes(R)
         self.record_routes(R)
         self.dashboard_routes(R)
+        self.structure_routes(R)  # before /define/<kinds>/...
         self.definition_routes(R)
         self.office_routes(R)
         self.mcp_routes(R)
@@ -675,6 +677,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                  ("/modules", "Modules", "what the practice has installed", "module"),
                  ("/workflows", "Workflows", "how work moves, step by step", "flow"),
                  ("/define/types", "Record types", "what the practice keeps records of", "records"),
+                 ("/define/structure", "Record structure", "what is part of what, and the links between records",
+                  "records"),
                  ("/define/views", "Views", "boards and tables of records", "board"),
                  ("/blocks", "Blocks", "reusable steps", "block"),
                  ("/define/skills", "Skills", "what agents know how to do", "skill"),

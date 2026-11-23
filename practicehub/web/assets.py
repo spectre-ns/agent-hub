@@ -4845,3 +4845,102 @@ ol.timeline li{padding:6px 0;border-bottom:1px solid var(--line)}
 """
 
 CSS = CSS + RECWORK_CSS
+
+STRUCTURE_CSS = """
+.st-layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:24px;align-items:start}
+@media (max-width:1000px){.st-layout{grid-template-columns:1fr}}
+.st-canvas{overflow:auto;border:1px solid var(--border);border-radius:6px;background:var(--sunken);padding:8px}
+.st-legend{display:flex;gap:8px 14px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--subtle);margin:0 0 6px 4px}
+.st-key{display:inline-block;width:22px;height:0;border-top:2px solid var(--border-bold);vertical-align:middle}
+.st-key.hand{border-top-color:var(--brand)}.st-key.field{border-top:2px dashed var(--subtlest)}
+.st-svg{display:block;font:13px/1 inherit;touch-action:none;user-select:none}
+.st-svg .st-node rect,.st-svg .st-root rect{fill:var(--surface);stroke:var(--border-bold);stroke-width:1}
+.st-svg .st-root rect{fill:transparent;stroke-dasharray:4 3}.st-svg .st-root text{fill:var(--subtle)}
+.st-svg .st-node text{fill:var(--fg)}.st-svg .st-node{cursor:grab}
+.st-svg .st-node:hover rect,.st-svg .st-node:focus rect{stroke:var(--brand);stroke-width:2}
+.st-svg .st-node:focus{outline:none}.st-svg .st-node:focus-visible rect{stroke:var(--focus);stroke-width:3}
+.st-svg .st-node.selected rect{fill:var(--selected-bg);stroke:var(--selected-fg);stroke-width:2}
+.st-svg .st-node.proposed rect{stroke:var(--warning);stroke-dasharray:5 3}
+.st-svg .st-badge{fill:var(--warning-fg);font-size:11px}
+.st-svg .drop rect{stroke:var(--success);stroke-width:3;fill:var(--success-bg)}
+.st-svg .dragging{opacity:.75;cursor:grabbing}.st-svg.is-dragging .st-arcs{opacity:.25}
+.st-svg .st-part{fill:none;stroke:var(--border-bold);stroke-width:1.5}
+.st-svg .st-arc path{fill:none;stroke-width:1.5}.st-svg .st-arc text{font-size:11px}
+.st-svg .st-arc.hand path{stroke:var(--brand)}.st-svg .st-arc.hand text{fill:var(--brand)}
+.st-svg .st-arc.field{display:none}.st-svg.show-fields .st-arc.field{display:inline}
+.st-svg .st-arc.field path{stroke:var(--subtlest);stroke-dasharray:4 3}
+.st-svg .st-arc.hl path{stroke-width:3}.st-svg .st-arc.field.hl path{stroke:var(--subtle)}
+.st-svg #st-arrow path{fill:var(--subtle)}
+.st-side h2{margin-top:0}.st-side form.card{margin:12px 0}.st-links li{padding:4px 0}
+.st-links form.inline{display:inline;margin-left:6px}
+"""
+CSS = CSS + STRUCTURE_CSS
+
+STRUCTURE_JS = r"""
+// The record structure (/define/structure): drag a type onto another to propose making it a part of that one, or
+// onto "Top level"; hovering a type lights its links; a tick shows what reference fields point at too.
+(function () {
+  const svg = document.querySelector(".st-svg");
+  if (!svg) return;
+  const fields = document.getElementById("st-fields");
+  if (fields) fields.addEventListener("change", () => svg.classList.toggle("show-fields", fields.checked));
+  const light = (t, on) => svg.querySelectorAll(".st-arc").forEach((a) => {
+    if (a.dataset.from === t || a.dataset.to === t) a.classList.toggle("hl", on);
+  });
+  svg.querySelectorAll(".st-node").forEach((n) => {
+    n.addEventListener("pointerenter", () => light(n.dataset.type, true));
+    n.addEventListener("pointerleave", () => light(n.dataset.type, false));
+    n.addEventListener("focus", () => light(n.dataset.type, true));
+    n.addEventListener("blur", () => light(n.dataset.type, false));
+  });
+  const sel = svg.querySelector(".st-node.selected");
+  if (sel) light(sel.dataset.type, true);
+  const dlg = document.getElementById("st-move");
+  if (!dlg || !dlg.showModal) return;
+  dlg.querySelector("[data-close]").addEventListener("click", () => dlg.close());
+  let drag = null;
+  const scale = () => { const r = svg.getBoundingClientRect(); return svg.viewBox.baseVal.width / r.width; };
+  svg.addEventListener("pointerdown", (ev) => {
+    const n = ev.target.closest(".st-node");
+    if (!n || ev.button !== 0) return;
+    drag = { n, x: ev.clientX, y: ev.clientY, moved: false, over: null };
+  });
+  window.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+    if (!drag.moved) { drag.moved = true; drag.n.classList.add("dragging"); svg.classList.add("is-dragging"); }
+    const k = scale();
+    drag.n.setAttribute("transform", `translate(${dx * k},${dy * k})`);
+    drag.n.style.pointerEvents = "none";
+    const under = document.elementFromPoint(ev.clientX, ev.clientY);
+    const over = under && under.closest(".st-node, .st-root");
+    if (drag.over && drag.over !== over) drag.over.classList.remove("drop");
+    drag.over = over && over !== drag.n ? over : null;
+    if (drag.over) drag.over.classList.add("drop");
+  });
+  window.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (!d.moved) return;
+    d.n.removeAttribute("transform"); d.n.style.pointerEvents = ""; d.n.classList.remove("dragging");
+    svg.classList.remove("is-dragging");
+    const stop = (ev) => { ev.preventDefault(); d.n.removeEventListener("click", stop, true); };
+    d.n.addEventListener("click", stop, true);  // a drag is not a click on the type
+    setTimeout(() => d.n.removeEventListener("click", stop, true), 0);
+    if (!d.over) return;
+    d.over.classList.remove("drop");
+    const owner = d.over.dataset.type || "";
+    const f = dlg.querySelector("form");
+    f.elements.type.value = d.n.dataset.type;
+    f.elements.owner.value = owner;
+    dlg.querySelector("#st-move-what").textContent = owner
+      ? `Make ${d.n.dataset.label} part of ${d.over.dataset.label}? Each will belong to one, and be shown on its page.`
+      : `Make ${d.n.dataset.label} stand alone, part of nothing?`;
+    dlg.showModal();
+    f.elements.note.focus();
+  });
+})();
+"""
+JS = JS + STRUCTURE_JS
+
