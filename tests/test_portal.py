@@ -101,6 +101,9 @@ def test_the_clinic_portal_is_valid(hub):
     (lambda c: c["kinds"]["forms"].update(max_upcoming=0), "max_upcoming"),
     (lambda c: c.update(public_origin="portal.example.ca"), "public_origin"),
     (lambda c: c["register"].pop("pending"), "pending"),
+    (lambda c: c["over_limit"].update(workflow="no-such-flow"), "no-such-flow"),
+    (lambda c: c["over_limit"].update(input="nope"), "over_limit.input"),
+    (lambda c: c["over_limit"].update(colour="red"), "over_limit.colour"),
 ])
 def test_a_bad_portal_is_refused_with_a_clear_problem(hub, change, says):
     pack = _pack(hub)
@@ -467,9 +470,51 @@ def test_a_kind_allows_only_so_many_open(hub):
     p, ref, token = signed_in(hub)
     for reason in ("my knee", "my elbow"):
         p.book(ref, "new-concern", None, {"reason": reason, "urgency": "routine"})
+    assert p.limits(ref)["new-concern"] == {"open": 2, "max": 2}, "told up front, before they write"
+    before = hub.db.runs.count({"workflow_id": "appointment-request"})
     with pytest.raises(Denied) as many:
-        p.book(ref, "new-concern", None, {"reason": "my shoulder", "urgency": "routine"})
-    assert str(many.value) == p.say("too_many")
+        p.book(ref, "new-concern", None, {"reason": "I need a form filled in for work", "urgency": "routine"})
+    assert str(many.value) == p.say("too_many"), "plainly paperwork: refused, to call"
+    got = p.book(ref, "new-concern", None, {"reason": "my shoulder", "urgency": "routine"})
+    assert got["over_limit"] and got["requested"] and not got["when"] and not got["alarm"]
+    run = _run_of(hub, got)
+    assert run["workflow_id"] == "patient-question" and run["ctx"]["input"]["question"] == "my shoulder", \
+        "not routine: a person reads it, though nothing more is booked"
+    assert hub.db.runs.count({"workflow_id": "appointment-request"}) == before
+
+
+def test_a_red_flag_past_the_limit_is_screened_and_reaches_a_nurse(hub):
+    """Round 7 blocker: a patient at the limit who then writes about chest pain is screened before the limit is
+    applied: the advice is loud, nothing is booked, and the words go to a nurse."""
+    p, ref, token = signed_in(hub)
+    for reason in ("my knee", "my elbow"):
+        p.book(ref, "new-concern", None, {"reason": reason, "urgency": "routine"})
+    got = p.book(ref, "new-concern", None, {"reason": "Since an hour ago my chest feels tight and my left arm is numb",
+                                            "urgency": "soon"})
+    assert got["alarm"] is True and got["advice"] and "chest pain" in got["found"] and got["over_limit"]
+    run = _run_of(hub, got)
+    assert run["workflow_id"] == "patient-question"
+    assert run["ctx"]["screen"]["red_flag"] is True
+    assert run["steps"]["urgent"]["state"] not in ("skipped", None), "a nurse is to call now"
+
+
+def test_the_limit_is_said_on_the_form_and_the_refusal_says_what_to_do_in_an_emergency(hub):
+    app = portal_app(hub)
+    p = Portal(hub, dev=True)
+    ref = person(hub)
+    for reason in ("my knee", "my elbow"):
+        p.book(ref, "new-concern", None, {"reason": reason, "urgency": "routine"})
+    b = Browser(app)
+    _sign_in(b)
+    page = b.go("GET", "/me")[2]
+    assert html.escape(app.say("at_limit", open=2)) in page
+    page = b.go("GET", "/book/new-concern")[2]
+    assert html.escape(app.say("at_limit", open=2)) in page and 'name="slot"' not in page
+    assert html.escape(app.say("safety")) in page
+    status, h, page = b.go("POST", "/book/new-concern", {"_form": _field(page, "_form"),
+                                                         "_submit": _field(page, "_submit"),
+                                                         "reason": "a form for my work", "urgency": "routine"})
+    assert status == 403 and html.escape(app.say("safety")) in page and "811" in page
 
 
 def _booked_forms(hub, p, ref):
@@ -705,6 +750,9 @@ def test_the_pages_walk_from_sign_in_to_a_booking(hub):
                                                       "urgency": "urgent"})
     page = b.go("GET", h["Location"])[2]
     assert 'class="advice alarm"' in page
+    assert 'class="ok"' not in page and app.say("requested") not in page, "no green 'we have it' over an alarm"
+    assert "<title>Your message needs attention today" in page and "<h2>What to do now</h2>" in page and "chest pain" in page
+    assert html.escape(app.say("safety")) in page
     status, _, page = b.go("POST", "/book/forms", {"_form": "forged", "_submit": "x" * 20, "slot": ""})
     assert status == 422 and "expired" in page
     assert b.go("POST", "/sign-out", {"_form": form}, origin="https://evil.example")[0] == 403
@@ -818,3 +866,152 @@ def test_the_portal_core_names_nothing_of_a_pack():
               ROOT / "practicehub" / "web" / "portal_api.py"):
         found = words.findall(f.read_text())
         assert not found, f"{f.name} names {sorted(set(found))}"
+
+
+def test_the_portal_knows_when_the_practice_is_closed(hub):
+    """Round 7 blocker: an alarm page says when nobody is there to read it."""
+    p = Portal(hub)
+    hours = (hub.pack.calendar or {}).get("hours") or {}
+    assert hours.get("mon") and not hours.get("sat")
+    saturday = datetime(2026, 11, 21, 11, 0)
+    assert p.opens(saturday) == datetime(2026, 11, 23, *map(int, hours["mon"][0].split(":")))
+    assert p.opens(datetime(2026, 11, 23, 10, 0)) is None, "open now"
+    assert p.opens(datetime(2026, 11, 23, 7, 30)).date() == datetime(2026, 11, 23).date()
+
+
+def test_booking_is_day_first_with_each_days_times_under_its_physician(hub):
+    """Round 7 blocker: the form listed only the first max_slots times (about a day), so other days never showed
+    and a visit booked online was never far enough off to cancel online."""
+    p = Portal(hub)
+    days = p.free_days("forms")
+    assert len(days) >= 10, "every working day of the horizon with free time"
+    assert all(d["count"] > 0 for d in days) and [d["date"] for d in days] == sorted(d["date"] for d in days)
+    later = days[-1]["date"]
+    slots = p.free_slots("forms", day=later)
+    assert slots and {s["date"] for s in slots} == {later}
+    assert len(slots) <= int(p.kind("forms").get("max_slots", 60)), "the cap is per day"
+    assert p.slot_free("forms", slots[0]["value"])
+    assert p.free_slots("forms", day="1999-01-01") == [] and p.free_slots("forms", day="nonsense") == []
+
+    app = portal_app(hub)
+    person(hub)
+    b = Browser(app)
+    _sign_in(b)
+    page = b.go("GET", "/book/forms")[2]
+    assert page.index('name="reason"') < page.index('name="_day"'), "what it is about, before when"
+    assert page.index('class="enter-default"') < page.index('name="_day"'), "Enter books, it does not pick a day"
+    assert "You can cancel online up to 24 hours before" in page
+    status, _, page = b.go("POST", "/book/forms", {"_form": _field(page, "_form"), "_submit": _field(page, "_submit"),
+                                                   "reason": "a sick note for work", "_day": later})
+    assert status == 200 and "a sick note for work" in page, "what they wrote is kept"
+    assert f'value="{later}" formnovalidate aria-pressed="true"' in page
+    values = [v for v in re.findall(r'name="slot" value="([^"]*)"', page) if v]
+    assert values and all(v.startswith(later) for v in values)
+    assert "<h4>" in page, "the times are under each physician"
+    status, h, _ = b.go("POST", "/book/forms", {"_form": _field(page, "_form"), "_submit": _field(page, "_submit"),
+                                                "reason": "a sick note for work", "slot": values[0], "_go": "1"})
+    assert status == 303
+    page = b.go("GET", h["Location"])[2]
+    assert "<title>Booked" in page
+    page = b.go("GET", "/me")[2]
+    assert "/cancel?" in page, "booked days ahead: it can be cancelled online"
+
+
+
+# ------------------------------------------------------------------------------------------- round 7: portal minor
+@pytest.mark.parametrize("day,month,year,says", [
+    ("32", "01", "1990", "1 to 31"),
+    ("31", "02", "1990", "February 1990 has no day 31"),
+    ("3", "02", "90", "4 digits"),
+    ("3", "02", "1850", "4 digits"),
+    ("3", "", "1990", "month"),
+])
+def test_sign_in_checks_the_date_as_typed_and_keeps_it(hub, day, month, year, says):
+    app = portal_app(hub)
+    b = Browser(app)
+    status, _, page = b.go("POST", "/sign-in", {"born_day": day, "born_month": month, "born_year": year,
+                                                "identifier": CARD})
+    assert status == 422 and says in html.unescape(page) and "Error:" in page
+    assert f'value="{year}"' in page, "what was typed is kept"
+    assert 'aria-invalid="true"' in page
+
+
+def test_sign_in_counts_the_cards_digits_and_says_how_many(hub):
+    app = portal_app(hub)
+    b = Browser(app)
+    page = b.go("GET", "/sign-in")[2]
+    assert "10 digits" in page and 'id="identifier-help"' in page and "For example" in page
+    status, _, page = b.go("POST", "/sign-in", {**_dob(), "identifier": "1234 567"})
+    assert status == 422 and "you typed 7" in page and 'value="1234 567"' in page
+
+
+def test_registering_asks_for_a_mobile_with_why_and_a_first_name(hub):
+    app = portal_app(hub)
+    page = Browser(app).go("GET", "/new")[2]
+    assert ">First name" in page and ">Last name" in page
+    assert "We text your sign-in code to this number." in page
+    assert re.search(r'for="r-phone">Mobile phone <span class=req>\(required\)', page)
+    b = Browser(app)
+    page = b.go("GET", "/new")[2]
+    status, _, page = b.go("POST", "/new", {"_submit": _field(page, "_submit"), "given": "Bea", "family": "Moss",
+                                            **_dob("2001-07-08", "r_birthDate"), "health_card": "7777 888 999"})
+    assert status == 422 and "Mobile phone: required" in page
+    bad = check_config(_pack_with(hub, lambda c: c["register"]["fields"].append({"field": "phone", "colour": 1})))
+    assert any("colour" in x for x in bad)
+
+
+def _pack_with(hub, change):
+    pack = _pack(hub)
+    change(pack.portal)
+    return pack
+
+
+def test_bookings_are_cards_with_the_next_step_and_why_not_cancel(hub):
+    p, ref, token = signed_in(hub)
+    soon = next(s for s in p.free_slots("forms", limit=10000))
+    p.book(ref, "forms", soon["value"], {"reason": "a sick note for work"})
+    later = later_slot(p, hours=48)
+    p.book(ref, "forms", later["value"], {"reason": "a form for my insurer"})
+    ups = p.upcoming(ref)
+    first, second = ups[0], ups[-1]
+    assert not first["can_cancel"] and "24 hours" in first["why_not"]
+    assert second["can_cancel"] and second["why_not"] is None and second["next"]
+    app = portal_app(hub)
+    b = Browser(app)
+    _sign_in(b)
+    page = b.go("GET", "/me")[2]
+    assert page.count('class="booking"') >= 2 and "Less than 24 hours away" in page
+    assert '<button class="linkish">Sign out</button>' in page
+
+
+def test_an_open_requests_day_is_the_practices_not_utcs(hub):
+    p, ref, token = signed_in(hub)
+    p.book(ref, "new-concern", None, {"reason": "my knee", "urgency": "routine"})
+    run = next(r for r in p._runs(ref, p.kind("new-concern")))
+    # 02:30 UTC on the 24th is the evening of the 23rd in Halifax
+    hub.db.runs.update({"_id": run["_id"]}, {"$set": {"created_at": "2026-11-24T02:30:00Z"}})
+    assert p.open_requests(ref)[0]["since"] == "Monday, November 23"
+
+
+def test_a_booking_is_the_done_pages_hero(hub):
+    app = portal_app(hub)
+    person(hub)
+    b = Browser(app)
+    _sign_in(b)
+    p = Portal(hub, dev=True)
+    later = later_slot(p, hours=48)
+    page = b.go("GET", f"/book/forms")[2]
+    page = b.go("POST", "/book/forms", {"_form": _field(page, "_form"), "_submit": _field(page, "_submit"),
+                                        "reason": "a sick note for work", "_day": later["date"]})[2]
+    status, h, _ = b.go("POST", "/book/forms", {"_form": _field(page, "_form"), "_submit": _field(page, "_submit"),
+                                                "reason": "a sick note for work", "slot": later["value"], "_go": "1"})
+    page = b.go("GET", h["Location"])[2]
+    assert page.index('class="hero"') < page.index('class="advice calm"'), "the booking first, then the advice"
+    assert html.escape(later["day"]) in page
+
+
+def test_the_portals_colours_follow_the_theme():
+    from practicehub.web import portal_app as pa
+    assert "#9b1c1c" not in pa.PORTAL_CSS and "#fdecec" not in pa.PORTAL_CSS and "#b45309" not in pa.PORTAL_CSS
+    assert ".portal .err{display:block;color:var(--danger-fg)" in pa.PORTAL_CSS
+    assert "font-size:18px" in pa.PORTAL_CSS and ".portal label,.portal legend{font-size:16px" in pa.PORTAL_CSS
