@@ -84,6 +84,8 @@ help = "what else it touches: stock on hand, training, suppliers, patients alrea
 name = "decision"
 label = "Board's note"
 type = "text"
+by = "workflow"   # the change board's (or product owner's) comment on its decision, kept on the change order
+show = true
 
 [[field]]
 name = "cancel_reason"
@@ -138,7 +140,5 @@ label = "Cancel"
 fields = ["cancel_reason"]
 require = ["cancel_reason"]
 
-[[signature]]
-meaning = "I approve this change"
-roles = ["change-board"]
-states = ["approved"]
+# No [[signature]]: the plm-change workflow's review gate is where the change board signs its approval; a second
+# meaning on the record only said the same thing again.
