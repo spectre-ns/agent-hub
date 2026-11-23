@@ -12,6 +12,12 @@ A pack is a directory:
     pack.py            optional: deterministic actions, context providers, stand-in answers, summaries, and
                        ``UPGRADES``: what a new version does to the records an older one left (``Hub.run_pack_upgrades``)
 
+A **custom overlay** is a practice pack that names another as its ``base = "<pack>"``: one client's practice built on a
+shared pack. It gets the base's code and every definition, and replaces what it has itself: a ``[practice]`` key at a
+time, any other top-level key (``modules``, ``roles``, ``members``...) whole, and a type, workflow, skill, block or view
+by its id. It brings no pack.py of its own (the code that runs is the base's, reviewed with it), and a base is not
+itself an overlay. So two clinics on general-practice can choose different modules.
+
 A **module** (``modules/<id>/module.toml``: document control, quality, product lifecycle...) has the same layout with
 ``[module]`` in place of ``[practice]``. It adds roles, data classes, grants, events, types, workflows, blocks, skills
 and views to whatever practice it is installed in; its workflow, block and view ids start with ``<module id>-``.
@@ -281,6 +287,10 @@ def _extensions(d: Path) -> dict:
     return out
 
 
+def _merged_ext(layers: list[Path]) -> dict:
+    return {k: v for d in layers for k, v in _extensions(d).items()}
+
+
 def find(name_or_path: str, kind: str = "practice") -> Path:
     p = Path(name_or_path)
     marker = "pack.toml" if kind == "practice" else "module.toml"
@@ -312,8 +322,53 @@ def load_module(name_or_path: str, expect_sha256: str | None = None, *, run_code
     return m
 
 
+def _layers(pack_dir: Path, kind: str) -> list[Path]:
+    """The directories a pack is read from, base first: a custom overlay is ``[base, overlay]``."""
+    if kind != "practice":
+        return [pack_dir]
+    base = tomllib.loads((pack_dir / "pack.toml").read_text()).get("base")
+    if not base:
+        return [pack_dir]
+    if not isinstance(base, str):
+        raise ValueError(f"the practice {pack_dir.name}: base names one pack")
+    base_dir = find(base)
+    if base_dir == pack_dir:
+        raise ValueError(f"the practice {pack_dir.name}: base names itself")
+    if tomllib.loads((base_dir / "pack.toml").read_text()).get("base"):
+        raise ValueError(f"the practice {pack_dir.name}: its base {base} is a custom overlay itself; build on the "
+                         f"pack it is built on")
+    if (pack_dir / "pack.py").exists():
+        raise ValueError(f"the practice {pack_dir.name}: a custom overlay brings no pack.py; the code that runs is "
+                         f"its base's ({base})")
+    return [base_dir, pack_dir]
+
+
+def _overlaid(docs: list[dict]) -> dict:
+    """The base's pack.toml with the overlay's on top: [practice] key by key, any other key whole."""
+    out = dict(docs[0])
+    for d in docs[1:]:
+        for k, v in d.items():
+            if k == "practice":
+                out["practice"] = {**out.get("practice", {}), **v}
+            elif k != "base":
+                out[k] = v
+    out.pop("base", None)
+    return out
+
+
 def digest(pack_dir: Path) -> str:
-    """One hash over every file of a pack (its code and its definitions), so a review covers all of it."""
+    """One hash over every file of a pack (its code and its definitions), so a review covers all of it; a custom
+    overlay's covers its base's files too, so a change to either is reviewed."""
+    layers = _layers(pack_dir, "practice") if (pack_dir / "pack.toml").exists() else [pack_dir]
+    if len(layers) > 1:
+        h = hashlib.sha256()
+        for d in layers:
+            h.update(_files_digest(d).encode() + b"\0")
+        return h.hexdigest()
+    return _files_digest(pack_dir)
+
+
+def _files_digest(pack_dir: Path) -> str:
     h = hashlib.sha256()
     for p in sorted(pack_dir.rglob("*")):
         if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc":
@@ -334,29 +389,32 @@ def load(name_or_path: str, kind: str = "practice", expect_sha256: str | None = 
 
 def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
           run_modules: bool | None = None) -> Pack:
-    code = (pack_dir / "pack.py").read_bytes() if (pack_dir / "pack.py").exists() else None
+    layers = _layers(pack_dir, kind)
+    code_dir = layers[0]  # a custom overlay runs its base's code
+    code = (code_dir / "pack.py").read_bytes() if (code_dir / "pack.py").exists() else None
     mod_sha = hashlib.sha256(code).hexdigest() if code is not None else ""
     if expect_sha256 is not None and mod_sha != expect_sha256:
         raise ModuleChanged(f"{pack_dir.name}/pack.py is not the code that was installed (it was "
                             f"{expect_sha256[:12] or 'absent'}, it is {mod_sha[:12] or 'absent'} now): it is not run "
                             f"until a policy owner upgrades the module")
-    doc = tomllib.loads((pack_dir / ("pack.toml" if kind == "practice" else "module.toml")).read_text())
+    doc = _overlaid([tomllib.loads((d / ("pack.toml" if kind == "practice" else "module.toml")).read_text())
+                     for d in layers])
     if kind == "module":
         doc["practice"] = doc.pop("module", {})
     skills = {}
-    for p in sorted((pack_dir / "skills").glob("*.toml")):
+    for p in [p for d in layers for p in sorted((d / "skills").glob("*.toml"))]:
         try:
             sk = parse_skill(p.read_text())
         except ValueError as exc:
             raise ValueError(f"skill {p.name}: {exc}") from None
         skills[sk.id] = sk
     workflows = {}
-    for p in sorted((pack_dir / "workflows").glob("*.toml")):
+    for p in [p for d in layers for p in sorted((d / "workflows").glob("*.toml"))]:
         workflows[tomllib.loads(p.read_text())["id"]] = p.read_text()
     blocks = {}
-    for p in sorted((pack_dir / "blocks").glob("*.toml")):
+    for p in [p for d in layers for p in sorted((d / "blocks").glob("*.toml"))]:
         blocks[tomllib.loads(p.read_text())["id"]] = p.read_text()
-    pack_id = doc["practice"].get("id") if kind == "module" else doc["practice"].get("kind", pack_dir.name)
+    pack_id = doc["practice"].get("id") if kind == "module" else doc["practice"].get("kind", code_dir.name)
     pack_id = pack_id or pack_dir.name
     from .contract import check_requires
     check_requires(f"the {kind} {pack_dir.name}", doc["practice"].get("requires_core"))
@@ -366,15 +424,16 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
             raise ValueError(f"the practice {pack_dir.name}: [practice] timezone: say the practice's time zone "
                              "(a name like America/Halifax)")
         zone(doc["practice"]["timezone"])
-    mod = _load_module(pack_dir, pack_id, code) if run_code else None
+    mod = _load_module(code_dir, pack_id, code) if run_code else None
     pack = Pack(id=pack_id, dir=pack_dir, practice=doc["practice"], roles=doc.get("roles", []),
                 data_classes=doc.get("data_classes", []), grants=doc.get("grants", {}), members=doc.get("members", []),
                 calendar=doc.get("calendar", {}), skills=skills, workflow_sources=workflows,
                 record_labels=doc.get("record_labels", {}), module=mod, subject=_subject(doc.get("subject", {}), kind),
-                block_sources=blocks, type_sources=_sources(pack_dir / "types"), view_sources=_sources(pack_dir / "views"),
+                block_sources=blocks, type_sources={k: v for d in layers for k, v in _sources(d / "types").items()},
+                view_sources={k: v for d in layers for k, v in _sources(d / "views").items()},
                 events=list(doc.get("events", [])), version=str(doc.get("version") or doc["practice"].get("version", "0")),
                 kind=kind, module_sha256=mod_sha, digest=digest(pack_dir), requires=list(doc["practice"].get("requires", []) or []),
-                extensions=_extensions(pack_dir), portal=dict(doc.get("portal") or {}))
+                extensions=_merged_ext(layers), portal=dict(doc.get("portal") or {}))
     if any(r.get("id") == "everyone" for r in pack.roles):
         raise ValueError("roles: 'everyone' is reserved: [grants.everyone] gives every member read access")
     if set(pack.grants.get("everyone", {})) - {"read"}:

@@ -1,0 +1,7 @@
+# Harbourview Family Medicine: the general-practice pack with the modules this clinic runs. A custom overlay: it
+# changes only what it says here, and its version is its base's. Another clinic on general-practice is another
+# overlay like this one, with its own name and its own choice of modules.
+base = "general-practice"
+
+# document control, quality (CAPA, SOPs), the practice wiki and stock: installed with the practice
+modules = ["dms", "qms", "wiki", "inventory"]

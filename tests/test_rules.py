@@ -1750,6 +1750,53 @@ def test_modules_the_pack_lists_are_installed_and_stay_installed(tmp_path, monke
     assert Hub(state).installed_modules() == ["dms"]
 
 
+def test_a_custom_overlay_is_its_base_with_its_own_modules_and_changes(tmp_path, monkeypatch):
+    """A client's practice is a custom overlay on a shared pack: the base's code and definitions, with its own choice
+    of modules, its own [practice] keys and its own definitions by id. It runs no code of its own, builds on a pack
+    that is not an overlay itself, and a change to its base changes its digest, so it is reviewed."""
+    import shutil
+    from practicehub import pack as packmod
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    gp = packmod.load("general-practice", run_modules=False)
+    hv = packmod.load("harbourview", run_modules=False)
+    assert [m.id for m in gp.modules] == [] and [m.id for m in hv.modules] == ["dms", "qms", "wiki", "inventory"]
+    assert hv.id == gp.id == "general-practice" and hv.version == gp.version and hv.subject_type == "Patient"
+    assert set(gp.type_sources) <= set(hv.type_sources) and set(gp.workflow_sources) <= set(hv.workflow_sources)
+
+    base = tmp_path / "base"
+    shutil.copytree(packmod.find("general-practice"), base, ignore=shutil.ignore_patterns("__pycache__"))
+    other = tmp_path / "bayside"
+    (other / "workflows").mkdir(parents=True)
+    (other / "pack.toml").write_text(f'base = "{base}"\nmodules = ["dms"]\n[practice]\nname = "Bayside Clinic"\n')
+    wf = (base / "workflows" / "lab-result-review.toml").read_text()
+    (other / "workflows" / "lab-result-review.toml").write_text(wf.replace('title = "Lab result review"',
+                                                                            'title = "Bayside result review"', 1))
+    bay = packmod.load(str(other), run_modules=False)
+    assert [m.id for m in bay.modules] == ["dms"] and bay.practice["name"] == "Bayside Clinic"
+    assert bay.practice["timezone"] == gp.practice["timezone"]  # the keys it does not set are its base's
+    assert 'title = "Bayside result review"' in bay.workflow_sources["lab-result-review"]
+    before = packmod.digest(other)
+    (base / "types" / "Patient.toml").write_text((base / "types" / "Patient.toml").read_text() + "\n")
+    assert packmod.digest(other) != before
+
+    (other / "pack.py").write_text("X = 1\n")
+    with pytest.raises(ValueError, match="brings no pack.py"):
+        packmod.load(str(other), run_modules=False)
+    (other / "pack.py").unlink()
+    on_overlay = tmp_path / "on-overlay"
+    on_overlay.mkdir()
+    (on_overlay / "pack.toml").write_text(f'base = "{other}"\n')
+    with pytest.raises(ValueError, match="is a custom overlay itself"):
+        packmod.load(str(on_overlay), run_modules=False)
+
+    state = tmp_path / "state"
+    Hub(state, pack=str(other)).install(str(other), demo=True)
+    hub = Hub(state)
+    assert hub.installed_modules() == ["dms"] and not hub.module_problems, hub.module_problems
+    assert hub.pack.practice["name"] == "Bayside Clinic" and hub.record_type("Observation")
+
+
 def test_work_for_a_role_nobody_on_duty_holds_is_raised_with_someone(hub):
     """Switch off the only nurse: urgent nurse work raises a notice with the escalation role, and the switch-off
     says which roles it left empty."""
