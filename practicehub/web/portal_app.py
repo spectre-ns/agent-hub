@@ -42,14 +42,16 @@ PORTAL_CSS = """
   border-radius:6px;min-height:44px}
 .portal .advice{font-size:1.2em;font-weight:600;padding:16px;border-radius:8px;border:2px solid currentColor;
   margin:16px 0}
-.portal .advice.alarm{color:#9b1c1c;background:#fdecec}
-.portal .dev{border:2px dashed #b45309;color:#b45309;padding:10px;border-radius:6px;margin:12px 0}
+.portal .advice.alarm{color:var(--danger-fg);background:var(--danger-bg)}
+.portal .advice h2{margin:0 0 8px;font-size:1.25em;color:inherit}
+.portal .advice p{margin:6px 0}
+.portal .dev{border:2px dashed var(--warning-fg);color:var(--warning-fg);padding:10px;border-radius:6px;margin:12px 0}
 .portal form.inline{display:inline}
 .portal fieldset{border:0;padding:0;margin:0 0 12px;min-width:0}
 .portal label.q,.portal legend.q{display:block;margin:12px 0 4px;font-weight:600}
-.portal .req{font-weight:400;color:var(--muted,#555)}
+.portal .req{font-weight:400;color:var(--subtle)}
 .portal .help{display:block;margin:2px 0 4px}
-.portal .err{display:block;color:#9b1c1c;margin:2px 0 4px}
+.portal .err{display:block;color:var(--danger-fg);font-weight:600;margin:2px 0 4px}
 .portal input[type=text],.portal textarea,.portal select{width:100%;max-width:100%;min-height:44px;font-size:16px}
 .portal .dob{display:flex;gap:8px}
 .portal .dob>div{flex:1}
@@ -129,6 +131,11 @@ def _host(h: str) -> str:
     if h.startswith("["):
         return h[1:h.find("]")] if "]" in h else h
     return h.rsplit(":", 1)[0] if h.count(":") == 1 else h
+
+
+def _and(xs: list[str]) -> str:
+    """'a', 'a and b', 'a, b and c'."""
+    return xs[0] if len(xs) == 1 else f'{", ".join(xs[:-1])} and {xs[-1]}'
 
 
 class PortalApp:
@@ -589,9 +596,28 @@ class PortalApp:
         if got["what"] == "register":
             return self.page(req, "Request sent", f'<p class="ok" role="status">{e(self.say("registered"))}</p>')
         text = r.get("advice") or self.say("emergency")
-        parts = [f'<div class="advice{" alarm" if r.get("alarm") else ""}" role="alert">{e(text)}</div>']
-        if r.get("alarm") and r.get("advice"):
-            parts.append(f'<p><strong>{e(self.say("emergency"))}</strong></p>')
+        found = [str(x) for x in r.get("found") or []]
+        closed = r.get("closed")
+        if r.get("alarm"):
+            # Loud: no green tick anywhere on this page, a heading of its own, what was found in plain words, and
+            # when nobody is at the practice to read it.
+            said = (f'<p>You wrote about {e(_and(found))}. That can be serious.</p>' if found else "")
+            shut = (f'<p><strong>The practice is closed now and opens {e(closed)}. Do not wait for us: '
+                    f'{e(self.say("safety"))}</strong></p>' if closed else
+                    f'<p><strong>{e(self.say("safety"))}</strong></p>')
+            sent = ("We have not booked anything. A nurse has what you wrote and will call you."
+                    if r.get("over_limit") or not r.get("when") else "")
+            parts = [f'<div class="advice alarm" role="alert"><h2>Your message needs attention today</h2>{said}'
+                     f'<p>{e(text)}</p>{shut}</div>']
+            if sent:
+                parts.append(f'<p>{e(sent)}</p>')
+            if r.get("when"):
+                parts.append(f'<p>{e(self.say("booked", when=r["when"], **{"with": r.get("with") or ""}))}</p>')
+            parts.append('<p><a class="btn" href="/me">Your bookings</a></p>')
+            return self.page(req, "Your message needs attention today", "".join(parts))
+        parts = [f'<div class="advice" role="alert">{e(text)}</div>']
+        if closed and not r.get("when"):
+            parts.append(f'<p>The practice is closed now. Someone reads your request after it opens {e(closed)}.</p>')
         if r.get("over_limit"):
             title = "Not booked: sent to the practice"
             parts.append(f'<p>{e(self.say("over_limit"))}</p>')

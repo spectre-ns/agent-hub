@@ -750,6 +750,9 @@ def test_the_pages_walk_from_sign_in_to_a_booking(hub):
                                                       "urgency": "urgent"})
     page = b.go("GET", h["Location"])[2]
     assert 'class="advice alarm"' in page
+    assert 'class="ok"' not in page and app.say("requested") not in page, "no green 'we have it' over an alarm"
+    assert "<h2>Your message needs attention today</h2>" in page and "chest pain" in page
+    assert html.escape(app.say("safety")) in page
     status, _, page = b.go("POST", "/book/forms", {"_form": "forged", "_submit": "x" * 20, "slot": ""})
     assert status == 422 and "expired" in page
     assert b.go("POST", "/sign-out", {"_form": form}, origin="https://evil.example")[0] == 403
@@ -863,3 +866,14 @@ def test_the_portal_core_names_nothing_of_a_pack():
               ROOT / "practicehub" / "web" / "portal_api.py"):
         found = words.findall(f.read_text())
         assert not found, f"{f.name} names {sorted(set(found))}"
+
+
+def test_the_portal_knows_when_the_practice_is_closed(hub):
+    """Round 7 blocker: an alarm page says when nobody is there to read it."""
+    p = Portal(hub)
+    hours = (hub.pack.calendar or {}).get("hours") or {}
+    assert hours.get("mon") and not hours.get("sat")
+    saturday = datetime(2026, 11, 21, 11, 0)
+    assert p.opens(saturday) == datetime(2026, 11, 23, *map(int, hours["mon"][0].split(":")))
+    assert p.opens(datetime(2026, 11, 23, 10, 0)) is None, "open now"
+    assert p.opens(datetime(2026, 11, 23, 7, 30)).date() == datetime(2026, 11, 23).date()
