@@ -3413,7 +3413,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             return first, schema.put(after, rt.lifecycle["path"], first), first
         return first, after, new
 
-    def _owner_picks_up(self, rt, ref: str, rec: dict, member: dict, cause: int) -> None:
+    def _owner_picks_up(self, rt, ref: str, rec: dict, member: dict, cause: int, *, before: dict | None = None) -> None:
         """A record filed before its type named a workflow (or before the version that walks it was approved), changed
         now, is picked up by that workflow where it is: the module upgrade's migration, done record by record as each
         is next written. It starts only where the type's ``when`` holds, nothing of its workflow is open about it and
@@ -3422,7 +3422,30 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         owner = rt.workflow["id"]
         if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner:
             return
-        self._pick_up(rt, ref, rec, member, cause)
+        if not self._pick_up(rt, ref, rec, member, cause) and before is not None:
+            self._start_again(rt, ref, before, rec, member, cause)
+
+    def _start_again(self, rt, ref: str, before: dict, rec: dict, member: dict, cause: int) -> bool:
+        """A write that did not move the record made its type's ``workflow.again`` hold (a lab correcting a result
+        already reviewed): its workflow starts about it again, from where it is, unless a run of it walks it now.
+        A start that fails is noted (``trigger.failed``) in a savepoint of its own, as a pick-up's is."""
+        owner = rt.workflow["id"]
+        if schema.starts_again(rt, before, rec) != owner \
+                or self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
+            return False
+        last = self.db.runs.find_one({"workflow_id": owner, "record": ref}, sort=[("created_at", DESC)],
+                                     fields=["id"])
+        starter = member if member.get("kind") in ("person", "agent", "service") else \
+            {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
+        try:
+            with self.db:
+                self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
+                                  previous=last["id"] if last else None)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.track.append(starter, "trigger.failed", ref, cause=cause,
+                              data={"workflow": owner, "error": f"starting it again: {exc}"})
+            return False
 
     def _pick_up(self, rt, ref: str, rec: dict, member: dict, cause: int | None) -> bool:
         """Start the workflow ``rt`` names about ``ref`` where it is, if its ``when`` holds, nothing of it is open
@@ -3699,7 +3722,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             if moved and (rt.workflow or {}).get("id"):
                 self._owner_follows_move(rt, ref, rec, member, run_id, rt.transition(*moved), ev)
             elif (rt.workflow or {}).get("id"):
-                self._owner_picks_up(rt, ref, rec, member, ev)
+                self._owner_picks_up(rt, ref, rec, member, ev, before=before)
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
         if rt.is_a("Restriction"):
             self.restrictions.reset()

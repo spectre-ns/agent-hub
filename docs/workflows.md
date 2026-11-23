@@ -147,6 +147,14 @@ The other steps keep working as before:
 - A gate decides on its item, because a decision signs what the step showed. Its outcome moves the record through
   the automation step it leads to.
 
+**A write that is not a move can start the work again.** A record type names its workflow with
+`workflow = { id = "...", when = "...", again = "..." }`. Take a write that does not move the record, such as a lab
+writing `status = "corrected"` on a result already reviewed. If `again` holds after that write and did not hold
+before it, the type's workflow starts about the record again, from where the record is. The last run becomes its
+previous run. This happens only when no run of the workflow is walking the record. `when` does not apply here, and a
+write that leaves `again` as it was starts nothing. The new run's own steps take it from there, for example an
+automation with `state` that moves the record back to waiting for review.
+
 `Hub.transition_screen(actor, ref)` returns two lists for the record page:
 
 - The moves the actor may make now. Each has its label, the fields it asks for (with their definitions and values),

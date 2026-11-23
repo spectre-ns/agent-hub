@@ -700,24 +700,33 @@ def _check_workflow(rt: RecordType, w) -> list[str]:
 
         workflow = "order-handling"
         workflow = { id = "order-handling", when = "record.status in ['requested', 'booked']" }   # only these start it
+        workflow = { id = "lab-result-review", again = "record.status == 'corrected'" }
+
+    ``again``: a write that does not move the record's state (a lab writing status = "corrected" on a result already
+    reviewed) and makes this condition hold, where it did not before, starts the workflow about the record again,
+    from where it is, when no run of it is walking it (``starts_again``). ``when`` does not apply to it.
     """
     if isinstance(w, str):
         w = {"id": w}
-    if not isinstance(w, dict) or set(w) - {"id", "when"} or not isinstance(w.get("id"), str) \
+    if not isinstance(w, dict) or set(w) - {"id", "when", "again"} or not isinstance(w.get("id"), str) \
             or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", w.get("id") or ""):
         return ["workflow: the id of a workflow, e.g. \"order-handling\", or { id = ..., when = \"<condition over "
                 "record>\" }"]
-    when = w.get("when")
-    if when is not None:
-        if not isinstance(when, str) or not when.strip():
-            return ["workflow.when: a condition over record, e.g. \"record.status == 'requested'\""]
+    conds = {}
+    for key in ("when", "again"):
+        cond = w.get(key)
+        if cond is None:
+            continue
+        if not isinstance(cond, str) or not cond.strip():
+            return [f"workflow.{key}: a condition over record, e.g. \"record.status == 'requested'\""]
         try:
-            expr.check(when)
+            expr.check(cond)
         except expr.ExprError as exc:
-            return [f"workflow.when: {exc}"]
+            return [f"workflow.{key}: {exc}"]
+        conds[key] = cond
     if not rt.lifecycle:
         return ["workflow: a record moved by a workflow has a lifecycle: its state is where the work is"]
-    rt.workflow = {"id": w["id"], "when": when}
+    rt.workflow = {"id": w["id"], "when": conds.get("when"), **({"again": conds["again"]} if "again" in conds else {})}
     return []
 
 
@@ -729,6 +738,19 @@ def starts_workflow(rt: RecordType, rec: dict) -> str | None:
     if not w or (w.get("when") and not expr.holds(w["when"], {"record": {**_named_values(rt, rec), **rec}})):
         return None
     return w["id"]
+
+
+def starts_again(rt: RecordType, before: dict, after: dict) -> str | None:
+    """The workflow a write of a record that did not move it starts again (its type's ``workflow.again``, which
+    holds of the record as written and did not hold of it before), or None."""
+    w = rt.workflow or {}
+    cond = w.get("again")
+    if not cond or before is None:
+        return None
+    ctx = lambda rec: {"record": {**_named_values(rt, rec), **rec}}  # noqa: E731
+    if expr.holds(cond, ctx(after)) and not expr.holds(cond, ctx(before)):
+        return w["id"]
+    return None
 
 
 def _named_values(rt: RecordType, rec: dict) -> dict:

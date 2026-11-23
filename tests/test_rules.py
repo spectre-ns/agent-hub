@@ -5525,6 +5525,42 @@ def test_on_cancel_actions_run_in_the_cancel_and_cancel_by_gives_cancelling_to_t
     assert hub.engine.cancel_refusal(rana, run) is None  # a policy owner always may
 
 
+# ------------------------------------------------------------------ a write that is not a move starts the work again
+def test_a_write_that_makes_the_type_s_again_hold_starts_its_workflow_again_where_the_record_is(hub):
+    """Rule: a type's ``workflow = { id, when, again }``: a write that does not move the record and makes ``again``
+    hold, where it did not hold before (a lab writing status = "corrected" on a result already reviewed), starts the
+    type's workflow about the record again, from where it is, with the last run as its previous one, when no run of
+    it walks the record now; ``when`` does not apply to it. A write that leaves ``again`` as it was starts nothing."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    with pytest.raises(DefinitionError) as exc:
+        schema.parse(JOB.format(top='workflow = { id = "job-flow", again = "record.outcome ==" }'))
+    assert any("workflow.again" in p for p in exc.value.problems)
+    _jobs(hub)
+    rana, amara, liam = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam")
+    p = hub.propose("type", rana, JOB.format(
+        top='workflow = { id = "job-flow", when = "record.status == \'open\'", again = "record.outcome == \'redo\'" }'),
+        "again")
+    hub.approve(amara, "type", "Job", p["version"])
+    ref, run = _job(hub)
+    hub.update_record(amara, ref, {"outcome": "redo"})  # its run walks it now: nothing more starts
+    assert len(list(hub.db.runs.find({"record": ref}))) == 1
+    hub.update_record(amara, ref, {"outcome": ""})
+    hub.move_record(amara, ref, "doing")
+    hub.move_record(liam, ref, "done", {"outcome": "Fixed"})
+    hub.engine.complete(liam, item_for(hub, run, "file"), {"filed": True})
+    assert hub.engine.run(run["id"])["status"] == "completed" and not hub.open_step(hub._type("Job"), ref)
+    hub.update_record(amara, ref, {"hours": 2})  # again does not hold: nothing starts
+    assert len(list(hub.db.runs.find({"record": ref}))) == 1
+    hub.update_record(amara, ref, {"outcome": "redo"})  # done, and found wanting
+    again = _own_run(hub, ref, "job-flow")
+    assert again["id"] != run["id"] and again["ctx"]["run"]["previous"] == run["id"]
+    assert again["ctx"]["run"]["start_state"] == "done"
+    hub.engine.cancel(rana, again["id"], "test over")
+    hub.update_record(amara, ref, {"hours": 3})  # still redo: it did not just come to hold
+    assert not list(hub.db.runs.find({"record": ref, "status": "running"}))
+
+
 # ------------------------------------------------------------------------------------------- a record walks its workflow
 def test_a_record_its_type_walks_starts_its_run_on_create_and_only_that_run_moves_it(hub):
     """A record whose type names its workflow starts that workflow when it is made (one run, about its subject), and
