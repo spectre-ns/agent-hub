@@ -59,6 +59,7 @@ from .definitions_pages import DefinitionPages
 from .calendar_pages import CalendarPages
 from .work_panel import WorkPanel
 from .mcp_pages import McpPages
+from .passes import PassPages
 from .office_pages import OfficePages
 from .live_pages import LivePages
 from .records_pages import Download, RecordPages, a_an
@@ -96,7 +97,7 @@ def _json(obj) -> bytes:
 
 # ================================================================================================== the app
 class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages,
-          AnalyticsPages, BpmnPages):
+          AnalyticsPages, BpmnPages, PassPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -1622,7 +1623,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
         note = f'<div class="note card">Note: {e(item["note"])}</div>' if item.get("note") else ""
         actions = ""
-        main = [note]
+        main = [note, self._pass_strip(me, run), self._blocked_html(item)]
         if error is not None:
             problems = [p for p in (getattr(error, "problems", None) or []) if str(p) != str(error)]
             main.insert(0, f'<div class="error" role="alert"><p>That did not go through: {e(str(error))}</p>'
@@ -1645,7 +1646,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         elif item["status"] == "waiting":
             main.append(f'<div class="card"><p><b>{e(item.get("waiting") or "Waiting for the workflow to go on")}'
                         f'</b></p><p class="muted">Nobody needs to do anything here yet; it comes back to someone '
-                        f'when the next step is theirs.</p></div>')
+                        f'when the next step is theirs.</p>'
+                        f'{self._wait_records_html(me, run, self._open_wait(run, wf))}</div>')
         elif item["status"] in ("done", "cancelled"):
             out = item["output"] or {}
             ok, missing = (True, [])
@@ -1759,6 +1761,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             parts.append(f'<div class="section"><h2>Draft by {self.who(by)}</h2><div class="card">'
                          f'{self._values(ctx["draft"])}</div></div>')
         if st["kind"] == "gate":
+            parts.append(self._signed_record_view(me, run, step))
             says = st.get("meanings") or {}
             varied = len(set(says.values())) > 1   # each outcome signs its own sentence: show it beside the choice
             radios = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="outcome" value="{e(o)}" '
@@ -2003,11 +2006,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             dl.append(("Caused by", f'<a href="/track/{run["root_event"]}">event #{run["root_event"]}</a>'))
         details = ('<aside class="details"><h3>Details</h3><dl>'
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
-        main = (self._run_head(me, run, wf, shown_steps)
+        main = (self._pass_strip(me, run) + self._run_head(me, run, wf, shown_steps)
                 + f'<div class="section"><h2>Workflow</h2>{self._flow(wf, run, links, viewer=viewer)}</div>'
                 f'<div class="section"><h2>Steps</h2><div class="subtasks">{"".join(rows)}</div></div>'
                 f'<div class="section"><h2>Activity</h2>{self._activity(events, me)}</div>')
-        return self.layout(req, self.hub.run_title(req["me"], run), f'<div class="issue"><div>{main}</div>{details}</div>',
+        return self.layout(req, self._run_title_pass(req["me"], run), f'<div class="issue"><div>{main}</div>{details}</div>',
                            crumbs=[("/runs", "All work"), (f"/workflows/{wf.id}", wf.title)], actions=actions)
 
     def _run_head(self, me, run, wf, shown_steps) -> str:
@@ -2019,7 +2022,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             return ""
         step = next((s for s in wf.steps if s.id == item.get("step_id")), None)
         if run["status"] != "running" or not step or step.id not in shown_steps:
-            now = self._loz(self.RUN_STATUS, run["status"])
+            now = self._loz(self.RUN_STATUS, run["status"]) + self._pass_outcome_words(me, run)
         else:
             whose = self.who(item["assignee"]) if item.get("assignee") else e(item.get("role") or "")
             now = f'now at <b>{e(step.title)}</b>' + (f' · {whose}' if whose else "")
@@ -2033,7 +2036,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                    + (f' <span class="badge">{e(state)}</span>' if state else "") + "</p>")
         title = f'<a href="/items/{e(item["id"])}">{e(item.get("title") or wf.title)}</a>'
         return (f'<div class="card run-head"><p><span class="key">{self._key(item["id"])}</span> <b>{title}</b></p>'
-                f'<p class="muted">{now}</p>{rec}</div>')
+                f'<p class="muted">{now}</p>{rec}{self._blocked_html(item)}'
+                f'{self._wait_records_html(me, run, step) if run["status"] == "running" else ""}</div>')
 
     # ------------------------------------------------------------------------------------------ workflows
     def page_workflows(self, req):
