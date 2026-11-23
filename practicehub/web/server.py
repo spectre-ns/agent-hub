@@ -1139,7 +1139,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         done_rows = self.hub.db.items.find({**flt, "status": "done", "kind": {"$in": ["task", "gate"]}},
                                            sort=[("updated_at", -1)], limit=12, fields=["id"])
         # a run's item between people's steps (an automation running, a wait waiting): seen, in no one's to-do
-        done_rows += self.hub.db.items.find({**flt, "status": "waiting"}, sort=[("updated_at", -1)], limit=24,
+        done_rows += self.hub.db.items.find({**flt, "status": "waiting", "resting": {"$ne": True}},
+                                            sort=[("updated_at", -1)], limit=24,
                                             fields=["id"])
         runs: dict = {}
 

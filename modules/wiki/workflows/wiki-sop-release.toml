@@ -1,16 +1,29 @@
 id = "wiki-sop-release"
 title = "Release a SOP"
-summary = "A SOP sent for release review is released by a SOP approver who did not write it, or returned with why."
+summary = """One revision of a SOP, from draft to in use: its authors write it and send it for release review; a SOP
+approver who did not write it releases it (and signs) or returns it with why; it is in use until it is revised or
+retired. The SOP's status is where this work is."""
 record = "Procedure"
 
-[trigger]
-event = "record.transitioned:Procedure"
-when = "record.status == 'in-review'"
+# The Procedure type names this workflow: making a SOP starts it, and its status is this work's position. A revision
+# is one run: returned or revised, the next run walks the next revision (a workflow has no loops). The periodic review
+# (wiki-sop-review) never moves the status: choosing revise there sets revise_asked, and this workflow opens the
+# revision. Nothing else starts it.
+
+[[steps]]
+id = "write"
+title = "Write the revision and send it for release review"
+kind = "wait"
+until = "record.status != 'draft'"
+instructions = """Write or revise the SOP together, then send it for release review on its page with a summary of what
+changed. Whoever writes this revision cannot release it."""
 
 [[steps]]
 id = "release"
 title = "Release the SOP for use"
 kind = "gate"
+after = ["write"]
+when = "record.status == 'in-review'"
 role = "sop-approver"
 signer = "person"
 not_by = ["record.editors"]   # nobody who wrote this revision, alone or in a live session, releases it
@@ -31,14 +44,15 @@ kind = "automation"
 after = ["release"]
 when = "release.outcome == 'release'"
 action = "record.update"
+state = "released"
 [steps.params]
 ref = "{{run.record}}"
 increment = ["revision"]
 [steps.params.set]
-status = "released"
 effective = "{{run.today}}"
 review_by = "{{run.today + 1y}}"
 returned_because = ""
+revise_asked = false
 
 [[steps]]
 id = "return"
@@ -47,8 +61,32 @@ kind = "automation"
 after = ["release"]
 when = "release.outcome == 'return'"
 action = "record.update"
+state = "draft"   # the next revision is the next run's
 [steps.params]
 ref = "{{run.record}}"
 [steps.params.set]
-status = "draft"
 returned_because = "{{release.comment}}"
+
+[[steps]]
+id = "in-use"
+title = "In use until revised or retired"
+kind = "wait"
+after = ["write", "publish"]
+when = "record.status == 'released'"
+until = "record.status != 'released' or record.revise_asked == true"   # revised, retired, or its review asks
+instructions = """The released revision is in use: staff read it and sign that they understood it. Revising it (on
+its page, or when its periodic review asks) starts the next revision; staff keep reading this one until that is
+released."""
+
+[[steps]]
+id = "open-revision"
+title = "Open the revision its review asked for"
+kind = "automation"
+after = ["in-use"]
+when = "record.status == 'released'"   # still released: its periodic review asked for a revision
+action = "record.update"
+state = "draft"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+revise_asked = false

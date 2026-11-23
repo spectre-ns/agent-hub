@@ -145,8 +145,10 @@ def test_a_due_follow_up_goes_to_the_owner_an_agent_drafts_and_a_person_sends(fi
     row = firm.db.outbox.find_one({"run_id": run["id"]})
     assert row["recipient"] == raj and row["purpose"] == "commercial" and row["status"] == "queued"
     assert firm.engine.run(run["id"])["status"] == "completed"
-    firm.engine.tick(firm.engine.now())  # asked once for this date
-    assert len([r for r in firm.engine.runs() if r["workflow_id"] == "crm-follow-up"]) == 1
+    firm.engine.tick(firm.engine.now())  # asked once for this date: the next run waits for its next date
+    runs = [r for r in firm.engine.runs() if r["workflow_id"] == "crm-follow-up"]
+    assert len(runs) == 2 and runs[0]["status"] == "running" and runs[0]["ctx"]["run"]["previous"] == run["id"]
+    assert firm.engine.run(runs[0]["id"])["steps"]["due"]["state"] == "waiting"
     due = next(w for w in viewmod.compute(firm, lee, firm.view("crm-follow-ups")) if w["title"] == "Due now")
     assert due["total"] == 0
 

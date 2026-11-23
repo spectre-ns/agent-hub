@@ -454,6 +454,22 @@ _WAITING = {"$expr": {"$in": ["waiting", {"$map": {"input": {"$objectToArray": {
 OPEN_WORK = ("open", "claimed", "held")
 
 
+def _waits(run: dict) -> dict:
+    """What a run's waits depend on, kept on the run so a write rechecks only the runs it can wake: ``waits_on`` is
+    its record (a wait's ``until`` is pure, and sees only the run's own record, its context and the time), or "*"
+    for a wait over a list (``for_each`` reads other records) or a run with no record; None when nothing waits.
+    ``resting``: every step still open is a wait no one is asked to watch (no role, no time it ends): a document in
+    force, an item in stock. Nothing is to be done about it, so it is not open work on the record's page, on the
+    board or in the metrics."""
+    st = [v for v in (run.get("steps") or {}).values() if isinstance(v, dict)]
+    waiting = [v for v in st if v.get("state") == "waiting"]
+    if not waiting or run.get("status") != "running":
+        return {"waits_on": None, "resting": False}
+    on = "*" if any(v.get("each") for v in waiting) or not run.get("record") else run["record"]
+    rests = all(v.get("rests") for v in waiting) and not any(v.get("state") in ("active", "failed") for v in st)
+    return {"waits_on": on, "resting": rests}
+
+
 def _item_doc(hub, **fields) -> dict:
     """A new work item with every field it has: what is not given takes its default."""
     doc = {"id": None, "n": hub.db.next_seq("items"), "run_id": None, "step_id": "", "kind": None, "title": "",
@@ -537,7 +553,7 @@ class Engine:
 
     def _save(self, run: dict) -> None:
         self.hub.db.runs.set(run["id"], {"ctx": run["ctx"], "steps": run["steps"], "status": run["status"],
-                                         "refs": run_refs(run), "updated_at": utcnow()})
+                                         "refs": run_refs(run), **_waits(run), "updated_at": utcnow()})
 
     def automation_actor(self, run: dict) -> dict:
         return {"id": f"workflow:{run['workflow_id']}@v{run['version']}", "kind": "automation", "name": run["title"],
@@ -576,14 +592,15 @@ class Engine:
 
     def start(self, actor: dict, wid: str, *, record: str | None = None, inputs: dict | None = None,
               cause: int | None = None, via_automation: bool = False, parent: str | None = None,
-              allow_duplicate: bool = False, on_create: bool = False) -> dict:
+              allow_duplicate: bool = False, on_create: bool = False, previous: str | None = None) -> dict:
         """``allow_duplicate``: the starter confirmed starting another run although one with the same
         ``trigger.one_open_per`` value is open (only where the trigger has ``allow_duplicate = true``).
 
         A workflow about a record type with ``[new_record]`` may be started on what such a record is about (its
         subject): the run makes the record, as its first act, and is about it from then on. ``on_create``: started
         because its record was just made (the type names this workflow); the start form is what the record says
-        (each ``[new_record]`` field that is one input gives it back), and nothing on it is required."""
+        (each ``[new_record]`` field that is one input gives it back), and nothing on it is required. ``previous``: the
+        run of the same workflow that walked the record's last pass (its ``not_by`` still counts: see ``_did``)."""
         from .hub import Denied, Invalid
         hub = self.hub
         wf, row = hub.workflow(wid)
@@ -658,13 +675,14 @@ class Engine:
         start_state = schema.first(got, lc_type.lifecycle["path"]) if record and lc_type and lc_type.lifecycle else \
             None
         ctx = {"run": {"id": run_id, "record": record, "subject": subject, "started_by": actor["id"],
-                       "start_state": start_state,
+                       "start_state": start_state, **({"previous": previous} if previous else {}),
                        "workflow": wid, "parent": parent, "blocks": pins, "skills": skills, "now": utcnow(),
                        "today": self.now().date().isoformat()},
                "input": values}
         with hub.db:  # checked in the transaction that starts it: two people pressing at once start one
             self._refuse_duplicate(wf, record, values, by_hand=not via_automation and cause is None,
                                    confirmed=allow_duplicate, subject=subject)
+            self._refuse_second_owner_run(wf, record)
             if make is not None:  # the record is made in the same step: refused, nothing is left behind
                 record = self._make_record(wf, row, run_id, make, subject, ctx, cause)
                 ctx["run"]["record"] = record
@@ -731,6 +749,72 @@ class Engine:
         return next((f for f in rt.fields if f["type"] == "reference" and f.get("rel") == "subject"
                      and "*" not in f["path"] and (subject_type in self.hub.concrete(f["target"]))), None)
 
+    def _refuse_second_owner_run(self, wf, record: str | None) -> None:
+        """A record whose type names this workflow is walked by one run of it at a time: its state is that run's
+        position, which two runs would each claim."""
+        from .hub import Invalid
+        if not record or "/" not in record:
+            return
+        rt = self.hub.record_type(record.split("/", 1)[0])
+        if rt is None or (rt.workflow or {}).get("id") != wf.id:
+            return
+        if self.hub.db.runs.find_one({"workflow_id": wf.id, "record": record, "status": "running"}, fields=["id"]):
+            raise Invalid(f"{wf.title} is already under way about this {rt.label.lower()}: its own workflow walks it "
+                          f"once at a time")
+
+    def _re_enter(self, run: dict, cause) -> None:
+        """A lifecycle that loops (a document revised after it was approved, a change order sent back, a CAPA found
+        not effective) is walked one pass per run, since a workflow has no loops: a run of the current version that
+        ends with its record moved since it started and back where its type's workflow starts hands the record on to
+        a new run of it, which walks the next pass. A run that never moved its record ends for good (it cannot start
+        itself over and over). The new run's ``run.previous`` is this one, so who did what before still counts."""
+        hub = self.hub
+        ref = str(run.get("record") or "")
+        if "/" not in ref:
+            return
+        try:
+            rt = hub.record_type(ref.split("/", 1)[0])
+            rec = hub.records.read(*ref.split("/", 1))
+            if rt is None or rec is None or self._walked_again(run, rt, rec) != "re-enter" \
+                    or hub.db.runs.find_one({"workflow_id": run["workflow_id"], "record": ref, "status": "running"}):
+                return  # an older version hands on (``_hand_on``); work still open walks it
+            with hub.db:
+                self.start({"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"},
+                           run["workflow_id"], record=ref, inputs=dict((run.get("ctx") or {}).get("input") or {}),
+                           cause=cause, via_automation=True, on_create=True, previous=run["id"])
+        except Exception as exc:  # noqa: BLE001 - the run that ended stays ended; the hand-on is noted
+            hub.track.append(self.automation_actor(run), "trigger.failed", ref, run_id=run["id"], cause=cause,
+                             data={"workflow": run["workflow_id"], "error": f"walking the next pass: {exc}"})
+
+    def _walked_again(self, run: dict, rt, rec: dict) -> str | None:
+        """Whether the record a run of its type's own workflow ended on is walked on by another run of it: "hand-on"
+        (the run was an older version: ``_hand_on``), "re-enter" (it moved during the run and is back where its
+        workflow starts: ``_re_enter``), or None (it is left where it is)."""
+        hub = self.hub
+        wid = run["workflow_id"]
+        if schema.starts_workflow(rt, rec) != wid or hub.record_workflow(rt) != wid:
+            return None
+        if hub.workflow(wid)[1]["version"] != run["version"]:
+            return "hand-on"
+        if hub.db.events.find_one({"action": "record.transitioned", "subject": run.get("record"),
+                                   "seq": {"$gt": run.get("root_event") or 0}}, fields=["seq"]):
+            return "re-enter"
+        return None
+
+    def stop(self, actor: dict, run_id: str, why: str, cause: int | None) -> None:
+        """Stop a record's own run because its record was moved out of its hands (entered in error, cancelled): its
+        open items are cancelled and ``run.stopped`` goes on the track, caused by the move. Nothing is abandoned: the
+        move already says where the record is."""
+        run = self.run(run_id)
+        if run["status"] != "running":
+            return
+        run["status"] = "cancelled"
+        self._save(run)
+        self.hub.db.items.update({"run_id": run_id, "status": {"$in": ["open", "claimed", "held", "waiting"]}},
+                                 {"$set": {"status": "cancelled", "updated_at": utcnow()}}, many=True)
+        self.hub.track.append(actor, "run.stopped", run["record"] or "", run_id=run_id, cause=cause,
+                              data={"reason": why})
+
     def _hand_on(self, run: dict, cause) -> None:
         """A run of an older version of a type's own workflow that ends with its record still where that workflow
         starts (a version that stopped once the booking was made) hands the record on to the current version, which
@@ -745,43 +829,104 @@ class Engine:
             if rt is None or rec is None or schema.starts_workflow(rt, rec) != run["workflow_id"]:
                 return
             wf, row = hub.workflow(run["workflow_id"])
-            if row["version"] == run["version"] or self.runs(record=ref, status="running"):
+            if row["version"] == run["version"] or \
+                    hub.db.runs.find_one({"workflow_id": wf.id, "record": ref, "status": "running"}, fields=["id"]):
+                return
+            if hub.record_workflow(rt) != wf.id:
                 return
             with hub.db:
                 self.start({"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"},
                            wf.id, record=ref, inputs=dict((run.get("ctx") or {}).get("input") or {}), cause=cause,
-                           via_automation=True, on_create=True)
+                           via_automation=True, on_create=True, previous=run["id"])
         except Exception as exc:  # noqa: BLE001 - the run that ended stays ended; the hand-on is noted
             hub.track.append(self.automation_actor(run), "trigger.failed", ref, run_id=run["id"], cause=cause,
                              data={"workflow": run["workflow_id"], "error": f"handing the record on: {exc}"})
+
+    RELINK_ALERT_AFTER = 3        # failed tries before the escalation role is told, once
+    RELINK_BACKOFF_MAX = 24 * 60  # minutes: a run that cannot be moved is tried at most daily
 
     def relink_runs(self) -> dict:
         """Move running runs that are about the subject itself onto a record of their own: a workflow whose current
         version makes its record (``[new_record]``) but whose older runs, started before it did, have the subject as
         their record. Each run is re-read and moved in its own transaction, and skipped when already moved, so it is
-        safe to repeat (every tick does) with one writer; a run that cannot be moved is noted and tried again next
-        time, never holding up the others. A run keeps its version, its item and key, its steps (who did what,
-        ``ctx[step].by``) and ``ctx.run.record`` (what its pinned steps say); it gains ``record`` (the record it
-        walks: the one it already made, else one made now from ``[new_record]``) and ``subject``."""
+        safe to repeat (every tick does) with one writer. A run keeps its version, its item and key, its steps (who
+        did what, ``ctx[step].by``) and ``ctx.run.record`` (what its pinned steps say); it gains ``record`` (the record
+        it walks: the one it already made, else one made now from ``[new_record]``) and ``subject``.
+
+        Only once the record type is ready for it (``_relink_ready``: its type names the workflow and that version is
+        about it, and a record made in its first state has somewhere to go when the old run ends or is cancelled);
+        until then each run stays on its subject. The runs are chosen in the database (only those not on a record of
+        the type yet, not noted as unmovable, and due a try). A run that can never move (its subject is not what the
+        type is about) is noted once (``run.relink_skipped``) and not looked at again; one whose move fails is tried
+        again later and later (``_relink_failed``)."""
         hub = self.hub
-        moved, failed = [], []
+        moved, failed, skipped = [], [], []
+        now = utcnow()
         for w in hub.workflows():
             wf = w["workflow"]
-            if not wf.new_record or not wf.record:
+            if not wf.new_record or not wf.record or not self._relink_ready(wf):
                 continue
-            for r in hub.db.runs.find({"workflow_id": wf.id, "status": "running"},
-                                      fields=["id", "record"]):
-                if str(r.get("record") or "").split("/", 1)[0] == wf.record:
+            q = {"workflow_id": wf.id, "status": "running", "relink_skipped": {"$ne": True},
+                 "record": {"$not": {"$regex": f"^{re.escape(wf.record)}/"}},
+                 "$or": [{"relink_next_at": None}, {"relink_next_at": {"$lte": now}}]}
+            for r in hub.db.runs.find(q, fields=["id", "record", "relink_attempts", "relink_error"]):
+                subject = str(r.get("record") or "")
+                if "/" not in subject or self._new_record_field(wf, subject.split("/", 1)[0]) is None:
+                    hub.db.runs.set(r["id"], {"relink_skipped": True})
+                    hub.track.append({"id": "engine", "kind": "automation"}, "run.relink_skipped", r["id"],
+                                     run_id=r["id"], data={"record": subject or None,
+                                                           "why": f"it is not about what a {wf.record} is about"})
+                    skipped.append(r["id"])
                     continue
                 try:
                     with hub.db:
                         if self._relink(wf, w["row"], r["id"]):
                             moved.append(r["id"])
-                except Exception as exc:  # noqa: BLE001 - tried again next time
+                except Exception as exc:  # noqa: BLE001 - tried again later
                     failed.append(r["id"])
-                    hub.track.append({"id": "engine", "kind": "automation"}, "run.relink_failed", r["id"],
-                                     run_id=r["id"], data={"error": str(exc)})
-        return {"moved": moved, "failed": failed}
+                    self._relink_failed(r, str(exc))
+        return {"moved": moved, "failed": failed, "skipped": skipped}
+
+    def _relink_ready(self, wf) -> bool:
+        """Whether runs of ``wf`` may be moved onto records of its type now: the type in force names ``wf`` and the
+        workflow's active version is about it (``Hub.record_workflow``), and a record made in the state ``[new_record]``
+        gives it, when only workflows move it on, has a place in the lifecycle's ``abandoned`` (an old run cancelled)
+        and, where the lifecycle has one, ``ended`` (an old run that ends without moving it). Until then a run moved
+        would leave a record nothing walks, that anyone could move."""
+        hub = self.hub
+        rt = hub.record_type(wf.record)
+        if rt is None or hub.record_workflow(rt) != wf.id:
+            return False
+        lc = rt.lifecycle
+        if not lc:
+            return True
+        made = (wf.new_record or {}).get(lc["field"])
+        if not isinstance(made, str) or "{{" in made:
+            made = lc["initial"]
+        exits = [t for t in lc["transition"] if (made in t["from"] or "*" in t["from"]) and t["to"] != made
+                 and "*" not in t["from"]]
+        if not exits or any(t["by"] != "workflow" for t in exits):
+            return True  # people move it on from there
+        return made in (lc.get("abandoned") or {}) and ("ended" not in lc or made in (lc.get("ended") or {}))
+
+    def _relink_failed(self, row: dict, error: str) -> None:
+        """A run that could not be moved: tried again after a wait that doubles each time (up to a day), noted on the
+        track only when the error is new, and the escalation role is told once, after a few tries."""
+        hub = self.hub
+        n = int(row.get("relink_attempts") or 0) + 1
+        wait = min(2 ** n, self.RELINK_BACKOFF_MAX)
+        at = (datetime.now(timezone.utc) + timedelta(minutes=wait)).replace(microsecond=0)
+        hub.db.runs.set(row["id"], {"relink_attempts": n, "relink_error": error[:500],
+                                    "relink_next_at": at.isoformat().replace("+00:00", "Z")})
+        if error[:500] != (row.get("relink_error") or ""):
+            seq = hub.track.append({"id": "engine", "kind": "automation"}, "run.relink_failed", row["id"],
+                                   run_id=row["id"], data={"error": error[:500], "attempt": n})
+        else:
+            seq = None
+        if n == self.RELINK_ALERT_AFTER:
+            run = self.run(row["id"])
+            self.alert(run, None, f"{run['title']} could not be moved onto a record of its own ({n} tries): "
+                                  f"{error[:200]}", role=hub.practice.get("escalation_role"), cause=seq)
 
     def _relink(self, wf, row, run_id: str) -> bool:
         hub = self.hub
@@ -1056,15 +1201,21 @@ class Engine:
                                      cause=cause, data={"step": step.id, "when": step.when})
                     break
                 if step.kind == "wait":
-                    st.update(state="waiting")
+                    st.update(state="waiting", **({"each": True} if step.for_each else {}))
                     self._save(run)
                     self._hist_note(run, step, done=False)
                     hub.track.append(self.automation_actor(run), "step.waiting", f"step:{step.id}", run_id=run_id,
                                      cause=cause, data={"step": step.id, "until": step.until,
                                                         **({"for_each": step.for_each} if step.for_each else {}),
                                                         **_timing(step)})
-                    if not self._wait_over(run, step, cause) and step.role:
-                        self._notice(run, step, f"Waiting: {step.title}", role=step.role, cause=cause)
+                    if not self._wait_over(run, step, cause):
+                        if step.role:
+                            self._notice(run, step, f"Waiting: {step.title}", role=step.role, cause=cause)
+                        elif not step.for_each and not getattr(step, "timeout", None) \
+                                and not run["steps"][step.id].get("wake_at") \
+                                and run["steps"][step.id].get("state") == "waiting":
+                            run["steps"][step.id]["rests"] = True  # no one watches it, and no time ends it
+                            self._save(run)
                     break
                 if step.kind == "automation":
                     actor = self.automation_actor(run)
@@ -1139,6 +1290,7 @@ class Engine:
             self._abandon(run, seq, stranded_only=True)
             self._late_finish(run, cause)
             self._hand_on(run, seq)
+            self._re_enter(run, seq)
         if run["status"] == "running":
             self._place(run_id, cause)
         elif run["status"] == "completed" and run.get("item"):
@@ -1304,9 +1456,14 @@ class Engine:
             out.append(run["id"])
         return out
 
-    def recheck_waits(self, cause: int | None) -> None:
-        """Something changed: let every run that is waiting see whether what it waits for now holds."""
-        rows = self.hub.db.runs.find({"status": "running", **_WAITING}, fields=["id"])
+    def recheck_waits(self, cause: int | None, ref: str | None = None) -> None:
+        """Something changed: let every run that is waiting see whether what it waits for now holds. ``ref``: the
+        record that changed; only the runs whose waits can see it are rechecked (``waits_on``: that record, or "*"),
+        and runs saved before it was kept; the tick rechecks every waiting run (time, and changes made outside)."""
+        q = {"status": "running", **_WAITING}
+        if ref:
+            q["$or"] = [{"waits_on": {"$in": [ref, "*"]}}, {"waits_on": {"$exists": False}}]
+        rows = self.hub.db.runs.find(q, fields=["id"])
         for r in rows:
             if r["id"] in self._advancing:
                 continue  # that run is advancing now and checks its waits itself
@@ -1448,6 +1605,8 @@ class Engine:
         rec = hub.records.read(*ref.split("/", 1))
         if rec is None:
             return
+        if stranded_only and self._walked_again(run, rt, rec):
+            return  # not stranded: its own workflow walks the next pass (``_re_enter``)
         st = schema.first(rec, lc["path"])
         to = lc["abandoned"].get(st)
         if to and stranded_only:
@@ -1703,7 +1862,8 @@ class Engine:
         hub.db.items.set(item_id, {"waiting": "; ".join(words), "kind": "wait", "step_id": step.id if step else "",
                                    "step_title": step.title if step else "", "role": None, "assignee": None,
                                    "claimed_by": None, "due_at": None, "escalated": 0, "escalate_next": None,
-                                   "persons_only": 0, "updated_at": utcnow()})
+                                   "persons_only": 0, "resting": bool(_waits(run)["resting"]),
+                                   "updated_at": utcnow()})
 
     def _hist_note(self, run: dict, step, *, done: bool = True, outcome: str | None = None,
                    by: str | None = None) -> None:
@@ -1741,7 +1901,27 @@ class Engine:
                                           fields=["history"]):
             if any(e.get("step") == step_id and e.get("by") == mid for e in row.get("history") or []):
                 return True
-        return False
+        return self._did_before(run, step_id, mid)
+
+    def _did_before(self, run: dict, step_id: str, mid: str) -> bool:
+        """A record's earlier passes (``run.previous``: a CAPA reopened, a change order sent back) are one piece of
+        work: whoever did the step in any pass before this one is kept off a ``not_by`` naming it, all the way back
+        along the chain of passes, not only in the last pass that did it."""
+        seen = {run["id"]}
+        while True:
+            prev = ((run.get("ctx") or {}).get("run") or {}).get("previous")
+            if not prev or prev in seen or len(seen) > 200:
+                return False
+            seen.add(prev)
+            run = self.hub.db.runs.get(prev)
+            if run is None:
+                return False
+            if (run["ctx"].get(step_id) or {}).get("by") == mid:
+                return True
+            for row in self.hub.db.items.find({"run_id": run["id"], "kind": {"$nin": ["notice", "hold"]}},
+                                              fields=["history"]):
+                if any(e.get("step") == step_id and e.get("by") == mid for e in row.get("history") or []):
+                    return True
 
     @staticmethod
     def what(item: dict) -> str:
@@ -2755,7 +2935,7 @@ class Engine:
             except Exception as exc:  # noqa: BLE001 - a trigger that cannot start is reported, not fatal to the write
                 self.hub.track.append(self.automation_actor_for(wf), "trigger.failed", ref, cause=cause,
                                       data={"workflow": wf.id, "event": wf.event, "error": str(exc)})
-        self.recheck_waits(cause)
+        self.recheck_waits(cause, ref)
         return started
 
     def automation_actor_for(self, wf) -> dict:
