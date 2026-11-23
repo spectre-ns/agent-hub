@@ -5884,3 +5884,48 @@ def test_a_reviewed_result_is_closed_only_once_the_patient_was_told(hub):
         hub.sign_record(M(hub, "noor"), ref, "Patient told")
     hub.sign_record(M(hub, "dr-amara"), ref, "Patient told")
     assert hub.records.read(*ref.split("/", 1))["review"] == "closed"
+
+
+# ------------------------------------------------------- a step whose move is signed is done by moving, never on its item
+SIGNED_FLOW = JOB_FLOW + """[[steps]]
+id = "approve"
+title = "Approve the job"
+kind = "task"
+role = "physician"
+after = ["file"]
+state = "approved"
+context = ["record:clinical"]
+[[steps.fields]]
+name = "note"
+type = "text"
+"""
+
+
+def test_a_step_whose_move_is_signed_is_refused_on_its_item_and_done_by_the_signed_move(hub):
+    """Rule: a person's step with ``state`` whose move from where the record is now is a signed transition is not
+    finished on its item (``Engine.complete``): the workflow cannot sign for the person, so the record would stay put
+    while the run went on. It is refused in words, and the person makes the signed move on the record's page, which
+    does the step. A run a record's type started (``started_by`` is no member) still hands its work to people."""
+    _jobs(hub, walked=False)
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    w = hub.propose_workflow(rana, SIGNED_FLOW, "signed approval")
+    hub.approve_workflow(amara, "job-flow", w["version"])
+    p = hub.propose("type", rana, JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }'),
+                    "walked")
+    hub.approve(amara, "type", "Job", p["version"])
+    importer = {"id": "import:jobs", "kind": "automation", "name": "Import", "status": "active"}
+    ref = f"Job/{hub.create_record(importer, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    run = _own_run(hub, ref, "job-flow")
+    assert not hub.db.members.get(run["started_by"])  # an import made the record: no member started its run
+    hub.move_record(amara, ref, "doing")
+    hub.move_record(amara, ref, "done", {"outcome": "New seal fitted"})
+    hub.engine.complete(amara, item_for(hub, hub.engine.run(run["id"]), "file"), {"filed": True})
+    item = item_for(hub, hub.engine.run(run["id"]), "approve")
+    with pytest.raises(Invalid, match="signed 'Approved': make that move on the record's page, with your signature"):
+        hub.engine.complete(amara, item, {"note": "Looks right"})
+    assert hub.engine.run(run["id"])["steps"]["approve"]["state"] == "active"
+    assert hub.engine._to_people(hub.engine.item(item))[0] == "physician"  # handed to people, though no member started it
+    hub.move_record(amara, ref, "approved", signature="Approved")
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["approve"]["state"] == "done" and run["status"] == "completed"
+    assert hub.records.read(*ref.split("/", 1))["status"] == "approved"
