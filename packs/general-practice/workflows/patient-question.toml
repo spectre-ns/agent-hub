@@ -1,7 +1,11 @@
 id = "patient-question"
 title = "Patient question"
-record = "Patient"
+record = "Communication"
 summary = """
+One message, from received to closed: the patient's message is this workflow's record, about the patient, and where
+it is in its handling is where the work is: received, triaged (screened and sent to whoever answers it), answered,
+closed. Each message is its own record and its own run: a new question while another waits is never folded into it.
+
 A patient writes in with a question. Code screens it first for red flags (chest pain, trouble breathing, stroke
 signs...): a flagged message goes straight to a nurse to call the patient within 30 minutes. Every patient is told
 at once that messages are not read around the clock and to call 911 in an emergency. Only a message that is plainly
@@ -14,6 +18,16 @@ or a draft the front desk will not send, goes to a nurse, and the nurse's answer
 [trigger]
 starters = ["front-desk", "nurse", "physician", "patient-portal"]
 event = "patient.question"
+one_open_per = "subject"           # the same submission twice (a double press, two people typing in one call)...
+one_open_same = ["input.question"] # ...with the same words...
+one_open_within = "10m"            # ...a moment ago starts one; any other message is its own
+
+# Started on the patient (the portal, the desk), the run files the message on the chart and handles it.
+[new_record]
+status = "in-progress"
+medium_text = "portal"
+message = "{{input.question}}"
+handling = "received"
 
 [[input]]
 name = "question"
@@ -29,6 +43,14 @@ block = "patient-message-screen"
 [steps.params]
 question = "{{input.question}}"
 
+# Screened, the message is triaged: it is with whoever answers it (a nurse now, a nurse within hours, or the desk).
+[[steps]]
+id = "triaged"
+title = "Triage the message"
+kind = "automation"
+after = ["screen"]
+state = "triaged"
+
 [[steps]]
 id = "safety-net"
 title = "Tell the patient what to do in an emergency"
@@ -37,7 +59,7 @@ after = ["screen"]
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "We have your message"
 body = "{{screen.advice}}"
 
@@ -92,6 +114,15 @@ name = "notes"
 type = "text"
 required = true
 
+# A red flag answered on the phone is answered; a patient nobody reached is closed with what the physician did.
+[[steps]]
+id = "called"
+title = "Answered on the phone"
+kind = "automation"
+after = ["urgent", "not-reached"]
+when = "urgent.action != 'could-not-reach' or not-reached.action == 'reached-the-patient'"
+state = "answered"
+
 [[steps]]
 id = "draft"
 title = "Draft a reply"
@@ -132,9 +163,10 @@ kind = "automation"
 after = ["review"]
 when = "review.outcome == 'send'"
 action = "message.send"
+state = "answered"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your question"
 body = "{{draft.reply}}"
 
@@ -162,8 +194,19 @@ title = "Send the nurse's answer"
 kind = "automation"
 after = ["clinician"]
 action = "message.send"
+state = "answered"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your question"
 body = "{{clinician.answer}}"
+
+[[steps]]
+id = "close"
+title = "Close the message"
+kind = "automation"
+after = ["send", "send-answer", "called", "not-reached"]
+action = "record.update"
+state = "closed"
+[steps.params.set]
+status = "completed"

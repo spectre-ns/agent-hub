@@ -9,6 +9,10 @@ date = "sent"
 active = "not record.status in ['completed', 'entered-in-error', 'not-done', 'stopped']"
 order = 100
 summary = "A message or letter to or from a patient, a pharmacy, a specialist."
+# A patient's message (one received for handling) is walked by its own workflow from received to closed: its
+# handling is where that work is. A letter or a fax the practice files (completed) starts none, and may be filed
+# closed straight away.
+workflow = { id = "patient-question", when = "record.handling == 'received' and record.status == 'in-progress'" }
 
 [[field]]
 name = "status"
@@ -23,6 +27,14 @@ type = "list"
 [[field]]
 name = "medium"
 type = "list"
+help = "portal, fax, phone, letter"
+advanced = true
+
+[[field]]
+name = "medium_text"
+label = "Sent by"
+path = "medium.0.text"
+type = "string"
 help = "portal, fax, phone, letter"
 
 [[field]]
@@ -61,7 +73,50 @@ type = "object"
 name = "payload"
 type = "list"
 help = "[{contentString}]"
+advanced = true
+
+[[field]]
+name = "message"
+label = "Message"
+path = "payload.0.contentString"
+type = "text"
 
 [[field]]
 name = "note"
 type = "list"
+
+[[field]]
+name = "handling"
+label = "Handling"
+type = "choice"
+choices = ["received", "triaged", "answered", "closed"]
+labels = { received = "Waiting to be read", triaged = "Triaged", answered = "Answered", closed = "Closed" }
+help = "where the practice's handling of a patient's message is"
+
+# The handling: the patient-question workflow moves it. A message no run walks (its work cancelled, or one entered as
+# received by hand) stays waiting to be read until someone closes it: a patient's message is never closed unread.
+[lifecycle]
+field = "handling"
+initial = "received"
+starts = ["closed"]
+labels = { received = "Waiting to be read", triaged = "Triaged", answered = "Answered", closed = "Closed" }
+abandoned = { triaged = "closed", answered = "closed" }
+ended = { received = "closed", triaged = "closed", answered = "closed" }
+[[lifecycle.transition]]
+from = ["received"]
+to = "triaged"
+by = "workflow"
+label = "Triaged"
+[[lifecycle.transition]]
+from = ["triaged"]
+to = "answered"
+by = "workflow"
+label = "Answered"
+[[lifecycle.transition]]
+from = ["answered", "triaged"]
+to = "closed"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["received"]
+to = "closed"
+label = "No answer needed"
