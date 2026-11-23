@@ -5261,3 +5261,85 @@ def test_a_person_makes_a_record_only_in_its_initial_state_or_one_its_lifecycle_
     with pytest.raises(Invalid, match="starts as 'requested'"):
         hub.create_record(rana, "Consent", dict(base, status="reviewed"))
     assert hub._type("Consent").lifecycle["starts"] == ["active"]
+
+
+# ------------------------------------------------------------------------- escalation: who hears, who takes it over
+def test_an_alert_with_nobody_else_on_duty_tells_the_late_themselves_never_nobody(hub):
+    """Whoever is late is never the only one told while someone else is on duty; with nobody else on duty at all,
+    they are told by name rather than nobody, and with nobody on duty the notice waits on the role."""
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub), inputs={"question": "My knee"})
+    for mid in [m["id"] for m in hub.members("person") if m["id"] != "noor"]:
+        hub.db.members.set(mid, {"status": "inactive"})
+    out = hub.engine.alert(run, None, "Overdue: call back", role="nurse", besides="noor")
+    assert [hub.engine.item(i)["assignee"] for i in out] == ["noor"]
+    hub.db.members.set("noor", {"status": "inactive"})
+    out = hub.engine.alert(run, None, "Overdue: call back", role="nurse", besides="noor")
+    assert [(hub.engine.item(i)["role"], hub.engine.item(i)["assignee"]) for i in out] == [("nurse", None)]
+
+
+def test_the_escalation_role_may_take_overdue_work_itself_from_its_notice(hub):
+    """A person holding a step's escalate_to role may claim the step's item once it is overdue (not before; never
+    an agent), and the overdue notice's Take it over claims the item and acknowledges the notice; one held by
+    someone else is taken off them, and they are told."""
+    from datetime import datetime, timezone
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")   # a nurse's step, escalated to the physicians
+    liam = M(hub, "dr-liam")
+    assert hub.engine.eligibility(liam, hub.engine.item(iid)) == (False, "it needs the nurse role")
+    hub.engine.claim(M(hub, "noor"), iid)
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    hub.engine.tick(datetime.now(timezone.utc))
+    note = hub.db.items.find_one({"kind": "notice", "escalates": iid, "role": "physician"})
+    assert note and hub.engine.escalated_item(liam, hub.engine.item(note["_id"]))["id"] == iid
+    assert hub.engine.escalated_item(M(hub, "jo"), hub.engine.item(note["_id"])) is None
+    taken = hub.engine.take_over(liam, note["_id"])      # from the notice: the work, not the notice
+    assert taken["id"] == iid and taken["claimed_by"] == "dr-liam"
+    assert hub.engine.item(note["_id"])["status"] == "done"
+    told = hub.db.items.find_one({"kind": "notice", "assignee": "noor", "run_id": run["id"]}, sort=[("n", -1)])
+    assert told and "Dr. Liam" in told["title"]
+    # back on the nurses' queue, overdue: the physician claims it outright; an agent never does
+    hub.engine.release(liam, iid, "")
+    free = hub.engine.item(iid)
+    assert not hub.engine.eligibility(M(hub, "clinical-admin-agent"), free)[0]
+    assert hub.engine.claim(liam, iid)["claimed_by"] == "dr-liam"
+
+
+def test_repeated_escalations_of_one_item_are_one_notice_row_with_a_count(hub):
+    from datetime import datetime, timedelta, timezone
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")
+    hub.engine.claim(M(hub, "noor"), iid)
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    now = datetime.now(timezone.utc)
+    for hours in (0, 2, 4):
+        assert iid in hub.engine.tick(now + timedelta(hours=hours))["overdue"]
+    rows = hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})
+    assert len(rows) == 1 and rows[0]["repeats"] == 3 and rows[0]["title"].startswith("Still not done (3)")
+    hub.engine.acknowledge(M(hub, "dr-liam"), rows[0]["_id"])   # acknowledged, the next one is a new row
+    hub.engine.tick(now + timedelta(hours=6))
+    assert len(hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})) == 2
+
+
+# ---------------------------------------------------------------------------- a lab result: closed only when told
+def test_a_reviewed_result_is_closed_only_once_the_patient_was_told(hub):
+    """A review that ends without the patient told (a visit booked) leaves the result "Patient not told": its review
+    ending does not close it, nor does anyone by hand. Only a physician's "Patient told" signature closes it."""
+    from practicehub.agents.runner import run_all_local
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_patient(hub),
+                           inputs={"test": "Sodium", "value": "131", "unit": "mmol/L", "range": "135-145",
+                                   "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), "book-visit", "")
+    run_all_local(hub, log=quiet)
+    ref = hub.engine.run(run["id"])["record"]
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    assert hub.records.read(*ref.split("/", 1))["review"] == "not-told"
+    with pytest.raises(Denied):
+        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})
+    with pytest.raises(Denied):
+        hub.sign_record(M(hub, "noor"), ref, "Patient told")
+    hub.sign_record(M(hub, "dr-amara"), ref, "Patient told")
+    assert hub.records.read(*ref.split("/", 1))["review"] == "closed"

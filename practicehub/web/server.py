@@ -1656,6 +1656,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             main.append(f'<div class="section"><h2>Result</h2><div class="card">{shown}</div></div>')
         elif item["kind"] == "notice":
             actions = (f'<form method="post" action="/items/{iid}/ack" class="inline"><button>Acknowledge</button></form>')
+            if eng.escalated_item(me, item):  # overdue work this member may do: taking it is the first thing to do
+                actions = (f'<form method="post" action="/items/{iid}/take-over" class="inline"><button>Take it over'
+                           f'</button></form> <form method="post" action="/items/{iid}/ack" class="inline">'
+                           f'<button class="secondary">Acknowledge</button></form>')
             about = (item.get("output") or {}).get("about") or ""
             if about.startswith("outbox:"):
                 main.append(self._message_card(me, about.split(":", 1)[1]))
@@ -2624,9 +2628,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         if verb == "release":
             eng.release(me, iid, f.get("note", ""))
             raise Redirect("/")
-        if verb == "take-over":
-            eng.take_over(me, iid, f.get("note", ""), to=f.get("to") or None)
-            raise Redirect(f"/items/{iid}")
+        if verb == "take-over":  # from an overdue notice, the work taken opens
+            raise Redirect(f"/items/{eng.take_over(me, iid, f.get('note', ''), to=f.get('to') or None)['id']}")
         if verb == "ack":
             eng.acknowledge(me, iid)
             raise Redirect("/")

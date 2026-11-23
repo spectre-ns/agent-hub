@@ -17,6 +17,7 @@ Rules that apply to everyone: separation of duties (``not_by``) and data-class r
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import secrets
@@ -1921,13 +1922,28 @@ class Engine:
         self.alert(run, step, text, role=step.escalate_to, cause=seq)
 
     def _notice(self, run: dict, step, text: str, *, role: str | None = None, assignee: str | None = None,
-                cause: int | None = None, priority: str | None = None, about: str | None = None) -> str:
-        item_id = _new_id("item")
+                cause: int | None = None, priority: str | None = None, about: str | None = None,
+                escalates: str | None = None) -> str:
+        """A notice. One that ``escalates`` an overdue item is the one row for that item and that recipient: told
+        again, the open notice takes the new words and counts the repeat (``repeats``) instead of a new row."""
         prio = priority or (getattr(step, "priority", None) if step else None) or "normal"
+        prio = prio if prio in ("normal", "urgent") else "normal"
+        if escalates:
+            prior = self.hub.db.items.find_one({"kind": "notice", "escalates": escalates, "role": role,
+                                                "assignee": assignee, "status": {"$in": ["open", "claimed"]}})
+            if prior:  # told twice for one cause (one tick's two passes) counts once
+                again = 0 if cause is not None and prior.get("cause") == cause else 1
+                self.hub.db.items.set(prior["_id"], {
+                    "title": text, "cause": cause, "repeats": int(prior.get("repeats") or 1) + again,
+                    "priority": "urgent" if "urgent" in (prio, prior.get("priority")) else "normal",
+                    "updated_at": utcnow()})
+                return prior["_id"]
+        item_id = _new_id("item")
+        more = {"escalates": escalates, "repeats": 1} if escalates else {}
         self.hub.db.items.insert(_item_doc(
             self.hub, id=item_id, run_id=run["id"], step_id=step.id if step else "", kind="notice", title=text,
             role=role, assignee=assignee, persons_only=1, status="open", cause=cause,
-            priority=prio if prio in ("normal", "urgent") else "normal", output={"about": about} if about else None))
+            priority=prio, output={"about": about} if about else None, **more))
         return item_id
 
     def _staffed(self, role: str | None, besides=None) -> list[str]:
@@ -1938,27 +1954,30 @@ class Engine:
 
     def alert(self, run: dict, step, text: str, *, role: str | None = None, assignee: str | None = None,
               cause: int | None = None, priority: str | None = None, about: str | None = None,
-              besides: str | None = None, owners_too: bool = False) -> list[str]:
+              besides: str | None = None, owners_too: bool = False, escalates: str | None = None) -> list[str]:
         """A notice someone on duty will see: the person named if they are active, else the role named if a person
         on duty holds it, else the practice's escalation role, else each policy owner on duty. Never a notice to
         nobody. ``besides`` (whoever is late with the work) is never the only one told: when they are the role's
-        only holder on duty, each other person holding it is told by name, else the next in line is."""
+        only holder on duty, each other person holding it is told by name, else the next in line is; when nobody
+        else is on duty at all, they are told themselves (by name), and with nobody on duty the notice waits on the
+        role. ``escalates`` (an overdue item) keeps one notice row per item and recipient."""
         hub = self.hub
         out: list[str] = []
         late = _besides(besides)
+        notice = functools.partial(self._notice, escalates=escalates)
         if assignee and assignee not in late:
             m = hub.db.members.find_one({"_id": assignee}, fields=["status", "kind"])
             if m and m["status"] == "active" and m["kind"] == "person":
-                return [self._notice(run, step, text, assignee=assignee, cause=cause, priority=priority, about=about)]
+                return [notice(run, step, text, assignee=assignee, cause=cause, priority=priority, about=about)]
         for r in (role, hub.practice.get("escalation_role")):
             others = self._staffed(r, besides)
             if not others:
                 continue
             if late & set(self._holders(r)):  # the late one holds it too: tell the others by name
-                out = [self._notice(run, step, text, assignee=o, cause=cause, priority=priority, about=about)
+                out = [notice(run, step, text, assignee=o, cause=cause, priority=priority, about=about)
                        for o in others]
             else:
-                out = [self._notice(run, step, text, role=r, cause=cause, priority=priority, about=about)]
+                out = [notice(run, step, text, role=r, cause=cause, priority=priority, about=about)]
             break
         told = set(out)
         if out and not owners_too:
@@ -1967,8 +1986,21 @@ class Engine:
                   and m["id"] not in late]
         named = {r.get("assignee") for r in hub.db.items.find({"_id": {"$in": sorted(told)}}, fields=["assignee"])
                  } if told else set()
-        return out + [self._notice(run, step, text, assignee=m["id"], cause=cause, priority=priority, about=about)
-                      for m in owners if m["id"] not in named]
+        out = out + [notice(run, step, text, assignee=m["id"], cause=cause, priority=priority, about=about)
+                     for m in owners if m["id"] not in named]
+        if out:
+            return out
+        # nobody else on duty: the late themselves, by name, rather than nobody; with no one on duty at all, the
+        # notice waits on the role for whoever comes on duty first
+        here = [m for m in sorted(late) if self._active_person(m)]
+        if here:
+            return [notice(run, step, text, assignee=m, cause=cause, priority=priority, about=about) for m in here]
+        waits_on = role or hub.practice.get("escalation_role")
+        return [notice(run, step, text, role=waits_on, cause=cause, priority=priority, about=about)] if waits_on else []
+
+    def _active_person(self, mid: str) -> bool:
+        m = self.hub.db.members.find_one({"_id": mid}, fields=["status", "kind"])
+        return bool(m and m["status"] == "active" and m["kind"] == "person")
 
     def item(self, item_id: str) -> dict:
         row = self.hub.db.items.get(item_id)
@@ -2010,11 +2042,15 @@ class Engine:
         is_agent = member["kind"] != "person"
         if item["assignee"] and item["assignee"] != member["id"]:
             return False, "it is assigned to someone else"
-        if not item["assignee"] and item["role"] not in member["roles"]:
-            return False, f"it needs the {item['role']} role"
         run = self.run(item["run_id"])
         wf, _ = hub.workflow(run["workflow_id"], run["version"])
         step = wf.step(item["step_id"])
+        # overdue work is escalated to the step's escalate_to role: a person holding it may take the work itself
+        # (every other rule below still holds: the data it reads, who did what, the directive, signing)
+        escalated_to_them = (bool(item.get("escalated")) and not is_agent
+                             and getattr(step, "escalate_to", None) in member["roles"])
+        if not item["assignee"] and item["role"] not in member["roles"] and not escalated_to_them:
+            return False, f"it needs the {item['role']} role"
         for prior in step.not_by:
             if prior == "run":
                 if run["started_by"] == member["id"]:
@@ -2187,6 +2223,8 @@ class Engine:
         "queue" for anyone who can; without it, overdue work is claimed by this member when they may do it, else it
         goes back to the queue (a manager reassigns clinical work, never does it)."""
         from .hub import Denied, Invalid
+        if self.item(item_id)["kind"] == "notice":
+            return self.take_over_from_notice(member, item_id, note)
         with self.hub.db:
             item = self.item(item_id)
             if to:
@@ -2222,6 +2260,39 @@ class Engine:
                     self.alert(run, step, f"{member['name']} moved \"{self.what(item)}\" off you: {note}",
                                assignee=before, cause=None)
         return self.item(item_id)
+
+    def escalated_item(self, member: dict, notice: dict) -> dict | None:
+        """The overdue item an escalation notice is about, when this member may take it over from the notice: it is
+        still open, and they may claim it (it waits on a queue they can take from) or take it off whoever has it."""
+        iid = notice.get("escalates") if notice.get("kind") == "notice" else None
+        if not iid or notice["status"] not in ("open", "claimed") or not self.eligibility(member, notice)[0]:
+            return None
+        item = self.hub.db.items.get(iid)
+        if not item or item["status"] not in ("open", "claimed"):
+            return None
+        item = self.item(iid)
+        if self.holder(item) == member["id"]:
+            return None
+        free = {**item, "status": "open", "claimed_by": None, "assignee": None}
+        if self.holder(item) is None:
+            return item if self.eligibility(member, item)[0] else None
+        return item if self.may_take_over(member, item) and self.eligibility(member, free)[0] else None
+
+    def take_over_from_notice(self, member: dict, notice_id: str, note: str = "") -> dict:
+        """Take it over, from the overdue notice: the item it is about is claimed by this member (taken off whoever
+        had it, who is told why), and the notice is acknowledged. Returns the item taken."""
+        from .hub import Denied
+        notice = self.item(notice_id)
+        item = self.escalated_item(member, notice)
+        if item is None:
+            raise Denied(f"{member['name']} may not take this over: the work is done, someone else has it, or it "
+                         "needs what you do not hold")
+        if self.holder(item) is None:
+            taken = self.claim(member, item["id"])
+        else:
+            taken = self.take_over(member, item["id"], (note or "").strip() or f"Overdue: {member['name']} took it over")
+        self.acknowledge(member, notice_id)
+        return taken
 
     def _directive_route(self, run: dict, step, assignee: str | None) -> tuple[str, bool, str | None]:
         """Where work on a file with a subject's directive goes: (role, persons_only, assignee). An agent the
@@ -2915,9 +2986,9 @@ class Engine:
             run = self.run(item["run_id"])
             wf, _ = hub.workflow(run["workflow_id"], run["version"])
             step = wf.step(item["step_id"])
-            # whom it is stuck with: who took it, else everyone on duty it waits for (escalating a physician's
-            # critical review to the medical director, who is one of those physicians, tells no one new)
-            late = item["claimed_by"] or item["assignee"] or set(self._staffed(item.get("role")))
+            # whom it is stuck with: who took it, else everyone on duty it waits for
+            held = item["claimed_by"] or item["assignee"]
+            pool = set() if held else set(self._staffed(item.get("role")))
             with hub.db:
                 hub.db.items.set(item["id"], {"escalated": level + 1,
                                               "escalate_next": clock.stamp(now_utc + allowed, tz),
@@ -2929,12 +3000,27 @@ class Engine:
                 what = self.what(item)
                 text = (f"Overdue: {what}" if level == 0 else f"Still not done ({level + 1}): {what}")
                 text += ". You may take it over."
-                # never only to the one who is late: to whoever else holds the escalation role, else the practice's
-                self.alert(run, step, text, role=step.escalate_to, cause=seq, priority=item.get("priority"),
-                           besides=late)
+                once = dict(cause=seq, escalates=item["id"])
+                if held:  # never only to the one who is late: whoever else holds the escalation role, else the next
+                    self.alert(run, step, text, role=step.escalate_to, priority=item.get("priority"), besides=held,
+                               **once)
+                else:
+                    # a pool nobody took: each holder of the escalation role is named, though they are in the pool
+                    # (the medical director is a physician); when that tells no one outside the pool, the practice's
+                    # escalation role hears too, so it is never only those it already waits on
+                    named = self._staffed(step.escalate_to)
+                    for m in named:
+                        self._notice(run, step, text, assignee=m, priority=item.get("priority"), **once)
+                    chasers = self._staffed(hub.practice.get("escalation_role"), pool)
+                    if not named:
+                        self.alert(run, step, text, role=step.escalate_to, priority=item.get("priority"),
+                                   besides=pool, **once)
+                    elif not set(named) - pool and chasers:
+                        self.alert(run, step, text, role=hub.practice.get("escalation_role"),
+                                   priority=item.get("priority"), besides=pool, **once)
                 if level >= 1:  # the second time and after: the practice's escalation role and owners hear too
-                    self.alert(run, step, text, role=hub.practice.get("escalation_role"), cause=seq,
-                               priority="urgent", besides=late, owners_too=True)
+                    self.alert(run, step, text, role=hub.practice.get("escalation_role"), priority="urgent",
+                               besides=held or pool, owners_too=True, **once)
             overdue.append(item["id"])
         missed = self._missed_deadlines(now_utc)
         checked = hub.db.get_setting("waits_checked", "") or ""
