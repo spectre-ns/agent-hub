@@ -2650,3 +2650,37 @@ def test_reason_boxes_are_labelled_and_cancelling_work_is_asked_for(hub, server)
     cancel = page.split('class="cancel-work"', 1)[1].split("</details>", 1)[0]
     assert "Cancel this work…</summary>" in cancel and "<label>Why it is cancelled" in cancel
     assert 'placeholder="reason to cancel"' not in page
+
+
+def test_an_urgent_row_takes_late_work_over_in_one_click_and_a_chart_row_names_only_the_work(hub, server):
+    """Late work someone still holds: whoever the escalation went to and who may take it over does so from the Urgent
+    row itself (the notice's own take-over, as on its page). On the patient's chart the row names the work, not the
+    patient again."""
+    from datetime import timedelta
+    eng = hub.engine
+    ref = _ellen(hub)
+    run = eng.start(hub.member("lab-feed"), "lab-result-review", record=ref, inputs={
+        "test": "Potassium", "value": "6.9", "unit": "mmol/L", "range": "3.5-5.0", "flag": "critical"})
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
+    gate = item_for(hub, run, "review-critical")
+    eng.claim(amara, gate)
+    eng.decide(amara, gate, "call-patient", "call her now", seen=eng.shown_digest(amara, gate))
+    call_ = item_for(hub, eng.run(run["id"]), "call-critical")
+    eng.claim(noor, call_)  # she keeps it, and it is late
+    eng.tick(eng.now() + timedelta(hours=1, minutes=5))
+    takers = [m for m in hub.members("person") if m["status"] == "active" and any(
+        eng.escalated_item(m, n) for n in eng.inbox(m) if n["kind"] == "notice" and n.get("escalates") == call_)]
+    assert takers, "nobody was told who may take it over"
+    who = takers[0]
+    (notice,) = [n for n in eng.inbox(who) if n["kind"] == "notice" and n.get("escalates") == call_]
+    page = call(server, "GET", "/", token(hub, who["id"]))[1]
+    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert f'action="/items/{notice["id"]}/take-over"' in band and "Noor" in band
+    status, _ = call(server, "POST", f"/items/{notice['id']}/take-over", token(hub, who["id"]))
+    assert status in (200, 303)
+    assert eng.holder(eng.item(call_)) != "noor"
+    pid = ref.split("/", 1)[1]
+    hub.db.items.set(call_, {"due_at": "2020-01-01T00:00:00Z"})
+    chart = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
+    band = chart.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert "<b>Lab result review</b>" in band and "Ellen MacLeod" not in band.split("</b>", 1)[0]

@@ -629,7 +629,7 @@ color:var(--subtle)}.col>header .col-name{font-size:14px;line-height:20px;color:
 .tile{display:block;background:var(--raised);border-radius:3px;box-shadow:var(--shadow-raised);padding:12px;margin-bottom:8px;color:var(--fg)}
 .tile:hover{background:var(--raised-hover);color:var(--fg);text-decoration:none}
 .tile .t{font-weight:400;margin-bottom:8px}.tile .about{font-size:12px;line-height:16px;color:var(--subtlest);margin:-4px 0 8px}
-.tile .foot{display:flex;align-items:center;gap:8px}.tile .foot .av{margin-left:auto}
+.tile .foot{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}.tile .foot .av{margin-left:auto}
 .tile .why{font-size:12px;line-height:16px;color:var(--danger-fg);margin:-4px 0 8px}
 
 /* ---- issue layout: content left, side panel (status and actions first) right */
