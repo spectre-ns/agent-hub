@@ -128,6 +128,15 @@ The other steps keep working as before:
   open step makes, or else the first way on that is not a correction.
 - The moves they may not make, each with the reason in words.
 
+`Hub.record_timeline(viewer, ref)` tells the record's history in words, oldest first. It covers:
+
+- the record's edits;
+- its moves: who made each, when, the values it wrote and the signature it carried;
+- its runs' steps: started, done by whom, decided, skipped or waiting.
+
+What the viewer may not read is folded, one line per hidden stretch ("3 clinical steps"). (`Hub.record_history` stays
+the list of versions that pages and exports read.)
+
 ### task
 
 Someone holding the role fills in the step's `fields`, or the skill's output fields. A person sees a form and an agent

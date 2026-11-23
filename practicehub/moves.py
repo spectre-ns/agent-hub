@@ -204,3 +204,193 @@ class MovesMixin:
                         "sign": t.get("sign"), "comment": t.get("comment", False), "forward": t["to"] == forward,
                         **({"does": opened[2].title} if opened and self.step_makes_move(opened[2], t["to"]) else {})})
         return {"state": cur, "state_label": rt.state_label(cur), "may": may, "may_not": may_not}
+
+    # ------------------------------------------------------------------ the record's history in words
+    def record_timeline(self, viewer: dict, ref: str) -> list[dict]:
+        """The record's history as one list in words, oldest first: its edits (which fields changed), its moves (who,
+        when, the values the move wrote, the signature it carried) and the steps of the runs about it (started, done
+        by whom, decided, skipped, waiting). What the viewer may not read is folded, one line per hidden stretch
+        ("3 clinical steps"). Each entry is ``{"at", "who", "text"}`` (``hidden``: the count it folds)."""
+        from .export import _item_words
+        rtype, _, rid = ref.partition("/")
+        rt = self._type(rtype)
+        self.require(viewer, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
+        view = visibility.Viewer(self, viewer)
+        gone = visibility.hidden_keys(self, viewer, rtype)
+        label = rt.label.lower()
+        names: dict = {}
+
+        def who(mid):
+            if mid not in names:
+                row = self.db.members.get(mid) if mid else None
+                names[mid] = (row or {}).get("name") or ("the hub" if not mid or ":" in str(mid) else "someone")
+            return names[mid]
+
+        def words(f, v) -> str:
+            text = _item_words(self, viewer, f, v)
+            return re.sub(r" \([A-Z][A-Za-z]*/[^)]+\)", "", text)
+
+        lc = rt.lifecycle
+        top = lambda f: f["path"].split(".")[0]
+        fields = [f for f in rt.fields if "*" not in f["path"] and not (lc and f["path"] == lc["path"])]
+        versions = self.db.record_versions.find({"type": rtype, "id": rid}, sort=[("version", ASC)])
+        events = self.db.events.find({"subject": ref, "action": {"$in": ["record.created", "record.updated",
+                                                                          "record.transitioned", "record.signed"]}},
+                                     sort=[("seq", ASC)])
+        writes = [e for e in events if e["action"] in ("record.created", "record.updated")]
+        # each version is written by the event of its write; versions written without one (seeded) come first
+        lead = len(versions) - len(writes)
+        at_seq = {e["seq"]: v for e, v in zip(writes[max(0, -lead):], versions[max(0, lead):])}
+        moves = {e["cause"]: e for e in events if e["action"] == "record.transitioned"}
+        signed = {(e["data"].get("signed") or {}).get("version"): e for e in events if e["action"] == "record.signed"
+                  and e.get("signature")}
+        rows: list[tuple[int, dict]] = []
+        prev = None
+        for v in versions[:max(0, lead)]:
+            rows.append((-1, {"at": v["at"], "who": who(v["actor"]), "text": f"{rt.label} filed"}))
+            prev = v["data"]
+        for e in writes:
+            v = at_seq.get(e["seq"])
+            if v is None:
+                continue
+            data = v["data"]
+            mv = moves.get(e["seq"])
+            changed = [f for f in fields if prev is not None
+                       and schema.first(data, f["path"]) != schema.first(prev, f["path"])]
+            seen_ = [f for f in changed if top(f) not in gone]
+            if prev is None:
+                text, hide = f"{rt.label} created", None
+                if lc:
+                    text += f" ({rt.state_label(schema.first(data, lc['path'])).lower()})"
+            elif mv:
+                text = (f"Moved from {rt.state_label(mv['data'].get('from')).lower()} to "
+                        f"{rt.state_label(mv['data'].get('to')).lower()}")
+                said = [f"{f['label']}: {words(f, schema.first(data, f['path']))}" for f in seen_
+                        if schema.first(data, f["path"]) not in (None, "", [], {})]
+                if said:
+                    text += ", with " + "; ".join(said)
+                if len(seen_) < len(changed):
+                    text += " (and fields you may not read)"
+                sg = signed.pop(v["version"], None)
+                if sg:
+                    text += f"; signed {sg['data']['signed'].get('meaning')!r} by {who(sg['actor'])}"
+                hide = None
+            elif changed and not seen_:
+                text, hide = "", self._classes_of(rt, changed)
+            elif changed:
+                text, hide = "Changed " + ", ".join(f["label"] for f in seen_), None
+                if len(seen_) < len(changed):
+                    text += " and fields you may not read"
+            else:
+                text, hide = "Saved with no change to what it says", None
+            if v.get("comment") and hide is None:
+                text += f": {v['comment']}"
+            row = {"at": v["at"], "who": who(v["actor"]), "text": text}
+            if hide:
+                row = {"at": v["at"], "who": "", "text": "", "fold": ("change", hide)}
+            rows.append((e["seq"], row))
+            prev = data
+        for e in signed.values():  # a signature that moved nothing
+            rows.append((e["seq"], {"at": e["at"], "who": who(e["actor"]),
+                                    "text": f"Signed {(e['data'].get('signed') or {}).get('meaning')!r} by "
+                                            f"{who(e['actor'])}"}))
+        rows += self._run_rows(viewer, view, ref, who)
+        rows.sort(key=lambda r: r[0])
+        return _fold([r for _, r in rows])
+
+    def _classes_of(self, rt, fields) -> str:
+        classes = sorted({f.get("data_class") or rt.data_class for f in fields})
+        return " and ".join(classes)
+
+    def _run_rows(self, viewer, view, ref: str, who) -> list[tuple[int, dict]]:
+        runs = {r["id"]: r for r in self.db.runs.find({"record": ref})}
+        if not runs:
+            return []
+        acts = ["run.started", "run.completed", "run.cancelled", "run.stopped", "step.activated", "step.done",
+                "step.skipped", "step.waiting", "step.failed", "item.completed", "gate.decided", "action.ran"]
+        out = []
+        for e in self.db.events.find({"run_id": {"$in": list(runs)}, "action": {"$in": acts}}, sort=[("seq", ASC)]):
+            run = runs[e["run_id"]]
+            wf = view.workflow_of_run(run["id"])
+            title = str(run.get("title") or "").split(": ", 1)[0] or "the work"
+            act = e["action"]
+            if act.startswith("run."):
+                done = {"run.started": "started", "run.completed": "finished", "run.cancelled": "cancelled",
+                        "run.stopped": "stopped"}[act]
+                why = (e.get("data") or {}).get("reason") or (e.get("data") or {}).get("why")
+                out.append((e["seq"], {"at": e["at"], "who": who(e["actor"]) if act != "run.completed" else "",
+                                       "text": f"'{title}' {done}" + (f": {why}" if why and isinstance(why, str)
+                                                                       else "")}))
+                continue
+            sid = (e.get("data") or {}).get("step")
+            step = None
+            if wf is not None and sid:
+                try:
+                    step = wf.step(sid)
+                except KeyError:
+                    step = None
+            if step is None:
+                continue
+            if act == "action.ran" and not step.state:
+                continue  # an automation's inner workings: its move shows as the record's own
+            ok, missing = view.step_visible(wf, sid)
+            if not ok:
+                out.append((e["seq"], {"at": e["at"], "who": "", "text": "",
+                                       "fold": ("step", " and ".join(missing))}))
+                continue
+            name = f"'{step.title}'"
+            data = e.get("data") or {}
+            if act == "step.activated":
+                text = f"{name} started" + (f", for the {self.role_name(step.role)}" if step.role else "")
+                actor = ""
+            elif act == "step.waiting":
+                text, actor = f"{name} waiting", ""
+            elif act == "step.skipped":
+                text, actor = f"{name} skipped", ""
+            elif act == "step.failed":
+                text, actor = f"{name} did not go through", ""
+            elif act == "gate.decided":
+                outcome = (data.get("output") or {}).get("outcome")
+                text = f"{name} decided" + (f": {schema.state_words(outcome).lower()}" if outcome else "")
+                text += " (signed)" if e.get("signature") else (" (an agent's decision)" if e.get("actor_kind") == "agent"
+                                                                 else "")
+                actor = who(e["actor"])
+            elif act == "item.completed":
+                text, actor = f"{name} done", who(e["actor"])
+            elif act == "action.ran":
+                text, actor = f"{name} done", ""
+            else:  # step.done: a wait that ended
+                text, actor = f"{name} done", ""
+            out.append((e["seq"], {"at": e["at"], "who": actor, "text": text + (f" by {actor}" if actor and
+                                                                                act in ("item.completed", "gate.decided")
+                                                                                else "")}))
+        return out
+
+    def role_name(self, rid: str) -> str:
+        try:
+            return f"{self.role(rid)['name'].lower()} role"
+        except Exception:  # noqa: BLE001
+            return f"{rid} role"
+
+
+def _fold(rows: list[dict]) -> list[dict]:
+    """One line per stretch of what the viewer may not read: "3 clinical steps", "2 changes to clinical fields"."""
+    out: list[dict] = []
+    for r in rows:
+        fold = r.pop("fold", None)
+        if not fold:
+            out.append(r)
+            continue
+        last = out[-1] if out else None
+        if last is not None and last.get("_fold") == fold:
+            last["hidden"] += 1
+        else:
+            last = {"at": r["at"], "who": "", "text": "", "hidden": 1, "_fold": fold}
+            out.append(last)
+        kind, cls = fold
+        n = last["hidden"]
+        last["text"] = (f"{n} {cls} step{'s' if n != 1 else ''}" if kind == "step"
+                        else f"{n} change{'s' if n != 1 else ''} to {cls} fields")
+    for r in out:
+        r.pop("_fold", None)
+    return out

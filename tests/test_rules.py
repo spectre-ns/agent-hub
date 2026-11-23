@@ -5335,3 +5335,39 @@ def test_the_transition_screen_lists_the_moves_a_member_may_make_and_why_not_the
     assert why == {"approved": "signing 'Approved' needs the medical-director role"}
     why = {m["to"]: m["why"] for m in hub.transition_screen(M(hub, "scribe-agent"), ref)["may_not"]}
     assert "only a person signs" in why["approved"]
+
+
+def test_a_record_s_history_tells_its_edits_moves_and_steps_in_words_folding_what_the_viewer_may_not_read(hub):
+    """Rule: ``Hub.record_timeline(viewer, ref)`` is the record's history as one list in words, oldest first: its
+    edits, its moves (who, when, the values written, the signature), and its runs' steps (started, done by whom,
+    skipped, waiting). What the viewer may not read is folded to one line per hidden stretch ("3 clinical steps");
+    no raw JSON and no ids. (``Hub.record_history`` stays the list of versions that pages and exports read.)"""
+    _jobs(hub)
+    amara, liam = M(hub, "dr-amara"), M(hub, "dr-liam")
+    ref, run = _job(hub)
+    hub.update_record(amara, ref, {"title": "Fix the big autoclave"})
+    hub.move_record(amara, ref, "doing")
+    hub.move_record(liam, ref, "done", {"outcome": "New seal fitted", "hours": 3})
+    hub.engine.complete(amara, item_for(hub, run, "file"), {"filed": True})
+    hub.move_record(amara, ref, "approved", signature="Approved")
+    tl = hub.record_timeline(amara, ref)
+    text = [e["text"] for e in tl]
+    assert text[0] == "Job created (open)"
+    assert "Changed Title" in text
+    i = text.index("Moved from doing to done, with Outcome: New seal fitted; Hours worked: 3")
+    assert tl[i]["who"] == liam["name"] and tl[i]["at"]
+    assert "Moved from done to approved; signed 'Approved' by " + amara["name"] in text
+    assert "'Do the work' started, for the physician role" in text
+    assert f"'Do the work' done by {liam['name']}" in text
+    assert text.index("Moved from doing to done, with Outcome: New seal fitted; Hours worked: 3") < \
+        text.index(f"'Do the work' done by {liam['name']}")
+    assert "'File the job sheet' started, for the physician role" in text
+    blob = json.dumps(tl)
+    assert ref.split("/")[1] not in blob and "{" not in "".join(text) and run["id"] not in blob
+    # who may not read the clinical class sees the stretches folded, and nothing of what they hold
+    tl = hub.record_timeline(M(hub, "rana"), ref)  # a practice manager reads visits, not clinical records
+    text = [e["text"] for e in tl]
+    assert not any("Do the work" in t or "File the job sheet" in t for t in text)
+    folds = [e for e in tl if e.get("hidden")]
+    assert folds and all(re.fullmatch(r"\d+ clinical steps?", e["text"]) for e in folds)
+    assert sum(e["hidden"] for e in folds) >= 4 and len(folds) < sum(e["hidden"] for e in folds)
