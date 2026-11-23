@@ -495,8 +495,11 @@ def test_views_show_in_the_sidebar_and_work_starts_about_any_record(hub, server)
     assert code == 200 and f'name="_record" value="CAPA/{capa["id"]}"' in page and 'class="about"' in page  # fixed
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": "Patient/x"})
     assert code == 422  # a CAPA workflow is about a CAPA
+    code, page = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
+    assert code == 422 and "already under way" in page  # its own workflow walks it: never a second run
+    hub.update_record(hub.member(qm["id"]), f"CAPA/{capa['id']}", {"status": "cancelled", "cancel_reason": "Test"})
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
-    assert code == 303
+    assert code == 303  # nothing of it open: work starts about it
 
 
 def test_the_privacy_officer_reports_who_accessed_a_file(hub, server):
@@ -2478,3 +2481,206 @@ def test_the_client_address_trusts_a_forwarded_address_only_from_a_proxy_nearby(
     assert client_address("8.8.8.8", {"x-forwarded-for": "1.1.1.1"}) == "8.8.8.8"  # a public peer
     assert client_address("127.0.0.1", {"x-forwarded-for": "10.0.0.1, 198.51.100.4"}) == "198.51.100.4"
     assert client_address("192.168.1.5", {}) == "192.168.1.5"
+
+
+# ---------------------------------------------------------------------------------------------- MAIN-UX: staff pages
+
+def test_the_slot_picker_offers_every_day_and_every_physician(hub, server):
+    """The cap on free slots is per day and per physician, not on the whole list (which offered only Monday
+    morning); the scheduler picks a day and whom with, then the time, and only the slot is sent."""
+    cal = hub.pack.calendar
+    run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    iid = item_for(hub, run, "propose")
+    free = hub.engine.context(M(hub, "jo"), iid)["context"]["provider:free-slots"]
+    days = {c["day"] for c in free}
+    whom = {c["with"] for c in free}
+    assert len(days) == int(cal["lookahead_days"]) and len(whom) >= 2
+    for d in days:
+        for w in whom:
+            assert 0 < sum(1 for c in free if c["day"] == d and c["with"] == w) <= int(cal["max_slots"])
+    assert [c["value"][:16] for c in free] == sorted(c["value"][:16] for c in free)  # earliest first
+    status, page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))
+    assert status == 200
+    picker = page.split('class="slot-picker"', 1)[1].split("</fieldset>", 1)[0]
+    assert "data-slot-day" in picker and "data-slot-with" in picker and picker.count("<optgroup") == len(days)
+    assert picker.count('name="slot"') == 1  # the day and the person filters are not sent
+    last = free[-1]
+    hub.engine.claim(M(hub, "jo"), iid)
+    hub.engine.complete(M(hub, "jo"), iid, {"slot": last["value"], "why": "the patient asked for later in the week"})
+    assert hub.engine.run(run["id"])["ctx"]["book"]["member_name"] == last["with_name"]
+
+
+def test_one_holder_is_named_the_same_way_everywhere(hub, server):
+    """Who holds a piece of work is one answer (taken, else given, else its role), on the item page, the board,
+    Your work and in a refusal; a refusal names the holder rather than "someone else"."""
+    from practicehub.web.holder import holder
+    assert holder({"status": "claimed", "claimed_by": "noor", "assignee": "jo", "role": "nurse"}) == \
+        {"member": "noor", "how": "taken", "role": "nurse"}
+    assert holder({"status": "open", "claimed_by": None, "assignee": "noor", "role": "nurse"})["how"] == "given"
+    assert holder({"status": "open", "claimed_by": None, "assignee": None, "role": "nurse"})["member"] is None
+    run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    iid = item_for(hub, run, "propose")
+    page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))[1]
+    assert "Held by" in page and "Waiting for</span> Scheduler" in page and ">Assignee<" not in page
+    hub.engine.claim(M(hub, "jo"), iid)
+    for path in (f"/items/{iid}", "/board", "/"):
+        page = call(server, "GET", path, token(hub, "jo"))[1]
+        assert "Jo Tremblay" in page, path
+    item = hub.engine.item(iid)
+    app = App(hub, dev=True)
+    words = app.holder_refusal(M(hub, "noor"), {**item, "status": "open", "claimed_by": None, "assignee": "jo"},
+                               "it is assigned to someone else")
+    assert words == "it is assigned to someone else: it is held by Jo Tremblay (given to them, not yet taken)"
+    # a refusal from the engine that already names the holder is left as it is
+    status, page = call(server, "POST", f"/items/{iid}/claim", token(hub, "scheduling-agent"))
+    assert status in (403, 409, 422) and "Jo Tremblay" in page
+    assert page.count("Jo Tremblay is working on it") <= 1 and "held by Jo Tremblay" not in page
+
+
+def _critical_call_escalated(hub, times=3):
+    """A critical result: the physician asks for a call, the nurse who took it hands it back, and it escalates
+    ``times`` times (the physician gets an escalation notice each time)."""
+    from datetime import timedelta
+    eng = hub.engine
+    ref = _ellen(hub)
+    obs = hub.create_record(hub.member("lab-feed"), "Observation", {
+        "status": "registered", "category": [{"text": "laboratory"}], "subject": {"reference": ref},
+        "code": {"text": "Potassium"}, "effectiveDateTime": eng.now().date().isoformat(),
+        "valueQuantity": {"value": 6.9, "unit": "mmol/L"}, "interpretation": [{"text": "critical"}]})
+    run = eng.start(hub.member("lab-feed"), "lab-result-review", record=ref, inputs={
+        "test": "Potassium", "value": "6.9", "unit": "mmol/L", "range": "3.5-5.0", "flag": "critical",
+        "observation": f"Observation/{obs['id']}"})
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
+    gate = item_for(hub, run, "review-critical")
+    eng.claim(amara, gate)
+    eng.decide(amara, gate, "call-patient", "call her now", seen=eng.shown_digest(amara, gate))
+    call_ = item_for(hub, hub.engine.run(run["id"]), "call-critical")
+    eng.claim(noor, call_)
+    eng.release(noor, call_, "Going on break")
+    now = eng.now()
+    for k in range(1, times + 1):
+        eng.tick(now + timedelta(hours=k, minutes=5))
+    return run, call_
+
+
+def test_urgent_work_comes_first_one_row_per_record_with_a_counter(hub, server):
+    """Your work opens on an Urgent band: one row per record, however many escalations were sent (a counter, not a
+    row each), with the result, how late, who holds it and the way in; the sidebar counts it in red; the board puts
+    it in an Urgent lane at the top; the escalation notice leads to the work."""
+    run, call_ = _critical_call_escalated(hub)
+    step = hub.engine.item(call_)["step_id"]
+    mine = [n for n in hub.engine.inbox(M(hub, "dr-amara"))
+            if n["kind"] == "notice" and n["run_id"] == run["id"] and n.get("step_id") == step]
+    told = sum(int(n.get("repeats") or 1) for n in mine)
+    assert told >= 2  # she was told more than once
+    hub.db.items.set(call_, {"due_at": "2020-01-01T00:00:00Z"})  # past its time, on the wall clock too
+    status, page = call(server, "GET", "/", token(hub, "dr-amara"))
+    assert status == 200
+    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert page.index('class="urgent-band"') < page.index("In progress with you")
+    assert band.count('class="u-row"') == 1 and f"Escalated {told}×" in band
+    assert "Potassium" in band and "Overdue" in band and f'href="/items/{call_}' in band
+    assert "Waiting for</span> Nurse" in band  # handed back: nobody holds it now
+    notices = page.split("<h2>Notices", 1)[1]
+    assert not any(n["id"] in notices for n in mine)  # counted on the row, not listed again
+    assert '<span class="count urgent"' in page.split('class="side"', 1)[1].split("</nav>", 1)[0]
+    board = call(server, "GET", "/board", token(hub, "dr-amara"))[1]
+    lane = board.split('class="lane urgent"', 1)[1]
+    assert lane.index(call_) < lane.index('class="lane"') if 'class="lane"' in lane else call_ in lane
+    item = call(server, "GET", f"/items/{mine[0]['id']}", token(hub, "dr-amara"))[1]
+    assert "Take it over" in item or (f'href="/items/{call_}' in item and "Open the work" in item)
+    # dismissing the row acknowledges every escalation on it
+    status, _ = call(server, "POST", "/notices/ack", token(hub, "dr-amara"),
+                     form=[("id", n["id"]) for n in mine] + [("_back", "/")])
+    assert status in (200, 303)
+    assert all(hub.engine.item(n["id"])["status"] == "done" for n in mine)
+
+
+def test_a_chart_shows_urgent_work_under_its_banner_at_every_width(hub, server):
+    """The chart's urgent work sits directly under the banner in the page itself (no layout rule moves it down on a
+    narrow screen), for anyone who may see the work, not only whom it was escalated to."""
+    run, call_ = _critical_call_escalated(hub, times=1)
+    pid = _ellen(hub).split("/", 1)[1]
+    page = call(server, "GET", f"/patients/{pid}", token(hub, "noor"))[1]
+    assert 'class="urgent-band"' in page and call_ in page.split('class="urgent-band"', 1)[1].split("</section>")[0]
+    banner_end = page.index('class="urgent-band"')
+    assert banner_end < page.index("file-tools") and banner_end < page.index('class="issue')
+    from practicehub.web.assets import CSS
+    rule = CSS.split(".urgent-band", 1)[1].split("}", 1)[0]
+    assert ".urgent-band" in CSS and not re.search(r"[{;]order:", rule)
+
+
+def test_a_result_the_patient_was_not_told_of_is_urgent_on_the_chart(hub, server):
+    """A result its review left "Patient not told" (a visit booked instead) has no work on it, yet it is listed under
+    Urgent on the chart, with a way to it, until a physician signs that the patient was told."""
+    from practicehub.agents.runner import run_all_local
+    ref = _ellen(hub)
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=ref, inputs={
+        "test": "Sodium", "value": "131", "unit": "mmol/L", "range": "135-145", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), "book-visit", "")
+    run_all_local(hub, log=quiet)
+    obs = hub.engine.run(run["id"])["record"]
+    assert hub.records.read(*obs.split("/", 1))["review"] == "not-told"
+    pid = ref.split("/", 1)[1]
+    page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
+    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert "Patient not told" in band and obs.split("/", 1)[1] in band
+    assert page.index('class="urgent-band"') < page.index('class="issue')
+    hub.sign_record(M(hub, "dr-amara"), obs, "Patient told", "Told at the visit")
+    page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
+    assert "Patient not told" not in page.split('class="urgent-band"', 1)[-1].split("</section>", 1)[0] \
+        or 'class="urgent-band"' not in page
+
+
+def test_reason_boxes_are_labelled_and_cancelling_work_is_asked_for(hub, server):
+    """A box that asks why has a label a screen reader reads (not a placeholder that goes when you type), and
+    cancelling a piece of work opens from "Cancel this work…" rather than sitting as a red button beside the title."""
+    run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    iid = item_for(hub, run, "propose")
+    hub.engine.claim(M(hub, "jo"), iid)
+    page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))[1]
+    give = page.split(f'action="/items/{iid}/release"', 1)[1].split("</form>", 1)[0]
+    assert "<label>Why you give it back" in give and "placeholder" not in give
+    page = call(server, "GET", f"/runs/{run['id']}", token(hub, "jo"))[1]
+    cancel = page.split('class="cancel-work"', 1)[1].split("</details>", 1)[0]
+    assert "Cancel this work…</summary>" in cancel and "<label>Why it is cancelled" in cancel
+    assert 'placeholder="reason to cancel"' not in page
+
+
+def test_an_urgent_row_takes_late_work_over_in_one_click_and_a_chart_row_names_only_the_work(hub, server):
+    """Late work someone still holds: whoever the escalation went to and who may take it over does so from the Urgent
+    row itself (the notice's own take-over, as on its page). On the patient's chart the row names the work, not the
+    patient again."""
+    from datetime import timedelta
+    eng = hub.engine
+    ref = _ellen(hub)
+    run = eng.start(hub.member("lab-feed"), "lab-result-review", record=ref, inputs={
+        "test": "Potassium", "value": "6.9", "unit": "mmol/L", "range": "3.5-5.0", "flag": "critical"})
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
+    gate = item_for(hub, run, "review-critical")
+    eng.claim(amara, gate)
+    eng.decide(amara, gate, "call-patient", "call her now", seen=eng.shown_digest(amara, gate))
+    call_ = item_for(hub, eng.run(run["id"]), "call-critical")
+    eng.claim(noor, call_)  # she keeps it, and it is late
+    eng.tick(eng.now() + timedelta(hours=1, minutes=5))
+    takers = [m for m in hub.members("person") if m["status"] == "active" and any(
+        eng.escalated_item(m, n) for n in eng.inbox(m) if n["kind"] == "notice" and n.get("escalates") == call_)]
+    assert takers, "nobody was told who may take it over"
+    who = takers[0]
+    (notice,) = [n for n in eng.inbox(who) if n["kind"] == "notice" and n.get("escalates") == call_]
+    page = call(server, "GET", "/", token(hub, who["id"]))[1]
+    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert f'action="/items/{notice["id"]}/take-over"' in band and "Noor" in band
+    status, _ = call(server, "POST", f"/items/{notice['id']}/take-over", token(hub, who["id"]))
+    assert status in (200, 303)
+    assert eng.holder(eng.item(call_)) != "noor"
+    pid = ref.split("/", 1)[1]
+    hub.db.items.set(call_, {"due_at": "2020-01-01T00:00:00Z"})
+    chart = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
+    band = chart.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert "<b>Lab result review</b>" in band and "Ellen MacLeod" not in band.split("</b>", 1)[0]

@@ -163,6 +163,22 @@ box-shadow:inset 2px 0 0 var(--selected-fg)}
 .side .count{margin-left:auto;font-size:12px;line-height:16px;background:var(--neutral);color:var(--fg);border-radius:8px;
 padding:0 8px;min-width:24px;text-align:center}
 .side a[aria-current=page] .count,.side a.nav.on .count{background:var(--brand);color:var(--brand-fg)}
+.side .count.urgent,.side a.nav.on .count.urgent,.side a[aria-current=page] .count.urgent{background:var(--danger);color:var(--danger-on);font-weight:700}
+.side .count.also{margin-left:4px}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+/* the Urgent band: first on Your work and on a chart, at every width */
+.urgent-band{border:1px solid var(--danger);border-left-width:4px;border-radius:4px;background:var(--danger-bg);padding:8px 16px;margin:0 0 16px}
+.urgent-band h2{margin:4px 0 8px;color:var(--danger-fg);display:flex;align-items:center;gap:8px}
+.urgent-band .u-row{padding:8px 0;border-top:1px solid var(--border)}
+.urgent-band .u-row:first-child{border-top:0}
+.urgent-band .u-head{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
+.urgent-band .u-head form{margin-left:auto}
+.urgent-band .u-value{color:var(--fg)}
+.urgent-band .u-work{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:4px}
+.urgent-band .u-go{margin-left:auto}
+.lane.urgent{color:var(--danger-fg)}
+.run-now{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}.run-now dt{font-weight:600;color:var(--subtle)}.run-now dd{margin:0}
+details.cancel-work>summary{list-style:none;cursor:pointer}details.cancel-work>summary::-webkit-details-marker{display:none}details.cancel-work[open]>summary{margin-bottom:8px}
 .side .legal{margin:24px 12px 0;font-size:12px;line-height:16px;color:var(--subtlest)}
 main{padding:24px 32px 32px;min-width:0}main:focus{outline:none}
 /* ---- the admin shell: the settings, a screen of their own, with a ribbon of every setup item */
@@ -483,6 +499,9 @@ input[type=hidden]{display:none}
 label.radio{font-weight:400;color:var(--fg);display:inline-flex;align-items:center;margin:4px 16px 4px 0;font-size:14px;line-height:20px}
 textarea.code{font:13px/20px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 fieldset.choices{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.slot-picker{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.slot-picker>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
+.slot-filters{display:flex;flex-wrap:wrap;gap:0 12px}.slot-filters label{flex:1 1 160px;margin-top:0}
 /* a screen's tabs: every part stays in the form (a required field is never hidden); the tab links jump to a part */
 fieldset.tabpanel{border:0;border-top:1px solid var(--border);margin:16px 0 0;padding:8px 0 0;min-width:0;scroll-margin-top:64px}
 fieldset.tabpanel:first-of-type{border-top:0;margin-top:0}
@@ -610,7 +629,7 @@ color:var(--subtle)}.col>header .col-name{font-size:14px;line-height:20px;color:
 .tile{display:block;background:var(--raised);border-radius:3px;box-shadow:var(--shadow-raised);padding:12px;margin-bottom:8px;color:var(--fg)}
 .tile:hover{background:var(--raised-hover);color:var(--fg);text-decoration:none}
 .tile .t{font-weight:400;margin-bottom:8px}.tile .about{font-size:12px;line-height:16px;color:var(--subtlest);margin:-4px 0 8px}
-.tile .foot{display:flex;align-items:center;gap:8px}.tile .foot .av{margin-left:auto}
+.tile .foot{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}.tile .foot .av{margin-left:auto}
 .tile .why{font-size:12px;line-height:16px;color:var(--danger-fg);margin:-4px 0 8px}
 
 /* ---- issue layout: content left, side panel (status and actions first) right */
@@ -2078,6 +2097,30 @@ function formTabs(root) {
 
 // A field only some kinds need (a member's sponsor: agents and services): shown, and asked for, only for those kinds.
 // Without the script it is always shown, with its hint.
+function slotPickers(root) {  // a day and a person narrow the times offered; the slot is the only value sent
+  root.querySelectorAll("[data-slots]").forEach((box) => {
+    if (box.dataset.ready) return;
+    box.dataset.ready = "1";
+    const day = box.querySelector("[data-slot-day]"), who = box.querySelector("[data-slot-with]");
+    const time = box.querySelector("[data-slot-time]");
+    const sync = () => {
+      time.querySelectorAll("optgroup").forEach((g) => {
+        let any = false;
+        g.querySelectorAll("option").forEach((o) => {
+          const on = (!day.value || o.dataset.day === day.value) && (!who.value || o.dataset.with === who.value);
+          o.hidden = o.disabled = !on;
+          if (on) any = true;
+        });
+        g.hidden = !any;
+      });
+      const cur = time.selectedOptions[0];
+      if (cur && cur.disabled) time.value = "";
+    };
+    day.addEventListener("change", sync);
+    who.addEventListener("change", sync);
+    sync();
+  });
+}
 function kindFields(root) {
   root.querySelectorAll("[data-kinds]").forEach((box) => {
     const form = box.closest("form");
@@ -2142,6 +2185,7 @@ function formModal() {
     body.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
     formTabs(body);
     kindFields(body);
+    slotPickers(body);
     body.querySelectorAll("[data-modal-close]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); close(); }));
     if (back) body.querySelectorAll("form[method=post]").forEach((f) => {  // opened from a board: back to it after
       if (!f.querySelector("input[name=_back]")) f.appendChild(el("input", { type: "hidden", name: "_back", value: back }));
@@ -2402,6 +2446,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
   formTabs(document);
   kindFields(document);
+  slotPickers(document);
   document.querySelectorAll("svg[data-flow]").forEach((svg) => {
     const src = document.getElementById(svg.dataset.flow);
     if (src) drawFlow(svg, JSON.parse(src.textContent));

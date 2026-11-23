@@ -130,7 +130,8 @@ def test_an_agent_never_releases_a_sop(wiki):
     _let_read(hub)
     hub.authz.write([("role:sop-approver", "assignee", member_ref(AGENT))])  # even holding the role
     assert "sop-approver" in M(hub, AGENT)["roles"]
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release")
+    run = next(r for r in hub.engine.runs(status="running") if r["workflow_id"] == "wiki-sop-release"
+               and r["steps"]["release"]["state"] == "active")  # the SOP in review
     i = item_for(hub, run, "release")
     ok, why = hub.engine.eligibility(M(hub, AGENT), hub.engine.item(i))
     assert not ok and "person" in why

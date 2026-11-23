@@ -46,21 +46,76 @@ def test_a_renewal_request_is_a_proposal_that_becomes_the_order_it_renews(hub, w
     assert ref in fax and "Ellen MacLeod" in fax
 
 
-def test_nobody_issues_a_renewal_request_by_hand_but_a_hand_written_prescription_is_theirs(hub):
-    from practicehub.hub import Invalid
-    amara = M(hub, "dr-amara")
+def test_nobody_issues_a_renewal_request_by_hand_and_a_hand_written_one_only_by_a_physicians_signature(hub):
+    """A renewal request is issued only by its workflow. An order a physician writes by hand starts no workflow and
+    is issued by their signature, "I prescribe this medication as written", with its directions and quantity: never
+    by setting its status, and never by a nurse's signature."""
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
     run = run_of(hub, "prescription-renewal")
     with pytest.raises((Denied, Invalid)):
         hub.update_record(amara, run["record"], {"status": "active"})
     assert _read(hub, run["record"])["status"] == "draft"
-    # an order the physician writes (not a proposal) starts no renewal, and they issue it themselves
     rx = hub.create_record(amara, "MedicationRequest", {
         "status": "draft", "intent": "order", "subject": {"reference": _pat(hub)},
-        "medicationCodeableConcept": {"text": "Amoxicillin 500 mg"}})
+        "medicationCodeableConcept": {"text": "Amoxicillin 500 mg capsule"}})
     ref = f"MedicationRequest/{rx['id']}"
     assert not hub.engine.runs(record=ref)
-    hub.update_record(amara, ref, {"status": "active"})
+    with pytest.raises((Denied, Invalid)):
+        hub.update_record(amara, ref, {"status": "active"})
+    meaning = "I prescribe this medication as written"
+    with pytest.raises((Denied, Invalid)):  # no directions or quantity yet: nothing to sign for
+        hub.sign_record(amara, ref, meaning)
+    hub.update_record(amara, ref, {"dosageInstruction": [{"text": "1 capsule three times daily for 7 days"}],
+                                   "dispenseRequest": {"quantity": {"value": 21, "unit": "capsule"}}})
+    with pytest.raises(Denied):
+        hub.sign_record(noor, ref, meaning)
+    hub.sign_record(amara, ref, meaning)
     assert _read(hub, ref)["status"] == "active"
+    sig = hub.signatures(amara, ref)
+    assert any(x["meaning"] == meaning and x["by"] == amara["id"] for x in sig)
+
+
+def test_a_renewal_not_on_the_chart_is_written_signed_as_written_sent_and_the_patient_told(hub):
+    """No current order on the chart: the physician chooses to write one, writes it (medication, directions,
+    quantity, repeats, days supply), signs it as written; the request becomes that order, it goes to the pharmacy
+    and the patient is told. Not written, the patient is told too."""
+    amara = M(hub, "dr-amara")
+    pat = _pat(hub)
+    run = hub.engine.start(M(hub, "jo"), "prescription-renewal", record=pat,
+                           inputs={"medication": "Levothyroxine 50 mcg", "pharmacy": "Spring Garden Pharmacy"})
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(amara, item_for(hub, run, "decide"), "renew", "")
+    run_all_local(hub, log=quiet)
+    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"decision": "written", "notes": "new start"})
+    hub.engine.complete(amara, item_for(hub, run, "write-rx"), {
+        "medication": "Levothyroxine 50 mcg tablet", "directions": "1 tablet by mouth every morning",
+        "quantity": 90, "unit": "tablet", "repeats": 3, "days_supply": 90})
+    hub.engine.decide(amara, item_for(hub, run, "sign-new"), "prescribe", "")
+    run_all_local(hub, log=quiet)
+    ref = hub.engine.run(run["id"])["record"]
+    rx = _read(hub, ref)
+    assert rx["status"] == "active" and rx["intent"] == "order"
+    assert rx["dosageInstruction"][0]["text"] == "1 tablet by mouth every morning"
+    assert rx["medicationCodeableConcept"]["text"] == "Levothyroxine 50 mcg tablet"
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    sent = list(hub.db.outbox.find({"run_id": run["id"]}))
+    assert any(m["channel"] == "fax" and "Levothyroxine 50 mcg tablet" in m["body"] for m in sent), sent
+    assert any(m["channel"] == "patient-portal" and "sent to your pharmacy" in m["body"] for m in sent), sent
+
+
+def test_a_renewal_not_on_the_chart_not_written_closes_and_tells_the_patient(hub):
+    amara = M(hub, "dr-amara")
+    run = hub.engine.start(M(hub, "jo"), "prescription-renewal", record=_pat(hub),
+                           inputs={"medication": "Levothyroxine 50 mcg", "pharmacy": "Spring Garden Pharmacy"})
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(amara, item_for(hub, run, "decide"), "renew", "")
+    run_all_local(hub, log=quiet)
+    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"decision": "not-written", "notes": "see me"})
+    run_all_local(hub, log=quiet)
+    assert _read(hub, run["record"])["status"] == "cancelled"
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    sent = list(hub.db.outbox.find({"run_id": run["id"], "channel": "patient-portal"}))
+    assert any("has not written a prescription" in m["body"] for m in sent), sent
 
 
 @pytest.mark.parametrize("outcome", ["decline", "book-visit"])
@@ -77,6 +132,41 @@ def test_a_renewal_not_given_closes_its_request(hub, worked, outcome):
         assert len(asked) == visits + 1 and any(v["subject"]["reference"] == pat for v in asked)
     else:
         assert len(asked) == visits
+
+
+def test_a_second_renewal_for_the_same_drug_is_flagged_to_the_physician(hub, worked):
+    """The pharmacy asked for Ramipril; the patient asks again on the portal later (not the same submission, so its
+    own request). Its preparation names the other open request, and an answer that leaves it out is refused."""
+    first = run_of(hub, "prescription-renewal")
+    hub.db.runs.set(first["id"], {"created_at": "2000-01-01T00:00:00"})  # asked a while ago
+    second =hub.engine.start(M(hub, "jo"), "prescription-renewal", record=_pat(hub),
+                              inputs={"medication": "Ramipril 5 mg", "pharmacy": "Quinpool Pharmacy"})
+    assert second["record"] != first["record"]
+    run_all_local(hub, log=quiet)
+    prep = hub.engine.run(second["id"])["ctx"]["prepare"]
+    assert any(first["record"] in c and "open" in c for c in prep["concerns"]), prep["concerns"]
+    guard = hub.pack.guards["renewal-prep"]
+    ctxview = hub.engine.context(M(hub, "dr-amara"), item_for(hub, second, "decide"))
+    ctxview["context"]["record:clinical"] = [hub.records.read(*first["record"].split("/", 1)) | {
+        "resourceType": "MedicationRequest", "id": first["record"].split("/", 1)[1]}]
+    ctxview["context"]["input.medication"] = "Ramipril 5 mg"
+    problems = guard({**prep, "concerns": []}, ctxview)
+    assert problems and first["record"] in problems[0]
+    assert not guard({**prep, "found_in_chart": False, "current_order": ""}, ctxview)
+
+
+def test_a_renewal_request_marked_entered_in_error_stops_its_run(hub, worked):
+    """The request was filed on the wrong patient: marked entered in error, its run stops (the physician's decision
+    goes with it) and the track says who stopped it; nothing renews it afterwards."""
+    run = run_of(hub, "prescription-renewal")
+    iid = item_for(hub, run, "decide")
+    hub.update_record(M(hub, "noor"), run["record"], {"status": "entered-in-error"})
+    assert hub.engine.run(run["id"])["status"] == "cancelled"
+    assert hub.db.items.get(iid)["status"] == "cancelled"
+    assert hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
+    with pytest.raises((Denied, Invalid)):
+        hub.engine.decide(M(hub, "dr-amara"), iid, "renew", "")
+    assert _read(hub, run["record"])["status"] == "entered-in-error"
 
 
 def test_a_new_renewal_request_made_by_hand_starts_its_workflow(hub):
@@ -142,7 +232,7 @@ def test_a_renewal_from_before_the_request_had_its_own_workflow_moves_onto_a_req
     assert ref.startswith("MedicationRequest/") and after["subject"] == pat and after["item"] == before["item"]
     assert after["version"] == before["version"] and after["ctx"]["run"]["record"] == pat
     assert _read(hub, ref)["status"] == "draft"
-    assert hub.engine.relink_runs() == {"moved": [], "failed": []}
+    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}
     hub.engine.decide(amara, item_for(hub, after, "decide"), "renew", "")
     run_all_local(hub, log=quiet)
     assert hub.engine.run(run["id"])["status"] == "completed"
@@ -214,19 +304,124 @@ def test_a_result_named_for_another_patient_is_refused(hub):
     assert any("someone else" in p for p in refused.value.problems)
 
 
-def test_a_late_critical_review_is_escalated_past_the_physicians_it_waits_for(hub):
-    """A critical review nobody has taken is stuck with every physician; it is escalated to someone who is not
-    waiting on it, never only back to the physicians."""
+def _flagged_review(hub, outcome):
+    """An abnormal sodium the physician has reviewed with ``outcome``: (run, result ref)."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), outcome, "")
+    run_all_local(hub, log=quiet)
+    return run, hub.engine.run(run["id"])["record"]
+
+
+@pytest.mark.parametrize("action,want", [("reached-the-patient", "closed"), ("letter-sent", "not-told"),
+                                         ("booked-a-visit", "not-told"), ("no-further-action", "not-told")])
+def test_a_result_is_closed_only_when_the_patient_was_told(hub, action, want):
+    """The nurse could not reach the patient: only the physician reaching them closes the result. Any other way the
+    review ends leaves it "Patient not told"."""
+    run, ref = _flagged_review(hub, "call-patient")
+    hub.engine.complete(M(hub, "noor"), item_for(hub, run, "call"), {"reached": False, "notes": "no answer"})
+    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"action": action, "notes": "done"})
+    run_all_local(hub, log=quiet)
+    assert _read(hub, ref)["review"] == want
+    assert hub.engine.run(run["id"])["status"] == "completed"
+
+
+def test_a_result_with_a_visit_booked_is_not_told_until_a_physician_signs_it_closed(hub):
+    """A visit booked to talk a result over has not told the patient: the result is "Patient not told" until a
+    physician signs that they were told. Nobody else closes it, by hand or by signature."""
+    run, ref = _flagged_review(hub, "book-visit")
+    assert _read(hub, ref)["review"] == "not-told"
+    assert hub.record_type("Observation").state_label("not-told") == "Patient not told"
+    with pytest.raises(Denied):
+        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})  # not a hand move
+    with pytest.raises(Denied):
+        hub.sign_record(M(hub, "noor"), ref, "Patient told")  # a nurse does not close it
+    hub.sign_record(M(hub, "dr-amara"), ref, "Patient told", "Told at the visit")
+    assert _read(hub, ref)["review"] == "closed"
+
+
+def test_a_review_cancelled_after_the_physician_reviewed_leaves_the_patient_not_told(hub):
+    """Cancelled before anyone told the patient, a reviewed result is "Patient not told", never closed."""
+    run, ref = _flagged_review(hub, "call-patient")
+    assert _read(hub, ref)["review"] == "reviewed"
+    hub.engine.cancel(M(hub, "rana"), run["id"], "the patient moved away")
+    assert _read(hub, ref)["review"] == "not-told"
+
+
+@pytest.mark.parametrize("outcome,before", [("no-action-needed", "closed"), ("book-visit", "not-told")])
+def test_a_reviewed_result_the_lab_corrects_is_reviewed_again(hub, outcome, before):
+    """The lab corrects a result already reviewed (closed, or the patient not told) and sends it again naming it: a
+    new review walks it from waiting for review, and the physician reviews the corrected value."""
+    run, ref = _flagged_review(hub, outcome)
+    assert _read(hub, ref)["review"] == before and hub.engine.run(run["id"])["status"] == "completed"
+    hub.update_record(M(hub, "lab-feed"), ref, {"status": "corrected", "valueQuantity": {"value": 128, "unit": "mmol/L"}})
+    pat = _read(hub, ref)["subject"]["reference"]
+    (again,) = hub.engine.emit(M(hub, "lab-feed"), "lab.result", record=pat,
+                               data={**LAB, "value": "128", "flag": "abnormal", "observation": ref})
+    assert again["id"] != run["id"] and hub.engine.run(again["id"])["record"] == ref
+    assert _read(hub, ref)["review"] == "received"
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, again, "sort"),
+                        {"category": "abnormal", "rationale": "lower still"})
+    hub.engine.decide(M(hub, "dr-liam"), item_for(hub, again, "review-flagged"), "no-action-needed", "")
+    run_all_local(hub, log=quiet)
+    assert _read(hub, ref)["review"] == "closed" and hub.engine.run(again["id"])["status"] == "completed"
+
+
+def test_a_late_critical_review_reaches_the_medical_director_by_name_and_a_chaser(hub):
+    """A critical review nobody has taken waits on every physician. Overdue, it still names the medical director
+    (who is one of those physicians), and since that tells no one outside the physicians, the practice manager
+    hears too. With the practice manager away it still reaches the director: never nobody. Told again, each person
+    keeps one notice row, which counts the repeats."""
     from datetime import datetime, timedelta, timezone
     run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub), inputs={**LAB, "value": "118"})
     iid = item_for(hub, run, "review-critical")
     hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
-    assert iid in hub.engine.tick(datetime.now(timezone.utc) + timedelta(minutes=1))["overdue"]
-    notes = hub.db.items.find({"kind": "notice", "run_id": run["id"], "title": {"$regex": "^Overdue"}})
-    physicians = {m["id"] for m in hub.active_holders("physician", persons_only=True)}
-    assert notes and all(n.get("assignee") not in physicians for n in notes)
-    assert all(n.get("role") not in ("physician", "medical-director") for n in notes), \
-        [(n.get("assignee"), n.get("role")) for n in notes]
+    now = datetime.now(timezone.utc) + timedelta(minutes=1)
+    assert iid in hub.engine.tick(now)["overdue"]
+
+    def notes():
+        return hub.db.items.find({"kind": "notice", "run_id": run["id"], "escalates": iid})
+    first = notes()
+    assert {(n["assignee"], n["role"]) for n in first} >= {("dr-amara", None)}
+    assert any(n["role"] == "practice-manager" or n["assignee"] == "rana" for n in first)
+    assert all(n["assignee"] != "dr-liam" for n in first)  # the pool is not told it is late, the director is
+    hub.db.members.set("rana", {"status": "inactive"})
+    for hours in (2, 4):
+        assert iid in hub.engine.tick(now + timedelta(hours=hours))["overdue"]
+    amara = [n for n in notes() if n["assignee"] == "dr-amara"]
+    assert len(amara) == 1 and amara[0]["repeats"] == 3 and amara[0]["title"].startswith("Still not done (3)")
+    assert amara[0]["priority"] == "urgent"
+
+
+def test_a_physician_takes_over_a_late_critical_call_from_its_notice(hub):
+    """A critical potassium: the physician asks for the patient to be called, the nurse gives the call back, and it
+    goes overdue. The physician's notice offers Take it over first (Acknowledge second), and it hands them the call."""
+    from datetime import datetime, timezone
+
+    from practicehub.web.server import App, Redirect
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={"test": "Potassium", "value": "6.9", "unit": "mmol/L", "range": "3.5-5.0",
+                                   "flag": "critical"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-critical"), "call-patient", "call now")
+    run_all_local(hub, log=quiet)
+    call = item_for(hub, run, "call-critical")
+    hub.engine.claim(M(hub, "noor"), call)
+    hub.engine.release(M(hub, "noor"), call, "Going on break; please take this one")
+    hub.db.items.set(call, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    hub.engine.tick(datetime.now(timezone.utc))
+    liam = M(hub, "dr-liam")
+    note = next(n for n in hub.db.items.find({"kind": "notice", "escalates": call})
+                if hub.engine.eligibility(liam, hub.engine.item(n["_id"]))[0])
+    app = App(hub, dev=False)
+    page = app.page_item({"me": liam, "query": {}, "path": f"/items/{note['_id']}"}, note["_id"])
+    assert page.index("Take it over") < page.index("Acknowledge")
+    assert '<button class="secondary">Acknowledge' in page
+    with pytest.raises(Redirect) as went:
+        app.post_item({"me": liam, "body": b"", "path": f"/items/{note['_id']}/take-over"}, note["_id"], "take-over")
+    assert went.value.to == f"/items/{call}"
+    assert hub.engine.item(call)["claimed_by"] == "dr-liam"
 
 
 # ------------------------------------------------------------------------------------------------ patient question

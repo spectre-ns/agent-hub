@@ -1,29 +1,36 @@
 id = "inventory-reorder"
 title = "Reorder stock"
-summary = """When an item's on hand falls to its reorder point, it is marked low and a purchaser is asked to order it.
-Once ordered it shows as on-order until a delivery is received."""
+summary = """One reorder cycle of a stock item: when its on hand falls to its reorder point, it is marked low and a
+purchaser is asked to order it; once ordered it shows as on-order until a delivery is received. The item's status is
+where this work is."""
 record = "StockItem"
 
-[trigger]
-event = "record.updated:StockItem"
-when = "record.status == 'stocked' and record.reorder_point != null and record.on_hand != null and record.on_hand <= record.reorder_point"
+# The StockItem type names this workflow: a stocked item is watched by it, and its status is this work's position. A
+# cycle is one run: restocked, the next run watches it again (a workflow has no loops). A posted delivery (the
+# inventory-post workflow) or a person clearing the reorder moves it back to stocked through a move this run waits on.
+
+[[steps]]
+id = "watch"
+title = "Watch on hand against the reorder point"
+kind = "wait"   # done at once for an item already low or on order (one handed on from an older version)
+until = "record.status != 'stocked' or (record.reorder_point != null and record.on_hand != null and record.on_hand <= record.reorder_point)"
 
 [[steps]]
 id = "low"
 title = "Mark the item low"
 kind = "automation"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "low"
+after = ["watch"]
+when = "record.status == 'stocked'"   # it reached its reorder point (not discontinued meanwhile)
+state = "low"
 
 [[steps]]
 id = "order"
 title = "Order more stock"
 kind = "task"
 role = "purchaser"
-after = ["low"]
+after = ["watch", "low"]
+when = "record.status == 'low'"
+moves = ["stocked", "discontinued"]   # a delivery posted first, a person clearing the reorder, or discontinued
 due = "2d"
 escalate_to = "inventory-manager"
 context = ["record:inventory"]
@@ -51,10 +58,15 @@ id = "on-order"
 title = "Mark the item on-order"
 kind = "automation"
 after = ["order"]
-action = "record.update"
-for_each = "{{run.record}}"
-where = "each_record.status == 'low'"   # unless a delivery arrived first
-[steps.params]
-ref = "{{each}}"
-[steps.params.set]
-status = "on-order"
+when = "record.status == 'low'"   # unless a delivery arrived first, or the reorder was cleared
+state = "on-order"
+
+[[steps]]
+id = "delivered"
+title = "Wait for the delivery"
+kind = "wait"
+after = ["watch", "on-order"]
+when = "record.status == 'on-order'"
+until = "record.status != 'on-order'"   # a posted delivery restocks it, or a person clears or discontinues it
+instructions = """Ordered: a stock keeper receives the delivery as a stock move, and posting it marks the item stocked
+again. Clear the reorder on the item's page if nothing is coming."""

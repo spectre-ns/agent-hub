@@ -6,6 +6,10 @@ data_class = "inventory"
 title = "{sku} {name}"
 flag = "status"
 order = 40
+# Its status (stocked, low, on order) is the reorder cycle, walked by the inventory-reorder workflow: one pass watches
+# on hand fall to the reorder point, asks a purchaser to order, and waits for the delivery. A posted delivery moves it
+# back to stocked only through a move that pass waits on.
+workflow = { id = "inventory-reorder", when = "record.status in ['stocked', 'low', 'on-order']" }
 summary = "A supply kept in stock, how many are on hand, and when to order more."
 
 [[field]]

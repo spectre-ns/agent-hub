@@ -386,8 +386,12 @@ def _high_risk_renewal(hub):
     hub.approve_workflow(M(hub, "rana"), "prescription-renewal", out["version"])
     agent = M(hub, "clinical-admin-agent")
     hub.db.members.set(agent["id"], {"profile": {**agent["profile"], "max_risk": "high"}})
-    pat = hub.records.search("Patient")[0]
-    med = hub.records.search("MedicationRequest")[0]
+    # an active order nobody has asked to renew yet (the demo's own request is for Ramipril), on its own patient
+    asked = {(r.get("subject"), (r.get("ctx") or {}).get("input", {}).get("medication"))
+             for r in hub.db.runs.find({"workflow_id": "prescription-renewal", "status": "running"})}
+    med = next(m for m in hub.records.search("MedicationRequest", limit=None) if m["status"] == "active"
+               and (m["subject"]["reference"], m["medicationCodeableConcept"].get("text")) not in asked)
+    pat = {"id": med["subject"]["reference"].split("/", 1)[1]}
     run = hub.engine.start(M(hub, "jo"), "prescription-renewal", record=f"Patient/{pat['id']}",
                            inputs={"medication": (med.get("medicationCodeableConcept") or {}).get("text", "x")})
     AgentRunner(LocalClient(hub, "clinical-admin-agent"), hub.models, quiet).work_once()
@@ -2866,7 +2870,7 @@ def test_a_released_product_changes_only_through_a_signed_change_order(products)
     # the specification goes through document control again (dms), by someone who did not write it
     hub.update_record(rana, spec, {"body": doc["body"].replace("10x10", "15x15")})
     hub.update_record(rana, spec, {"status": "in-review"})
-    review = next(r for r in hub.db.runs.find({"workflow_id": "dms-review", "status": "running"}))
+    review = next(r for r in hub.db.runs.find({"workflow_id": "dms-review", "record": spec, "status": "running"}))
     d = item_for(hub, hub.engine.run(review["id"]), "approve")
     hub.engine.claim(amara, d)
     hub.engine.decide(amara, d, "approve")
@@ -2916,6 +2920,12 @@ def _move(hub, who, sku, kind, quantity, **more):
     return hub.records.read("StockMove", m["id"])
 
 
+def _post_run(hub, move):
+    """The stock move's own running inventory-post run."""
+    return next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post"
+                and r["record"] == f"StockMove/{move['id']}" and r["status"] == "running")
+
+
 def test_on_hand_is_set_only_by_a_workflow(stock):
     hub, rana = stock, M(stock, "rana")
     gloves = _item(hub, "GL-M")
@@ -2943,7 +2953,7 @@ def test_a_write_off_is_signed_off_by_someone_who_did_not_write_it(stock):
         _move(hub, rana, "GL-M", "issue", -4)
     move = _move(hub, rana, "GL-M", "write-off", 4, reason="a box got wet")
     assert move["status"] == "submitted" and _item(hub, "GL-M")["on_hand"] == 24
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, move)
     i = item_for(hub, run, "sign-off")
     with pytest.raises(Denied):
         hub.engine.claim(rana, i)
@@ -2953,7 +2963,7 @@ def test_a_write_off_is_signed_off_by_someone_who_did_not_write_it(stock):
     assert hub.records.read("StockMove", move["id"])["status"] == "posted"
 
     count = _move(hub, rana, "GL-M", "count", 18, reason="shelf count")
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, count)
     i = item_for(hub, run, "sign-off")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "reject", "count it again")
@@ -2962,14 +2972,14 @@ def test_a_write_off_is_signed_off_by_someone_who_did_not_write_it(stock):
     assert "count it again" in counted["reject_reason"]
 
     big = _move(hub, rana, "GL-M", "write-off", 999, reason="flood")   # more than is on hand: never below zero
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, big)
     i = item_for(hub, run, "sign-off")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "post")
     assert _item(hub, "GL-M")["on_hand"] == 20 and hub.records.read("StockMove", big["id"])["status"] == "rejected"
 
     found = _move(hub, rana, "GL-M", "found", 2, reason="behind the shelf")
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post" and r["status"] == "running")
+    run = _post_run(hub, found)
     i = item_for(hub, run, "sign-off")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "post")
@@ -2985,7 +2995,8 @@ def test_an_item_at_its_reorder_point_is_ordered_and_restocked_by_a_delivery(sto
     _move(hub, rana, "SY-3", "issue", 2)              # 5 -> 3, at or under its reorder point of 4
     item = _item(hub, "SY-3")
     assert item["on_hand"] == 3 and item["status"] == "low"
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-reorder")
+    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-reorder"
+               and r["record"] == f"StockItem/{item['id']}" and r["status"] == "running")
     i = item_for(hub, run, "order")
     hub.engine.claim(amara, i)
     hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-1"})
@@ -2993,6 +3004,241 @@ def test_an_item_at_its_reorder_point_is_ordered_and_restocked_by_a_delivery(sto
     _move(hub, rana, "SY-3", "receive", 10)
     item = _item(hub, "SY-3")
     assert item["on_hand"] == 13 and item["status"] == "stocked"
+
+
+# ------------------------------------------------------------------------------------------- a record walked by its workflow
+def _own_run(hub, ref, wid):
+    got = [r for r in hub.db.runs.find({"workflow_id": wid, "record": ref, "status": "running"})]
+    assert len(got) == 1, got
+    return got[0]
+
+
+def test_a_record_s_state_has_one_owning_workflow_and_others_move_it_only_through_a_move_it_waits_on(stock):
+    """Rule: a record whose type names its workflow (``workflow = {id, when}``) is walked by one running run of it at
+    a time (a second is refused), and its state moves with that run's steps in the same write. Another workflow, or a
+    person, moves it only through a move the owner's open step waits on (a wait's ``until``, a step's ``moves``);
+    anything else is refused. A non-lifecycle workflow (a sweep, a reaction) may start on its schedule or event, but
+    writes only fields the owner's wait watches, never the state."""
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    syr = _item(hub, "SY-3")
+    ref = f"StockItem/{syr['id']}"
+    owner = _own_run(hub, ref, "inventory-reorder")
+    with pytest.raises((Denied, Invalid)):
+        hub.engine.start(rana, "inventory-reorder", record=ref, via_automation=True)
+    with pytest.raises((Denied, Invalid)):  # by its workflow only
+        hub.update_record(rana, ref, {"status": "low"})
+    _move(hub, rana, "SY-3", "issue", 2)  # on hand at its reorder point: the open wait ends, the run marks it low
+    low = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "low"})
+    assert low["run_id"] == owner["id"]
+    i = item_for(hub, owner, "order")
+    hub.engine.claim(amara, i)
+    hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-9"})
+    _move(hub, rana, "SY-3", "receive", 10)  # another workflow restocks it: a move the owner's wait takes
+    back = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "stocked"})
+    assert back["run_id"] != owner["id"] and hub.engine.run(owner["id"])["status"] == "completed"
+
+
+def test_a_loop_is_walked_by_the_next_run_which_knows_who_did_what_before(stock):
+    """Rule: a workflow has no loops, so a lifecycle that comes back (a move rejected and revised) is walked one pass
+    per run: a run that moved its record and ends with it back where its type's ``when`` holds starts the next run,
+    whose ``run.previous`` is the one before, so ``not_by`` holds across passes. A run that never moved its record
+    ends for good, and a companion's open run never holds the next pass back."""
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    count = _move(hub, rana, "GL-M", "count", 18, reason="shelf count")
+    ref = f"StockMove/{count['id']}"
+    first = _post_run(hub, count)
+    i = item_for(hub, first, "sign-off")
+    hub.engine.claim(amara, i)
+    hub.engine.decide(amara, i, "reject", "count again")
+    second = _own_run(hub, ref, "inventory-post")
+    assert second["id"] != first["id"] and second["ctx"]["run"]["previous"] == first["id"]
+    hub.update_record(rana, ref, {"status": "draft"})
+    hub.update_record(rana, ref, {"status": "submitted"})
+    with pytest.raises(Denied):
+        hub.engine.claim(rana, item_for(hub, second, "sign-off"))
+
+
+def test_a_record_filed_before_its_type_named_a_workflow_or_had_a_lifecycle_is_picked_up_on_its_next_write(stock):
+    """Rule: the migration a module upgrade needs is done record by record: a record with no state (filed before its
+    type had a lifecycle) is in its type's first state, written so on its next change; and a record its type's
+    workflow has never walked at the active version is picked up there, once (idempotent, retried on each write
+    until it starts, and never failing the write)."""
+    hub, rana = stock, M(stock, "rana")
+    rec = hub.records.create("StockItem", {"resourceType": "StockItem", "sku": "OLD-1", "name": "Old stock",
+                                           "on_hand": 50, "reorder_point": 5})  # the store, as an old hub left it
+    ref = f"StockItem/{rec['id']}"
+    assert not hub.db.runs.find_one({"record": ref})
+    hub.update_record(rana, ref, {"supplier": "Bluenose Supply"})
+    assert hub.records.read("StockItem", rec["id"])["status"] == "stocked"
+    run = _own_run(hub, ref, "inventory-reorder")
+    assert hub.engine.run(run["id"])["steps"]["watch"]["state"] == "waiting"
+    hub.update_record(rana, ref, {"supplier": "Another supplier"})
+    assert len(list(hub.db.runs.find({"record": ref}))) == 1
+
+
+def test_a_record_moved_out_of_its_workflow_s_hands_stops_its_open_run_on_the_track(hub):
+    """Rule: a correction (a move from any state, such as entered in error) or a move to a closing state, open to
+    whoever may write the record, stops its open run: its items are cancelled and ``run.stopped`` goes on the track,
+    caused by the move. Nothing is abandoned: the move already says where the record is."""
+    install(hub, "dms")
+    install(hub, "qms")
+    for m in hub.pack.modules:
+        m.module.demo(hub)
+    rana = M(hub, "rana")
+    capa = hub.create_record(rana, "CAPA", {"title": "Duplicate", "kind": "preventive", "problem": "P"})
+    ref = f"CAPA/{capa['id']}"
+    run = _own_run(hub, ref, "qms-capa")
+    hub.update_record(rana, ref, {"status": "cancelled", "cancel_reason": "A duplicate"})
+    stopped = hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
+    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "cancelled"})
+    assert stopped and stopped["cause"] == moved["seq"] and hub.engine.run(run["id"])["status"] == "cancelled"
+    assert not hub.db.items.find_one({"run_id": run["id"], "status": {"$in": ["open", "claimed", "waiting"]}})
+    assert hub.records.read("CAPA", capa["id"])["status"] == "cancelled"
+
+
+def test_not_by_keeps_off_whoever_did_the_step_in_any_earlier_pass_of_the_record(hub):
+    """Rule: the passes of a record (``run.previous``, all the way back) are one piece of work for ``not_by``:
+    whoever did a named step in any pass, not only the last pass that did it, does not take the step it names."""
+    from practicehub.hub import member_ref
+    install(hub, "dms")
+    install(hub, "qms")
+    for m in hub.pack.modules:
+        m.module.demo(hub)
+    hub.authz.write([("role:quality-manager", "assignee", member_ref(w)) for w in ("dr-liam", "noor")])
+    rana, amara, liam, noor = (M(hub, w) for w in ("rana", "dr-amara", "dr-liam", "noor"))
+    capa = hub.create_record(rana, "CAPA", {"title": "Three passes", "kind": "corrective", "problem": "P"})
+    ref = f"CAPA/{capa['id']}"
+
+    def take(run, step, who, *, decide=None, data=None):
+        i = item_for(hub, run, step)
+        hub.engine.claim(who, i)
+        if decide:
+            hub.engine.decide(who, i, decide, "again")
+        else:
+            hub.engine.complete(who, i, data or {})
+
+    run = _own_run(hub, ref, "qms-capa")
+    take(run, "investigate", rana, data={"root_cause": "R", "plan": "P1"})
+    take(run, "verify", noor, decide="not-effective")
+    run = _own_run(hub, ref, "qms-capa")                  # pass 2: amara acts
+    take(run, "act", amara, data={"plan": "P2"})
+    take(run, "verify", noor, decide="not-effective")
+    run = _own_run(hub, ref, "qms-capa")                  # pass 3: liam acts
+    take(run, "act", liam, data={"plan": "P3"})
+    v = item_for(hub, run, "verify")
+    for who in (rana, amara, liam):  # investigated in pass 1, acted in pass 2, acted now
+        with pytest.raises(Denied):
+            hub.engine.claim(who, v)
+    hub.engine.claim(noor, v)
+
+
+# ------------------------------------------------------------------ round 7 core: records their workflows walk
+def test_records_nothing_walks_are_picked_up_after_an_approval_once_per_version_of_their_workflow(hub):
+    """Rule: after a type or a workflow is approved (and when the hub opens), every record whose type's workflow
+    walks it now and whose ``when`` holds, but that nothing walks (filed before), is picked up where it is, in
+    batches; once per version of the workflow. A workflow version that stops starting itself is approved only
+    after the type that names it (``Hub._check_hand_over``; tests/test_module_workflows.py)."""
+    install(hub, "dms")
+    doc = hub.records.create("Document", {"resourceType": "Document", "title": "Filed before", "body": "B",
+                                          "status": "draft", "owner": "rana"})
+    ref = f"Document/{doc['id']}"
+    assert not hub.db.runs.find_one({"record": ref})
+    hub.db.set_setting(hub.WALKED, {})
+    assert hub.walk_unwalked() == {"Document": 1}
+    assert _own_run(hub, ref, "dms-review")
+    assert hub.walk_unwalked() == {}
+    hub.db.set_setting(hub.WALKED, {})
+    assert hub.walk_unwalked() == {}  # it is walked: never a second run
+
+
+def test_a_resting_wait_is_rechecked_only_by_its_own_record_is_not_open_work_and_does_not_block_removal(hub,
+                                                                                                     monkeypatch):
+    """Rule: a wait no one is asked to watch and no time ends (a document in force) rests: a write rechecks only the
+    runs whose waits can see the record written (``waits_on``: their record, or "*" for a wait over a list); a
+    resting run is not open work on the record's page, the board's Waiting lane or the metrics; and removing its
+    module stops it rather than being refused."""
+    install(hub, "dms")
+    rana = M(hub, "rana")
+    docs = [hub.records.create("Document", {"resourceType": "Document", "title": f"SOP {n}", "body": "B",
+                                            "status": "approved", "revision": 1, "owner": "rana"}) for n in (1, 2)]
+    hub.db.set_setting(hub.WALKED, {})
+    hub.walk_unwalked()
+    refs = [f"Document/{d['id']}" for d in docs]
+    runs = [_own_run(hub, r, "dms-review") for r in refs]
+    for r, ref in zip(runs, refs):
+        assert r["steps"]["in-force"]["state"] == "waiting" and r["waits_on"] == ref and r["resting"] is True
+        assert hub.engine.item(r["item"])["resting"] is True
+    woke = []
+    real = hub.engine.advance
+    monkeypatch.setattr(hub.engine, "advance", lambda rid, cause=None, *a, **k: (woke.append(rid),
+                                                                                real(rid, cause, *a, **k))[1])
+    hub.engine.recheck_waits(None, refs[0])
+    assert woke == [runs[0]["id"]]  # the other document's wait cannot see this write
+    monkeypatch.setattr(hub.engine, "advance", real)
+    from practicehub import analytics
+    assert all(f["open"] == 0 for f in analytics.report(hub, rana)["workflows"] if f["id"] == "dms-review")
+    hub.uninstall_module(rana, "dms", "no longer needed")
+    assert all(hub.engine.run(r["id"])["status"] == "cancelled" for r in runs)
+
+
+def test_unclaimed_overdue_work_reaches_its_escalate_to_role_even_someone_who_also_holds_the_step_s_role(hub):
+    """Rule: an item no one claimed, past its due time, goes to the step's ``escalate_to`` role: no one is "late" on
+    work they never took, so a holder of that role who also holds the step's own role is told all the same (the
+    only medical director is also a physician)."""
+    from datetime import datetime, timezone
+    from practicehub.hub import member_ref
+    hub.authz.write([("role:nurse", "assignee", member_ref("dr-amara"))])
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    assert iid in hub.engine.tick(datetime.now(timezone.utc))["overdue"]
+    notes = hub.db.items.find({"kind": "notice", "run_id": run["id"], "title": {"$regex": "^Overdue"}})
+    reached = {n.get("role") for n in notes} | {n.get("assignee") for n in notes}
+    assert "physician" in reached or "dr-amara" in reached, notes
+
+
+def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_up_where_it_lands(hub):
+    """Rule: a record its type's workflow is not walking (approved before an upgrade, or its run is over) is moved
+    by another workflow's run as any record is, rather than refused, and its own workflow starts where it lands; a
+    run moving it must be about what the record is about (a run about one patient never moves another's visit)."""
+    install(hub, "dms")
+    install(hub, "qms")
+    for m in hub.pack.modules:
+        m.module.demo(hub)
+    rana = M(hub, "rana")
+    doc = hub.records.create("Document", {"resourceType": "Document", "title": "Old SOP", "body": "B",
+                                          "status": "approved", "revision": 3, "owner": "rana"})
+    dref = f"Document/{doc['id']}"
+    assert not hub.db.runs.find_one({"record": dref})   # approved before its type named a workflow
+    capa = hub.create_record(rana, "CAPA", {"title": "Old SOP", "kind": "corrective", "problem": "P",
+                                            "documents": [dref]})
+    run = _own_run(hub, f"CAPA/{capa['id']}", "qms-capa")
+    i = item_for(hub, run, "investigate")
+    hub.engine.claim(rana, i)
+    hub.engine.complete(rana, i, {"root_cause": "R", "plan": "P"})
+    assert hub.records.read("Document", doc["id"])["status"] == "draft"
+    assert hub.engine.run(run["id"])["steps"]["revise-documents"]["state"] == "done"
+    walk = _own_run(hub, dref, "dms-review")
+    assert hub.engine.run(walk["id"])["steps"]["revise"]["state"] == "waiting"
+
+    jo = M(hub, "jo")
+    pats = hub.records.search("Patient")
+    a, b = f"Patient/{pats[0]['id']}", f"Patient/{pats[1]['id']}"
+    ra = hub.engine.start(jo, "appointment-request", record=a, inputs={"reason": "knee", "kind": "new-concern"})
+    rb = hub.engine.start(jo, "appointment-request", record=b, inputs={"reason": "back", "kind": "new-concern"})
+    visit = hub.records.read(*hub.engine.run(rb["id"])["record"].split("/", 1))
+    old = {k: v for k, v in visit.items() if k not in ("id", "meta")}
+    old.update(status="triaged", subject={"reference": b}, plannedStartDate="2026-11-20T09:00:00-04:00")
+    rec = hub.records.create("Encounter", old)        # a visit of b's that nothing walks now
+    ref = f"Encounter/{rec['id']}"
+    actor = hub.engine.automation_actor(hub.engine.run(ra["id"]))
+    with pytest.raises((Denied, Invalid)) as exc:
+        hub.update_record(actor, ref, {**rec, "status": "in-progress"}, run_id=ra["id"])
+    assert "someone else" in str(exc.value)
+    hub.update_record(hub.engine.automation_actor(hub.engine.run(rb["id"])), ref, {**rec, "status": "in-progress"},
+                      run_id=rb["id"])
+    assert hub.records.read("Encounter", rec["id"])["status"] == "in-progress"
 
 
 def test_increment_and_decrement_take_amounts_and_for_each_takes_one_reference(hub):
@@ -3080,6 +3326,31 @@ def test_a_record_type_stored_before_a_stricter_check_is_set_aside_not_a_failure
     assert "Patient" in hub.record_types() and "initial" in hub.broken_types["Condition"]
     listed = {d["id"]: d for d in hub.definitions("type")}
     assert listed["Condition"]["definition"] is None and "initial" in listed["Condition"]["problem"]
+
+
+# --------------------------------------------------------------- lifecycle.ended: where an old run's record goes
+
+_ENDED_TYPE = ('id = "Widget"\ndata_class = "clinical"\n[[field]]\nname = "status"\ntype = "choice"\n'
+               'choices = ["a", "b", "c"]\n[lifecycle]\nfield = "status"\ninitial = "a"\n'
+               'abandoned = { b = "a" }\n'
+               '[[lifecycle.transition]]\nfrom = ["a"]\nto = "b"\n'
+               '[[lifecycle.transition]]\nfrom = ["b"]\nto = "c"\nby = "workflow"\n'
+               '[[lifecycle.transition]]\nfrom = ["b"]\nto = "a"\nby = "workflow"\n')
+
+
+def test_a_lifecycle_ended_names_only_its_own_states_and_moves_it_has(hub):
+    """``lifecycle.ended`` says where a record goes when an older version's run ends without moving it: each entry
+    is state = state, both the type's, with a move between them. Anything else is refused when proposed."""
+    rana = M(hub, "rana")
+    for ended, why in (('"c"', "a table"), ('{ b = "gone" }', "both must be its states"),
+                       ('{ nowhere = "a" }', "both must be its states"), ('{ a = "c" }', "no move from 'a' to 'c'")):
+        src = _ENDED_TYPE.replace('abandoned = { b = "a" }\n', f'abandoned = {{ b = "a" }}\nended = {ended}\n')
+        with pytest.raises(Invalid) as e:
+            hub.propose("type", rana, src)
+        assert any(p.startswith("lifecycle.ended") and why in p for p in e.value.problems), (ended, e.value.problems)
+    src = _ENDED_TYPE.replace('abandoned = { b = "a" }\n', 'abandoned = { b = "a" }\nended = { b = "c" }\n')
+    p = hub.propose("type", rana, src)  # a real move from a state it is in: accepted
+    assert p["version"]
 
 
 # ------------------------------------------------------------------------------------------- the calendar
@@ -3491,7 +3762,8 @@ def test_a_returned_sop_says_why_and_goes_back_to_its_authors(wiki):
     hub = wiki
     amara = M(hub, "dr-amara")
     sop = _sop(hub, "Cleaning the treatment rooms")
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release")
+    run = next(r for r in hub.engine.runs(status="running") if r["workflow_id"] == "wiki-sop-release"
+               and r["steps"]["release"]["state"] == "active")  # the SOP in review
     i = item_for(hub, run, "release")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "return", "Say which detergent.")
@@ -4918,9 +5190,10 @@ def test_a_record_its_type_walks_starts_its_run_on_create_and_only_that_run_move
         hub.update_record(jo, ref, {"handling": "answered"})
 
 
-def test_marking_a_walked_record_entered_in_error_stops_its_run_on_the_track(hub):
-    """Entered in error is open to anyone who may write the record, and stops the run walking it: its open work is
-    cancelled and the track says why, caused by the move."""
+def test_a_correction_a_run_waits_for_lets_it_go_on_to_its_own_end_not_stopped(hub):
+    """Entered in error is open to anyone who may write the record. A run with a wait that lists it (the visit's
+    check-in wait) is not stopped: it takes that step and goes on to its own end, leaving no open work. (A run no
+    wait of which lists it is stopped: test_a_record_moved_out_of_its_workflow_s_hands_stops_its_open_run.)"""
     jo, pat = M(hub, "jo"), _patient(hub)
     visit = hub.create_record(jo, "Encounter", {
         "status": "planned", "subject": {"reference": pat}, "plannedStartDate": "2027-03-10T09:00",
@@ -4928,10 +5201,9 @@ def test_marking_a_walked_record_entered_in_error_stops_its_run_on_the_track(hub
     ref = f"Encounter/{visit['id']}"
     (run,) = hub.engine.runs(record=ref, status="running")
     hub.update_record(jo, ref, {"status": "entered-in-error"})
-    assert hub.engine.run(run["id"])["status"] == "cancelled"
-    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "entered-in-error"})
-    stopped = hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
-    assert stopped and stopped["cause"] == moved["seq"] and stopped["actor"] == "jo"
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    assert not hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
+    assert hub.records.read("Encounter", visit["id"])["status"] == "entered-in-error"
     assert not hub.db.items.exists({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})
 
 
@@ -5081,3 +5353,85 @@ def test_a_lifecycle_declares_how_each_state_reads_not_guessed_from_its_words(hu
     assert tone(RecordPages, "active", sr) == "inprogress" and tone(RecordPages, "completed", sr) == "success"
     assert tone(RecordPages, "undocumented", enc) == "moved" and tone(RecordPages, "noshow", enc) == "removed"
     assert tone(RecordPages, "finished", enc) == "success"
+
+
+# ------------------------------------------------------------------------- escalation: who hears, who takes it over
+def test_an_alert_with_nobody_else_on_duty_tells_the_late_themselves_never_nobody(hub):
+    """Whoever is late is never the only one told while someone else is on duty; with nobody else on duty at all,
+    they are told by name rather than nobody, and with nobody on duty the notice waits on the role."""
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub), inputs={"question": "My knee"})
+    for mid in [m["id"] for m in hub.members("person") if m["id"] != "noor"]:
+        hub.db.members.set(mid, {"status": "inactive"})
+    out = hub.engine.alert(run, None, "Overdue: call back", role="nurse", besides="noor")
+    assert [hub.engine.item(i)["assignee"] for i in out] == ["noor"]
+    hub.db.members.set("noor", {"status": "inactive"})
+    out = hub.engine.alert(run, None, "Overdue: call back", role="nurse", besides="noor")
+    assert [(hub.engine.item(i)["role"], hub.engine.item(i)["assignee"]) for i in out] == [("nurse", None)]
+
+
+def test_the_escalation_role_may_take_overdue_work_itself_from_its_notice(hub):
+    """A person holding a step's escalate_to role may claim the step's item once it is overdue (not before; never
+    an agent), and the overdue notice's Take it over claims the item and acknowledges the notice; one held by
+    someone else is taken off them, and they are told."""
+    from datetime import datetime, timezone
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")   # a nurse's step, escalated to the physicians
+    liam = M(hub, "dr-liam")
+    assert hub.engine.eligibility(liam, hub.engine.item(iid)) == (False, "it needs the nurse role")
+    hub.engine.claim(M(hub, "noor"), iid)
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    hub.engine.tick(datetime.now(timezone.utc))
+    note = hub.db.items.find_one({"kind": "notice", "escalates": iid, "role": "physician"})
+    assert note and hub.engine.escalated_item(liam, hub.engine.item(note["_id"]))["id"] == iid
+    assert hub.engine.escalated_item(M(hub, "jo"), hub.engine.item(note["_id"])) is None
+    taken = hub.engine.take_over(liam, note["_id"])      # from the notice: the work, not the notice
+    assert taken["id"] == iid and taken["claimed_by"] == "dr-liam"
+    assert hub.engine.item(note["_id"])["status"] == "done"
+    told = hub.db.items.find_one({"kind": "notice", "assignee": "noor", "run_id": run["id"]}, sort=[("n", -1)])
+    assert told and "Dr. Liam" in told["title"]
+    # back on the nurses' queue, overdue: the physician claims it outright; an agent never does
+    hub.engine.release(liam, iid, "")
+    free = hub.engine.item(iid)
+    assert not hub.engine.eligibility(M(hub, "clinical-admin-agent"), free)[0]
+    assert hub.engine.claim(liam, iid)["claimed_by"] == "dr-liam"
+
+
+def test_repeated_escalations_of_one_item_are_one_notice_row_with_a_count(hub):
+    from datetime import datetime, timedelta, timezone
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")
+    hub.engine.claim(M(hub, "noor"), iid)
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    now = datetime.now(timezone.utc)
+    for hours in (0, 2, 4):
+        assert iid in hub.engine.tick(now + timedelta(hours=hours))["overdue"]
+    rows = hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})
+    assert len(rows) == 1 and rows[0]["repeats"] == 3 and rows[0]["title"].startswith("Still not done (3)")
+    hub.engine.acknowledge(M(hub, "dr-liam"), rows[0]["_id"])   # acknowledged, the next one is a new row
+    hub.engine.tick(now + timedelta(hours=6))
+    assert len(hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})) == 2
+
+
+# ---------------------------------------------------------------------------- a lab result: closed only when told
+def test_a_reviewed_result_is_closed_only_once_the_patient_was_told(hub):
+    """A review that ends without the patient told (a visit booked) leaves the result "Patient not told": its review
+    ending does not close it, nor does anyone by hand. Only a physician's "Patient told" signature closes it."""
+    from practicehub.agents.runner import run_all_local
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_patient(hub),
+                           inputs={"test": "Sodium", "value": "131", "unit": "mmol/L", "range": "135-145",
+                                   "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), "book-visit", "")
+    run_all_local(hub, log=quiet)
+    ref = hub.engine.run(run["id"])["record"]
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    assert hub.records.read(*ref.split("/", 1))["review"] == "not-told"
+    with pytest.raises(Denied):
+        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})
+    with pytest.raises(Denied):
+        hub.sign_record(M(hub, "noor"), ref, "Patient told")
+    hub.sign_record(M(hub, "dr-amara"), ref, "Patient told")
+    assert hub.records.read(*ref.split("/", 1))["review"] == "closed"

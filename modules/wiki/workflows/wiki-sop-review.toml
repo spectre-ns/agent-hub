@@ -3,6 +3,9 @@ title = "Review a SOP that is due"
 summary = "A released SOP past its review date goes to its owner: confirm it is still right (signed), or revise it."
 record = "Procedure"
 
+# A companion, started by the clock: the SOP's status belongs to wiki-sop-release, which walks it. This never moves
+# the status; choosing revise sets revise_asked, and the SOP's own workflow opens the revision.
+
 [trigger]
 schedule = "daily 07:00"
 for_each = "Procedure"
@@ -57,4 +60,4 @@ action = "record.update"
 [steps.params]
 ref = "{{run.record}}"
 [steps.params.set]
-status = "draft"
+revise_asked = true   # the SOP's own workflow opens the revision

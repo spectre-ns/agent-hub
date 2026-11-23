@@ -3,9 +3,12 @@ title = "Lab result review"
 record = "Observation"
 summary = """
 One result, from received to closed: the result is this workflow's record, and its review is where the work is:
-waiting for review (received), reviewed by a physician (reviewed), the patient told (told), closed. A result the lab
+waiting for review (received), reviewed by a physician (reviewed), the patient told (told), closed. A result is closed
+only when the patient was told: a review that ends without that (the patient not reached, a visit booked, the review
+cancelled) leaves it "Patient not told" until a physician signs it closed. A result the lab
 files starts its review; a result the lab sends for a patient (the lab.result event) is filed as one, or, when it names
-the result it already filed, walks that one. The lab's own status stays the lab's.
+the result it already filed, walks that one; a result already reviewed that the lab sends again (corrected) is
+reviewed again, from waiting for review. The lab's own status stays the lab's.
 
 A result arrives from the lab. Code checks the value against its range and the practice's critical limits, whatever
 the lab's flag says; a result the lab or the check calls critical pages the physicians at once and goes straight to an urgent physician review, without waiting for the sort. Other
@@ -62,6 +65,15 @@ label = "Result record"
 type = "reference"
 target = ["Observation"]
 help = "The result the lab filed for this patient, if it filed one (another patient's is refused); else one is filed"
+
+# The lab sending a correction of a result already reviewed (input.observation names it): it is reviewed again,
+# from waiting for review, whatever the last review decided.
+[[steps]]
+id = "reopen"
+title = "Review the corrected result again"
+kind = "automation"
+when = "record.review != 'received'"
+state = "received"
 
 [[steps]]
 id = "check"
@@ -180,7 +192,7 @@ comment = "{{review.comment}}{{review-flagged.comment}}{{review-critical.comment
 id = "file-result"
 title = "File the review on the result"
 kind = "automation"
-after = ["reviewed"]
+after = ["reviewed", "reopen"]
 action = "record.update"
 state = "reviewed"
 [steps.params.set]
@@ -316,13 +328,24 @@ urgency = "urgent"
 id = "told-by-phone"
 title = "The patient was told by phone"
 kind = "automation"
-after = ["call", "call-critical", "file-result"]   # told once the review is filed
-when = "call.reached == true or call-critical.reached == true"
+after = ["call", "call-critical", "not-reached", "file-result"]   # told once the review is filed
+when = "call.reached == true or call-critical.reached == true or not-reached.action == 'reached-the-patient'"
 state = "told"
+
+# Every path ends here. The patient told, the result is closed; otherwise (not reached and no one has told them since,
+# a visit booked to talk it over) it is "Patient not told", until a physician signs it closed.
+[[steps]]
+id = "not-told"
+title = "The patient has not been told of the result"
+kind = "automation"
+after = ["tell-normal", "tell-reviewed", "told-by-phone", "not-reached", "book", "book-critical"]
+when = "record.review == 'reviewed'"
+state = "not-told"
 
 [[steps]]
 id = "close"
 title = "Close the result"
 kind = "automation"
-after = ["tell-normal", "tell-reviewed", "told-by-phone", "not-reached", "book", "book-critical"]
+after = ["tell-normal", "tell-reviewed", "told-by-phone", "not-reached", "book", "book-critical", "not-told"]
+when = "record.review == 'told'"
 state = "closed"
