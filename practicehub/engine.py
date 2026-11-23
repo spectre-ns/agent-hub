@@ -1880,11 +1880,15 @@ class Engine:
         is_agent = member["kind"] != "person"
         if item["assignee"] and item["assignee"] != member["id"]:
             return False, "it is assigned to someone else"
-        if not item["assignee"] and item["role"] not in member["roles"]:
-            return False, f"it needs the {item['role']} role"
         run = self.run(item["run_id"])
         wf, _ = hub.workflow(run["workflow_id"], run["version"])
         step = wf.step(item["step_id"])
+        # overdue work is escalated to the step's escalate_to role: a person holding it may take the work itself
+        # (every other rule below still holds: the data it reads, who did what, the directive, signing)
+        escalated_to_them = (bool(item.get("escalated")) and not is_agent
+                             and getattr(step, "escalate_to", None) in member["roles"])
+        if not item["assignee"] and item["role"] not in member["roles"] and not escalated_to_them:
+            return False, f"it needs the {item['role']} role"
         for prior in step.not_by:
             if prior == "run":
                 if run["started_by"] == member["id"]:
@@ -2057,6 +2061,8 @@ class Engine:
         "queue" for anyone who can; without it, overdue work is claimed by this member when they may do it, else it
         goes back to the queue (a manager reassigns clinical work, never does it)."""
         from .hub import Denied, Invalid
+        if self.item(item_id)["kind"] == "notice":
+            return self.take_over_from_notice(member, item_id, note)
         with self.hub.db:
             item = self.item(item_id)
             if to:
@@ -2092,6 +2098,39 @@ class Engine:
                     self.alert(run, step, f"{member['name']} moved \"{self.what(item)}\" off you: {note}",
                                assignee=before, cause=None)
         return self.item(item_id)
+
+    def escalated_item(self, member: dict, notice: dict) -> dict | None:
+        """The overdue item an escalation notice is about, when this member may take it over from the notice: it is
+        still open, and they may claim it (it waits on a queue they can take from) or take it off whoever has it."""
+        iid = notice.get("escalates") if notice.get("kind") == "notice" else None
+        if not iid or notice["status"] not in ("open", "claimed") or not self.eligibility(member, notice)[0]:
+            return None
+        item = self.hub.db.items.get(iid)
+        if not item or item["status"] not in ("open", "claimed"):
+            return None
+        item = self.item(iid)
+        if self.holder(item) == member["id"]:
+            return None
+        free = {**item, "status": "open", "claimed_by": None, "assignee": None}
+        if self.holder(item) is None:
+            return item if self.eligibility(member, item)[0] else None
+        return item if self.may_take_over(member, item) and self.eligibility(member, free)[0] else None
+
+    def take_over_from_notice(self, member: dict, notice_id: str, note: str = "") -> dict:
+        """Take it over, from the overdue notice: the item it is about is claimed by this member (taken off whoever
+        had it, who is told why), and the notice is acknowledged. Returns the item taken."""
+        from .hub import Denied
+        notice = self.item(notice_id)
+        item = self.escalated_item(member, notice)
+        if item is None:
+            raise Denied(f"{member['name']} may not take this over: the work is done, someone else has it, or it "
+                         "needs what you do not hold")
+        if self.holder(item) is None:
+            taken = self.claim(member, item["id"])
+        else:
+            taken = self.take_over(member, item["id"], (note or "").strip() or f"Overdue: {member['name']} took it over")
+        self.acknowledge(member, notice_id)
+        return taken
 
     def _directive_route(self, run: dict, step, assignee: str | None) -> tuple[str, bool, str | None]:
         """Where work on a file with a subject's directive goes: (role, persons_only, assignee). An agent the

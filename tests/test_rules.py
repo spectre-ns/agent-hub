@@ -5005,6 +5005,34 @@ def test_an_alert_with_nobody_else_on_duty_tells_the_late_themselves_never_nobod
     assert [(hub.engine.item(i)["role"], hub.engine.item(i)["assignee"]) for i in out] == [("nurse", None)]
 
 
+def test_the_escalation_role_may_take_overdue_work_itself_from_its_notice(hub):
+    """A person holding a step's escalate_to role may claim the step's item once it is overdue (not before; never
+    an agent), and the overdue notice's Take it over claims the item and acknowledges the notice; one held by
+    someone else is taken off them, and they are told."""
+    from datetime import datetime, timezone
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")   # a nurse's step, escalated to the physicians
+    liam = M(hub, "dr-liam")
+    assert hub.engine.eligibility(liam, hub.engine.item(iid)) == (False, "it needs the nurse role")
+    hub.engine.claim(M(hub, "noor"), iid)
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    hub.engine.tick(datetime.now(timezone.utc))
+    note = hub.db.items.find_one({"kind": "notice", "escalates": iid, "role": "physician"})
+    assert note and hub.engine.escalated_item(liam, hub.engine.item(note["_id"]))["id"] == iid
+    assert hub.engine.escalated_item(M(hub, "jo"), hub.engine.item(note["_id"])) is None
+    taken = hub.engine.take_over(liam, note["_id"])      # from the notice: the work, not the notice
+    assert taken["id"] == iid and taken["claimed_by"] == "dr-liam"
+    assert hub.engine.item(note["_id"])["status"] == "done"
+    told = hub.db.items.find_one({"kind": "notice", "assignee": "noor", "run_id": run["id"]}, sort=[("n", -1)])
+    assert told and "Dr. Liam" in told["title"]
+    # back on the nurses' queue, overdue: the physician claims it outright; an agent never does
+    hub.engine.release(liam, iid, "")
+    free = hub.engine.item(iid)
+    assert not hub.engine.eligibility(M(hub, "clinical-admin-agent"), free)[0]
+    assert hub.engine.claim(liam, iid)["claimed_by"] == "dr-liam"
+
+
 def test_repeated_escalations_of_one_item_are_one_notice_row_with_a_count(hub):
     from datetime import datetime, timedelta, timezone
     run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),

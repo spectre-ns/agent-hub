@@ -240,6 +240,35 @@ def test_a_late_critical_review_reaches_the_medical_director_by_name_and_a_chase
     assert amara[0]["priority"] == "urgent"
 
 
+def test_a_physician_takes_over_a_late_critical_call_from_its_notice(hub):
+    """A critical potassium: the physician asks for the patient to be called, the nurse gives the call back, and it
+    goes overdue. The physician's notice offers Take it over first (Acknowledge second), and it hands them the call."""
+    from datetime import datetime, timezone
+
+    from practicehub.web.server import App, Redirect
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={"test": "Potassium", "value": "6.9", "unit": "mmol/L", "range": "3.5-5.0",
+                                   "flag": "critical"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-critical"), "call-patient", "call now")
+    run_all_local(hub, log=quiet)
+    call = item_for(hub, run, "call-critical")
+    hub.engine.claim(M(hub, "noor"), call)
+    hub.engine.release(M(hub, "noor"), call, "Going on break; please take this one")
+    hub.db.items.set(call, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    hub.engine.tick(datetime.now(timezone.utc))
+    liam = M(hub, "dr-liam")
+    note = next(n for n in hub.db.items.find({"kind": "notice", "escalates": call})
+                if hub.engine.eligibility(liam, hub.engine.item(n["_id"]))[0])
+    app = App(hub, dev=False)
+    page = app.page_item({"me": liam, "query": {}, "path": f"/items/{note['_id']}"}, note["_id"])
+    assert page.index("Take it over") < page.index("Acknowledge")
+    assert '<button class="secondary">Acknowledge' in page
+    with pytest.raises(Redirect) as went:
+        app.post_item({"me": liam, "body": b"", "path": f"/items/{note['_id']}/take-over"}, note["_id"], "take-over")
+    assert went.value.to == f"/items/{call}"
+    assert hub.engine.item(call)["claimed_by"] == "dr-liam"
+
+
 # ------------------------------------------------------------------------------------------------ patient question
 def _handling(hub, ref):
     return _read(hub, ref)["handling"]
