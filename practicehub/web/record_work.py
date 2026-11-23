@@ -95,8 +95,11 @@ class RecordWork:
             visible = bool(live and step and self.may_see_item(me, item, run))
             if live and item["status"] == "waiting":
                 wait = self._open_wait(run, wf)
-                what = item.get("waiting") or "the workflow to go on"
-                status.append(f'<span class="rs-item"><span class="muted">waiting for</span> {e(what)}</span>'
+                # the engine's words: "waiting: <a wait step>", "waiting until <when>", "waiting on 2 of 3"
+                what = item.get("waiting") or "waiting for the workflow to go on"
+                said = (f'<span class="muted">at</span> {e(what.split(": ", 1)[1])}' if what.startswith("waiting: ")
+                        else e(what[:1].upper() + what[1:]))
+                status.append(f'<span class="rs-item">{said}</span>'
                               if visible or not step else
                               '<span class="rs-item muted">waiting at a step you may not see</span>')
                 if visible:
@@ -127,10 +130,10 @@ class RecordWork:
             if run["status"] == "running":
                 why = eng.cancel_refusal(me, run)
                 if why:
-                    quiet.append(f"<li><b>Cancel {e(wf.title.lower())}</b>: {e(why)}</li>")
+                    quiet.append(f"<li><b>Cancel “{e(wf.title)}”</b>: {e(why)}</li>")
                 else:
                     ends.append(f'<details class="cancel-work"><summary class="btn subtle">Cancel '
-                                f'{e(wf.title.lower())}…</summary><form method="post" '
+                                f'“{e(wf.title)}”…</summary><form method="post" '
                                 f'action="/runs/{e(run["id"])}/cancel" class="inline">'
                                 f'<input type="hidden" name="_back" value="{e(back)}"><label>Why it is cancelled '
                                 f'<input name="reason" required></label> <button class="danger">Cancel this work'

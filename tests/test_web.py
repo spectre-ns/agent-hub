@@ -2667,7 +2667,7 @@ def test_reason_boxes_are_labelled_and_cancelling_work_is_asked_for(hub, server)
     assert "<label>Why you give it back" in give and "placeholder" not in give
     page = follow(server, f"/runs/{run['id']}", token(hub, "jo"))[1]  # on the record's page
     cancel = page.split('class="cancel-work"', 1)[1].split("</details>", 1)[0]
-    assert "Cancel appointment request…</summary>" in cancel and "<label>Why it is cancelled" in cancel
+    assert "Cancel “Appointment request”…</summary>" in cancel and "<label>Why it is cancelled" in cancel
     assert 'placeholder="reason to cancel"' not in page
 
 

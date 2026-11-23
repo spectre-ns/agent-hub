@@ -74,9 +74,9 @@ def test_the_side_panel_shows_one_primary_move(hub, server):
     req = urllib.request.Request(f"{server}/records/Encounter/{v['id']}", headers={"Authorization": f"Bearer {tok}"})
     with urllib.request.urlopen(req) as r:
         page = r.read().decode()
-    side = page.split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    side = page.split('class="rw-moves"', 1)[1].split("</div>", 1)[0]  # the moves, under the record's title
     assert re.search(r'<button class="primary"[^>]*>Check in</button>', side)
-    assert re.search(r'<button class="secondary"[^>]*>Mark no-show…</button>', side)
+    assert re.search(r'(<button class="secondary"[^>]*>|<a class="btn secondary"[^>]*>)Mark no-show…</(button|a)>', side)
     assert len(re.findall(r'class="(?:btn )?primary"', side)) == 1
 
 
