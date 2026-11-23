@@ -163,6 +163,21 @@ box-shadow:inset 2px 0 0 var(--selected-fg)}
 .side .count{margin-left:auto;font-size:12px;line-height:16px;background:var(--neutral);color:var(--fg);border-radius:8px;
 padding:0 8px;min-width:24px;text-align:center}
 .side a[aria-current=page] .count,.side a.nav.on .count{background:var(--brand);color:var(--brand-fg)}
+.side .count.urgent,.side a.nav.on .count.urgent,.side a[aria-current=page] .count.urgent{background:var(--danger);color:var(--danger-on);font-weight:700}
+.side .count.also{margin-left:4px}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+/* the Urgent band: first on Your work and on a chart, at every width */
+.urgent-band{border:1px solid var(--danger);border-left-width:4px;border-radius:4px;background:var(--danger-bg);padding:8px 16px;margin:0 0 16px}
+.urgent-band h2{margin:4px 0 8px;color:var(--danger-fg);display:flex;align-items:center;gap:8px}
+.urgent-band .u-row{padding:8px 0;border-top:1px solid var(--border)}
+.urgent-band .u-row:first-child{border-top:0}
+.urgent-band .u-head{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
+.urgent-band .u-head form{margin-left:auto}
+.urgent-band .u-value{color:var(--fg)}
+.urgent-band .u-work{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:4px}
+.urgent-band .u-go{margin-left:auto}
+.lane.urgent{color:var(--danger-fg)}
+.run-now{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}.run-now dt{font-weight:600;color:var(--subtle)}.run-now dd{margin:0}
 .side .legal{margin:24px 12px 0;font-size:12px;line-height:16px;color:var(--subtlest)}
 main{padding:24px 32px 32px;min-width:0}main:focus{outline:none}
 /* ---- the admin shell: the settings, a screen of their own, with a ribbon of every setup item */

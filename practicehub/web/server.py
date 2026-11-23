@@ -51,6 +51,7 @@ def client_address(peer: str, headers: dict) -> str:
             pass
     return str(near)
 from ..visibility import Viewer, workflow_classes as visibility_classes
+from .holder import HolderWords, holder
 from .analytics_pages import AnalyticsPages
 from .assets import CSS, ICONS, JS
 from .bpmn_pages import BpmnPages
@@ -96,7 +97,7 @@ def _json(obj) -> bytes:
 
 # ================================================================================================== the app
 class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages,
-          AnalyticsPages, BpmnPages):
+          AnalyticsPages, BpmnPages, HolderWords):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -162,6 +163,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         R("POST", r"/board/move", self.post_board_move)
         R("GET", r"/items/(?P<iid>[\w-]+)", self.page_item)
         R("POST", r"/items/(?P<iid>[\w-]+)/(?P<verb>claim|complete|decide|release|ack|take-over)", self.post_item)
+        R("POST", r"/notices/ack", self.post_notices_ack)
         R("GET", rf"/{sp}", self.page_subjects)
         R("POST", rf"/{sp}", self.post_subject)
         R("GET", rf"/{sp}/(?P<pid>[\w.-]+)", self.page_subject)
@@ -829,23 +831,28 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
 
     def _sidebar(self, req, me) -> str:
         path = self._nav_path(req, me)
-        mine = [i for i in self.hub.engine.inbox(me) if i["kind"] != "notice"]
+        inbox = self.hub.engine.inbox(me) if me else []
+        mine = [i for i in inbox if i["kind"] != "notice"]
+        urgent = len(self._urgent(me, inbox)) if me else 0
         sp = f'/{self.subj["path"]}'
         hrefs = ["/", "/board", "/runs", sp, "/schedule", "/records"] + [f"/records/{t}" for t in self.shortcuts(me)] \
             + [f"/views/{v.id}" for v in (self.hub.views_for(me) if me else [])]
         hits = [h for h in hrefs if path == h or (h != "/" and path.startswith(h + "/"))]
         best = max(hits, key=len) if hits else None  # only the closest link is lit: a shortcut, not All records too
 
-        def nav(h, label, icon, count=None):
+        def nav(h, label, icon, count=None, red=0):
             on = h == best
             n = f'<span class="count">{count}</span>' if count else ""
+            if red:  # urgent work first, in red, said in words to a screen reader
+                n = (f'<span class="count urgent" title="{red} urgent">{red}<span class="vh"> urgent</span>'
+                     f'</span>') + n.replace('class="count"', 'class="count also"')
             cur = ' aria-current="page"' if on else ""
             return (f'<a class="nav{" on" if on else ""}" href="{h}"{cur}><svg viewBox="0 0 24 24" aria-hidden="true">'
                     f'{ICONS[icon]}</svg>{e(label)}{n}</a>')
 
         p = self.hub.practice
         parts = ['<aside class="side" id="side">',
-                 '<nav aria-label="Main">', nav("/", "Your work", "inbox", len(mine)), nav("/board", "Board", "board"), nav("/runs", "All work", "list"),
+                 '<nav aria-label="Main">', nav("/", "Your work", "inbox", len(mine), urgent), nav("/board", "Board", "board"), nav("/runs", "All work", "list"),
                  '<div class="sec">Practice</div>', nav(sp, self.subj["plural"], "people")]
         if me and self.hub.of_base("Booking"):  # everyone opens the calendar; what they may not read shows as Busy
             parts.append(nav("/schedule", "Schedule", "calendar"))
@@ -906,8 +913,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
     ITEM_STATUS = {"open": ("To do", ""), "claimed": ("In progress", "prog"), "held": ("Waiting for sponsor", "wait"),
                    "done": ("Done", "done"), "cancelled": ("Cancelled", ""), "waiting": ("Waiting", "wait"),
                    "folded": ("Moved", "")}
-    STEP_STATE = {"pending": ("Waiting", ""), "active": ("In progress", "prog"), "done": ("Done", "done"),
-                  "skipped": ("Skipped", ""), "failed": ("Failed", "bad"), "waiting": ("Waiting", "wait"),
+    STEP_STATE = {"pending": ("To come", ""), "active": ("Now", "prog"), "done": ("Done", "done"),
+                  "skipped": ("Not needed", ""), "failed": ("Stopped", "bad"), "waiting": ("Now", "wait"),
                   "if-needed": ("If needed", "")}
     RUN_STATUS = {"running": ("In progress", "prog"), "completed": ("Done", "done"), "cancelled": ("Cancelled", "")}
 
@@ -1069,10 +1076,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             rows.append(f'<tr><td style="white-space:nowrap">{self._ki(it["kind"])} <span class="key">{self._key(it["id"])}'
                         f'</span></td><td><a href="/items/{it["id"]}">{e(it["title"])}</a>{self._urgency(it)}{flag}{note}{reason}</td>'
                         f'<td><a href="/runs/{it["run_id"]}">{e(it.get("run_title", ""))}</a></td>'
-                        f'<td>{e(self._role_words(it["role"]))}</td><td>{self._av(it["claimed_by"]) if it["claimed_by"] else ""}</td>'
+                        f'<td>{e(self._role_words(it["role"]))}</td><td>{self.holder_html(it) if it["kind"] != "notice" else ""}</td>'
                         f'<td>{self._item_loz(it)}</td><td class="muted" style="white-space:nowrap">'
                         f'{self._at(it["created_at"])}</td></tr>')
-        return ('<table class="list"><tr><th>Key</th><th>Work</th><th>About</th><th>Role</th><th>Assignee</th>'
+        return ('<table class="list"><tr><th>Key</th><th>Work</th><th>About</th><th>Role</th><th>Held by</th>'
                 f'<th>Status</th><th>Created</th></tr>{"".join(rows)}</table>')
 
     def _approvals_section(self, me) -> str:
@@ -1087,6 +1094,142 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'<p class="muted">Someone asked for these; you may approve or decline each one on its page.</p>'
                 f'<table class="list"><tr><th>Change</th><th>Asked by</th><th>Asked</th></tr>{rows}</table></section>')
 
+    # ------------------------------------------------------------------------------------------ urgent work
+    @staticmethod
+    def _overdue(it) -> bool:
+        due = it.get("due_at")
+        if not due or it.get("status") not in ("open", "claimed", "held"):
+            return False
+        try:
+            return datetime.fromisoformat(due.replace("Z", "+00:00")) < datetime.now(timezone.utc)
+        except ValueError:
+            return False
+
+    def _is_urgent(self, it) -> bool:
+        """Urgent work still to do, or work past its time: what goes first, above everything else."""
+        return (it.get("kind") not in ("notice", "hold") and it.get("status") in ("open", "claimed")
+                and (it.get("priority") == "urgent" or self._overdue(it)))
+
+    def _urgent(self, me, items: list | None = None) -> list[dict]:
+        """This member's urgent work, one group per record (else per run): urgent or overdue work in their roles or
+        hands, and the escalation notices sent to them about work still not done. A notice sent again and again
+        about the same work counts up on its row; it is not a row of its own each time."""
+        eng = self.hub.engine
+        items = eng.inbox(me, include_ineligible=True) if items is None else items
+        groups: dict = {}
+        runs: dict = {}
+
+        def run_of(rid):
+            if rid not in runs:
+                runs[rid] = eng.run(rid)
+            return runs[rid]
+
+        def group(it):
+            run = run_of(it["run_id"])
+            key = run.get("record") or run["id"]
+            if key not in groups:
+                groups[key] = {"key": key, "run": run, "title": self.hub.run_title(me, run), "work": {},
+                               "notices": []}
+            return groups[key]
+
+        for it in items:
+            if self._is_urgent(it):
+                group(it)["work"][it["id"]] = it
+        for n in items:
+            if n["kind"] != "notice" or n["status"] not in ("open", "claimed") or not n.get("step_id"):
+                continue
+            late = self._late_work_of(me, n)
+            if not late:
+                continue  # a notice about work since done, or not about late work: an ordinary notice
+            g = group(n)
+            g["notices"].append(n)
+            for w in late:
+                g["work"].setdefault(w["id"], w)
+        out = list(groups.values())
+        for g in out:
+            g["work"] = sorted(g["work"].values(), key=lambda w: (not self._overdue(w), w.get("due_at") or "~"))
+        return sorted(out, key=lambda g: (not any(self._overdue(w) for w in g["work"]),
+                                          min((w.get("due_at") or "~") for w in g["work"]) if g["work"] else "~"))
+
+    def _record_urgent(self, me, ref: str, runs: list[dict]) -> list[dict]:
+        """The urgent band of one record's page: urgent or overdue work about it that this member may see, whoever
+        holds it, and the escalation notices about it sent to this member."""
+        eng = self.hub.engine
+        open_runs = {r["id"]: r for r in runs if r["status"] == "running"}
+        if not open_runs:
+            return []
+        work = [eng.item(r["_id"]) for r in self.hub.db.items.find(
+            {"run_id": {"$in": list(open_runs)}, "status": {"$in": ["open", "claimed"]},
+             "kind": {"$in": ["task", "gate"]}}, fields=["_id"])]
+        work = [w for w in work if self._is_urgent(w) and self.may_see_item(me, w, open_runs[w["run_id"]])]
+        notices = [n for n in eng.inbox(me) if n["kind"] == "notice" and n["run_id"] in open_runs]
+        return self._urgent(me, work + notices)
+
+    def _late_work_of(self, me, notice) -> list[dict]:
+        """The late work an escalation notice is about (open, at the notice's step of its run), that this member
+        may see; none for any other notice."""
+        if notice["kind"] != "notice" or not notice.get("step_id"):
+            return []
+        eng = self.hub.engine
+        run = eng.run(notice["run_id"])
+        late = [eng.item(r["_id"]) for r in self.hub.db.items.find(
+            {"run_id": notice["run_id"], "step_id": notice["step_id"], "kind": {"$in": ["task", "gate"]},
+             "status": {"$in": ["open", "claimed"]}, "escalated": {"$gt": 0}}, fields=["_id"])]
+        return [w for w in late if self.may_see_item(me, w, run)]
+
+    def _urgent_value(self, me, run) -> str:
+        """What the work is about besides its record: the records its start named (a result, a referral), each
+        named the way this member may see it."""
+        vals = (run.get("ctx") or {}).get("input") or {}
+        refs = [self._ref_html(me, v) for v in vals.values() if isinstance(v, str) and v != run.get("record")]
+        return " · ".join(r for r in refs if r)
+
+    def _urgent_band(self, me, groups: list[dict], *, here: str = "/") -> str:
+        """The Urgent band: a row per record, with what it is about, how late, who holds it, and the way in."""
+        if not groups:
+            return ""
+        eng = self.hub.engine
+        rows = []
+        for g in groups:
+            value = self._urgent_value(me, g["run"])
+            asks = []
+            for w in g["work"]:
+                if eng.may_take_over(me, w):
+                    go = f'<a class="btn danger" href="/items/{e(w["id"])}#take-over">Take it over</a>'
+                elif w["status"] == "open" and eng.eligibility(me, w)[0]:
+                    go = f'<a class="btn primary" href="/items/{e(w["id"])}">Do it now</a>'
+                else:
+                    go = f'<a class="btn secondary" href="/items/{e(w["id"])}">Open</a>'
+                asks.append(f'<div class="u-work"><span class="key">{self._key(w["id"])}</span> '
+                            f'<a href="/items/{e(w["id"])}">{e(w.get("step_title") or w["title"])}</a>'
+                            f'{self._urgency(w)} <span class="muted">·</span> {self.holder_html(w, avatar=False)}'
+                            f'<span class="u-go">{go}</span></div>')
+            count = len(g["notices"])
+            told = (f' <span class="badge overdue" title="Escalation notices sent to you about this">Escalated '
+                    f'{count}×</span>' if count else "")
+            ack = ""
+            if g["notices"]:
+                ids = "".join(f'<input type="hidden" name="id" value="{e(n["id"])}">' for n in g["notices"])
+                ack = (f'<form method="post" action="/notices/ack" class="inline">{ids}<input type="hidden" '
+                       f'name="_back" value="{e(here)}"><button class="subtle">Dismiss '
+                       f'{"notice" if count == 1 else f"the {count} notices"}</button></form>')
+            rows.append(f'<li class="u-row"><div class="u-head"><b>{e(g["title"])}</b>{told}'
+                        f'{f" <span class=u-value>{value}</span>" if value else ""}{ack}</div>{"".join(asks)}</li>')
+        return (f'<section class="urgent-band" aria-labelledby="urgent-h"><h2 id="urgent-h">Urgent '
+                f'<span class="badge urgent">{len(groups)}</span></h2><ul class="plain">{"".join(rows)}</ul></section>')
+
+    def post_notices_ack(self, req):
+        """Dismiss several notices at once (an Urgent row's escalations): each one this member may acknowledge."""
+        me, eng = req["me"], self.hub.engine
+        f = self.form(req)
+        ids = f.get("id") or []
+        for nid in [ids] if isinstance(ids, str) else ids:
+            try:
+                eng.acknowledge(me, str(nid))
+            except (Denied, Invalid, NotFound):
+                continue  # acknowledged already, or not this member's: the others still go
+        raise Redirect(self.safe_back(f.get("_back")) or "/")
+
     def page_inbox(self, req):
         me = req["me"]
         items = self.hub.engine.inbox(me, include_ineligible=True)
@@ -1096,7 +1239,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         doing = [i for i in mine if i["kind"] not in ("notice", "hold") and i["claimed_by"] == me["id"]]
         ready = [i for i in mine if i["kind"] not in ("notice", "hold") and i["claimed_by"] != me["id"]]
         other = [i for i in items if not i["eligible"]]
-        parts = []
+        urgent = self._urgent(me, items)
+        folded = {n["id"] for g in urgent for n in g["notices"]}
+        notices = [n for n in notices if n["id"] not in folded]
+        parts = [self._urgent_band(me, urgent)]
         if holds:
             parts.append(f'<h2>Waiting for your approval ({len(holds)})</h2>'
                          f'<p class="muted">High-risk work by agents you sponsor. Nothing happens until you decide.</p>'
@@ -1199,6 +1345,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         back = self.here(req)
 
         def lane_of(it):
+            if self._is_urgent(it):
+                return "\x00urgent"  # the first lane
             if group == "workflow":
                 return run_of(it["run_id"])["workflow_id"]
             if group == "role":
@@ -1210,10 +1358,14 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             lanes.setdefault(lane_of(it), []).append(it)
         titles = {w["workflow"].id: w["workflow"].title for w in self.hub.workflows()} if group == "workflow" else {}
         out = []
-        for lane in sorted(lanes):
+        for lane in sorted(lanes, key=lambda k: (k != "\x00urgent", k)):
             its = lanes[lane]
-            if lane:
-                out.append(f'<div class="lane">{e(titles.get(lane, lane))} <span class="badge">{len(its)}</span></div>')
+            if lane == "\x00urgent":
+                out.append(f'<div class="lane urgent">Urgent <span class="badge urgent">{len(its)}</span>'
+                           f'<span class="muted">urgent, or past its time</span></div>')
+            elif lane or "\x00urgent" in lanes:
+                out.append(f'<div class="lane">{e(titles.get(lane, lane) or "Everything else")} '
+                           f'<span class="badge">{len(its)}</span></div>')
             colhtml = []
             for cid, label, cls in cols:
                 tiles = [self._tile(i, self._item_moves(me, i), back) for i in its if column(i) == cid]
@@ -1254,7 +1406,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         about = it.get("run_title", "") if it.get("run_title", "") != it["title"] else ""
         inner = (f'<div class="t">{e(it["title"])}{self._urgency(it)}</div>'
                  f'<div class="about">{e(" · ".join(x for x in (now, about) if x))}</div>{note}<div class="foot">{self._ki(it["kind"])}'
-                 f'<span class="key">{self._key(it["id"])}</span>{flag}{self._av(it["claimed_by"])}</div>')
+                 f'<span class="key">{self._key(it["id"])}</span>{flag}{self.holder_avatar(it)}</div>')
         return self.board_card(inner, f'/items/{it["id"]}', urgent, it["id"], it["title"], moves or {},
                                "/board/move", {"item": it["id"], "_back": back})
 
@@ -1331,6 +1483,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 raise Invalid({"wait": "an approval waits for its sponsor; work is not moved there"}.get(
                     to, "pick a column it may go to"))
         except (Denied, Invalid) as exc:
+            if isinstance(exc, Denied):
+                exc = Denied(self.holder_refusal(me, eng.item(iid), str(exc)))
             raise self.refused_move(req, item["title"], exc, back) from None
         raise Redirect(back)
 
@@ -1527,9 +1681,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             what = f"<b>{e(wf.title)} is already open for this.</b> " + (
                 f"It is {e(self._key(iid))}; whoever holds it can tell you more." if item else "")
         else:
-            holder = item.get("claimed_by") or item.get("assignee")
             role = item.get("role") or ""
-            who = (f"held by {e(self.member_name(holder))}" if holder else
+            who = (f"held by {e(self.holder_text(item))}" if holder(item)["member"] else
                    f"waiting for {e(self.hub.role(role)['name'])}" if role and self.hub._role_known(role) else
                    "not held by anyone yet")
             at = ""
@@ -1585,7 +1738,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         except KeyError:
             step = None
         crumbs = [("/board", "Board"), (f"/runs/{run['id']}", self.hub.run_title(req["me"], run)), ("", self._key(iid))]
-        dl = [("Status", self._item_loz(item) + self._urgency(item)), ("Assignee", self.who(item["claimed_by"])),
+        dl = [("Status", self._item_loz(item) + self._urgency(item)), ("Held by", self.holder_html(item)),
               ("Role", e(self._role_words(item["role"]) or "—")),
               ("Type", f'{self._ki(item["kind"])} {e({"gate": "decision", "hold": "approval"}.get(item["kind"], item["kind"]))}')]
         if step and item["kind"] in ("task", "gate"):
@@ -1655,6 +1808,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             main.append(f'<div class="section"><h2>Result</h2><div class="card">{shown}</div></div>')
         elif item["kind"] == "notice":
             actions = (f'<form method="post" action="/items/{iid}/ack" class="inline"><button>Acknowledge</button></form>')
+            for w in self._late_work_of(me, item):  # an escalation: the way to the late work itself
+                go = ("Take it over" if eng.may_take_over(me, w) else "Open the work")
+                actions = (f'<a class="btn {"danger" if go == "Take it over" else "primary"}" '
+                           f'href="/items/{e(w["id"])}{"#take-over" if go == "Take it over" else ""}">{go} '
+                           f'({e(self._key(w["id"]))})</a> ' + actions)
             about = (item.get("output") or {}).get("about") or ""
             if about.startswith("outbox:"):
                 main.append(self._message_card(me, about.split(":", 1)[1]))
@@ -1681,7 +1839,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 people = "".join(f'<option value="{e(m["id"])}">{e(m["name"])}</option>'
                                  for m in eng.reassign_options(item))
                 mine = '<option value="">Me</option>' if eng.may_take_over(me, item) and ok_free else ""
-                actions = (f'<form method="post" action="/items/{iid}/take-over" class="inline reassign">'
+                actions = (f'<form method="post" action="/items/{iid}/take-over" class="inline reassign" '
+                           f'id="take-over">'
                            f'<label>Move from {e(held)} to <select name="to">{mine}{people}'
                            f'<option value="queue">Anyone who can</option></select></label>'
                            f'<input name="note" placeholder="why (they will see it)" required>'
@@ -1704,7 +1863,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         if kids:
             rows = "".join(f'<li><a href="/items/{e(k["_id"])}">{e(self._key(k["_id"]))}</a> '
                            f'{e(k.get("step_title") or k["title"])} {self._loz(self.ITEM_STATUS, k["status"])} '
-                           f'{e(self.member_name(k.get("claimed_by") or k.get("assignee")) or "")}</li>'
+                           f'{self.holder_html(k, avatar=False)}</li>'
                            for k in kids)
             out.append(f'<div class="section"><h2>Parts</h2><ul class="plain">{rows}</ul></div>')
         return "".join(out)
@@ -1723,6 +1882,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             who = self.member_name(h.get("by")) or self.member_name(h.get("assignee")) or \
                 self._role_words(h.get("role")) or ""
             how = (h.get("outcome") or ("in progress" if not h.get("done_at") else "done")).replace("_", " ")
+            if not h.get("done_at") and not h.get("outcome") and h.get("step") == item.get("step_id") \
+                    and item["status"] in ("open", "claimed"):  # the step now: whoever holds the item holds it
+                held = holder(item)
+                who = self.holder_text(item) if held["member"] else who
+                how = "in progress" if held["how"] == "taken" else "waiting to be taken"
             extra = (" (ran out of time)" if h.get("timed_out") else "") + \
                 (f" (escalated {h['escalated']}x)" if h.get("escalated") else "")
             rows.append(f'<tr><td>{e(h.get("title") or "")}</td><td>{e(who)}</td>'
@@ -1736,7 +1900,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         kept = kept or {}
         ok, why = eng.eligibility(me, item)
         if not ok:
-            return f'<div class="error">You cannot take this: {e(why)}</div>'
+            return f'<div class="error">You cannot take this: {e(self.holder_refusal(me, item, why))}</div>'
         ctx = eng.context(me, iid)
         st = ctx["step"]
         parts = []
@@ -1794,7 +1958,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
     EVENT_QUIET = {"signed", "attested", "refs", "refs_sha256", "hash", "mac", "signature", "version", "parent",
                    "blocks", "skills", "cause", "credential", "token", "jti", "token_id"}
 
-    def _event_words(self, ev: dict, me: dict, memo: dict | None = None) -> str:
+    def _event_words(self, ev: dict, me: dict, memo: dict | None = None, raw: bool = True) -> str:
         """An event's data as plain lines, "Label: value", members by name, records by their title or kind, a step
         by its title, no ids; the raw data stays under Details for whoever needs it."""
         memo = {} if memo is None else memo
@@ -1868,6 +2032,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             if text:
                 lines.append(f'<li><span class="muted">{e(self.human(k))}:</span> {text}</li>')
         plain = f'<ul class="plain ev-lines">{"".join(lines[:10])}</ul>' if lines else ""
+        if not raw:
+            return plain
         return (plain + f'<details><summary class="meta">Details</summary><pre>{e(json.dumps(data, indent=1))}</pre>'
                         f'</details>')
 
@@ -1894,17 +2060,48 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             return e(m["name"]) if m else words[kind]
         return e(self.human(subject)) if not self.ID_RE.search(subject) else ""
 
+    ACTION_WORDS = {
+        "run.started": "started this work", "run.completed": "finished this work", "run.cancelled": "cancelled this work",
+        "run.deadline_missed": "noted that this work missed its deadline", "action.ran": "did an automatic step",
+        "step.activated": "started a step", "step.done": "finished a step", "step.skipped": "found a step not needed",
+        "step.waiting": "is waiting", "step.failed": "could not do a step", "step.retried": "tried a step again",
+        "item.claimed": "took the work", "item.released": "gave the work back", "item.escalated": "passed the work up",
+        "item.overdue": "noted the work is late", "item.taken_over": "took the work over", "item.held": "held the work "
+        "for approval", "item.passed_on": "passed the work on", "item.refused": "refused the work",
+        "hold.decided": "decided on the held work", "notice.acknowledged": "read a notice",
+        "record.created": "created", "record.updated": "changed", "record.transitioned": "moved on",
+        "record.signed": "signed", "record.attested": "attested", "record.viewed": "opened",
+        "file.added": "added a file", "booking.overbooked": "overbooked a slot", "event.received": "received an event",
+    }
+
     def _activity(self, events, me) -> str:
-        """Events as an activity feed, redacted for this viewer."""
+        """Events as an activity feed in words, redacted for this viewer. Events about steps this member may not see
+        fold into one line each run of them; event numbers and raw data are for policy owners (who audit)."""
         rows, memo = [], {}
+        audit = self.hub.is_policy_owner(me)
+        hidden = 0
+
+        def fold():
+            if hidden:
+                rows.append(f'<li class="muted"><span class="av empty" aria-hidden="true">·</span><div class="body">'
+                            f'{hidden} thing{"s" if hidden != 1 else ""} happened in steps you may not see.</div></li>')
+
         for ev in Viewer(self.hub, me).events(events):
-            signed = self._signed_badge(ev)
             data = {k: v for k, v in ev["data"].items() if k not in ("signed", "attested")}
-            cause = f' · because of <a href="/track/{ev["cause"]}">#{ev["cause"]}</a>' if ev["cause"] else ""
+            if data and set(data) <= {"hidden"}:  # all it would say is that it is hidden
+                hidden += 1
+                continue
+            fold()
+            hidden = 0
+            signed = self._signed_badge(ev)
+            cause = (f' · because of <a href="/track/{ev["cause"]}">#{ev["cause"]}</a>'
+                     if ev["cause"] and audit else "")
+            seq = f'<a href="/track/{ev["seq"]}">#{ev["seq"]}</a> · ' if audit else ""
+            what = self.ACTION_WORDS.get(ev["action"], ev["action"].replace(".", " ").replace("_", " "))
             rows.append(f'<li>{self._av(ev["actor"])}<div class="body"><div><b>{e(self.member_name(ev["actor"]))}</b> '
-                        f'{e(ev["action"].replace(".", " "))}{signed}</div><div class="meta">'
-                        f'<a href="/track/{ev["seq"]}">#{ev["seq"]}</a> · {self._at(ev["at"])}{cause}</div>'
-                        + (self._event_words(ev, me, memo) if data else "") + "</div></li>")
+                        f'{e(what)}{signed}</div><div class="meta">{seq}{self._at(ev["at"])}{cause}</div>'
+                        + (self._event_words(ev, me, memo, raw=audit) if data else "") + "</div></li>")
+        fold()
         return f'<ul class="activity">{"".join(rows)}</ul>' if rows else '<p class="muted">No activity yet.</p>'
 
     # ------------------------------------------------------------------------------------------ runs
@@ -1932,9 +2129,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
 
     def _flow(self, wf, run=None, links=None, legend=True, viewer=None) -> str:
         fid = f"flow-{wf.id}-{run['id'] if run else 'def'}"
-        leg = ('<div class="legend"><span><span class="ki task">T</span> task</span><span><span class="ki gate">D</span> '
-               'decision (signed)</span><span><span class="ki automation">A</span> automation</span><span><span class="badge '
-               'agent">AI</span> an agent may do it</span><span>- - - only under a condition</span></div>') if legend else ""
+        leg = ('<div class="legend"><span><span class="ki task">T</span> something a person does</span><span>'
+               '<span class="ki gate">D</span> a decision someone signs</span><span><span class="ki automation">A</span> '
+               'done automatically</span><span><span class="badge agent">AI</span> an assistant may do it</span>'
+               '<span>- - - only when needed</span></div>') if legend else ""
         return (f'<div class="flowwrap"><svg data-flow="{fid}"></svg></div>{leg}'
                 f'<script type="application/json" id="{fid}">{self._flow_json(wf, run, links, viewer)}</script>')
 
@@ -1975,15 +2173,17 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                                f'required><button>Retry this step</button></form>')
             title = (f'<a href="/items/{e(st["item"])}">{e(s.title)}</a>' if st.get("item") else e(s.title))
             key = f'<span class="key">{self._key(st["item"])}</span>' if st.get("item") else ""
-            cond = (f"only {cond_words(wf, s.when)}" if s.when and viewer.full(wf) else "only if needed" if s.when else "")
-            meta = " · ".join(x for x in [s.role or s.action or "", cond] if x)
+            cond = (f"only {cond_words(wf, s.when)}" if s.when and viewer.full(wf) else "")  # the lozenge says "if needed"
+            meta = " · ".join(x for x in [self._role_words(s.role) if s.role else "", cond] if x)
             rows.append(f'<div class="row{" skipped" if st["state"] == "skipped" else ""}">{self._ki(s.kind)}{key}'
                         f'<div class="t">{title} <span class="muted">{e(meta)}</span>{detail}</div>'
                         f'{self._av(st["by"]) if st.get("by") else ""}{self._loz(self.STEP_STATE, st["state"])}</div>')
         if unseen:
             missing = viewer.missing(visibility_classes(wf))
-            rows.append(f'<div class="row muted"><div class="t">{unseen} step{"s" if unseen != 1 else ""} you may not '
-                        f'see (they need access to {e(", ".join(missing))})</div></div>')
+            kinds = " and ".join(self._class_name(c).lower() for c in missing) or "restricted"
+            rows.append(f'<div class="row muted"><div class="t">{unseen} more step{"s" if unseen != 1 else ""} '
+                        f'{"are" if unseen != 1 else "is"} kept from your role: '
+                        f'{"they show" if unseen != 1 else "it shows"} {e(kinds)} information.</div></div>')
         events = list(reversed(hub.track.list(run_id=rid, limit=500)))
         actions = ""
         if run["status"] == "running" and (run["started_by"] == me["id"] or hub.is_policy_owner(me)):
@@ -1991,15 +2191,13 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                        f'placeholder="reason to cancel" required><button class="danger">Cancel</button></form>')
         dl = [("Status", self._loz(self.RUN_STATUS, run["status"])),
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
-        if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
-            dl.append((self.subj["label"], self.subject_link(run["record"])))
-        elif run["record"]:
-            dl.append(("About", self.record_link(run["record"])))
         if run.get("subject") and run["subject"] != run["record"] and run["subject"].startswith(self.subj["type"] + "/"):
-            dl.append((self.subj["label"], self.subject_link(run["subject"])))
+            dl.append((self.subj["label"], self._ref_html(me, run["subject"]) or e(self.subj["label"])))
+        elif run["record"] and run["record"].startswith(self.subj["type"] + "/"):
+            dl.append((self.subj["label"], self._ref_html(me, run["record"]) or e(self.subj["label"])))
         dl += [("Started by", self.who(run["started_by"])), ("Created", self._at(run["created_at"])),
                ("Updated", self._at(run["updated_at"]))]
-        if run.get("root_event"):
+        if run.get("root_event") and hub.is_policy_owner(me):  # the audit trail: for who audits
             dl.append(("Caused by", f'<a href="/track/{run["root_event"]}">event #{run["root_event"]}</a>'))
         details = ('<aside class="details"><h3>Details</h3><dl>'
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
@@ -2007,33 +2205,67 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 + f'<div class="section"><h2>Workflow</h2>{self._flow(wf, run, links, viewer=viewer)}</div>'
                 f'<div class="section"><h2>Steps</h2><div class="subtasks">{"".join(rows)}</div></div>'
                 f'<div class="section"><h2>Activity</h2>{self._activity(events, me)}</div>')
-        return self.layout(req, self.hub.run_title(req["me"], run), f'<div class="issue"><div>{main}</div>{details}</div>',
+        return self.layout(req, self._run_heading(me, run, wf), f'<div class="issue"><div>{main}</div>{details}</div>',
                            crumbs=[("/runs", "All work"), (f"/workflows/{wf.id}", wf.title)], actions=actions)
 
+    def _run_heading(self, me, run, wf) -> str:
+        """A run page's title: the work and whom it is about ("Appointment request: Ellen MacLeod (born …)") when this
+        member may read who that is, else the work alone; never the record's summary, which the head shows once."""
+        about = run.get("subject") or run.get("record")
+        return self.hub.run_title(me, {**run, "record": about}) if about else wf.title
+
     def _run_head(self, me, run, wf, shown_steps) -> str:
-        """The run's one item, at the top of its page: its key and title, the step it is now at and whose it is, and
-        the record it walks in the state it is in. Nothing for a run without one, or a step the member may not see."""
-        hub = self.hub
-        item = hub.db.items.find_one({"_id": run.get("item")}) if run.get("item") else None
-        if not item:
-            return ""
-        step = next((s for s in wf.steps if s.id == item.get("step_id")), None)
-        if run["status"] != "running" or not step or step.id not in shown_steps:
-            now = self._loz(self.RUN_STATUS, run["status"])
-        else:
-            whose = self.who(item["assignee"]) if item.get("assignee") else e(item.get("role") or "")
-            now = f'now at <b>{e(step.title)}</b>' + (f' · {whose}' if whose else "")
-        rec = ""
+        """The top of a run's page, in words: the record it walks and its state, where the work is now (even at a step
+        this member may not see, said as such), who holds it and how late, what is waiting beside it, what comes
+        next."""
+        hub, eng = self.hub, self.hub.engine
+        viewer = Viewer(hub, me)
+        lines = []
         if run.get("record") and "/" in run["record"]:
             rtype, rid = run["record"].split("/", 1)
-            rt, r = hub.record_type(rtype), hub.records.read(rtype, rid)
+            rt = hub.record_type(rtype)
+            try:
+                r = hub.records.read(rtype, rid)
+            except HubError:
+                r = None
             field = ((rt.lifecycle or {}).get("field") if rt else None)
             state = rt.state_label(r.get(field)) if r and field and self._may_read(me, rtype) else ""
-            rec = (f'<p>{self.record_link(run["record"])}'
-                   + (f' <span class="badge">{e(state)}</span>' if state else "") + "</p>")
-        title = f'<a href="/items/{e(item["id"])}">{e(item.get("title") or wf.title)}</a>'
-        return (f'<div class="card run-head"><p><span class="key">{self._key(item["id"])}</span> <b>{title}</b></p>'
-                f'<p class="muted">{now}</p>{rec}</div>')
+            words = e(rt.label) if rt else e(rtype)
+            lines.append(("About", f'<a href="{e(self.record_href(run["record"]))}">{words}</a>'
+                          + (f' <span class="loz">{e(state)}</span>' if state else "")))
+        if run["status"] != "running":
+            lines.append(("Status", self._loz(self.RUN_STATUS, run["status"])))
+        item = eng.item(run["item"]) if run.get("item") and hub.db.items.get(run["item"]) else None
+        at = None
+        if run["status"] == "running" and item and item["status"] in ("open", "claimed", "held", "waiting"):
+            at = item.get("step_id")
+            step = next((s for s in wf.steps if s.id == at), None)
+            if step and at in shown_steps and self.may_see_item(me, item, run):
+                now = (f'<span class="key">{self._key(item["id"])}</span> '
+                       f'<a href="/items/{e(item["id"])}"><b>{e(step.title)}</b></a>')
+            else:
+                missing = viewer.step_visible(wf, at)[1] if step else []
+                kinds = " and ".join(self._class_name(c).lower() for c in missing)
+                now = (f'<b>a {e(kinds)} step</b> <span class="muted">(kept from your role)</span>' if kinds
+                       else '<b>a step you may not see</b>')
+            lines.append(("Now", now + (self._urgency(item) if item["status"] != "waiting" else "")))
+            if item["status"] == "waiting":
+                lines.append(("Held by", f'<span class="muted">Nobody: it waits for</span> '
+                                         f'{e(item.get("waiting") or "the workflow to go on")}'))
+            else:
+                lines.append(("Held by", self.holder_html(item)))
+        if run["status"] == "running":
+            beside = [s for s in wf.steps if s.id in shown_steps and s.id != at
+                      and shown_steps[s.id]["state"] in ("waiting", "active")]
+            for s in beside:
+                lines.append(("Also", f'{e(s.title)} {self._loz(self.STEP_STATE, shown_steps[s.id]["state"])}'))
+            nxt = [s for s in wf.steps if s.id in shown_steps and shown_steps[s.id]["state"] == "pending"][:2]
+            if nxt:
+                lines.append(("Next", e(", then ".join(s.title for s in nxt))))
+        if not lines:
+            return ""
+        rows = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in lines)
+        return f'<div class="card run-head"><dl class="run-now">{rows}</dl></div>'
 
     # ------------------------------------------------------------------------------------------ workflows
     def page_workflows(self, req):
@@ -2647,7 +2879,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         f = self.form(req)
         item = eng.item(iid)
         if verb == "claim":
-            eng.claim(me, iid)
+            try:
+                eng.claim(me, iid)
+            except Denied as exc:  # the refusal names who holds it
+                raise Denied(self.holder_refusal(me, item, str(exc))) from None
             raise Redirect(f"/items/{iid}")
         if verb == "release":
             eng.release(me, iid, f.get("note", ""))
@@ -2665,6 +2900,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             else:
                 eng.complete(me, iid, self._form_output(f))
         except (Denied, Invalid) as exc:  # the page again, saying what went wrong, with what was typed kept
+            if isinstance(exc, Denied):
+                exc = Denied(self.holder_refusal(me, eng.item(iid), str(exc)))
             kept = {k: v for k, v in f.items() if k not in ("passphrase", "credential", "seen")}
             code = 403 if isinstance(exc, Denied) else 422
             raise Rendered(code, self.page_item(req, iid, kept=kept, error=exc)) from None
@@ -2771,9 +3008,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))]
         # beside the chart, like any record's: the work under way about them (finished work is in the list below)
         panel = self.work_panel(me, ref)
-        body = "".join(parts)
+        # urgent work about them goes directly under the banner, at every width: never below the fold of the chart
+        band = self._urgent_band(me, self._record_urgent(me, ref, runs), here=f"/{self.subj['path']}/{pid}")
+        body = parts[0] + band + "".join(parts[1:])
         if panel:
-            body = (parts[0] + f'<div class="issue side-after"><div>{"".join(parts[1:])}</div>'
+            body = (parts[0] + band + f'<div class="issue side-after"><div>{"".join(parts[1:])}</div>'
                     f'<aside class="issue-side" aria-label="Open work">{panel}</aside></div>')
         return self.layout(req, self.hub.short_title(p), body, heading=False,
                            crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.short_title(p))],

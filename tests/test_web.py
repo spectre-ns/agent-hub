@@ -2506,3 +2506,103 @@ def test_the_slot_picker_offers_every_day_and_every_physician(hub, server):
     hub.engine.claim(M(hub, "jo"), iid)
     hub.engine.complete(M(hub, "jo"), iid, {"slot": last["value"], "why": "the patient asked for later in the week"})
     assert hub.engine.run(run["id"])["ctx"]["book"]["member_name"] == last["with_name"]
+
+
+def test_one_holder_is_named_the_same_way_everywhere(hub, server):
+    """Who holds a piece of work is one answer (taken, else given, else its role), on the item page, the board,
+    Your work and in a refusal; a refusal names the holder rather than "someone else"."""
+    from practicehub.web.holder import holder
+    assert holder({"status": "claimed", "claimed_by": "noor", "assignee": "jo", "role": "nurse"}) == \
+        {"member": "noor", "how": "taken", "role": "nurse"}
+    assert holder({"status": "open", "claimed_by": None, "assignee": "noor", "role": "nurse"})["how"] == "given"
+    assert holder({"status": "open", "claimed_by": None, "assignee": None, "role": "nurse"})["member"] is None
+    run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    iid = item_for(hub, run, "propose")
+    page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))[1]
+    assert "Held by" in page and "Waiting for</span> Scheduler" in page and ">Assignee<" not in page
+    hub.engine.claim(M(hub, "jo"), iid)
+    for path in (f"/items/{iid}", "/board", "/"):
+        page = call(server, "GET", path, token(hub, "jo"))[1]
+        assert "Jo Tremblay" in page, path
+    item = hub.engine.item(iid)
+    app = App(hub, dev=True)
+    words = app.holder_refusal(M(hub, "noor"), {**item, "status": "open", "claimed_by": None, "assignee": "jo"},
+                               "it is assigned to someone else")
+    assert words == "it is assigned to someone else: it is held by Jo Tremblay (given to them, not yet taken)"
+    # a refusal from the engine that already names the holder is left as it is
+    status, page = call(server, "POST", f"/items/{iid}/claim", token(hub, "scheduling-agent"))
+    assert status in (403, 409, 422) and "Jo Tremblay" in page
+    assert page.count("Jo Tremblay is working on it") <= 1 and "held by Jo Tremblay" not in page
+
+
+def _critical_call_escalated(hub, times=3):
+    """A critical result: the physician asks for a call, the nurse who took it hands it back, and it escalates
+    ``times`` times (the physician gets an escalation notice each time)."""
+    from datetime import timedelta
+    eng = hub.engine
+    ref = _ellen(hub)
+    obs = hub.create_record(hub.member("lab-feed"), "Observation", {
+        "status": "registered", "category": [{"text": "laboratory"}], "subject": {"reference": ref},
+        "code": {"text": "Potassium"}, "effectiveDateTime": eng.now().date().isoformat(),
+        "valueQuantity": {"value": 6.9, "unit": "mmol/L"}, "interpretation": [{"text": "critical"}]})
+    run = eng.start(hub.member("lab-feed"), "lab-result-review", record=ref, inputs={
+        "test": "Potassium", "value": "6.9", "unit": "mmol/L", "range": "3.5-5.0", "flag": "critical",
+        "observation": f"Observation/{obs['id']}"})
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
+    gate = item_for(hub, run, "review-critical")
+    eng.claim(amara, gate)
+    eng.decide(amara, gate, "call-patient", "call her now", seen=eng.shown_digest(amara, gate))
+    call_ = item_for(hub, hub.engine.run(run["id"]), "call-critical")
+    eng.claim(noor, call_)
+    eng.release(noor, call_, "Going on break")
+    now = eng.now()
+    for k in range(1, times + 1):
+        eng.tick(now + timedelta(hours=k, minutes=5))
+    return run, call_
+
+
+def test_urgent_work_comes_first_one_row_per_record_with_a_counter(hub, server):
+    """Your work opens on an Urgent band: one row per record, however many escalations were sent (a counter, not a
+    row each), with the result, how late, who holds it and the way in; the sidebar counts it in red; the board puts
+    it in an Urgent lane at the top; the escalation notice leads to the work."""
+    run, call_ = _critical_call_escalated(hub)
+    step = hub.engine.item(call_)["step_id"]
+    mine = [n for n in hub.engine.inbox(M(hub, "dr-amara"))
+            if n["kind"] == "notice" and n["run_id"] == run["id"] and n.get("step_id") == step]
+    assert len(mine) >= 2  # several escalation notices went to her
+    hub.db.items.set(call_, {"due_at": "2020-01-01T00:00:00Z"})  # past its time, on the wall clock too
+    status, page = call(server, "GET", "/", token(hub, "dr-amara"))
+    assert status == 200
+    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert page.index('class="urgent-band"') < page.index("In progress with you")
+    assert band.count('class="u-row"') == 1 and f"Escalated {len(mine)}×" in band
+    assert "Potassium" in band and "Overdue" in band and f'href="/items/{call_}' in band
+    assert "Waiting for</span> Nurse" in band  # handed back: nobody holds it now
+    notices = page.split("<h2>Notices", 1)[1]
+    assert not any(n["id"] in notices for n in mine)  # counted on the row, not listed again
+    assert '<span class="count urgent"' in page.split('class="side"', 1)[1].split("</nav>", 1)[0]
+    board = call(server, "GET", "/board", token(hub, "dr-amara"))[1]
+    lane = board.split('class="lane urgent"', 1)[1]
+    assert lane.index(call_) < lane.index('class="lane"') if 'class="lane"' in lane else call_ in lane
+    item = call(server, "GET", f"/items/{mine[0]['id']}", token(hub, "dr-amara"))[1]
+    assert f'href="/items/{call_}' in item and ("Take it over" in item or "Open the work" in item)
+    # dismissing the row acknowledges every escalation on it
+    status, _ = call(server, "POST", "/notices/ack", token(hub, "dr-amara"),
+                     form=[("id", n["id"]) for n in mine] + [("_back", "/")])
+    assert status in (200, 303)
+    assert all(hub.engine.item(n["id"])["status"] == "done" for n in mine)
+
+
+def test_a_chart_shows_urgent_work_under_its_banner_at_every_width(hub, server):
+    """The chart's urgent work sits directly under the banner in the page itself (no layout rule moves it down on a
+    narrow screen), for anyone who may see the work, not only whom it was escalated to."""
+    run, call_ = _critical_call_escalated(hub, times=1)
+    pid = _ellen(hub).split("/", 1)[1]
+    page = call(server, "GET", f"/patients/{pid}", token(hub, "noor"))[1]
+    assert 'class="urgent-band"' in page and call_ in page.split('class="urgent-band"', 1)[1].split("</section>")[0]
+    banner_end = page.index('class="urgent-band"')
+    assert banner_end < page.index("file-tools") and banner_end < page.index('class="issue')
+    from practicehub.web.assets import CSS
+    rule = CSS.split(".urgent-band", 1)[1].split("}", 1)[0]
+    assert ".urgent-band" in CSS and not re.search(r"[{;]order:", rule)
