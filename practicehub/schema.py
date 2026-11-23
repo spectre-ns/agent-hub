@@ -63,6 +63,10 @@ answer that becomes a record, an engine calling the API.
     to = "final"
     by = "workflow"               # "anyone" who may write the class (default), or only a "workflow" step
     # label = "Finalise"          # the move's words (default: the state it goes to, in words)
+    # asks = ["conclusion"]       # fields the move's screen asks for, written in the same move
+    # requires = ["conclusion"]   # fields that must be set once it has moved (whoever moves it, a workflow too);
+                                  #   the type's own field rules check what they hold
+    # sign = "Approved"           # the mover signs it with this meaning (a person: an agent never signs)
     # [lifecycle.labels]          # a state's words, where its code is not words: onleave = "On leave"
 
 A path may use ``*`` for every item of a list (``participant.*.actor``).
@@ -204,7 +208,7 @@ KEYS = {
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
               "roles", "required_unless"},
     "lifecycle": {"field", "states", "initial", "transition", "locked", "abandoned", "in_use", "labels"},
-    "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
+    "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment", "asks", "requires", "sign"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "screen": {"id", "on", "tab", "fields", "label"},
     "tab": {"label", "fields"},
@@ -487,19 +491,24 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                     problems.append(f"lifecycle.transition: {s!r} is not one of its states")
             if by not in BY:
                 problems.append(f"{where}: by is one of {', '.join(BY)}")
-            req = t.get("require", []) or []
-            req = [req] if isinstance(req, str) else req
-            tf = t.get("fields", []) or []
+            # asks/requires are the words a type author writes; fields/require the older names of the same lists
+            req = [x for k in ("require", "requires") for x in (lambda v: [v] if isinstance(v, str) else v)(t.get(k) or [])]
+            tf = [x for k in ("fields", "asks") for x in (lambda v: [v] if isinstance(v, str) else v)(t.get(k) or [])]
             if not _strings(req) or not _strings(tf):
-                problems.append(f"{where}: require and fields are lists of field names")
+                problems.append(f"{where}: asks and requires are lists of field names")
                 req, tf = [], []
+            sign = t.get("sign")
+            if sign is not None and not (isinstance(sign, str) and sign.strip()):
+                problems.append(f"{where}: sign is what the mover's signature means, e.g. sign = \"Approved\"")
+                sign = None
             if not isinstance(t.get("comment", False), bool):
                 problems.append(f"{where}: comment is true or false")
             if t.get("screen") is not None and not isinstance(t["screen"], str):
                 problems.append(f"{where}: screen is a screen id")
             trans.append({"from": frm, "to": to, "by": by, "label": str(t.get("label") or labels.get(to) or state_words(to)),
                           "screen": t.get("screen") if isinstance(t.get("screen"), str) else None,
-                          "fields": list(tf), "require": list(req), "comment": t.get("comment") is True})
+                          "fields": list(tf), "require": list(req), "comment": t.get("comment") is True,
+                          "sign": sign.strip() if sign else None})
         locked = lc.get("locked") or []  # states in which people change nothing but the state itself
         if not _strings(locked):
             problems.append("lifecycle.locked: a list of its states")
@@ -572,6 +581,10 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             problems.append(f"signature {meaning!r}: moves_to {g['moves_to']!r} is not one of its states")
         if g.get("moves_to") and not g.get("roles"):
             problems.append(f"signature {meaning!r}: a signature that moves the record says which roles may sign it")
+    for t in (lc or {}).get("transition", []):
+        if t.get("sign") and sigs and not any(g["meaning"] == t["sign"] for g in sigs):
+            problems.append(f"lifecycle.transition to {t['to']!r}: sign {t['sign']!r} is not one of its signatures' "
+                            f"meanings ({', '.join(repr(g['meaning']) for g in sigs)})")
     screens = _screens(doc, fields, base_map, lc, problems)
     label = str(doc.get("label") or tid)
     rt = RecordType(id=tid, label=label, plural=str(doc.get("plural") or label + "s"),

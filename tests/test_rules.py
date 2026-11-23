@@ -5088,3 +5088,135 @@ def test_a_new_portal_setting_on_an_existing_hub_is_not_taken_from_disk(tmp_path
     hub = Hub(state)
     assert hub.db.get_setting("pack_config")["portal"] == {}, "changed files: nothing pinned from them"
     assert not hub.pack.portal and hub.pack_problem
+
+
+# ------------------------------------------------------------------ record transitions: moving a record on its page
+JOB = """id = "Job"
+data_class = "visits"
+{top}
+[[field]]
+name = "title"
+required = true
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "doing", "done", "approved", "cancelled"]
+[[field]]
+name = "outcome"
+label = "Outcome"
+type = "text"
+[[field]]
+name = "hours"
+label = "Hours worked"
+type = "number"
+min = 0
+[[signature]]
+meaning = "Approved"
+roles = ["medical-director"]
+states = ["done"]
+[lifecycle]
+field = "status"
+initial = "open"
+[[lifecycle.transition]]
+from = ["open"]
+to = "doing"
+label = "Start"
+[[lifecycle.transition]]
+from = ["doing"]
+to = "done"
+label = "Finish"
+asks = ["outcome", "hours"]
+requires = ["outcome"]
+[[lifecycle.transition]]
+from = ["done"]
+to = "approved"
+label = "Approve"
+sign = "Approved"
+[[lifecycle.transition]]
+from = ["*"]
+to = "cancelled"
+label = "Cancel"
+"""
+JOB_FLOW = """id = "job-flow"
+title = "Do the job"
+record = "Job"
+[trigger]
+starters = ["physician"]
+[[steps]]
+id = "work"
+title = "Do the work"
+kind = "task"
+role = "physician"
+moves = ["doing"]
+state = "done"
+context = ["record:clinical"]
+[[steps.fields]]
+name = "outcome"
+type = "text"
+required = true
+[[steps.fields]]
+name = "hours"
+type = "number"
+[[steps]]
+id = "file"
+title = "File the job sheet"
+kind = "task"
+role = "physician"
+when = "record.status == 'done'"
+context = ["record:clinical"]
+[[steps.fields]]
+name = "filed"
+type = "boolean"
+"""
+
+
+def _jobs(hub, *, walked=True):
+    """A test fixture: a Job type whose lifecycle asks, requires and signs, and (walked) the workflow it names."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    p = hub.propose("type", rana, JOB.format(top=""), "jobs")
+    hub.approve(amara, "type", "Job", p["version"])
+    if walked:
+        w = hub.propose_workflow(rana, JOB_FLOW, "jobs")
+        hub.approve_workflow(amara, "job-flow", w["version"])
+        p = hub.propose("type", rana, JOB.format(top='workflow = { id = "job-flow", when = "record.status != \'cancelled\'" }'),
+                        "walked")
+        hub.approve(amara, "type", "Job", p["version"])
+
+
+def test_a_transition_asks_requires_and_signs_and_a_move_missing_a_required_field_is_refused_in_words(hub):
+    """Rule: a lifecycle transition may declare ``asks`` (fields its screen asks for, written in the same move),
+    ``requires`` (fields that must be set once it has moved, checked by the type's own field rules) and ``sign`` (a
+    signature meaning, which must be one of the type's ``[[signature]]`` meanings when it lists any). A move that
+    leaves a required field empty is refused, naming the field in words, by hand or by a workflow; a signed move is
+    made only by a person's signature with that meaning."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    rt = schema.parse(JOB.format(top=""))
+    t = rt.transition("doing", "done")
+    assert t["fields"] == ["outcome", "hours"] and t["require"] == ["outcome"] and t["sign"] is None
+    assert rt.transition("done", "approved")["sign"] == "Approved"
+    for bad, says in ((JOB.format(top="").replace('sign = "Approved"', 'sign = "Okayed"'), "not one of its signatures"),
+                      (JOB.format(top="").replace('sign = "Approved"', 'sign = 3'), "sign is what"),
+                      (JOB.format(top="").replace('requires = ["outcome"]', 'requires = ["verdict"]'), "no field 'verdict'")):
+        with pytest.raises(DefinitionError) as exc:
+            schema.parse(bad)
+        assert any(says in p for p in exc.value.problems), (says, exc.value.problems)
+    _jobs(hub, walked=False)
+    amara = M(hub, "dr-amara")
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    hub.update_record(amara, ref, {"status": "doing"})
+    with pytest.raises(Invalid, match="fill in Outcome"):
+        hub.update_record(amara, ref, {"status": "done"})
+    with pytest.raises(Invalid) as exc:  # the type's own rules check what the move writes
+        hub.update_record(amara, ref, {"status": "done", "outcome": "Fixed", "hours": -1})
+    assert any("Hours worked" in p or "hours" in p for p in exc.value.problems), exc.value.problems
+    run = {"id": "r", "record": ref}
+    actor = {"id": "engine", "kind": "automation", "name": "Engine", "status": "active"}
+    with pytest.raises(Invalid, match="fill in Outcome"):  # a workflow's move too
+        hub.update_record(actor, ref, {"status": "done"})
+    hub.update_record(amara, ref, {"status": "done", "outcome": "Fixed"})
+    with pytest.raises(Denied, match="signed 'Approved'"):  # a plain edit never makes a signed move
+        hub.update_record(amara, ref, {"status": "approved"})
+    with pytest.raises(Denied, match="signed 'Approved'"):
+        hub.update_record(actor, ref, {"status": "approved"})
+    assert run and hub.records.read(*ref.split("/"))["status"] == "done"

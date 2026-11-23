@@ -3653,6 +3653,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                              if schema.first(after, rt.field(n)["path"]) in (None, "", [], {})]
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
+                    self._move_signed(rt, t, _signature)
                     moved = (old, new)
             clashes, over = [], None
             if rt.is_a("Booking"):
@@ -3693,6 +3694,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.restrictions.reset()
             self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)
+
+    def _move_signed(self, rt, t: dict, signature: int | None) -> None:
+        """A transition with ``sign`` is made only by a person's signature with that meaning (``move_record`` with
+        one, or a ``[[signature]]`` that ``moves_to`` there): never by an agent, a workflow or a plain edit."""
+        if not t.get("sign"):
+            return
+        ev = self.db.events.find_one({"_id": signature}) if signature is not None else None
+        sg = ((ev or {}).get("data") or {}).get("signed") or {}
+        if not ev or not ev.get("signature") or ev.get("actor_kind") != "person" or sg.get("meaning") != t["sign"]:
+            raise Denied(f"moving a {rt.label.lower()} to {rt.state_label(t['to']).lower()} is signed "
+                         f"{t['sign']!r} by the person who moves it")
 
     # ------------------------------------------------------------------ signatures on any record
     def _record_digest(self, rec: dict) -> str:
