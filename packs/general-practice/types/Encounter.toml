@@ -23,6 +23,9 @@ active = "record.status in ['requested', 'planned', 'arrived', 'triaged', 'in-pr
 # completed (finished, from an old chart) is not walked.
 workflow = { id = "appointment-request", when = "record.status in ['requested', 'planned', 'arrived', 'in-progress']" }
 order = 70
+# A visit is part of its patient: reached through their chart (Patient > Visits > Visit), listed there, never moved
+# to another patient. The calendar, the schedule and the desk still list every visit.
+part_of = "subject"
 summary = "A visit, from booking to the end: when and with whom, then what billing needs, never the note itself."
 
 # The calendar reads a visit through the core's Booking: booked start and end, the reason, the patient, the

@@ -60,7 +60,8 @@ STARTS = {"Encounter": "planned", "Observation": "final",
 # what owns a record of each type: it exists only inside its patient or its visit
 OWNED = {"AllergyIntolerance": "Patient", "Consent": "Patient", "Condition": "Patient", "Immunization": "Patient",
          "MedicationStatement": "Patient", "Coverage": "Patient", "RelatedPerson": "Patient",
-         "QuestionnaireResponse": "Patient", "Composition": "Encounter", "ChargeItem": "Encounter"}
+         "QuestionnaireResponse": "Patient", "Encounter": "Patient", "Composition": "Encounter",
+         "ChargeItem": "Encounter"}
 
 
 @pytest.fixture

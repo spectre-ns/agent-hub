@@ -17,10 +17,11 @@ answer that becomes a record, an engine calling the API.
     short_title = "{name}"        # how it is named where a name travels on screen (tab title, breadcrumbs, headings,
                                   #   tooltips, notices): leave out an identifier that belongs only on the record itself
     parent = "parent"             # a reference field to the same type: its records form a tree (pages under pages, folders)
-    part_of = "subject"           # a reference field (or base field) naming the one record that owns it: an allergy is
-                                  #   part of its patient, a visit note part of its visit. It is reached only through its
-                                  #   owner (no list or create of its own). A record that merely refers to another (a
-                                  #   visit to its patient) links to it instead: ``rel`` on the reference field.
+    part_of = "subject"           # a reference field (or base field) naming the one record that owns it: an allergy or
+                                  #   a visit is part of its patient, a visit note part of its visit. It is reached only
+                                  #   through its owner (no list or create of its own). A record that merely refers to
+                                  #   another (a result to the order it answers) links to it instead: ``rel`` on the
+                                  #   reference field.
     [navigator]                   # with a tree: a second navigation column, its tops (spaces) and the open one's tree
     tops = "Spaces"               #   what the records at the top of the tree are called
     hide = ["archived"]           #   lifecycle states left out of it (a record in one still shows when it is open)

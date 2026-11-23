@@ -779,3 +779,45 @@ def test_a_visit_marked_entered_in_error_stops_its_run_on_the_track(hub):
     assert stop["actor"] == "jo" and "entered in error" in stop["data"]["reason"]
     moved = hub.db.events.find_one({"seq": stop["cause"]})
     assert moved["action"] == "record.transitioned" and moved["data"]["to"] == "entered-in-error"
+
+
+# ------------------------------------------------------------------------------------ visit: part of its patient
+def test_a_visit_is_part_of_its_patient(hub):
+    """A visit is a part of its patient (``part_of = "subject"``): reached through their chart (Patient > Visits >
+    Visit, the sidebar lit on the patients), listed once in the chart's Visits section, never moved to another
+    patient, and with no Create of its own; its note, a part of the visit, is reached through both."""
+    import re as _re
+    from practicehub.hub import Invalid
+    from practicehub.web.server import App
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_note(hub, amara)
+    hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
+    run_all_local(hub, log=quiet)
+    pat = hub.engine.run(run["id"])["subject"]
+    app = App(hub, dev=False)
+    req = lambda path: {"me": amara, "query": {}, "path": path}
+    visit = hub.records.read(*ref.split("/", 1))
+    ptitle, vtitle = hub.short_title(hub.records.read(*pat.split("/", 1))), hub.short_title(visit)
+    page = app.page_record(req("/records/" + ref), *ref.split("/", 1))
+    crumbs = page.split('class="crumbs"', 1)[1].split("</div>", 1)[0]
+    assert crumbs.index(ptitle) < crumbs.index("Visits") < crumbs.index(vtitle), crumbs
+    side = page.split('<aside class="side"', 1)[1].split("</nav>", 1)[0]
+    lit = _re.findall(r'<a class="nav on" href="([^"]+)"', side)
+    assert lit == [f"/{hub.pack.subject['path']}"], lit
+    chart = app.page_subject(req(app.record_href(pat)), pat.split("/", 1)[1])
+    assert chart.count('id="part-Encounter"') == 1 and 'id="link-Encounter"' not in chart
+    assert ref.split("/", 1)[1] in chart.split('id="part-Encounter"', 1)[1]
+    (note,) = [c for c in hub.records.search("Composition", limit=None)
+               if (c.get("encounter") or {}).get("reference") == ref]
+    npage = app.page_record(req(f"/records/Composition/{note['id']}"), "Composition", note["id"])
+    ncrumbs = npage.split('class="crumbs"', 1)[1].split("</div>", 1)[0]
+    assert ncrumbs.index(ptitle) < ncrumbs.index("Visits") < ncrumbs.index(vtitle) < ncrumbs.index("Notes"), ncrumbs
+    nside = npage.split('<aside class="side"', 1)[1].split("</nav>", 1)[0]
+    assert _re.findall(r'<a class="nav on" href="([^"]+)"', nside) == [f"/{hub.pack.subject['path']}"]
+    other = _pat(hub, "Rahimi")
+    with pytest.raises(Invalid, match="stays part of"):
+        hub.update_record(amara, ref, {"subject": {"reference": other}})
+    listing = app.page_records(req("/records/Encounter"), "Encounter")
+    assert '/records/Encounter/new"' not in listing and "part of a patient" in listing
+    home = app.page_record_types(req("/records"))
+    assert 'href="/records/Encounter"' not in home

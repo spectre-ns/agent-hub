@@ -11,7 +11,9 @@
 # practice installed before keeps its own until a policy owner changes them); the red-flag screen catches more ways
 # of saying an emergency; a desk booking from a calendar slot is booked at once only when the reason is plainly
 # routine, anything else goes to a nurse first, and to a nurse too if the screen itself fails.
-version = "3.1"
+# 4.1: a visit is part of its patient (part_of): reached through and listed on their chart, never moved to another
+# patient; the calendar, the schedule and the desk still list every visit.
+version = "4.1"
 
 [practice]
 requires_core = "1.0"
