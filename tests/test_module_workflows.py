@@ -604,3 +604,66 @@ def test_upgrading_inventory_hands_work_under_way_on_and_picks_up_items_on_their
     assert step_state(hub, picked, "watch") == "waiting"
     hub.update_record(rana, gref, {"supplier": "A third supplier"})
     assert len(runs(hub, "inventory-reorder", gref)) == 1
+
+
+# ------------------------------------------------------------------------------------------- crm: Interaction, Person
+def _interaction(hub, who, **more):
+    from practicehub.hub import member_ref
+    hub.authz.write([("role:relationship-manager", "assignee", member_ref(who["id"]))])
+    if not hub.records.search("Organization", limit=1):
+        demo(hub, "crm")
+    org = hub.records.search("Organization", limit=1)[0]
+    it = hub.create_record(who, "Interaction", {"with": f"Organization/{org['id']}", "kind": "call",
+                                                "at": f"{hub.engine.now().date().isoformat()}T09:30:00",
+                                                "summary": "Delivery dates.", **more})
+    return f"Interaction/{it['id']}"
+
+
+def test_an_interaction_is_walked_by_its_follow_up_and_the_daily_sweep_never_moves_it(hub):
+    install(hub, "crm")
+    rana = M(hub, "rana")
+    ref = _interaction(hub, rana)
+    first = open_run(hub, "crm-follow-up", ref)  # logging it starts its follow-up, which notes who logged it
+    rec = hub.records.read(*ref.split("/", 1))
+    assert rec["logged_by"] == "rana" and rec["status"] == "logged" and step_state(hub, first, "due") == "waiting"
+    assert not hub.db.workflows.find_one({"workflow_id": "crm-interaction-logged"})  # merged into its owner
+    hub.update_record(rana, ref, {"follow_up": hub.engine.now().date().isoformat()})
+    hub.engine.tick(hub.engine.now())  # the date came: the sweep marks it, and the waiting follow-up takes it
+    rec = hub.records.read(*ref.split("/", 1))
+    assert rec["follow_up_asked"] == rec["follow_up"] and rec["status"] == "follow-up"
+    sweep = next(r for r in hub.engine.runs() if r["workflow_id"] == "crm-follow-up-due" and r["record"] == ref)
+    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "follow-up"})
+    assert moved["run_id"] == first["id"] and moved["run_id"] != sweep["id"]  # moved by its owner, never the sweep
+    with pytest.raises((Denied, Invalid)):  # being followed up: its workflow says when it is done
+        hub.update_record(rana, ref, {"status": "logged"})
+    # cancelled, the follow-up is not done: it goes back to logged and the next run takes the same date up again
+    hub.engine.cancel(rana, first["id"], "Wrong person")
+    second = open_run(hub, "crm-follow-up", ref)
+    assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "asked") == "done"
+    assert hub.records.read(*ref.split("/", 1))["status"] == "follow-up"
+    # one with no date yet is followed up now by a person: a move its waiting step takes
+    now = _interaction(hub, rana)
+    waiting = open_run(hub, "crm-follow-up", now)
+    hub.update_record(rana, now, {"status": "follow-up"})
+    assert step_state(hub, waiting, "due") == "done" and step_state(hub, waiting, "asked") == "skipped"
+    assert open_run(hub, "crm-follow-up", now)["id"] == waiting["id"]
+
+
+def test_upgrading_crm_retires_the_logged_note_and_picks_up_interactions_filed_before(hub, old_modules):
+    install(hub, "crm")
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    ref = _interaction(hub, rana)
+    rec = hub.records.read(*ref.split("/", 1))
+    assert rec["logged_by"] == "rana" and "status" not in rec  # version 1: no lifecycle, no one's work
+    proposed = old_modules(hub, "crm")
+    for key in (("type", "Interaction"), ("workflow", "crm-follow-up")):
+        assert key in proposed
+    approve_all(hub, proposed, amara)
+    assert not runs(hub, "crm-follow-up", ref, "running")
+    hub.update_record(rana, ref, {"summary": "Delivery dates, and a new price list."})  # its next write
+    rec = hub.records.read(*ref.split("/", 1))
+    assert rec["status"] == "logged"  # filed before its type had a lifecycle: in its first state
+    picked = open_run(hub, "crm-follow-up", ref)
+    assert step_state(hub, picked, "due") == "waiting"
+    hub.update_record(rana, ref, {"summary": "Delivery dates and prices."})
+    assert len(runs(hub, "crm-follow-up", ref)) == 1  # picked up once

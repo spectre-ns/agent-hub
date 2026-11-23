@@ -1,0 +1,23 @@
+id = "crm-follow-up-due"
+title = "Follow-up dates that have come"
+summary = """Each morning, an interaction whose follow-up date has come is marked as asked for; the interaction's own
+follow-up (the crm-follow-up workflow) is waiting for that mark and takes it to its owner."""
+record = "Interaction"
+
+# A sweep, not the interaction's lifecycle: it writes only follow_up_asked, a field the owner's wait watches, and never
+# moves the status. A wait cannot watch the calendar on its own, so the sweep is what turns a date into a change.
+
+[trigger]
+schedule = "daily 07:00"
+for_each = "Interaction"
+where = "record.follow_up != null and record.follow_up <= run.today and record.follow_up_asked != record.follow_up"
+
+[[steps]]
+id = "asked"
+title = "Note that the follow-up was asked for"
+kind = "automation"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+follow_up_asked = "{{record.follow_up}}"
