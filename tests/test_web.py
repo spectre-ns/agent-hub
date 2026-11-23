@@ -2606,3 +2606,19 @@ def test_a_chart_shows_urgent_work_under_its_banner_at_every_width(hub, server):
     from practicehub.web.assets import CSS
     rule = CSS.split(".urgent-band", 1)[1].split("}", 1)[0]
     assert ".urgent-band" in CSS and not re.search(r"[{;]order:", rule)
+
+
+def test_reason_boxes_are_labelled_and_cancelling_work_is_asked_for(hub, server):
+    """A box that asks why has a label a screen reader reads (not a placeholder that goes when you type), and
+    cancelling a piece of work opens from "Cancel this work…" rather than sitting as a red button beside the title."""
+    run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    iid = item_for(hub, run, "propose")
+    hub.engine.claim(M(hub, "jo"), iid)
+    page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))[1]
+    give = page.split(f'action="/items/{iid}/release"', 1)[1].split("</form>", 1)[0]
+    assert "<label>Why you give it back" in give and "placeholder" not in give
+    page = call(server, "GET", f"/runs/{run['id']}", token(hub, "jo"))[1]
+    cancel = page.split('class="cancel-work"', 1)[1].split("</details>", 1)[0]
+    assert "Cancel this work…</summary>" in cancel and "<label>Why it is cancelled" in cancel
+    assert 'placeholder="reason to cancel"' not in page

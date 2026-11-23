@@ -1832,8 +1832,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                            f'id="claim-hint-{iid}">Optional: tells the others you are on it. Done assigns it to you '
                            f'anyway.</span></form>')
             elif ok:
-                actions = (f'<form method="post" action="/items/{iid}/release" class="inline"><input name="note" '
-                           f'placeholder="why you give it back"><button class="secondary">Give it back</button></form>')
+                actions = (f'<form method="post" action="/items/{iid}/release" class="inline"><label>Why you give it '
+                           f'back <span class="muted">(optional)</span> <input name="note"></label> '
+                           f'<button class="secondary">Give it back</button></form>')
             elif eng.may_reassign(me, item):
                 held = self.member_name(eng.holder(item))
                 people = "".join(f'<option value="{e(m["id"])}">{e(m["name"])}</option>'
@@ -1843,7 +1844,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                            f'id="take-over">'
                            f'<label>Move from {e(held)} to <select name="to">{mine}{people}'
                            f'<option value="queue">Anyone who can</option></select></label>'
-                           f'<input name="note" placeholder="why (they will see it)" required>'
+                           f'<label>Why <span class="muted">(they will see it)</span> <input name="note" required></label>'
                            f'<button>{"Take over" if item["escalated"] else "Reassign"}</button></form>')
         main.append(self._item_family(me, item))
         main.append(self._step_history(me, wf, item))
@@ -2187,8 +2188,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         events = list(reversed(hub.track.list(run_id=rid, limit=500)))
         actions = ""
         if run["status"] == "running" and (run["started_by"] == me["id"] or hub.is_policy_owner(me)):
-            actions = (f'<form method="post" action="/runs/{rid}/cancel" class="inline"><input name="reason" '
-                       f'placeholder="reason to cancel" required><button class="danger">Cancel</button></form>')
+            actions = (f'<details class="cancel-work"><summary class="btn subtle">Cancel this work…</summary>'
+                       f'<form method="post" action="/runs/{rid}/cancel" class="inline"><label>Why it is cancelled '
+                       f'<input name="reason" required></label> <button class="danger">Cancel this work</button>'
+                       f'</form></details>')
         dl = [("Status", self._loz(self.RUN_STATUS, run["status"])),
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
         if run.get("subject") and run["subject"] != run["record"] and run["subject"].startswith(self.subj["type"] + "/"):
@@ -2443,7 +2446,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 withdraw = ""
                 if v["author"] == me["id"] or hub.is_policy_owner(me):
                     withdraw = (f'<form method="post" action="/workflows/{e(wid)}/{v["version"]}/withdraw" class="inline">'
-                                f'<input name="reason" placeholder="reason"><button class="secondary">'
+                                f'<label>Why <input name="reason"></label> <button class="secondary">'
                                 f'{"Withdraw" if v["author"] == me["id"] else "Decline"}</button></form>')
                 try:
                     pwf, _ = hub.workflow(wid, v["version"])
@@ -3225,7 +3228,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 withdraw = ""
                 if v["author"] == me["id"] or hub.is_policy_owner(me):
                     withdraw = (f'<form method="post" action="/blocks/{e(bid)}/{v["version"]}/withdraw" class="inline">'
-                                f'<input name="reason" placeholder="reason"><button class="secondary">'
+                                f'<label>Why <input name="reason"></label> <button class="secondary">'
                                 f'{"Withdraw" if v["author"] == me["id"] else "Decline"}</button></form>')
                 extra = (f'<div class="card"><h3>Before you approve</h3>{warn}'
                          f'{self._block_body(pblk) if pblk and not blk else ""}<details{" open" if blk else ""}><summary>'

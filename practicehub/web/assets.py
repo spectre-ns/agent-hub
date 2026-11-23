@@ -178,6 +178,7 @@ padding:0 8px;min-width:24px;text-align:center}
 .urgent-band .u-go{margin-left:auto}
 .lane.urgent{color:var(--danger-fg)}
 .run-now{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}.run-now dt{font-weight:600;color:var(--subtle)}.run-now dd{margin:0}
+details.cancel-work>summary{list-style:none;cursor:pointer}details.cancel-work>summary::-webkit-details-marker{display:none}details.cancel-work[open]>summary{margin-bottom:8px}
 .side .legal{margin:24px 12px 0;font-size:12px;line-height:16px;color:var(--subtlest)}
 main{padding:24px 32px 32px;min-width:0}main:focus{outline:none}
 /* ---- the admin shell: the settings, a screen of their own, with a ribbon of every setup item */
