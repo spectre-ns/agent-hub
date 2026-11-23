@@ -214,19 +214,30 @@ def test_a_result_named_for_another_patient_is_refused(hub):
     assert any("someone else" in p for p in refused.value.problems)
 
 
-def test_a_late_critical_review_is_escalated_past_the_physicians_it_waits_for(hub):
-    """A critical review nobody has taken is stuck with every physician; it is escalated to someone who is not
-    waiting on it, never only back to the physicians."""
+def test_a_late_critical_review_reaches_the_medical_director_by_name_and_a_chaser(hub):
+    """A critical review nobody has taken waits on every physician. Overdue, it still names the medical director
+    (who is one of those physicians), and since that tells no one outside the physicians, the practice manager
+    hears too. With the practice manager away it still reaches the director: never nobody. Told again, each person
+    keeps one notice row, which counts the repeats."""
     from datetime import datetime, timedelta, timezone
     run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub), inputs={**LAB, "value": "118"})
     iid = item_for(hub, run, "review-critical")
     hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
-    assert iid in hub.engine.tick(datetime.now(timezone.utc) + timedelta(minutes=1))["overdue"]
-    notes = hub.db.items.find({"kind": "notice", "run_id": run["id"], "title": {"$regex": "^Overdue"}})
-    physicians = {m["id"] for m in hub.active_holders("physician", persons_only=True)}
-    assert notes and all(n.get("assignee") not in physicians for n in notes)
-    assert all(n.get("role") not in ("physician", "medical-director") for n in notes), \
-        [(n.get("assignee"), n.get("role")) for n in notes]
+    now = datetime.now(timezone.utc) + timedelta(minutes=1)
+    assert iid in hub.engine.tick(now)["overdue"]
+
+    def notes():
+        return hub.db.items.find({"kind": "notice", "run_id": run["id"], "escalates": iid})
+    first = notes()
+    assert {(n["assignee"], n["role"]) for n in first} >= {("dr-amara", None)}
+    assert any(n["role"] == "practice-manager" or n["assignee"] == "rana" for n in first)
+    assert all(n["assignee"] != "dr-liam" for n in first)  # the pool is not told it is late, the director is
+    hub.db.members.set("rana", {"status": "inactive"})
+    for hours in (2, 4):
+        assert iid in hub.engine.tick(now + timedelta(hours=hours))["overdue"]
+    amara = [n for n in notes() if n["assignee"] == "dr-amara"]
+    assert len(amara) == 1 and amara[0]["repeats"] == 3 and amara[0]["title"].startswith("Still not done (3)")
+    assert amara[0]["priority"] == "urgent"
 
 
 # ------------------------------------------------------------------------------------------------ patient question

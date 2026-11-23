@@ -4989,3 +4989,34 @@ def test_a_person_makes_a_record_only_in_its_initial_state_or_one_its_lifecycle_
     with pytest.raises(Invalid, match="starts as 'requested'"):
         hub.create_record(rana, "Consent", dict(base, status="reviewed"))
     assert hub._type("Consent").lifecycle["starts"] == ["active"]
+
+
+# ------------------------------------------------------------------------- escalation: who hears, who takes it over
+def test_an_alert_with_nobody_else_on_duty_tells_the_late_themselves_never_nobody(hub):
+    """Whoever is late is never the only one told while someone else is on duty; with nobody else on duty at all,
+    they are told by name rather than nobody, and with nobody on duty the notice waits on the role."""
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub), inputs={"question": "My knee"})
+    for mid in [m["id"] for m in hub.members("person") if m["id"] != "noor"]:
+        hub.db.members.set(mid, {"status": "inactive"})
+    out = hub.engine.alert(run, None, "Overdue: call back", role="nurse", besides="noor")
+    assert [hub.engine.item(i)["assignee"] for i in out] == ["noor"]
+    hub.db.members.set("noor", {"status": "inactive"})
+    out = hub.engine.alert(run, None, "Overdue: call back", role="nurse", besides="noor")
+    assert [(hub.engine.item(i)["role"], hub.engine.item(i)["assignee"]) for i in out] == [("nurse", None)]
+
+
+def test_repeated_escalations_of_one_item_are_one_notice_row_with_a_count(hub):
+    from datetime import datetime, timedelta, timezone
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")
+    hub.engine.claim(M(hub, "noor"), iid)
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    now = datetime.now(timezone.utc)
+    for hours in (0, 2, 4):
+        assert iid in hub.engine.tick(now + timedelta(hours=hours))["overdue"]
+    rows = hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})
+    assert len(rows) == 1 and rows[0]["repeats"] == 3 and rows[0]["title"].startswith("Still not done (3)")
+    hub.engine.acknowledge(M(hub, "dr-liam"), rows[0]["_id"])   # acknowledged, the next one is a new row
+    hub.engine.tick(now + timedelta(hours=6))
+    assert len(hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})) == 2
