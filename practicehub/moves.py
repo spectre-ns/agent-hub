@@ -168,3 +168,39 @@ class MovesMixin:
         self.db.runs.set(run["id"], {"steps": run["steps"]})
         self.engine.complete(member, item["id"], answer)
         return True
+
+    # ------------------------------------------------------------------ the transition screen
+    def transition_screen(self, actor: dict, ref: str) -> dict:
+        """The moves ``actor`` may make of the record now, each with its label, the fields it asks for (their
+        definitions and what they hold now), what it requires, the signature it asks for and whether it is the
+        forward move (the one the open step makes, else the first way on that is not a correction); and the moves
+        out of where it is that they may not make, each with why in words."""
+        rtype, _, rid = ref.partition("/")
+        rt = self._type(rtype)
+        rec = self.read_record(actor, ref)
+        if not rt.lifecycle:
+            return {"state": None, "state_label": "", "may": [], "may_not": []}
+        raw = self.records.read(rtype, rid)
+        cur = schema.first(raw, rt.lifecycle["path"])
+        opened = self.open_step(rt, ref) or False
+        exits = [t for t in rt.lifecycle["transition"] if (cur in t["from"] or "*" in t["from"]) and t["to"] != cur]
+        made = opened[2].state if opened and opened[2].kind == "task" and opened[2].state else None
+        forward = made or next((t["to"] for t in exits if "*" not in t["from"] and t["by"] != "workflow"), None)
+        may, may_not = [], []
+        for t in exits:
+            entry = {"to": t["to"], "label": t["label"], "state_label": rt.state_label(t["to"])}
+            why = self.move_refusal(actor, rt, ref, schema.put(dict(raw), rt.lifecycle["path"], t["to"]), t,
+                                    opened)
+            if why:
+                may_not.append({**entry, "why": why})
+                continue
+            asks = []
+            for n in t["fields"]:
+                f = rt.field(n)
+                if f and visibility.may_field(self, actor, f, write=True):
+                    asks.append({**{k: v for k, v in f.items() if k not in ("path",)}, "value": schema.first(rec, f["path"]),
+                                 "required": f.get("required") is True or n in t["require"]})
+            may.append({**entry, "asks": asks, "requires": [rt.field(n)["label"] for n in t["require"]],
+                        "sign": t.get("sign"), "comment": t.get("comment", False), "forward": t["to"] == forward,
+                        **({"does": opened[2].title} if opened and self.step_makes_move(opened[2], t["to"]) else {})})
+        return {"state": cur, "state_label": rt.state_label(cur), "may": may, "may_not": may_not}

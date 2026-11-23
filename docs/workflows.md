@@ -72,6 +72,62 @@ Runs that were open before this (an item per step) are folded when the hub opens
 and gains every item's history; the one open step moves onto it, and steps open side by side become its children.
 The other items are marked as moved, and their links lead to the run's item. It runs once per run.
 
+### Moving the record: transitions and the steps they do
+
+For a workflow about a record, people can do the work on the record's own page, as in an issue tracker: they move the
+record to its next state, and the move checks what the next state needs. The move is the record type's own lifecycle
+transition. It says what the move needs:
+
+```toml
+[[lifecycle.transition]]           # in the record type
+from = ["doing"]
+to = "done"
+label = "Finish"
+asks = ["outcome", "hours"]        # the move's screen asks for these, and they are written with the state, in one go
+requires = ["outcome"]             # these must hold something once it has moved; the type's field rules check them
+# sign = "Approved"                # the mover signs with this meaning (one of the type's [[signature]] meanings)
+```
+
+A move that leaves a `requires` field empty is refused, naming the field ("to move a job to 'done', fill in
+Outcome"). This applies to every move: by hand, by a workflow, or by a signature. A move with `sign` is made only by
+a person's signature with that meaning. An agent never signs, and neither does a plain edit or a workflow.
+
+`Hub.move_record(actor, ref, to, values, signature)` makes any move. It is refused, in words, unless the actor may
+make that move now:
+
+- the transition's `by` allows them;
+- the signature is a person's, by a role the signature allows;
+- they hold the role of the open step of the record's own workflow;
+- nobody else holds that step. If someone has claimed it or it is assigned to them, the refusal names that person.
+
+A correction open from every state (`from = ["*"]`) stays anyone's who may write the record.
+
+**A step declares the move it makes with `state`.** A task with `state = "done"` is done by the move to `done`. Doing
+the transition is doing the step, and the other way round:
+
+- If someone moves the record to that state while the step is open, the step is done by them. They can do this with
+  `move_record` or by editing the record. The step's fields are taken from the transition's `asks`, by field name.
+  The run then goes on.
+- If someone finishes the step on its item, the record makes the same move, through the same transition. The step's
+  answers go into the fields the move asks for, and `requires` and `sign` still apply.
+
+The transition holds what a move needs, and the step holds which move it is.
+
+The other steps keep working as before:
+
+- `moves` lists states people may move the record to while the step stays open. Examples are starting the work and
+  stepping out of a visit.
+- A step that moves nothing (no `state`) is done on its item.
+- A gate decides on its item, because a decision signs what the step showed. Its outcome moves the record through
+  the automation step it leads to.
+
+`Hub.transition_screen(actor, ref)` returns two lists for the record page:
+
+- The moves the actor may make now. Each has its label, the fields it asks for (with their definitions and values),
+  what it requires, the signature it asks for, and whether it is the forward move. The forward move is the one the
+  open step makes, or else the first way on that is not a correction.
+- The moves they may not make, each with the reason in words.
+
 ### task
 
 Someone holding the role fills in the step's `fields`, or the skill's output fields. A person sees a form and an agent

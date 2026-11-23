@@ -5179,7 +5179,7 @@ def _jobs(hub, *, walked=True):
     if walked:
         w = hub.propose_workflow(rana, JOB_FLOW, "jobs")
         hub.approve_workflow(amara, "job-flow", w["version"])
-        p = hub.propose("type", rana, JOB.format(top='workflow = { id = "job-flow", when = "record.status != \'cancelled\'" }'),
+        p = hub.propose("type", rana, JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }'),
                         "walked")
         hub.approve(amara, "type", "Job", p["version"])
 
@@ -5300,3 +5300,38 @@ def test_the_move_a_step_makes_is_the_step_and_doing_the_step_makes_the_move(hub
     hub.engine.complete(amara, i, {"filed": True})
     assert hub.records.read(*ref2.split("/"))["status"] == "done"
     assert hub.engine.run(run2["id"])["status"] == "completed"
+
+
+def test_the_transition_screen_lists_the_moves_a_member_may_make_and_why_not_the_others(hub):
+    """Rule: ``Hub.transition_screen(actor, ref)`` lists the moves out of where the record is that the actor may make
+    now, each with its label, the fields it asks for (their definitions), what it requires, the signature it asks
+    for and whether it is the forward move (the one the open step makes); and the moves they may not make, each with
+    why in words."""
+    _jobs(hub)
+    amara, liam, noor = M(hub, "dr-amara"), M(hub, "dr-liam"), M(hub, "noor")
+    ref, run = _job(hub)
+    hub.move_record(amara, ref, "doing")
+    scr = hub.transition_screen(amara, ref)
+    assert scr["state"] == "doing"
+    by = {m["to"]: m for m in scr["may"]}
+    done = by["done"]
+    assert done["label"] == "Finish" and done["forward"] and done["does"] == "Do the work"
+    assert [a["name"] for a in done["asks"]] == ["outcome", "hours"] and done["requires"] == ["Outcome"]
+    assert done["asks"][0]["label"] == "Outcome" and done["asks"][0]["type"] == "text" and done["asks"][0]["required"]
+    assert done["asks"][1]["min"] == 0 and not done["asks"][1]["required"] and done["sign"] is None
+    assert not by["cancelled"]["forward"]
+    why = {m["to"]: m["why"] for m in hub.transition_screen(noor, ref)["may_not"]}
+    assert why == {"done": "'Do the work' is for the physician role"}
+    hub.engine.claim(liam, run["item"])
+    why = {m["to"]: m["why"] for m in hub.transition_screen(amara, ref)["may_not"]}
+    assert "holds 'Do the work'" in why["done"] and "Liam" in why["done"]
+    hub.move_record(liam, ref, "done", {"outcome": "Fixed"})
+    why = {m["to"]: m["why"] for m in hub.transition_screen(amara, ref)["may_not"]}
+    assert why["approved"] == "a job is moved by its workflow; it is not waiting for approved now"
+    hub.engine.complete(liam, item_for(hub, run, "file"), {"filed": True})  # its work is over
+    scr = hub.transition_screen(amara, ref)
+    assert [(m["to"], m["sign"]) for m in scr["may"]] == [("approved", "Approved"), ("cancelled", None)]
+    why = {m["to"]: m["why"] for m in hub.transition_screen(liam, ref)["may_not"]}
+    assert why == {"approved": "signing 'Approved' needs the medical-director role"}
+    why = {m["to"]: m["why"] for m in hub.transition_screen(M(hub, "scribe-agent"), ref)["may_not"]}
+    assert "only a person signs" in why["approved"]
