@@ -3125,6 +3125,23 @@ def test_a_resting_wait_is_rechecked_only_by_its_own_record_is_not_open_work_and
     assert all(hub.engine.run(r["id"])["status"] == "cancelled" for r in runs)
 
 
+def test_unclaimed_overdue_work_reaches_its_escalate_to_role_even_someone_who_also_holds_the_step_s_role(hub):
+    """Rule: an item no one claimed, past its due time, goes to the step's ``escalate_to`` role: no one is "late" on
+    work they never took, so a holder of that role who also holds the step's own role is told all the same (the
+    only medical director is also a physician)."""
+    from datetime import datetime, timezone
+    from practicehub.hub import member_ref
+    hub.authz.write([("role:nurse", "assignee", member_ref("dr-amara"))])
+    run = hub.engine.start(M(hub, "jo"), "patient-question", record=_patient(hub),
+                           inputs={"question": "My knee hurts"})
+    iid = item_for(hub, run, "clinician")
+    hub.db.items.set(iid, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
+    assert iid in hub.engine.tick(datetime.now(timezone.utc))["overdue"]
+    notes = hub.db.items.find({"kind": "notice", "run_id": run["id"], "title": {"$regex": "^Overdue"}})
+    reached = {n.get("role") for n in notes} | {n.get("assignee") for n in notes}
+    assert "physician" in reached or "dr-amara" in reached, notes
+
+
 def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_up_where_it_lands(hub):
     """Rule: a record its type's workflow is not walking (approved before an upgrade, or its run is over) is moved
     by another workflow's run as any record is, rather than refused, and its own workflow starts where it lands; a
