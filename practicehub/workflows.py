@@ -126,6 +126,38 @@ class DefinitionError(ValueError):
         self.problems = problems
 
 
+def _requires_links(raw, where: str) -> tuple[list[dict], list[str]]:
+    """``requires_links = ["results", { rel = "encounter", from = "Observation", min = 2 }]``: the run's record must
+    have, before the step is done, at least ``min`` (1) links of each rel: from it (a link it allows, or a reference
+    field's), or with ``from``, to it from records of that type (a lab result naming this visit). On a gate,
+    ``outcomes`` limits it to those decisions (a referral is sent only with its letter; it is cancelled without one)."""
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], [f"{where}: requires_links is a list of rels, or of tables {{rel, from, min}}"]
+    out, problems = [], []
+    for x in raw:
+        x = {"rel": x} if isinstance(x, str) else x
+        if not isinstance(x, dict) or not isinstance(x.get("rel"), str) or not x["rel"]:
+            problems.append(f"{where}: requires_links: each is a rel, or a table with one")
+            continue
+        bad = set(x) - {"rel", "from", "min", "outcomes"}
+        if bad:
+            problems.append(f"{where}: requires_links {x['rel']!r}: unknown key {', '.join(sorted(bad))}")
+        n = x.get("min", 1)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            problems.append(f"{where}: requires_links {x['rel']!r}: min is a whole number, 1 or more")
+            n = 1
+        if "from" in x and not (isinstance(x["from"], str) and x["from"]):
+            problems.append(f"{where}: requires_links {x['rel']!r}: from is the record type the links come from")
+        outs = x.get("outcomes")
+        if outs is not None and not (isinstance(outs, list) and all(isinstance(o, str) for o in outs)):
+            problems.append(f"{where}: requires_links {x['rel']!r}: outcomes is a list of the gate's outcomes")
+            outs = None
+        out.append({"rel": x["rel"], "from": x.get("from") or None, "min": n, "outcomes": outs})
+    return out, problems
+
+
 @dataclass
 class Step:
     id: str
@@ -164,6 +196,8 @@ class Step:
     timeout: str | None = None       # a wait with until: done anyway, as timed out, after this long
     state: str | None = None         # the lifecycle state the run's record moves to when this step is done
     moves: list = field(default_factory=list)  # states a person may move the record to on its page meanwhile
+    # links the run's record must have before a person's step is done: [{rel, from, min}] (``requires_links``)
+    requires_links: list[dict] = field(default_factory=list)
 
     @property
     def agents_may(self) -> bool:
@@ -346,6 +380,15 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
             until=raw.get("until") or None, wait_for=raw.get("for") or None, at=raw.get("at") or None,
             timeout=raw.get("timeout") or None, state=raw.get("state") or None,
             moves=list(raw.get("moves") or []) if isinstance(raw.get("moves") or [], list) else [None])
+        step.requires_links, more = _requires_links(raw.get("requires_links"), where)
+        problems += more
+        for need in step.requires_links:
+            if need["outcomes"] is not None and (kind != "gate" or set(need["outcomes"]) - set(step.outcomes)):
+                problems.append(f"{where}: requires_links {need['rel']!r}: outcomes names the gate's own outcomes "
+                                f"({', '.join(step.outcomes) or 'none'})")
+        if step.requires_links and (kind not in ("task", "gate") or not doc.get("record")):
+            problems.append(f"{where}: requires_links is for a person's step (a task or a gate) of a workflow about "
+                            f"a record")
         if not all(isinstance(m, str) and m for m in step.moves):
             problems.append(f"{where}: moves lists the lifecycle states a person may move the record to while this "
                             f"step is open, e.g. moves = [\"on-hold\"]")

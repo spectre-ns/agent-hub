@@ -2846,7 +2846,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
                                              limit=limit)]
 
     ACCESS_ACTIONS = ("record.viewed", "records.exported", "record.created", "record.updated", "record.transitioned",
-                      "record.signed")
+                      "record.linked", "record.unlinked", "record.signed")
     LISTED = "records.listed"  # a list or search that showed the record among others: found by data.refs
 
     def access_report(self, member: dict, subject: str) -> list[dict]:
@@ -2928,6 +2928,77 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             if schema.first(v["data"], lc["path"]) == lc["in_use"]:
                 return v
         return None
+
+    def hand_links(self, member: dict, ref: str) -> dict[str, list[str]]:
+        """The links made by hand from this record that the member may read, by rel: {rel: [Type/id]}."""
+        out: dict[str, list[str]] = {}
+        for r in self.db.links.find({"from_ref": ref, "hand": True}, sort=[("rel", ASC), ("to_ref", ASC)]):
+            rt = self.record_type(r["to_ref"].split("/")[0])
+            if rt and self.can(member, "reader", f"data_class:{rt.data_class}"):
+                out.setdefault(r["rel"], []).append(r["to_ref"])
+        return out
+
+    def link(self, member: dict, ref: str, rel: str, to: str, *, cause: int | None = None,
+             run_id: str | None = None) -> dict:
+        """A person links a record to another, by a link its type allows (``[[link]]``): one that is not made by
+        filling in a field. Whoever may write the record may link it, to a record they may read, while it is not
+        locked; a link it allows once replaces none (unlink the one there first)."""
+        return self._hand_link(member, ref, rel, to, True, cause, run_id)
+
+    def unlink(self, member: dict, ref: str, rel: str, to: str, *, cause: int | None = None,
+               run_id: str | None = None) -> dict:
+        return self._hand_link(member, ref, rel, to, False, cause, run_id)
+
+    def _hand_link(self, member, ref, rel, to, make, cause, run_id) -> dict:
+        rtype, rid = ref.split("/", 1)
+        rt = self._type(rtype)
+        if member.get("kind") != "automation":
+            self.require(member, "writer", f"data_class:{rt.data_class}", f"link {rtype} records")
+        x = rt.link(rel)
+        if not x:
+            raise Invalid(f"a {rt.label.lower()} has no link {rel!r}"
+                          + (f" (its links: {', '.join(y['rel'] for y in rt.allowed_links())})" if rt.allowed_links() else ""))
+        if x.get("field"):
+            raise Invalid(f"a {rt.label.lower()}'s {x['label'].lower()} is a field: fill it in on the record instead")
+        if not schema.REF_TEXT.fullmatch(to or ""):
+            raise Invalid("link to a record (Type/id)")
+        ttype, tid = to.split("/", 1)
+        trt = self.record_type(ttype)
+        if not trt or ("*" not in x["to"] and ttype not in self.concrete(x["to"])):
+            raise Invalid(f"a {rt.label.lower()}'s {x['label'].lower()} is a {' or '.join(self._labels(x['to']))}, "
+                          f"not a {trt.label.lower() if trt else ttype}")
+        with self.db:
+            rec = self.records.read(rtype, rid)
+            if not rec:
+                raise NotFound(f"there is no {ref}")
+            if make:
+                self.require(member, "reader", f"data_class:{trt.data_class}", f"read {ttype} records") \
+                    if member.get("kind") != "automation" else None
+                if not self.records.read(ttype, tid):
+                    raise NotFound(f"there is no {to}")
+                if to == ref:
+                    raise Invalid("a record is not linked to itself")
+            st = schema.first(rec, rt.lifecycle["path"]) if rt.lifecycle else None
+            if rt.lifecycle and st in rt.lifecycle.get("locked", []) and not self._by_workflow(member, run_id):
+                raise Invalid(f"a {rt.label.lower()} that is {rt.state_label(st).lower()} is not linked or unlinked")
+            key = f"{ref}|{rel}|{to}"
+            there = self.db.links.find_one({"_id": key})
+            if make:
+                if there:
+                    return {"ref": ref, "rel": rel, "to": to, "changed": False}
+                if not x["many"] and self.db.links.count({"from_ref": ref, "rel": rel}):
+                    raise Invalid(f"a {rt.label.lower()} has one {x['label'].lower()}: unlink the one it has first")
+                self.db.links.insert({"_id": key, "from_ref": ref, "rel": rel, "to_ref": to, "hand": True})
+            else:
+                if not there or not there.get("hand"):
+                    raise NotFound(f"{ref} is not linked to {to} as {x['label'].lower()}")
+                self.db.links.delete({"_id": key})
+            self.track.append(member, "record.linked" if make else "record.unlinked", ref, cause=cause,
+                              run_id=run_id, data={"rel": rel, "to": to})
+        return {"ref": ref, "rel": rel, "to": to, "changed": True}
+
+    def _labels(self, types: list[str]) -> list[str]:
+        return [(self.record_type(t).label.lower() if self.record_type(t) else t) for t in types]
 
     def linked(self, member: dict, ref: str) -> list[dict]:
         """Records that point at this one, that the member may read: (rel, ref)."""
@@ -3619,7 +3690,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         The titles it names are kept too, so that a record given one of those titles later links back."""
         from .records import fold
         ref = f"{rt.id}/{rec['id']}"
-        self.db.links.delete({"from_ref": ref})
+        self.db.links.delete({"from_ref": ref, "hand": {"$ne": True}})  # links made by hand are not in the record
         for rel, to in sorted(set(schema.links(rt, rec)) | set(self.mention_links(rt, rec))):
             self.db.links.insert({"_id": f"{ref}|{rel}|{to}", "from_ref": ref, "rel": rel, "to_ref": to})
         self.db.mention_names.delete({"from_ref": ref})
@@ -4235,9 +4306,57 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
                 raise exc from None
         problems += [p for p in self._block_problems(wf, approving=approving) if p not in problems]
         problems += [p for p in self._state_problems(wf) if p not in problems]
+        problems += [p for p in self._link_problems(wf) if p not in problems]
         if problems:
             raise wfmod.DefinitionError(problems)
         return wf
+
+    def _link_problems(self, wf: wfmod.Workflow) -> list[str]:
+        """A step's ``requires_links`` names links its record's type has: one it allows, or (``from``) one the other
+        type allows that may point at it."""
+        rt = self.record_type(wf.record) if wf.record else None
+        if rt is None:
+            return []
+        problems = []
+        for s in wf.steps:
+            for need in s.requires_links:
+                if need["from"]:
+                    other = self.record_type(need["from"])
+                    x = other.link(need["rel"]) if other else None
+                    if not other:
+                        problems.append(f"step {s.id}: requires_links {need['rel']!r}: there is no record type "
+                                        f"{need['from']!r}")
+                    elif not x or not ("*" in x["to"] or rt.id in self.concrete(x["to"])):
+                        problems.append(f"step {s.id}: requires_links {need['rel']!r}: a {other.label.lower()} has no "
+                                        f"link {need['rel']!r} that may point at a {rt.label.lower()}")
+                elif not rt.link(need["rel"]):
+                    rels = [x["rel"] for x in rt.allowed_links()]
+                    problems.append(f"step {s.id}: requires_links {need['rel']!r}: a {rt.label.lower()} has no such "
+                                    f"link" + (f" (its links: {', '.join(rels)})" if rels else ""))
+        return problems
+
+    def missing_links(self, step, ref: str, outcome: str | None = None) -> list[str]:
+        """What a step's ``requires_links`` still wants of the record, in words (empty: it has them all). On a gate,
+        for the outcome decided (or, without one, for any)."""
+        rt = self.record_type(ref.split("/", 1)[0])
+        out = []
+        for need in getattr(step, "requires_links", []) or []:
+            if outcome is not None and need.get("outcomes") is not None and outcome not in need["outcomes"]:
+                continue
+            if need["from"]:
+                n = self.db.links.count({"to_ref": ref, "rel": need["rel"],
+                                         "from_ref": {"$regex": f"^{re.escape(need['from'])}/"}})
+                other = self.record_type(need["from"])
+                x = other.link(need["rel"]) if other else None
+                words = (other.plural if need["min"] > 1 else other.label).lower() if other else need["from"]
+                what = f"{words} linked to it" + (f" as {x['label'].lower()}" if x else "")
+            else:
+                n = self.db.links.count({"from_ref": ref, "rel": need["rel"]})
+                x = rt.link(need["rel"]) if rt else None
+                what = (x["label"] if x else need["rel"]).lower()
+            if n < need["min"]:
+                out.append(f"{what}" + (f" ({need['min']} needed, {n} so far)" if need["min"] > 1 else ""))
+        return out
 
     def _state_problems(self, wf: wfmod.Workflow) -> list[str]:
         """A step's ``state`` is a state of its record's lifecycle; a ``[new_record]`` state is one too."""

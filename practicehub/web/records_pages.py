@@ -104,6 +104,8 @@ class RecordPages:
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>edit|move|sign)", self.post_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/move", self.page_move)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/attach", self.post_attach)
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/link", self.page_link)
+        R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>link|unlink)", self.post_link)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/override", self.post_override)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
         R("GET", r"/api/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
@@ -1561,6 +1563,7 @@ class RecordPages:
                         f'{self._kind_badge(rtype, k)}</li>'
                         for k in kids) + "</ul>" if kids else "<p class='muted'>Nothing yet.</p>") + "</section>")
             if not editing:  # what is part of it, then what links to it
+                main.append(self.hand_links_html(me, rt, ref, url, may_write and not locked))
                 sections, rail, hidden = self.owner_sections(me, ref) if not is_page else ("", [], 0)
                 main.append(self.started_from(me, ref, rt))  # what was made from it (a visit's referrals, orders)
                 main.append(sections)
@@ -1825,6 +1828,114 @@ class RecordPages:
                    f'record changes, the signature stays but no longer covers it.</p>{self._sign_prompt(me)}'
                    f'<button class="primary">Sign</button></form>')
         return "".join(out)
+
+    def hand_links_html(self, me, rt, ref: str, url: str, may: bool) -> str:
+        """The links a person makes by hand on this record (its type's ``[[link]]``): each, with what it links to,
+        a Link button while there is room for another, and Unlink on each."""
+        if not rt.links:
+            return ""
+        have = self.hub.hand_links(me, ref)
+        rows = []
+        for x in rt.links:
+            now = have.get(x["rel"], [])
+            add = (f' <a class="btn secondary small" href="{url}/link?rel={e(urllib.parse.quote(x["rel"]))}" '
+                   f'data-modal>Link {e(a_an(self._link_noun(x)))}</a>'
+                   if may and (x["many"] or not now) else "")
+            items = "".join(
+                f'<li>{self.record_link(to)}'
+                + (f'<form method="post" action="{url}/unlink" class="inline">'
+                   f'<input type="hidden" name="rel" value="{e(x["rel"])}"><input type="hidden" name="to" value="{e(to)}">'
+                   f'<button class="subtle small" aria-label="Unlink this from {e(x["label"].lower())}">'
+                   f'Unlink</button></form>' if may else "") + "</li>" for to in now)
+            rows.append(f'<div class="hand-link"><h3>{e(x["label"])}{add}</h3>'
+                        + (f'<ul class="plain">{items}</ul>' if items else '<p class="muted small">None linked yet.</p>')
+                        + (f'<p class="muted small">{e(x["help"])}</p>' if x.get("help") and may and not now else "")
+                        + "</div>")
+        return f'<section class="hand-links" id="links"><h2>Links</h2>{"".join(rows)}</section>'
+
+    def _link_noun(self, x) -> str:
+        """What a link links to, as a noun: its one type's label, or "record" for several."""
+        kinds = self.hub.concrete(x["to"])
+        rt = self.hub.record_type(kinds[0]) if len(kinds) == 1 else None
+        return self._lower(rt.label) if rt else "record"
+
+    def _link_choices(self, me, rt, ref: str, x) -> list[tuple[str, str]]:
+        """What a link may point at, for its picker: records of its types the member may read; for a part, those of
+        the same owner (a referral's results are its patient's)."""
+        hub = self.hub
+        owner = hub.owner_of(hub.records.read(*ref.split("/", 1)) or {})
+        taken = set(hub.hand_links(me, ref).get(x["rel"], []))
+        out = []
+        for t in hub.concrete(x["to"]):
+            ort = hub.record_type(t)
+            if not ort or not self._may_read(me, t):
+                continue
+            if owner:
+                refs = [r["from_ref"] for r in hub.db.links.find(
+                    {"to_ref": owner, "from_ref": {"$regex": f"^{re.escape(t)}/"}}, fields=["from_ref"])]
+                recs = [r for r in (hub.records.read(*r.split("/", 1)) for r in dict.fromkeys(refs)) if r]
+            else:
+                recs = hub.records.search(t, limit=PICK)
+            for r in recs:
+                key = f"{t}/{r['id']}"
+                if key != ref and key not in taken:
+                    out.append((key, f"{ort.label}: {hub.title(r)}"))
+        return out[:PICK * 2]
+
+    def page_link(self, req, rtype, rid, kept: dict | None = None, error: Exception | None = None):
+        """Link this record to another, by one of the links its type allows."""
+        me, hub = req["me"], self.hub
+        ref = f"{rtype}/{rid}"
+        rt = hub.record_type(rtype)
+        if not rt:
+            raise Invalid(f"there is no record type {rtype}")
+        rec = hub.read_record(me, ref)
+        k = kept or {}
+        rel = str(k.get("rel") or req["query"].get("rel") or "")
+        x = next((x for x in rt.links if x["rel"] == rel), None)
+        if x is None:
+            raise Invalid(f"a {rt.label.lower()} has no link {rel!r} made by hand")
+        url = e(self.record_href(ref)) if rt.part_of else f"/records/{e(rtype)}/{e(rid)}"
+        err = ""
+        if error is not None:
+            probs = getattr(error, "problems", None) or []
+            err = (f'<div class="flash error" role="alert"><p>{e(str(error))}</p>'
+                   + (f'<ul>{"".join(f"<li>{e(p)}</li>" for p in probs)}</ul>' if probs else "") + "</div>")
+        choices = self._link_choices(me, rt, ref, x)
+        cur = str(k.get("to") or "")
+        if choices:
+            opts = "".join(f'<option value="{e(v)}"{" selected" if v == cur else ""}>{e(lbl)}</option>'
+                           for v, lbl in choices)
+            pick = (f'<label>{e(x["label"])} <select name="to" required><option value=""></option>{opts}</select>'
+                    + (f'<small class="muted">{e(x["help"])}</small>' if x.get("help") else "") + "</label>")
+        else:
+            pick = (f'<p class="muted">There is nothing to link yet: no {e(self._link_noun(x))} '
+                    f'{"of the same " + e(self.subj["label"].lower()) if hub.owner_of(rec) else ""} you may read.</p>'
+                    f'<label>Or its address (Type/id) <input name="to" value="{e(cur)}" required '
+                    f'pattern="[A-Za-z]\\w*/[\\w.-]+"></label>')
+        noun = self._link_noun(x)
+        body = (f'<div data-modal-body>{err}<form method="post" action="{url}/link" class="card stack" id="link">'
+                f'<p class="muted">{e(hub.short_title(rec))}</p>'
+                f'<input type="hidden" name="rel" value="{e(rel)}">{pick}'
+                f'<div class="filters"><button class="primary">Link</button>'
+                f'<a class="btn secondary" href="{url}" data-modal-close>Cancel</a></div></form></div>')
+        return self.layout(req, f"Link {a_an(noun)}", body,
+                           crumbs=[(self.record_href(ref), hub.short_title(rec)), (None, f"Link {a_an(noun)}")])
+
+    def post_link(self, req, rtype, rid, verb):
+        from .server import Rendered
+        me = req["me"]
+        f = {k: (v[0] if isinstance(v, list) else v) for k, v in self.form(req).items()}
+        ref = f"{rtype}/{rid}"
+        rel, to = str(f.get("rel") or ""), str(f.get("to") or "").strip()
+        try:
+            (self.hub.link if verb == "link" else self.hub.unlink)(me, ref, rel, to)
+        except (Denied, Invalid) as exc:
+            if verb == "unlink":
+                raise
+            raise Rendered(403 if isinstance(exc, Denied) else 422,
+                           self.page_link({**req, "query": {}}, rtype, rid, kept=f, error=exc)) from None
+        raise self._redirect(self.record_href(ref) + "#links")
 
     def _links_panel(self, me, rt, rec, ref) -> str:
         out = []

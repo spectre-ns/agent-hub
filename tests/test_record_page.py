@@ -4,6 +4,7 @@ it, and its steps told in its history. A run's page is only for work about no re
 record opens the record."""
 
 import html
+import json
 import re
 import urllib.parse
 
@@ -286,3 +287,37 @@ def test_a_part_is_addressed_under_its_owner_layer_by_layer(hub, server):
     other = next(p["id"] for p in hub.records.search("Patient", limit=None) if p["id"] != pid)
     assert call(server, "GET", f"/patients/{other}/lab-results/{oid}", tok)[0] == 404  # not theirs
     assert call(server, "GET", f"/patients/{pid}/visits/{oid}", tok)[0] == 404
+
+
+def test_a_referral_is_linked_by_hand_on_its_page_to_its_patients_records_and_unlinked_there(hub, server):
+    """A type's ``[[link]]`` is a section of its page: Link opens a dialog listing what it may link to (the same
+    patient's records), and each linked record has Unlink. The API does the same."""
+    amara = token(hub, "dr-amara")
+    pat = "Patient/" + next(iter(hub.records.search("Patient", limit=None)))["id"]
+    ref = "ServiceRequest/" + hub.create_record(M(hub, "dr-amara"), "ServiceRequest", {
+        "status": "draft", "intent": "order", "subject": {"reference": pat}, "code": {"text": "Cardiology"}},
+        start_workflow=False)["id"]
+    rep = "DiagnosticReport/" + hub.create_record(M(hub, "dr-amara"), "DiagnosticReport", {
+        "status": "final", "code": {"text": "Echo"}, "subject": {"reference": pat}})["id"]
+    url = addr(hub, ref)
+    page = call(server, "GET", url, amara)[1]
+    links = page.split('id="links"', 1)[1].split("</section>", 1)[0]
+    assert "Specialist&#x27;s report" in links and "Sent with the letter" in links and "None linked yet" in links
+    assert f'{url}/link?rel=report' in links
+    code, dialog = call(server, "GET", f"{url}/link?rel=report", amara)
+    assert code == 200 and f'value="{rep}"' in dialog                # the patient's report is offered
+    other = [r for r in hub.records.search("DiagnosticReport", limit=None)
+             if (r.get("subject") or {}).get("reference") != pat]
+    assert all(f'value="DiagnosticReport/{r["id"]}"' not in dialog for r in other)  # another patient's is not
+    code, page = call(server, "POST", f"{url}/link", amara, form={"rel": "nope", "to": rep})
+    assert code == 422
+    code, _ = call(server, "POST", f"{url}/link", amara, form={"rel": "report", "to": rep})
+    assert code == 303 and hub.hand_links(M(hub, "dr-amara"), ref) == {"report": [rep]}
+    links = call(server, "GET", url, amara)[1].split('id="links"', 1)[1].split("</section>", 1)[0]
+    assert "Echo" in links and f'{url}/link?rel=report' not in links  # a single link, made: no second
+    code, _ = call(server, "POST", f"{url}/unlink", amara, form={"rel": "report", "to": rep})
+    assert code == 303 and hub.hand_links(M(hub, "dr-amara"), ref) == {}
+    t, _, rid = ref.partition("/")
+    assert call(server, "POST", f"/api/records/{t}/{rid}/link", amara, body={"rel": "report", "to": rep})[0] == 200
+    got = json.loads(call(server, "GET", f"/api/records/{t}/{rid}/links", amara)[1])
+    assert {x["rel"]: x["linked"] for x in got} == {"sent-with": [], "report": [rep]}

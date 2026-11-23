@@ -134,6 +134,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)", self.api_record)
         R("POST", r"/api/records/(?P<rtype>[A-Za-z]+)", self.api_create_record)
         R("PATCH", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)", self.api_update_record)
+        R("GET", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)/links", self.api_hand_links)
+        R("POST", r"/api/records/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)/(?P<verb>link|unlink)", self.api_link)
         R("GET", r"/api/chart/(?P<rtype>[A-Za-z]+)/(?P<rid>[\w.-]+)", self.api_chart)
         R("GET", r"/api/workflows", self.api_workflows)
         R("POST", r"/api/workflows", self.api_propose)
@@ -513,6 +515,22 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         if not ver:
             raise Invalid("say which version you changed: the If-Match header, or _version in the body")
         return self.hub.update_record(req["me"], f"{rtype}/{rid}", b, expected_version=str(ver).strip('"W/'))
+
+    def api_hand_links(self, req, rtype, rid):
+        """The links a record's type allows by hand (``[[link]]``), and what each links to now."""
+        rt = self.hub.record_type(rtype)
+        if not rt:
+            raise Invalid(f"there is no record type {rtype}")
+        self.hub.read_record(req["me"], f"{rtype}/{rid}")
+        have = self.hub.hand_links(req["me"], f"{rtype}/{rid}")
+        return [{**{k: x[k] for k in ("rel", "label", "to", "many")}, "linked": have.get(x["rel"], [])}
+                for x in rt.links]
+
+    def api_link(self, req, rtype, rid, verb):
+        """Link a record to another by a link its type allows (``{"rel": ..., "to": "Type/id"}``), or unlink it."""
+        b = self.body_json(req)
+        fn = self.hub.link if verb == "link" else self.hub.unlink
+        return fn(req["me"], f"{rtype}/{rid}", str(b.get("rel") or ""), str(b.get("to") or ""))
 
     def api_create_record(self, req, rtype):
         return self.hub.create_record(req["me"], rtype, self.body_json(req))
@@ -1991,6 +2009,10 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         rest = {k: v for k, v in ctx["context"].items() if k not in asked}
         if st.get("instructions"):
             parts.append(f'<div class="section"><h2>Description</h2><div class="card">{e(st["instructions"])}</div></div>')
+        if st.get("needs"):  # requires_links: what to link first, on the record's page
+            rec_url = self.record_href(run["record"]) + "#links"
+            parts.append(f'<div class="flash info" role="note"><p>Before this is done, the record needs: '
+                         f'{e("; ".join(st["needs"]))}. <a href="{e(rec_url)}">Link it on the record</a>.</p></div>')
         if ctx.get("skill") and not on_record:
             parts.append(f'<details class="card"><summary>How an agent is told to do this ({e(ctx["skill"]["title"])})'
                          f'</summary><pre class="wrap">{e(ctx["skill"]["instructions"])}</pre></details>')

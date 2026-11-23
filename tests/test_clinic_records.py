@@ -593,9 +593,17 @@ def test_a_referral_is_its_own_record_walked_from_draft_to_report_received(hub):
     with pytest.raises(Denied):  # its workflow moves it
         hub.update_record(M(hub, "dr-amara"), ref, {**rec, "status": "completed"})
     hub.engine.complete(M(hub, "jo"), item_for(hub, run, "booked"), {"seen": "booked", "appointment": "2027-01-12T10:00"})
-    hub.engine.complete(M(hub, "noor"), item_for(hub, run, "report"), {"summary": "Holter normal; no follow-up."})
+    noor = M(hub, "noor")
+    assert hub.engine.context(noor, item_for(hub, run, "report"))["step"]["needs"] == ["specialist's report"]
+    with pytest.raises(Invalid, match="specialist's report"):  # closed only with the report linked to it
+        hub.engine.complete(noor, item_for(hub, run, "report"), {"summary": "Holter normal; no follow-up."})
+    report = hub.create_record(M(hub, "dr-amara"), "DiagnosticReport", {
+        "status": "final", "code": {"text": "Holter monitor"}, "subject": {"reference": pat}})
+    hub.link(noor, ref, "report", f"DiagnosticReport/{report['id']}")
+    hub.engine.complete(noor, item_for(hub, run, "report"), {"summary": "Holter normal; no follow-up."})
     run_all_local(hub, log=quiet)
     assert _read(hub, ref)["status"] == "completed" and hub.engine.run(run["id"])["status"] == "completed"
+    assert hub.hand_links(noor, ref) == {"report": [f"DiagnosticReport/{report['id']}"]}  # kept through its saves
     moves = [e["data"]["to"] for e in hub.db.events.find({"subject": ref, "action": "record.transitioned"}, sort="seq")]
     assert moves == ["active", "completed"]
     assert len([i for i in _items(hub, run) if i["parent_id"] is None]) == 1

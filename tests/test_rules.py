@@ -5976,3 +5976,61 @@ def test_a_step_whose_move_is_signed_is_refused_on_its_item_and_done_by_the_sign
     run = hub.engine.run(run["id"])
     assert run["steps"]["approve"]["state"] == "done" and run["status"] == "completed"
     assert hub.records.read(*ref.split("/", 1))["status"] == "approved"
+
+
+def test_a_type_declares_the_links_people_make_by_hand_and_the_hub_refuses_any_other(hub):
+    """``[[link]]`` on a type: the links a person makes from its page, not by filling in a field. The hub refuses a
+    rel the type does not declare, a target of a type the link does not allow, a second one of a single link, and
+    a field's own rel; hand links survive the record's saves (which rebuild its field links)."""
+    from practicehub import schema
+    head = 'id = "X"\nlabel = "X"\ndata_class = "clinical"\n[[field]]\nname = "who"\ntype = "reference"\ntarget = ["Patient"]\n'
+    with pytest.raises(schema.DefinitionError, match="name this one apart"):
+        schema.parse(head + '[[link]]\nrel = "who"\nto = ["Patient"]\n')
+    with pytest.raises(schema.DefinitionError, match="colour"):
+        schema.parse(head + '[[link]]\nrel = "a"\nto = ["Patient"]\ncolour = "red"\n')
+    assert [x["rel"] for x in schema.parse(head + '[[link]]\nrel = "seen-by"\nto = ["Patient"]\n').allowed_links()] \
+        == ["who", "seen-by"]
+    amara, jo = M(hub, "dr-amara"), M(hub, "jo")
+    pat = "Patient/" + next(r for r in hub.records.search("Patient", limit=None))["id"]
+    ref = "ServiceRequest/" + hub.create_record(amara, "ServiceRequest", {
+        "status": "draft", "intent": "order", "subject": {"reference": pat}, "code": {"text": "Cardiology"}},
+        start_workflow=False)["id"]
+    obs = "Observation/" + next(r for r in hub.records.search("Observation", limit=None))["id"]
+    rep = ["DiagnosticReport/" + hub.create_record(amara, "DiagnosticReport", {
+        "status": "final", "code": {"text": t}, "subject": {"reference": pat}})["id"] for t in ("Echo", "Holter")]
+    with pytest.raises(Invalid, match="no link"):
+        hub.link(amara, ref, "results", obs)
+    with pytest.raises(Invalid):
+        hub.link(amara, ref, "subject", obs)          # a field's link is made by filling in the field
+    with pytest.raises(Invalid):
+        hub.link(amara, ref, "report", obs)           # a report link is to a report
+    hub.link(amara, ref, "sent-with", obs)
+    hub.link(amara, ref, "report", rep[0])
+    with pytest.raises(Invalid, match="one"):
+        hub.link(amara, ref, "report", rep[1])        # a single link
+    rec = hub.read_record(amara, ref)
+    hub.update_record(amara, ref, {**rec, "priority": "urgent"})
+    assert hub.hand_links(amara, ref) == {"report": [rep[0]], "sent-with": [obs]}
+    hub.unlink(amara, ref, "sent-with", obs)
+    assert hub.hand_links(amara, ref) == {"report": [rep[0]]} and hub.hand_links(jo, ref) == {}  # jo reads no reports
+    acts = [e["action"] for e in hub.db.events.find({"subject": ref}, sort="seq")]
+    assert acts.count("record.linked") == 2 and acts.count("record.unlinked") == 1
+
+
+def test_a_workflow_step_may_require_links_and_its_check_knows_the_record_types_links(hub):
+    """``requires_links`` on a person's step names links its record's type has: one it allows, or one another type
+    allows to it (``from``); ``outcomes`` is for a gate's own outcomes. The check refuses anything else."""
+    from practicehub.workflows import DefinitionError
+    src = hub.workflow("referral")[1]["source"]
+    hub.check_workflow(src)
+
+    def problems(need):
+        bad = src.replace('requires_links = ["report"]', f"requires_links = [{need}]", 1)
+        assert bad != src
+        with pytest.raises(DefinitionError) as exc:
+            hub.check_workflow(bad)
+        return " | ".join(exc.value.problems)
+    assert "no such link" in problems('"letters"')
+    assert "may point at" in problems('{ rel = "report", from = "Patient" }')
+    assert "outcomes" in problems('{ rel = "report", outcomes = ["send"] }')   # the report step is a task
+    assert "min" in problems('{ rel = "report", min = 0 }')

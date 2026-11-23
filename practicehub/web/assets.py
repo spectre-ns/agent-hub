@@ -418,6 +418,8 @@ ul.tree li::before{content:"";display:inline-block;width:6px;height:6px;margin-r
   background:var(--border-bold);vertical-align:middle}
 ul.toc li.l2{padding-left:12px}ul.toc li.l3,ul.toc li.l4{padding-left:24px}
 section.children h2{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+section.hand-links h3{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0 4px}
+section.hand-links li{display:flex;gap:8px;align-items:center}section.hand-links form.inline{margin:0;display:inline}
 table.kv th{width:1%;white-space:nowrap;padding:4px 12px 4px 0;border:0;vertical-align:top;font-size:14px;line-height:20px;
 font-weight:400;color:var(--subtlest)}
 table.kv td{padding:4px 12px 4px 0;color:var(--fg);font-weight:500}

@@ -15,6 +15,23 @@ summary = "A referral to a specialist (or a requisition), signed by the referrin
 # referral starts its workflow when it is made; one the physician files as already sent (active) starts none.
 workflow = { id = "referral", when = "record.status == 'draft' and record.intent == 'order'" }
 
+# Links a person makes by hand on the referral's page: the chart items sent with the letter, and the specialist's
+# report once it is filed (its referral is closed only with it: the referral workflow's report step asks for it).
+[[link]]
+rel = "sent-with"
+label = "Sent with the letter"
+to = ["Observation", "DiagnosticReport", "Condition", "MedicationRequest", "Immunization", "AllergyIntolerance"]
+help = "results, problems and medications the specialist should see"
+back = "Sent with a referral"
+
+[[link]]
+rel = "report"
+label = "Specialist's report"
+to = ["DiagnosticReport"]
+many = false
+help = "the report the specialist sent back, filed on the chart"
+back = "Report for a referral"
+
 [[field]]
 name = "status"
 type = "choice"

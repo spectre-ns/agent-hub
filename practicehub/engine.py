@@ -2713,7 +2713,10 @@ class Engine:
                      "instructions": instructions, "outcomes": step.outcomes,
                      "meaning": self.meaning_for(member, run, step),
                      "meanings": {o: self.meaning_for(member, run, step, o) for o in step.outcomes},
-                     "signer": step.signer, "skill": skill.id if skill else step.skill, "block": step.block},
+                     "signer": step.signer, "skill": skill.id if skill else step.skill, "block": step.block,
+                     # the links its record must have before it is done (``requires_links``) that it does not yet
+                     "needs": self.hub.missing_links(step, run["record"]) if step.requires_links and run.get("record")
+                     else []},
             "skill": {"id": skill.id, "title": skill.title, "instructions": skill.instructions} if skill else None,
             "context": data, "draft": draft, "fields": fields,
             "schema": json_schema(fields, self._choice_ctx(fields, data, run)),
@@ -2742,6 +2745,17 @@ class Engine:
             return [{"value": c, "label": c} for c in f["choices"]]
         src = expr.lookup(self._choice_ctx([f], data, run), f["choices_from"]) or []
         return [c if isinstance(c, dict) else {"value": c, "label": c} for c in src]
+
+    def _require_links(self, run: dict, step, outcome: str | None = None) -> None:
+        """A step's ``requires_links``: the record must have them before the step is done (or, on a gate, before
+        the outcomes they are for are decided)."""
+        from .hub import Invalid
+        if not step.requires_links or not run.get("record"):
+            return
+        missing = self.hub.missing_links(step, run["record"], outcome)
+        if missing:
+            rt = self.hub.record_type(run["record"].split("/", 1)[0])
+            raise Invalid(f"this step needs the {rt.label.lower() if rt else 'record'} to have: {'; '.join(missing)}", missing)
 
     def complete(self, member: dict, item_id: str, output: dict) -> dict:
         """Finish a task with its fields."""
@@ -2776,6 +2790,7 @@ class Engine:
                 problems = guard(values, ctxview) or []
                 if problems:
                     raise Invalid("the answer does not pass the step's checks", problems)
+            self._require_links(run, step)
             if item["status"] == "open":  # Done on an open item takes it first, on the record: nobody presses
                 # Assign to me only to be allowed to finish
                 hub.track.append(member, "item.claimed", f"item:{item_id}", run_id=item["run_id"], cause=item["cause"],
@@ -2832,6 +2847,7 @@ class Engine:
             run, wf, step = self.step_of(item)
             if outcome not in step.outcomes:
                 raise Invalid(f"the decision is one of: {', '.join(step.outcomes)}")
+            self._require_links(run, step, outcome)
             values = {"outcome": outcome, "comment": comment or ""}
             what = {"run": run["id"], "step": step.id, "outcome": outcome,
                     "meaning": self.meaning_for(member, run, step, outcome),

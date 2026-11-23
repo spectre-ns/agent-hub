@@ -335,6 +335,10 @@ class CatalogMixin:
             for t in f["target"]:
                 if t != "*" and t not in known:
                     problems.append(f"field {f['name']}: there is no record type {t!r} to point at")
+        for x in rt.links:
+            for t in x["to"]:
+                if t != "*" and t not in known:
+                    problems.append(f"link {x['rel']!r}: there is no record type {t!r} to point at")
         base = schema.bases().get(rt.extends or "")
         for bname, m in (rt.base_map.items() if base else ()):
             bf = base.field(bname)

@@ -145,6 +145,7 @@ class RecordType:
     screens: dict = field(default_factory=dict)  # id -> {"id", "on": [ops], "tabs": [{"label", "fields": [names]}]}
     parent: str | None = None  # the path of a reference to its own type: its records form a tree
     part_of: dict | None = None  # {"field", "path", "target"}: the reference to the one record that owns it
+    links: list[dict] = field(default_factory=list)  # [{rel, label, to, many, help, back}]: links a person may make
     slug: str = ""  # a part's segment in its address under its owner (/patients/7f3a/lab-results/b147); else its plural
     navigator: dict | None = None  # {"tops": words, "hide": [states]}: a second navigation column for the tree
     layout: str = "record"   # "page": its formatted text is the page, with its fields and controls in a bar above
@@ -167,6 +168,25 @@ class RecordType:
 
     def field(self, name: str) -> dict | None:
         return next((f for f in self.fields if f["name"] == name), None)
+
+    def link(self, rel: str) -> dict | None:
+        """The link a person may make from a record of it, by its rel: one it declares, or one of its reference fields
+        (``{rel, label, to, many, field}``: made by filling in the field, never by hand)."""
+        own = next((x for x in self.links if x["rel"] == rel), None)
+        if own:
+            return own
+        f = next((f for f in self.references if f["rel"] == rel), None)
+        return {"rel": rel, "label": f["label"], "to": list(f["target"]), "many": bool(f.get("list")) or "*" in f["path"],
+                "field": f["name"], "help": f.get("help", ""), "back": ""} if f else None
+
+    def allowed_links(self) -> list[dict]:
+        """Every link a record of it may have: its reference fields', then those it declares to be made by hand."""
+        seen, out = set(), []
+        for x in [*(self.link(f["rel"]) for f in self.references), *self.links]:
+            if x["rel"] not in seen:
+                seen.add(x["rel"])
+                out.append(x)
+        return out
 
     def field_class(self, f: dict) -> str:
         """The data class that guards a field's value: its own, else the type's."""
@@ -204,14 +224,14 @@ class RecordType:
 # A slug is never one of the words that follow a record's address for its own pages and actions.
 SLUG = re.compile(r"[a-z][a-z0-9-]*")
 RESERVED_SEGMENTS = frozenset({"new", "export", "edit", "move", "sign", "attach", "override", "files", "workflow", "office",
-                               "reschedule", "everything"})
+                               "reschedule", "everything", "link", "unlink", "links"})
 
 
 # Every key each table of a record type may hold: anything else is a typo, said so rather than quietly ignored.
 KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
-         "part_of", "slug",
+         "part_of", "slug", "link",
          "navigator", "layout", "standard", "consent", "booking", "workflow"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
@@ -221,6 +241,7 @@ KEYS = {
     "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment", "asks", "requires", "sign",
                    "opens", "confirm"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
+    "link": {"rel", "label", "to", "many", "help", "back"},
     "screen": {"id", "on", "tab", "fields", "label"},
     "tab": {"label", "fields"},
     "navigator": {"tops", "hide"},
@@ -669,6 +690,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
     if not SLUG.fullmatch(rt.slug) or rt.slug in RESERVED_SEGMENTS:
         problems.append(f"slug: {rt.slug!r} cannot be a part of an address: give one of lowercase letters, digits and "
                         f"dashes, starting with a letter, and not one of {', '.join(sorted(RESERVED_SEGMENTS))}")
+    rt.links, more = _check_links(doc.get("link", []), rt)
+    problems += more
     problems += _check_field_classes(rt)
     nav = doc.get("navigator")
     if nav is not None:
@@ -1495,6 +1518,43 @@ def validate(rt: RecordType, rec: dict, *, partial_ok: bool = False, members=Non
         if st is not None and st not in rt.lifecycle["states"]:
             problems.append(f"{rt.label}: {st!r} is not one of its states ({', '.join(rt.lifecycle['states'])})")
     return problems
+
+
+LINK_REL = re.compile(r"[a-z][a-z0-9_-]*")
+
+
+def _check_links(raw, rt: RecordType) -> tuple[list[dict], list[str]]:
+    """``[[link]]``: the links a person may make from a record of this type to another record, by hand (a referral
+    letter to its referral, a CAPA to the complaint that raised it): a rel, a label, the types it may point at, and
+    whether more than one may be made. Its rel is never one of its reference fields' (those are made by the field)."""
+    problems, out = [], []
+    if not isinstance(raw, list) or not all(isinstance(x, dict) for x in raw):
+        return [], ["link: a list of tables ([[link]])"]
+    field_rels = {f["rel"] for f in rt.references}
+    for i, x in enumerate(raw):
+        rel = str(x.get("rel") or "")
+        where = f"link {rel or i + 1!r}"
+        problems += _unknown(where, x, "link")
+        to = x.get("to")
+        to = [to] if isinstance(to, str) else to
+        if not LINK_REL.fullmatch(rel):
+            problems.append(f"{where}: rel is lowercase letters, digits, dashes and underscores, starting with a letter")
+        elif rel in field_rels:
+            problems.append(f"{where}: the field that points with rel {rel!r} makes that link; name this one apart")
+        elif rel == "mentions" or any(y["rel"] == rel for y in out):
+            problems.append(f"{where}: rel {rel!r} is already a link of this type")
+        if not to or not isinstance(to, list) or not all(isinstance(t, str) and t for t in to):
+            problems.append(f"{where}: to is the record type (or list of them) it may point at")
+            to = []
+        for k in ("label", "help", "back"):
+            if k in x and not isinstance(x[k], str):
+                problems.append(f"{where}: {k} is text")
+        if "many" in x and not isinstance(x["many"], bool):
+            problems.append(f"{where}: many is true or false")
+        out.append({"rel": rel, "label": str(x.get("label") or state_words(rel).capitalize()), "to": list(to),
+                    "many": bool(x.get("many", True)), "help": str(x.get("help") or ""), "back": str(x.get("back") or ""),
+                    "field": None})
+    return out, problems
 
 
 def links(rt: RecordType, rec: dict) -> list[tuple[str, str]]:

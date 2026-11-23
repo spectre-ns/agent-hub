@@ -27,8 +27,10 @@
 # Its review reads "In review", its work is named for the result, and a visit a physician books from it names the
 # result it was booked for (Visit > Because of).
 # 4.3: prescriptions, reports, referrals and orders, claims and messages are parts of their patient too: every
+# 4.4: a referral is linked by hand to what was sent with its letter and to the specialist's report, and is
+# closed only with the report linked.
 # patient record is reached through the patient (Patient > Prescriptions > Prescription), and its address is under them.
-version = "4.3"
+version = "4.4"
 
 [practice]
 requires_core = "1.0"

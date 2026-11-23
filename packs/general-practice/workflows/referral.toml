@@ -204,8 +204,9 @@ after = ["booked"]
 when = "booked.seen == 'booked'"
 persons_only = true
 context = ["record:clinical", "input", "booked"]
-instructions = "When the specialist's report arrives, file it on the chart and summarize it here; this closes the referral."
+instructions = "When the specialist's report arrives, file it on the chart, link it to the referral as its report, and summarize it here; this closes the referral."
 state = "completed"
+requires_links = ["report"]   # the referral is closed only with the specialist's report linked to it
 [[steps.fields]]
 name = "summary"
 type = "text"
