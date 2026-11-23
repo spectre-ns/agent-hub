@@ -906,7 +906,7 @@ class Engine:
                  and "*" not in t["from"]]
         if not exits or any(t["by"] != "workflow" for t in exits):
             return True  # people move it on from there
-        return made in (lc.get("abandoned") or {}) and ("ended" not in lc or made in (lc.get("ended") or {}))
+        return made in (lc.get("abandoned") or {}) and (not lc.get("ended") or made in lc["ended"])
 
     def _relink_failed(self, row: dict, error: str) -> None:
         """A run that could not be moved: tried again after a wait that doubles each time (up to a day), noted on the

@@ -232,7 +232,7 @@ def test_a_renewal_from_before_the_request_had_its_own_workflow_moves_onto_a_req
     assert ref.startswith("MedicationRequest/") and after["subject"] == pat and after["item"] == before["item"]
     assert after["version"] == before["version"] and after["ctx"]["run"]["record"] == pat
     assert _read(hub, ref)["status"] == "draft"
-    assert hub.engine.relink_runs() == {"moved": [], "failed": []}
+    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}
     hub.engine.decide(amara, item_for(hub, after, "decide"), "renew", "")
     run_all_local(hub, log=quiet)
     assert hub.engine.run(run["id"])["status"] == "completed"
