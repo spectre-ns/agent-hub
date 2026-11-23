@@ -758,7 +758,7 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
     page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
     # in the page's main column, before the side panel: what was started from the visit, and where each one is
     started = page.index("Started from this visit")
-    assert started < page.index('class="issue-side"') and kids[0]["ref"] in page[started:] and "Being written" in page
+    assert started < page.index('class="issue-side"') and f'/referrals/{kids[0]["ref"].split("/")[1]}"' in page[started:] and "Being written" in page
     from practicehub.visibility import Viewer
     viewer = Viewer(hub, amara)
     stuck, rank = app._child_work({**kids[0]["run"], "steps": {"draft": {"state": "failed"}}}, viewer)
@@ -771,7 +771,7 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
                            *kids[0]["ref"].split("/", 1))
     assert "Made for" in back and ref.split("/", 1)[1] in back
     chart = app.page_record({"me": amara, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
-    assert all(k["ref"] in chart for k in kids)
+    assert all(f'/referrals/{k["ref"].split("/")[1]}"' in chart for k in kids)  # referrals are parts of the patient
 
 
 def test_prescriptions_and_lab_orders_written_in_the_note_are_sub_records_of_the_visit(hub):

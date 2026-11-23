@@ -7,6 +7,7 @@ standard = "fhir-r4"
 strict = true
 date = "effectiveDateTime"
 active = "not record.status in ['cancelled', 'entered-in-error']"
+part_of = "subject"
 order = 45
 summary = "A report that groups results (a lab panel, imaging), with the reporting clinician's conclusion."
 

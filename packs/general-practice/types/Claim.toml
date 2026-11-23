@@ -7,6 +7,7 @@ standard = "fhir-r4"
 strict = true
 date = "created"
 active = "record.status == 'active'"
+part_of = "patient"
 order = 125
 summary = "A claim to MSI or an insurer."
 

@@ -49,7 +49,27 @@ def call(base, method, path, token=None, body=None, form=None):
         with opener.open(req) as r:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as exc:
+        where = urllib.parse.urlsplit(exc.headers.get("Location", "")).path
+        if method == "GET" and exc.code == 303 and path.startswith("/records/") and _nested(where):
+            # a part's own address goes to its address under its owner, as a browser follows it
+            return call(base, "GET", exc.headers["Location"].split("#", 1)[0], token)
         return exc.code, exc.read().decode()
+
+
+def addr(hub, ref: str) -> str:
+    """A record's address on the web: a part's is under its owner's, layer by layer (/patients/<id>/visits/<id>)."""
+    t, _, rid = ref.partition("/")
+    rt = hub.record_type(t)
+    owner = hub.owner_ref(ref) if rt and rt.part_of else None
+    if owner:
+        return f"{addr(hub, owner)}/{rt.slug}/{rid}"
+    return f"/patients/{rid}" if t == "Patient" else f"/records/{ref}"
+
+
+def _nested(path: str) -> bool:
+    """An address under an owner: /patients/<id>/<kind>/<id>..., /records/<Type>/<id>/<kind>/<id>..."""
+    segs = path.strip("/").split("/")
+    return (segs[0] == "patients" and len(segs) >= 4) or (segs[0] == "records" and len(segs) >= 5)
 
 
 def follow(base, path, token=None):
@@ -197,17 +217,19 @@ def test_a_physician_edits_and_signs_with_forms(hub, server):
     assert code == 303
     sign = item_for(hub, run, "sign")
     code, html = page("GET", f"/items/{sign}")
+    # the decision leads the step's page: a button per outcome, each opening its own dialog
+    assert html.index('class="section rw-decide"') < html.index("<h2>Description</h2>") if "<h2>Description</h2>" in html \
+        else 'class="section rw-decide"' in html
+    assert f'href="/items/{sign}/decide?outcome=sign"' in html and 'type="radio"' not in html
+    code, html = page("GET", f"/items/{sign}/decide?outcome=sign")
     assert "electronic signature" in html and 'name="passphrase"' in html and 'name="credential"' not in html
-    # the decision is a row of cards: the native radio is kept for the keyboard but hidden, never a bare circle
-    assert '<fieldset class="choices options decide">' in html
-    assert all('class="opt-input"' in r for r in re.findall(r'<input type="radio"[^>]*>', html))
     seen = re.search(r'name="seen" value="([0-9a-f]{64})"', html).group(1)
     form = {"outcome": "sign", "comment": "Reviewed with the patient", "seen": seen}
     code, html = page("POST", f"/items/{sign}/decide", form)
     assert code == 403  # signing asks for the passphrase again
-    # the item page again, inline: the error, the outcome and comment kept, no way back that loses them
+    # the decision's dialog again: the error, the outcome and comment kept, no way back that loses them
     assert "give your passphrase again" in html and "history.back" not in html
-    assert re.search(r'value="sign" required checked', html) and ">Reviewed with the patient</textarea>" in html
+    assert 'name="outcome" value="sign"' in html and ">Reviewed with the patient</textarea>" in html
     assert page("POST", f"/items/{sign}/decide", {**form, "passphrase": liams})[0] == 403  # someone else's
     assert page("POST", f"/items/{sign}/decide", {**form, "passphrase": token(hub, "dr-amara")})[0] == 403  # a token
     code, html = page("POST", f"/items/{sign}/decide", {**form, "passphrase": words, "seen": "0" * 64})
@@ -1548,7 +1570,7 @@ def test_booking_a_slot_makes_a_visit_in_its_first_state(hub, server):
     assert v["participant"][0]["individual"]["reference"] == "Practitioner/dr-amara"
     assert v["reasonCode"][0]["text"] == "Sore throat"
     page = call(server, "GET", f"/schedule?date={DAY}", token(hub, "jo"))[1]
-    assert "Ellen MacLeod" in page and f'href="/records/Encounter/{v["id"]}"' in page
+    assert "Ellen MacLeod" in page and f'href="{addr(hub, "Encounter/" + v["id"])}"' in page
     assert "Sore throat" not in page  # the front desk sees the booking, not why
     assert "Sore throat" in call(server, "GET", f"/schedule?date={DAY}", token(hub, "dr-amara"))[1]
     assert f'with=dr-amara&amp;at={DAY}T09%3A00' not in page  # the slot is taken
@@ -1562,7 +1584,7 @@ def test_booking_a_slot_makes_a_visit_in_its_first_state(hub, server):
     # said back: when, with whom, for whom, and the visit to open; nothing to read out for a plain form request
     booked = page.split('<div class="flash success" role="status">', 1)[1].split("</div>", 1)[0]
     assert "Booked for Monday January 7 at 10:00" in booked and "Dr. Amara Okafor" in booked
-    assert "Ellen MacLeod" in booked and f'href="/records/Encounter/{desk["id"]}"' in booked
+    assert "Ellen MacLeod" in booked and f'href="{addr(hub, "Encounter/" + desk["id"])}"' in booked
     assert "Tell the caller now" not in page and "Not booked yet" not in page
     status, page = _book(server, hub, who="jo", at=f"{DAY}T10:30")  # a reason sent past the form is refused
     assert status == 422 and "clinical" in page
@@ -1755,7 +1777,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """Version 2 of the clinic pack merged Appointment into Visit (tests/test_rules.py upgrades a version 1)."""
-    assert hub.pack.version == "4.2" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "4.3" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do
@@ -2155,7 +2177,7 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     assert re.search(r'class="lc-node [a-z]+ current"><title>In progress', modal)
     # the chart of the patient lists the same run beside it
     chart = call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", token(hub, "dr-amara"))[1]
-    assert f'href="/records/{visit}#work"' in _panel(chart) and "On this patient" in chart
+    assert f'href="{addr(hub, visit)}#work"' in _panel(chart) and "On this patient" in chart
 
 
 def test_a_record_page_reads_in_words(hub, server):

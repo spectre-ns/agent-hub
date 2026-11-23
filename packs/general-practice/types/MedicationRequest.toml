@@ -8,6 +8,7 @@ standard = "fhir-r4"
 strict = true
 date = "authoredOn"
 active = "record.status == 'active'"
+part_of = "subject"
 order = 30
 summary = "A prescription. A renewal request is a proposal its workflow prescribes or closes."
 # A renewal request (a draft proposal) is walked by its own workflow from asked for to prescribed or closed: the

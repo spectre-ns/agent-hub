@@ -74,6 +74,10 @@ e = html.escape
 SHOWN = 200  # rows a list shows; past this, the store is searched, never a list cut short
 
 
+class _NoType:
+    part_of = None
+
+
 class Redirect(Exception):
     def __init__(self, to: str, cookie: str | list[str] | None = None):
         self.to, self.cookie = to, cookie
@@ -257,6 +261,20 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         if method == "GET" and path in self.STATIC:
             ctype, text = self.STATIC[path]
             return 200, {"Content-Type": ctype, "Cache-Control": "no-cache"}, text.encode()
+        if not is_api:
+            # a part is addressed under its owner (/patients/7f3a/lab-results/b147): routed by its own address, and
+            # shown by the nested one; its own address, asked for in a browser, goes to the nested one
+            flat = self.flat_path(path)
+            if flat != path:
+                req["shown"], req["path"], path = path, flat, flat
+            elif method == "GET":
+                m = re.fullmatch(r"/records/([A-Za-z]\w*)/([\w.-]+)()/?", path)  # its page; its files and dialogs serve here too
+                if m and m.group(2) not in ("new", "export") and (self.hub.record_type(m.group(1)) or
+                                                                   _NoType).part_of:
+                    nested = self.record_href(f"{m.group(1)}/{m.group(2)}")
+                    if not nested.startswith("/records/"):
+                        q = urllib.parse.urlencode(query)
+                        return 303, {"Location": nested + m.group(3) + (f"?{q}" if q else "")}, b""
         for m, rx, fn, auth in self.routes:
             match = rx.match(path)
             if not match or m != method:
@@ -819,6 +837,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         up to the first owner that is not itself a part."""
         path = req["path"]
         for _ in range(4):  # a part of a part of a part, at most
+            path = self.flat_path(path)
             m = re.fullmatch(r"/records/([A-Za-z][A-Za-z0-9_]*)/(new|[A-Za-z0-9_.-]+)(/.*)?", path)
             rt = self.hub.record_type(m.group(1)) if m else None
             if not (rt and rt.part_of and me and self._may_read(me, rt.id)):
@@ -1464,7 +1483,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
     @staticmethod
     def here(req) -> str:
         q = urllib.parse.urlencode(req["query"])
-        return req["path"] + (f"?{q}" if q else "")
+        return req.get("shown", req["path"]) + (f"?{q}" if q else "")
 
     @staticmethod
     def safe_back(v) -> str:
@@ -1985,36 +2004,20 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         if st["kind"] == "gate":
             if not on_record:  # on the record's page, the record is the page above
                 parts.append(self._signed_record_view(me, run, step))
-            says = st.get("meanings") or {}
-            varied = len(set(says.values())) > 1   # each outcome signs its own sentence: show it beside the choice
-            radios = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="outcome" value="{e(o)}" '
-                             f'required{" checked" if kept.get("outcome") == o else ""}> '
-                             f'<b>{e(self.human(o))}</b>'
-                             + (f' <small class="muted">signs “{e(says.get(o, st["meaning"]))}”</small>' if varied else '')
-                             + '</label>' for o in st["outcomes"])
-            sign = ('<p class="sign">Deciding is your electronic signature, with the sentence beside your choice, '
-                    if varied else f'<p class="sign">Deciding is your electronic signature: <b>“{e(st["meaning"])}”</b>, ')
-            decide = (f'<div class="section"><h2>Decide</h2><form method="post" action="/items/{iid}/decide" class="card">{hidden}'
-                         f'<fieldset class="choices options decide"><legend>Your decision<span class="req" aria-hidden="true"> *</span></legend>{radios}</fieldset><label>Comment<textarea name="comment" rows="3">{e(str(kept.get("comment", "")))}</textarea></label>'
-                         f'{sign}over exactly what is shown on this page. If it changes before you decide, you are asked '
-                         f'to read it again.</p>{self._sign_prompt(me)}<input type="hidden" name="seen" '
-                         f'value="{e(eng.shown_digest(me, iid))}"><button class="primary">Sign and decide</button></form></div>')
-            if on_record:
-                # on the record's page the decision leads, as its moves do: a button for each outcome, each opening a
-                # dialog for that outcome alone (what it signs, what it sets going, a comment, the signature)
-                q = urllib.parse.quote(back, safe="") if back else ""
-                last = len(st["outcomes"]) - 1
-                btns = "".join(
-                    f'<a class="btn {"primary" if i == 0 else "danger-subtle" if i == last and self._ends(o) else "secondary"}" '
-                    f'href="/items/{e(iid)}/decide?outcome={e(urllib.parse.quote(o, safe=""))}'
-                    + (f'&amp;_back={e(q)}' if q else "") + f'" data-modal>{e(self.human(o))}…</a>'
-                    for i, o in enumerate(st["outcomes"]))
-                decide = (f'<div class="section rw-decide"><h2>Decide</h2>'
-                          f'<div class="rw-moves" role="group" aria-label="Your decision">{btns}</div>'
-                          f'<p class="muted">Each opens what that decision signs and what follows it.</p></div>')
-            # on the record's page the decision leads (the record is above it, its request and notes follow); on the
-            # step's own page it follows what it is about
-            parts.insert(0 if on_record else len(parts), decide)
+            # the decision leads, on the record's page and the step's own: a button for each outcome, as a record's
+            # moves are, each opening a dialog for that outcome alone (what it signs, what it sets going, a comment,
+            # the signature)
+            q = urllib.parse.quote(back, safe="") if back else ""
+            last = len(st["outcomes"]) - 1
+            btns = "".join(
+                f'<a class="btn {"primary" if i == 0 else "danger-subtle" if i == last and self._ends(o) else "secondary"}" '
+                f'href="/items/{e(iid)}/decide?outcome={e(urllib.parse.quote(o, safe=""))}'
+                + (f'&amp;_back={e(q)}' if q else "") + f'" data-modal>{e(self.human(o))}…</a>'
+                for i, o in enumerate(st["outcomes"]))
+            decide = (f'<div class="section rw-decide"><h2>Decide</h2>'
+                      f'<div class="rw-moves" role="group" aria-label="Your decision">{btns}</div>'
+                      f'<p class="muted">Each opens what that decision signs and what follows it.</p></div>')
+            parts.insert(0, decide)
         else:
             prefill = {k: v for k, v in (ctx.get("draft") or {}).items()}
             prefill.update(self._form_output(kept))  # what the person typed, sent back with an error: theirs
@@ -2053,7 +2056,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         follows = eng.outcome_follows(run, step, outcome)  # steps of the workflow they are deciding in: theirs to see
         then = ("".join(f"<li>{e(s.title)}</li>" for s in follows) if follows else "")
         hidden = f'<input type="hidden" name="_back" value="{e(back)}">' if back else ""
-        cancel = back or self.run_href(run)
+        cancel = back or f"/items/{iid}"
         err = (f'<div class="flash error" role="alert"><p>That did not go through: {e(str(error))}</p>'
                f'<p>Nothing was decided. What you typed is kept below.</p></div>' if error is not None else "")
         body = (f'<div data-modal-body>{err}<p><b>{e(step.title)}</b> <span class="muted">·</span> {e(about)}</p>'
@@ -3045,7 +3048,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                 exc = Denied(self.holder_refusal(me, eng.item(iid), str(exc)))
             kept = {k: v for k, v in f.items() if k not in ("passphrase", "credential", "seen", "_back")}
             code = 403 if isinstance(exc, Denied) else 422
-            if verb == "decide" and f.get("_dialog"):  # from an outcome's dialog: that dialog again, as typed
+            if verb == "decide" and f.get("outcome"):  # a decision is made in its outcome's dialog: that again, as typed
                 raise Rendered(code, self.page_decide(req, iid, kept={**kept, "_back": back}, error=exc)) from None
             again = self._record_again(req, back, {"iid": iid, "kept": kept, "error": exc}) if back else None
             raise Rendered(code, again or self.page_item(req, iid, kept=kept, error=exc)) from None
@@ -3198,7 +3201,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
     def _record_again(self, req, back: str, work: dict) -> str | None:
         """The record page ``back`` names, drawn again with ``work`` (a refusal, what was typed) at its work; None
         for a page that is not a record's."""
-        path = back.split("#", 1)[0].split("?", 1)[0]
+        path = self.flat_path(back.split("#", 1)[0].split("?", 1)[0])
         m = re.fullmatch(r"/records/([A-Za-z][\w]*)/([\w.-]+)", path)
         if not m:
             return None

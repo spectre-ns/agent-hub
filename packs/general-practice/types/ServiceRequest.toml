@@ -7,6 +7,7 @@ standard = "fhir-r4"
 strict = true
 date = "authoredOn"
 active = "record.status in ['draft', 'active', 'on-hold']"
+part_of = "subject"
 order = 80
 summary = "A referral to a specialist (or a requisition), signed by the referring physician."
 # A referral being written (a draft order) is walked by its own workflow from asked for to the specialist's report:

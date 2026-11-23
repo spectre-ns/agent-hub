@@ -9,7 +9,7 @@ import urllib.parse
 
 from conftest import M, item_for, visit_run
 from test_rules import _jobs
-from test_web import _ellen, call, follow, passphrase, server, token  # noqa: F401 - server is a fixture
+from test_web import _ellen, addr, call, follow, passphrase, server, token  # noqa: F401 - server is a fixture
 
 
 def _job(hub, title="Fix the autoclave"):
@@ -98,7 +98,7 @@ def test_no_page_links_work_about_a_record_to_the_run(hub, server):
                 continue
             assert not re.search(r'href="/runs/run-', page), (who, path)
     api = call(server, "GET", f"/api/runs/{run['id']}", token(hub, "dr-amara"))[1]
-    assert f'"href": "/records/{run["record"]}#work"' in api.replace('":"', '": "')
+    assert f'"href": "{addr(hub, run["record"])}#work"' in api.replace('":"', '": "')
 
 
 def test_the_history_tells_the_steps_and_folds_what_the_member_may_not_read(hub, server):
@@ -175,11 +175,11 @@ def test_visits_are_listed_in_time_order_with_a_today_filter(hub, server):
 def test_a_patients_lab_results_and_prescriptions_are_sections_of_their_chart(hub, server):
     pid = _ellen(hub).split("/")[1]
     page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
-    # lab results are a part of the patient (Patient > Lab results > Lab result); prescriptions are linked
-    assert page.count('id="part-Observation"') == 1 and 'id="link-Observation"' not in page
-    assert '<h2 id="link-MedicationRequest-h">Prescriptions' in page
+    # lab results and prescriptions are parts of the patient (Patient > Lab results > Lab result)
+    for t in ("Observation", "MedicationRequest"):
+        assert page.count(f'id="part-{t}"') == 1 and f'id="link-{t}"' not in page
     own = page.split('class="subnav owner-rail"', 1)[1].split("</nav>", 1)[0].split('<div class="sec">Linked here', 1)[0]
-    assert 'href="#part-Observation"' in own and 'href="#link-MedicationRequest"' in own
+    assert 'href="#part-Observation"' in own and 'href="#part-MedicationRequest"' in own
 
 
 def test_a_lab_result_is_under_its_patient_in_its_crumbs(hub, server):
@@ -251,3 +251,32 @@ def test_a_decision_on_the_record_is_a_button_per_outcome_each_opening_its_own_d
     words = passphrase(hub, "dr-amara")
     code, _ = call(server, "POST", f"/items/{iid}/decide", tok, form={**form, "passphrase": words})
     assert code in (200, 303) and hub.engine.item(iid)["status"] == "done"
+
+
+def test_a_part_is_addressed_under_its_owner_layer_by_layer(hub, server):
+    """A part's address is its owner's, then its kind (the pack's plural, as a slug) and its id, to any depth: a
+    result is /patients/<id>/lab-results/<id>, a visit's note /patients/<id>/visits/<id>/notes/<id>. Its own
+    address goes there; a part named under a record that does not own it is not found."""
+    from tests.test_clinic_records import LAB, _pat
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    ref = hub.engine.run(run["id"])["record"]
+    pid = hub.owner_of(hub.records.read(*ref.split("/", 1))).split("/", 1)[1]
+    oid = ref.split("/", 1)[1]
+    tok = token(hub, "dr-amara")
+    nested = f"/patients/{pid}/lab-results/{oid}"
+    import urllib.error
+    import urllib.request
+    from test_web import opener
+    try:
+        opener.open(urllib.request.Request(server + f"/records/{ref}", headers={"Authorization": f"Bearer {tok}"}))
+        raise AssertionError("its own address is not where it is shown")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 303 and exc.headers["Location"] == nested
+    code, page = call(server, "GET", nested, tok)
+    assert code == 200
+    crumbs = page.split('class="crumbs"', 1)[1].split("</nav>", 1)[0]
+    assert f'href="/patients/{pid}"' in crumbs and "Lab results" in crumbs and "Records" not in crumbs
+    other = next(p["id"] for p in hub.records.search("Patient", limit=None) if p["id"] != pid)
+    assert call(server, "GET", f"/patients/{other}/lab-results/{oid}", tok)[0] == 404  # not theirs
+    assert call(server, "GET", f"/patients/{pid}/visits/{oid}", tok)[0] == 404

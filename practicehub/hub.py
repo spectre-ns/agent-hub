@@ -3054,6 +3054,26 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             return None
         return schema.ref_of(schema.first(rec, rt.part_of["path"]))
 
+    def owner_ref(self, ref: str) -> str | None:
+        """The record that owns the part ``ref`` names, by reference. A part never changes owner (``update_record``
+        refuses it), so what is found once is kept."""
+        cache = self.__dict__.setdefault("_owners", {})
+        if ref in cache:
+            return cache[ref]
+        t, _, rid = ref.partition("/")
+        rt = self.record_type(t)
+        if not rt or not rt.part_of or not rid:
+            return None
+        rec = self.records.read(t, rid)
+        owner = self.owner_of(rec) if rec else None
+        if owner:
+            cache[ref] = owner
+        return owner
+
+    def part_slugs(self, rtype: str) -> dict[str, schema.RecordType]:
+        """The part types of ``rtype`` by their slug: the words that follow its address for its parts."""
+        return {rt.slug: rt for rt in self.part_types(rtype)}
+
     def parts(self, member: dict, ref: str) -> tuple[dict[str, list[dict]], int]:
         """A record's parts, per part type (every part type of its type, even with none yet), newest first, that
         the member may read; and how many it may not."""

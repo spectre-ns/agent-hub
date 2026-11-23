@@ -145,6 +145,7 @@ class RecordType:
     screens: dict = field(default_factory=dict)  # id -> {"id", "on": [ops], "tabs": [{"label", "fields": [names]}]}
     parent: str | None = None  # the path of a reference to its own type: its records form a tree
     part_of: dict | None = None  # {"field", "path", "target"}: the reference to the one record that owns it
+    slug: str = ""  # a part's segment in its address under its owner (/patients/7f3a/lab-results/b147); else its plural
     navigator: dict | None = None  # {"tops": words, "hide": [states]}: a second navigation column for the tree
     layout: str = "record"   # "page": its formatted text is the page, with its fields and controls in a bar above
     standard: str | None = None  # "fhir-r4": its records are FHIR R4 resources (exported as FHIR); None: its own shape
@@ -199,11 +200,18 @@ class RecordType:
         return None
 
 
+# A part's address is its owner's, then its slug and its id, to any depth (/patients/7f3a/visits/91c2/notes/44de).
+# A slug is never one of the words that follow a record's address for its own pages and actions.
+SLUG = re.compile(r"[a-z][a-z0-9-]*")
+RESERVED_SEGMENTS = frozenset({"new", "export", "edit", "move", "sign", "attach", "override", "files", "workflow", "office",
+                               "reschedule", "everything"})
+
+
 # Every key each table of a record type may hold: anything else is a typo, said so rather than quietly ignored.
 KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
-         "part_of",
+         "part_of", "slug",
          "navigator", "layout", "standard", "consent", "booking", "workflow"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
@@ -389,7 +397,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         if k in doc and not isinstance(doc[k], bool):
             problems.append(f"{k}: true or false, not {doc[k]!r}")
     for k in ("label", "plural", "summary", "data_class", "title", "short_title", "active", "date", "flag", "parent", "extends",
-              "part_of"):
+              "part_of", "slug"):
         if k in doc and not isinstance(doc[k], str):
             problems.append(f"{k}: text, not {doc[k]!r}")
             doc.pop(k)
@@ -657,6 +665,10 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             problems.append("part_of: a record is not part of its own kind; for a tree, say parent")
         else:
             rt.part_of = {"field": pf["name"], "path": pf["path"], "target": list(pf["target"])}
+    rt.slug = str(doc.get("slug") or re.sub(r"[^a-z0-9]+", "-", rt.plural.lower()).strip("-"))
+    if not SLUG.fullmatch(rt.slug) or rt.slug in RESERVED_SEGMENTS:
+        problems.append(f"slug: {rt.slug!r} cannot be a part of an address: give one of lowercase letters, digits and "
+                        f"dashes, starting with a letter, and not one of {', '.join(sorted(RESERVED_SEGMENTS))}")
     problems += _check_field_classes(rt)
     nav = doc.get("navigator")
     if nav is not None:

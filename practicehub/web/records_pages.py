@@ -231,7 +231,35 @@ class RecordPages:
             return f"/team/{rid}"
         if t == self.subj["type"]:
             return f'/{self.subj["path"]}/{rid}'
+        rt = self.hub.record_type(t)
+        if rt and rt.part_of and rid != "new":  # a part lives under its owner: /patients/7f3a/lab-results/b147
+            owner = self.hub.owner_ref(ref)
+            if owner:
+                return f"{self.record_href(owner)}/{rt.slug}/{rid}"
         return f"/records/{t}/{rid}"
+
+    def flat_path(self, path: str) -> str:
+        """A part's nested address (``/patients/7f3a/visits/91c2/notes/44de/edit``) as the one its pages are routed
+        by (``/records/Composition/44de/edit``); any other path as it is. Each layer must be the part of the one above
+        it: a part named under a record that does not own it is not found."""
+        sp = re.escape(self.subj["path"])
+        m = re.fullmatch(rf"/(?:{sp}/(?P<pid>[\w.-]+)|records/(?P<t>[A-Za-z]\w*)/(?P<rid>[\w.-]+))(?P<rest>(?:/[\w.-]+)*)/?",
+                         path)
+        if not m or not m.group("rest"):
+            return path
+        cur = f'{self.subj["type"]}/{m.group("pid")}' if m.group("pid") else f'{m.group("t")}/{m.group("rid")}'
+        segs, i = m.group("rest").split("/")[1:], 0
+        while i + 1 < len(segs):
+            rt = self.hub.part_slugs(cur.split("/", 1)[0]).get(segs[i])
+            if not rt:
+                break
+            ref = f"{rt.id}/{segs[i + 1]}"
+            if self.hub.owner_ref(ref) != cur:
+                return "/not-found"
+            cur, i = ref, i + 2
+        if i == 0:
+            return path
+        return f"/records/{cur}" + "".join(f"/{x}" for x in segs[i:])
 
     def reader(self) -> dict | None:
         """Who this request is for: set per request, per thread."""

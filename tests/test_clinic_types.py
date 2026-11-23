@@ -61,7 +61,8 @@ STARTS = {"Encounter": "planned", "Observation": "final",
 OWNED = {"AllergyIntolerance": "Patient", "Consent": "Patient", "Condition": "Patient", "Immunization": "Patient",
          "MedicationStatement": "Patient", "Coverage": "Patient", "RelatedPerson": "Patient",
          "QuestionnaireResponse": "Patient", "Encounter": "Patient", "Observation": "Patient", "Composition": "Encounter",
-         "ChargeItem": "Encounter"}
+         "ChargeItem": "Encounter", "MedicationRequest": "Patient", "DiagnosticReport": "Patient",
+         "ServiceRequest": "Patient", "Claim": "Patient", "Communication": "Patient"}
 
 
 @pytest.fixture
@@ -229,7 +230,7 @@ def test_a_nested_picker_past_the_list_is_typed_and_found_when_saved(clinic, mon
     for med in ("Ramipril 5 mg", "Ramipril 5 mg", "Amlodipine 5 mg", "Atorvastatin 20 mg"):
         mk(med)
     amara = token(hub, "dr-amara")
-    form = call(base, "GET", "/records/MedicationRequest/new", amara)[1].split('id="new"', 1)[1]
+    form = call(base, "GET", f"/records/MedicationRequest/new?subject={patient}", amara)[1].split('id="new"', 1)[1]
     assert '<input name="priorPrescription.reference"' in form and 'list="dl-' in form
     sent = {"subject": patient, "medicationCodeableConcept.text": "Metformin 1000 mg", "intent": "order"}
     code, body = call(base, "POST", "/records/MedicationRequest", amara,
@@ -242,7 +243,7 @@ def test_a_nested_picker_past_the_list_is_typed_and_found_when_saved(clinic, mon
                if (r.get("medicationCodeableConcept") or {}).get("text") == "Metformin 1000 mg")
     assert new["priorPrescription"] == {"reference": f"MedicationRequest/{old['id']}"}
     page = call(base, "GET", f"/records/MedicationRequest/{new['id']}", amara)[1]
-    assert f'href="/records/MedicationRequest/{old["id"]}"' in page
+    assert f'href="/patients/{patient.split("/")[1]}/prescriptions/{old["id"]}"' in page
 
 
 def test_a_part_page_lights_its_owner_in_the_sidebar(clinic):
