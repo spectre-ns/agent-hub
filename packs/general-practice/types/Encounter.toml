@@ -283,10 +283,13 @@ label = "Handled on the phone"
 from = ["requested"]
 to = "cancelled"
 by = "workflow"
+# Checking in opens two hours before the visit is booked for, and a no-show only once its time has come: the desk who
+# opens tomorrow's visit by mistake cannot mark it missed (which messages the patient and frees the slot).
 [[lifecycle.transition]]
 from = ["planned"]
 to = "arrived"
 label = "Check in"
+opens = "plannedStartDate - 2h"
 [[lifecycle.transition]]
 from = ["arrived"]
 to = "triaged"
@@ -311,7 +314,9 @@ to = "cancelled"
 [[lifecycle.transition]]
 from = ["planned"]
 to = "noshow"
-label = "No-show"
+label = "Mark no-show"
+opens = "plannedStartDate"
+confirm = "The patient will be messaged under the missed-appointment policy (a fee may apply), and the {plannedStartDate:time} slot freed for someone else."
 [[lifecycle.transition]]
 from = ["*"]
 to = "entered-in-error"

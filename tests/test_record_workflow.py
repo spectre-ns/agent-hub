@@ -1,6 +1,8 @@
 """A record type names the workflow that moves it from open to closed: creating the record starts it, about that
 record; the record's lifecycle state is where the work is; one run, one item, one record for the whole of its life.
 The general-practice pack's visit (Encounter) and its appointment workflow are the worked example."""
+import re
+
 import pytest
 
 from practicehub import schema
@@ -28,6 +30,14 @@ def _status(hub, ref):
 def _items(hub, run):
     """The run's work items (its one item and any children), notices apart."""
     return list(hub.db.items.find({"run_id": run["id"], "kind": {"$ne": "notice"}}))
+
+
+def _at_the_visit(hub, ref, minutes=0):
+    """The practice's clock at the time the visit is booked for (``minutes`` after it): a check-in opens two hours
+    before, a no-show at its time."""
+    from datetime import datetime, timedelta
+    start = datetime.fromisoformat(hub.records.read(*ref.split("/", 1))["plannedStartDate"][:16])
+    hub.engine._now = start + timedelta(minutes=minutes)
 
 
 def test_starting_a_request_makes_the_requested_visit_on_the_chart(hub):
@@ -193,8 +203,12 @@ def test_one_visit_walks_from_requested_to_completed_with_one_item(hub):
     assert _status(hub, ref) == "planned" and hub.records.read(*ref.split("/", 1))["plannedStartDate"]
     # checking in on the visit's own page (its lifecycle transition) moves the workflow on: no button of its own
     from practicehub.web.server import App
+    _at_the_visit(hub, ref, -180)
     page = App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
-    assert "Check in" in page
+    assert "Check in from" in page  # not yet: it opens two hours before the visit
+    _at_the_visit(hub, ref, -30)
+    page = App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert ">Check in</button>" in page
     hub.update_record(jo, ref, {"status": "arrived"})
     run = hub.engine.run(rid)
     assert run["steps"]["checked-in"]["state"] == "done" and run["steps"]["seen"]["state"] == "waiting"
@@ -231,10 +245,40 @@ def test_a_no_show_applies_the_policy_and_closes_the_run(hub):
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
         "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
     ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref, 5)
     hub.update_record(jo, ref, {"status": "noshow"})
     run = hub.engine.run(run["id"])
     assert run["steps"]["no-show"]["state"] == "done" and run["steps"]["tell-missed"]["state"] == "done"
     assert run["steps"]["end"]["state"] == "skipped" and run["status"] == "completed"
+    assert _status(hub, ref) == "noshow"
+
+
+def test_a_visit_is_checked_in_from_two_hours_before_and_marked_a_no_show_only_once_its_time_has_come(hub):
+    """The desk who opens tomorrow's visit by mistake can neither check it in nor mark it missed: Check in opens two
+    hours before the time it is booked for, a no-show at that time; the page says when each opens, and the no-show's
+    confirm says what follows (the message, the slot freed)."""
+    from practicehub.hub import Invalid
+    from practicehub.web.server import App
+    jo = M(hub, "jo")
+    run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    ref = hub.engine.run(run["id"])["record"]
+    page = lambda: App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref},
+                                                   *ref.split("/", 1))
+    _at_the_visit(hub, ref, -24 * 60)  # the day before
+    for to in ("noshow", "arrived"):
+        with pytest.raises(Invalid, match="opens at"):
+            hub.update_record(jo, ref, {"status": to})
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert 'value="noshow"' not in side and 'value="arrived"' not in side
+    assert "Check in from Tue 09 Mar 09:00" in side and "Mark no-show from Tue 09 Mar 11:00" in side
+    _at_the_visit(hub, ref, -60)  # an hour before: checked in early, still not missed
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert 'value="arrived"' in side and 'value="noshow"' not in side and "Mark no-show from 11:00" in side
+    _at_the_visit(hub, ref, 10)  # ten minutes late: either
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert re.search(r'data-confirm="The patient will be messaged[^"]*the 11:00 slot freed[^"]*">Mark no-show…', side)
+    hub.update_record(jo, ref, {"status": "noshow"})
     assert _status(hub, ref) == "noshow"
 
 
@@ -291,6 +335,7 @@ def _to_the_visit(hub, by):
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
         "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
     ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref, -10)
     hub.update_record(jo, ref, {"status": "arrived"})
     hub.update_record(by, ref, {"status": "in-progress"})
     return run, ref
@@ -328,6 +373,7 @@ def test_a_move_its_workflow_waits_on_and_the_step_it_takes_are_one_transaction(
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
         "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
     ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref)
     real = hub.engine._advance
 
     def broken(run_id, cause):
@@ -388,6 +434,7 @@ def test_the_record_page_says_who_holds_it_what_is_next_and_when_it_is_due_even_
     def down(*a, **k):
         raise RuntimeError("the portal is down")
     monkeypatch.setitem(engine.CORE_ACTIONS, "message.send", down)
+    _at_the_visit(hub, vref, 5)
     hub.update_record(jo, vref, {"status": "noshow"})
     assert hub.engine.run(other["id"])["steps"]["tell-missed"]["state"] == "failed"
     app._local.me = amara
@@ -470,6 +517,7 @@ def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_vis
     assert hub.engine.run(rid)["status"] == "completed"
     (walk,) = hub.engine.runs(record=ref, status="running")
     assert walk["version"] == cur["version"] and walk["steps"]["checked-in"]["state"] == "waiting"
+    _at_the_visit(hub, ref)
     hub.update_record(jo, ref, {"status": "arrived"})
     assert hub.engine.run(walk["id"])["steps"]["checked-in"]["state"] == "done"
 

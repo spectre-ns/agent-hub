@@ -13,6 +13,7 @@ placed and not dated, and a conditional step they may not see the reason for is 
 from __future__ import annotations
 
 import html
+import re
 
 from .. import schema
 from ..visibility import Viewer, workflow_classes
@@ -60,6 +61,54 @@ class WorkPanel:
             return None
         rank = lambda t: (st in reach(t["to"]), not any(t["to"] in x["from"] for x in trans), moves.index(t))
         return min(ok, key=rank)
+
+    # ------------------------------------------------------------------------------------ a move's time and words
+    def moves_open_now(self, rt, moves: list[dict], rec: dict) -> tuple[list[dict], str]:
+        """The moves a person may make now, and a line saying when the others open (a move with ``opens``: a visit's
+        check-in from two hours before it is booked for, a no-show from its time)."""
+        now = self.hub.engine.now()
+        ok, later = [], []
+        for t in moves:
+            at = schema.opens_at(rt, t, rec)
+            if at is not None and now < at:
+                same = at.date() == now.date()
+                later.append(f"{t['label']} from {at.strftime('%H:%M') if same else at.strftime('%a %d %b %H:%M')}")
+            else:
+                ok.append(t)
+        note = f'<p class="muted small moves-later">{e("; ".join(later))}</p>' if later else ""
+        return ok, note
+
+    _CONFIRM = re.compile(r"\{([A-Za-z_][\w.]*)(?::(time|notice))?\}")
+
+    def move_confirm(self, rt, t: dict, rec: dict) -> str:
+        """What follows a move, as its type says it (``confirm``), with the record's own values in it: ``{field}``
+        as the page shows it, ``{field:time}`` a time's hour and minute, ``{field:notice}`` how long from now until
+        that time, in hours ("20 hours' notice"). Empty when the type says nothing."""
+        text = t.get("confirm") or ""
+        if not text:
+            return ""
+        from datetime import datetime
+
+        def fill(m):
+            f = rt.field(m.group(1))
+            v = schema.first(rec, f["path"]) if f else None
+            if v in (None, ""):
+                return "its time" if m.group(2) else ""
+            try:
+                at = datetime.fromisoformat(str(v)[:19])
+            except ValueError:
+                at = None
+            if m.group(2) == "time" and at:
+                return at.strftime("%H:%M")
+            if m.group(2) == "notice" and at:
+                hours = (at - self.hub.engine.now()).total_seconds() / 3600
+                if hours <= 0:
+                    return "no notice (its time has passed)"
+                n = int(hours)
+                return "less than an hour's notice" if n < 1 else f"{n} hour's notice" if n == 1 else \
+                    f"{n} hours' notice"
+            return str(v)[:16].replace("T", " ")
+        return self._CONFIRM.sub(fill, text)
 
     def work_panel(self, me, ref: str, *, rt=None, st=None, moves_html: str = "", auto=(), url: str = "") -> str:
         """The side panel's lifecycle and open-work sections, as HTML (empty when there is neither)."""

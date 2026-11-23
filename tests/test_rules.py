@@ -3136,6 +3136,8 @@ def test_a_clinician_may_squeeze_in_an_urgent_visit_saying_why(hub):
     assert "chest pain" not in json.dumps(Viewer(hub, jo).event(ev))  # the reason is clinical: not the desk's
     assert "chest pain" in json.dumps(Viewer(hub, amara).event(ev))
     assert "text" not in hub.read_record(jo, f"Encounter/{over['id']}")["priority"]  # urgent, yes; why, no
+    from datetime import datetime
+    hub.engine._now = datetime(2027, 3, 2, 9, 0)  # at its time: it may be checked in (from two hours before)
     for st in ("arrived", "in-progress"):  # nothing about the first visit's time changed: no clash to refuse
         hub.update_record(jo, f"Encounter/{first['id']}", {"status": st})
     from practicehub.engine import bookings
@@ -3165,6 +3167,8 @@ def test_a_visit_that_is_over_or_cancelled_is_not_moved(hub):
     """The hub refuses moving a finished or cancelled visit (not only the page): it no longer holds its time."""
     jo = M(hub, "jo")
     pat = _pat(hub)
+    from datetime import datetime
+    hub.engine._now = datetime(2027, 3, 3, 9, 5)  # a no-show only once its time has come
     for end_state in ("cancelled", "noshow"):
         v = hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-03T09:00"))
         hub.update_record(jo, f"Encounter/{v['id']}", {"status": end_state})
@@ -4989,3 +4993,67 @@ def test_a_person_makes_a_record_only_in_its_initial_state_or_one_its_lifecycle_
     with pytest.raises(Invalid, match="starts as 'requested'"):
         hub.create_record(rana, "Consent", dict(base, status="reviewed"))
     assert hub._type("Consent").lifecycle["starts"] == ["active"]
+
+
+# ============================================================== round 7, clinic visit: moves that open at a time
+_TIMED = '''
+id = "Slot"
+label = "Slot"
+data_class = "clinical"
+[[field]]
+name = "status"
+type = "choice"
+choices = ["booked", "here", "missed"]
+[[field]]
+name = "start"
+type = "datetime"
+[lifecycle]
+field = "status"
+initial = "booked"
+[[lifecycle.transition]]
+from = ["booked"]
+to = "here"
+opens = "start - 2h"
+[[lifecycle.transition]]
+from = ["booked"]
+to = "missed"
+opens = "start + 15m"
+confirm = "The {start:time} slot is freed."
+'''
+
+
+def test_a_move_may_open_only_at_a_time_its_record_keeps_and_say_what_follows():
+    """``opens`` on a transition: a person may make the move only from a time the record keeps, moved on or back by
+    minutes, hours or days; ``confirm`` is what the person is told follows. A malformed one is refused."""
+    from datetime import datetime
+    from practicehub import schema
+    rt = schema.parse(_TIMED)
+    here, missed = (rt.transition("booked", s) for s in ("here", "missed"))
+    assert here["opens"] == {"field": "start", "minutes": -120} and missed["opens"] == {"field": "start", "minutes": 15}
+    assert missed["confirm"] == "The {start:time} slot is freed."
+    rec = {"status": "booked", "start": "2026-11-23T09:00"}
+    assert schema.opens_at(rt, here, rec) == datetime(2026, 11, 23, 7, 0)
+    assert schema.opens_at(rt, missed, rec) == datetime(2026, 11, 23, 9, 15)
+    assert schema.opens_at(rt, here, {"status": "booked"}) is None  # no time kept: it waits for nothing
+    for bad in ('opens = "start - two hours"', 'opens = "nowhere"', "confirm = 3"):
+        with pytest.raises(Exception):
+            schema.parse(_TIMED.replace('opens = "start - 2h"', bad))
+
+
+def test_a_person_is_refused_a_move_before_it_opens_and_a_workflow_is_not(hub):
+    from datetime import datetime
+    jo = M(hub, "jo")
+    pat = next(p for p in hub.records.search("Patient", limit=None) if p["name"][0]["family"] == "MacLeod")
+    importer = {"id": "import", "kind": "automation", "name": "Import", "status": "active"}
+    visit = hub.create_record(importer, "Encounter", {
+        "status": "planned", "subject": {"reference": f"Patient/{pat['id']}"}, "plannedStartDate": "2027-03-09T11:00"})
+    ref = f"Encounter/{visit['id']}"
+    rt = hub.record_type("Encounter")
+    t = rt.transition("planned", "noshow")
+    hub.engine._now = datetime(2027, 3, 9, 10, 59)
+    assert "opens at 11:00 on 2027-03-09" in hub.move_not_open_yet(rt, t, visit, jo, None)
+    assert hub.move_not_open_yet(rt, t, visit, importer, None) is None
+    with pytest.raises(Invalid, match="opens at 11:00"):
+        hub.update_record(jo, ref, {"status": "noshow"})
+    hub.engine._now = datetime(2027, 3, 9, 11, 0)
+    assert hub.move_not_open_yet(rt, t, visit, jo, None) is None

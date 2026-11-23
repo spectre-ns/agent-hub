@@ -60,14 +60,17 @@ def server(hub):
 
 
 def test_the_side_panel_shows_one_primary_move(hub, server):
+    from datetime import datetime, timedelta
     v = next(v for v in hub.records.search("Encounter", limit=None) if v.get("status") == "planned")
+    # at the visit's time: checking in and a no-show are both open then (neither before)
+    hub.engine._now = datetime.fromisoformat(v["plannedStartDate"][:16]) + timedelta(minutes=5)
     tok = hub.issue_token(M(hub, "jo"), "jo", "test")
     req = urllib.request.Request(f"{server}/records/Encounter/{v['id']}", headers={"Authorization": f"Bearer {tok}"})
     with urllib.request.urlopen(req) as r:
         page = r.read().decode()
     side = page.split('class="side-actions"', 1)[1].split("</div>", 1)[0]
     assert re.search(r'<button class="primary"[^>]*>Check in</button>', side)
-    assert re.search(r'<button class="secondary"[^>]*>No-show</button>', side)
+    assert re.search(r'<button class="secondary"[^>]*>Mark no-show…</button>', side)
     assert len(re.findall(r'class="(?:btn )?primary"', side)) == 1
 
 
