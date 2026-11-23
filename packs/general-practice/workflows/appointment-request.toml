@@ -335,14 +335,16 @@ to = "{{run.subject}}"
 subject = "Your missed appointment"
 body = "We missed you at your appointment. {{no-show.reason}}. Amount due: ${{no-show.amount}}. Reply to rebook."
 
-# Cancelled while booked: late (less than the policy's notice before the time it was booked for), the patient is told
-# under the missed-appointment policy; with notice, nothing is due and nothing is sent.
+# Cancelled while booked by the patient: late (less than the policy's notice before the time it was booked for), the
+# patient is told under the missed-appointment policy; with notice, nothing is due and nothing is sent. The notice is
+# worked out from when it was cancelled (the wait's end) to the time it was booked for. Cancelled by the practice, no
+# policy applies: the patient is told and asked to rebook.
 [[steps]]
 id = "late-cancel"
 title = "Apply the missed-appointment policy to a cancellation"
 kind = "automation"
 after = ["checked-in"]
-when = "record.status == 'cancelled'"
+when = "record.status == 'cancelled' and record.cancelled_by != 'practice'"
 block = "missed-appointment-fee"
 [steps.params]
 starts = "{{record.plannedStartDate}}"
@@ -362,6 +364,19 @@ channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your cancelled appointment"
 body = "Your appointment was cancelled with less than 24 hours' notice. {{late-cancel.reason}}. Amount due: ${{late-cancel.amount}}. Reply to rebook."
+
+[[steps]]
+id = "tell-practice-cancelled"
+title = "Tell the patient the practice cancelled"
+kind = "automation"
+after = ["checked-in"]
+when = "record.status == 'cancelled' and record.cancelled_by == 'practice'"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your appointment is cancelled"
+body = "We are sorry: we had to cancel your appointment on {{record.plannedStartDate}}. There is no charge. Reply to rebook."
 
 [[steps]]
 id = "seen"

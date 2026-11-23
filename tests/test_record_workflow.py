@@ -282,6 +282,40 @@ def test_a_visit_is_checked_in_from_two_hours_before_and_marked_a_no_show_only_o
     assert _status(hub, ref) == "noshow"
 
 
+@pytest.mark.parametrize("who,hours,late,told", [
+    ("patient", 20, True, "tell-late-cancel"),      # the patient, under a day before: the policy, on the visit's run
+    ("patient", 72, False, None),                   # the patient, with notice: nothing due, nothing sent
+    (None, 5, True, "tell-late-cancel"),            # not said (the portal: the patient themselves): the patient's
+    ("practice", 2, None, "tell-practice-cancelled"),  # the practice: no policy, the patient told to rebook
+])
+def test_cancelling_a_visit_asks_who_cancelled_and_works_out_the_notice(hub, who, hours, late, told):
+    """Cancel the visit asks who cancelled and says how much notice that is; only the patient's late cancellation runs
+    the missed-appointment policy, from the visit's own run. One the practice made tells the patient, with no fee."""
+    from practicehub.web.server import App
+    jo = M(hub, "jo")
+    run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref, -hours * 60)
+    page = App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert "Cancel the visit…</a>" in page
+    screen = App(hub, dev=False).page_move({"me": jo, "query": {"to": "cancelled"}, "path": f"/records/{ref}/move"},
+                                           *ref.split("/", 1))
+    assert 'name="cancelled_by"' in screen and "The patient" in screen and "The practice" in screen
+    import html
+    assert f"that is {hours} hours' notice" in html.unescape(screen) and "11:00 slot is freed" in screen
+    hub.update_record(jo, ref, {"status": "cancelled", **({"cancelled_by": who} if who else {})})
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    steps = {k: (v or {}).get("state") for k, v in run["steps"].items()}
+    if late is None:
+        assert steps["late-cancel"] == "skipped"
+    else:
+        assert steps["late-cancel"] == "done" and run["ctx"]["late-cancel"]["late"] is late
+    for tell in ("tell-late-cancel", "tell-practice-cancelled"):
+        assert (steps.get(tell) == "done") is (tell == told), (tell, steps.get(tell))
+
+
 def test_a_visit_booked_on_the_calendar_starts_its_workflow_booked(hub):
     jo = M(hub, "jo")
     pat = _pat(hub, "MacLeod")
