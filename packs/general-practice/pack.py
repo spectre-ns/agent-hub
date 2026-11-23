@@ -349,12 +349,42 @@ def guard_no_signature(values, ctxview):
             for k, v in values.items() if isinstance(v, str) and SIGNING.search(v)]
 
 
+def _same_drug_renewals(recs, asked, own, today):
+    """Other renewal work on the same drug for this patient: a renewal request still open (a draft proposal), or an
+    order issued today. Two requests a while apart (the pharmacy faxes, the patient asks on the portal an hour later)
+    are both walked; the physician must know of the other before renewing again."""
+    word = str(asked or "").strip().split()[0].lower() if str(asked or "").strip() else ""
+    out = []
+    for r in recs:
+        ref = f"MedicationRequest/{r.get('id')}"
+        if r.get("resourceType") != "MedicationRequest" or ref == own or not word or word not in _med_text(r).lower():
+            continue
+        if r.get("status") == "draft" and r.get("intent") == "proposal":
+            out.append((ref, "open"))
+        elif r.get("status") == "active" and str(r.get("authoredOn") or "")[:10] == today:
+            out.append((ref, "issued today"))
+    return out
+
+
+def _same_drug_concerns(found):
+    return [f"Another renewal request for this medication is open: {ref}" if how == "open"
+            else f"This medication was already prescribed today: {ref}" for ref, how in found]
+
+
 def guard_renewal_prep(values, ctxview):
     """The order a renewal replaces must be this patient's active prescription, copied as written: the workflow marks
-    it completed, so an answer may never point it at another record."""
+    it completed, so an answer may never point it at another record. Other renewal work on the same drug (a request
+    still open, an order issued today) must be named in the concerns, so the physician sees it before deciding."""
     recs = (ctxview.get("context") or {}).get("record:clinical") or []
     meds = {f"MedicationRequest/{r.get('id')}": r for r in recs if r.get("resourceType") == "MedicationRequest"}
     ref = str(values.get("current_order") or "")
+    run = ctxview.get("run") or {}
+    said = " ".join(str(c) for c in (values.get("concerns") or []))
+    unsaid = [o for o, _ in _same_drug_renewals(recs, (ctxview.get("context") or {}).get("input.medication"),
+                                                run.get("record"), run.get("today") or date.today().isoformat())
+              if o not in said]
+    if unsaid:
+        return [f"concerns must name the other renewal work on this medication: {', '.join(unsaid)}"]
     if not values.get("found_in_chart"):
         return [f"current_order is {ref}, but found_in_chart is not true"] if ref else []
     if ref not in meds:
@@ -518,7 +548,9 @@ def standin_renewal_prep(ctx):
     visits = sorted((r.get("period", {}).get("start") or r.get("meta", {}).get("lastUpdated", ""))[:10]
                     for r in _recs(ctx, "visits", "Encounter"))
     last_visit = visits[-1] if visits else None
-    concerns = []
+    run = ctx.get("run") or {}
+    concerns = _same_drug_concerns(_same_drug_renewals(_recs(ctx, "clinical"), asked, run.get("record"),
+                                                       run.get("today") or date.today().isoformat()))
     for al in _recs(ctx, "clinical", "AllergyIntolerance"):
         if word and word in _text(al.get("code")).lower():
             concerns.append(f"Allergy recorded: {summarize(al)}")

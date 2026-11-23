@@ -134,6 +134,41 @@ def test_a_renewal_not_given_closes_its_request(hub, worked, outcome):
         assert len(asked) == visits
 
 
+def test_a_second_renewal_for_the_same_drug_is_flagged_to_the_physician(hub, worked):
+    """The pharmacy asked for Ramipril; the patient asks again on the portal later (not the same submission, so its
+    own request). Its preparation names the other open request, and an answer that leaves it out is refused."""
+    first = run_of(hub, "prescription-renewal")
+    hub.db.runs.set(first["id"], {"created_at": "2000-01-01T00:00:00"})  # asked a while ago
+    second =hub.engine.start(M(hub, "jo"), "prescription-renewal", record=_pat(hub),
+                              inputs={"medication": "Ramipril 5 mg", "pharmacy": "Quinpool Pharmacy"})
+    assert second["record"] != first["record"]
+    run_all_local(hub, log=quiet)
+    prep = hub.engine.run(second["id"])["ctx"]["prepare"]
+    assert any(first["record"] in c and "open" in c for c in prep["concerns"]), prep["concerns"]
+    guard = hub.pack.guards["renewal-prep"]
+    ctxview = hub.engine.context(M(hub, "dr-amara"), item_for(hub, second, "decide"))
+    ctxview["context"]["record:clinical"] = [hub.records.read(*first["record"].split("/", 1)) | {
+        "resourceType": "MedicationRequest", "id": first["record"].split("/", 1)[1]}]
+    ctxview["context"]["input.medication"] = "Ramipril 5 mg"
+    problems = guard({**prep, "concerns": []}, ctxview)
+    assert problems and first["record"] in problems[0]
+    assert not guard({**prep, "found_in_chart": False, "current_order": ""}, ctxview)
+
+
+def test_a_renewal_request_marked_entered_in_error_stops_its_run(hub, worked):
+    """The request was filed on the wrong patient: marked entered in error, its run stops (the physician's decision
+    goes with it) and the track says who stopped it; nothing renews it afterwards."""
+    run = run_of(hub, "prescription-renewal")
+    iid = item_for(hub, run, "decide")
+    hub.update_record(M(hub, "noor"), run["record"], {"status": "entered-in-error"})
+    assert hub.engine.run(run["id"])["status"] == "cancelled"
+    assert hub.db.items.get(iid)["status"] == "cancelled"
+    assert hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
+    with pytest.raises((Denied, Invalid)):
+        hub.engine.decide(M(hub, "dr-amara"), iid, "renew", "")
+    assert _read(hub, run["record"])["status"] == "entered-in-error"
+
+
 def test_a_new_renewal_request_made_by_hand_starts_its_workflow(hub):
     noor = M(hub, "noor")
     rx = hub.create_record(noor, "MedicationRequest", {
