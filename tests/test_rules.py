@@ -5186,9 +5186,10 @@ def test_a_record_its_type_walks_starts_its_run_on_create_and_only_that_run_move
         hub.update_record(jo, ref, {"handling": "answered"})
 
 
-def test_marking_a_walked_record_entered_in_error_stops_its_run_on_the_track(hub):
-    """Entered in error is open to anyone who may write the record, and stops the run walking it: its open work is
-    cancelled and the track says why, caused by the move."""
+def test_a_correction_a_run_waits_for_lets_it_go_on_to_its_own_end_not_stopped(hub):
+    """Entered in error is open to anyone who may write the record. A run with a wait that lists it (the visit's
+    check-in wait) is not stopped: it takes that step and goes on to its own end, leaving no open work. (A run no
+    wait of which lists it is stopped: test_a_record_moved_out_of_its_workflow_s_hands_stops_its_open_run.)"""
     jo, pat = M(hub, "jo"), _patient(hub)
     visit = hub.create_record(jo, "Encounter", {
         "status": "planned", "subject": {"reference": pat}, "plannedStartDate": "2027-03-10T09:00",
@@ -5196,10 +5197,9 @@ def test_marking_a_walked_record_entered_in_error_stops_its_run_on_the_track(hub
     ref = f"Encounter/{visit['id']}"
     (run,) = hub.engine.runs(record=ref, status="running")
     hub.update_record(jo, ref, {"status": "entered-in-error"})
-    assert hub.engine.run(run["id"])["status"] == "cancelled"
-    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "entered-in-error"})
-    stopped = hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
-    assert stopped and stopped["cause"] == moved["seq"] and stopped["actor"] == "jo"
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    assert not hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
+    assert hub.records.read("Encounter", visit["id"])["status"] == "entered-in-error"
     assert not hub.db.items.exists({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})
 
 
