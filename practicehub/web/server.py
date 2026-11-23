@@ -1358,7 +1358,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             if wf and any(st["state"] == "active" for st in r["steps"].values()) and not now:
                 now = ["a step you may not see"]
             wf = wf or wfs.get(r["workflow_id"])
-            rows.append(f'<tr><td><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(req["me"], r))}</a></td>'
+            # Work is done on its record's page (as in Jira): a row opens the record, not the run's steps
+            href = self.record_href(r["record"]) if r.get("record") else f'/runs/{r["id"]}'
+            rows.append(f'<tr><td><a href="{e(href)}">{e(self.hub.run_title(req["me"], r))}</a></td>'
                         f'<td>{e(wf.title if wf else r["workflow_id"])} <span class="muted">v{r["version"]}</span></td>'
                         f'<td>{e(", ".join(now))}</td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'
                         f'<td>{self._av(r["started_by"])}</td><td class="muted" style="white-space:nowrap">'

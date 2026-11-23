@@ -132,11 +132,13 @@ def test_any_status_shows_every_run_and_stays_chosen(hub, server):  # noqa: F811
     live = hub.engine.start(jo, "appointment-request", record=f"Patient/{pats[1]['id']}",
                             inputs={"reason": "check-up", "urgency": "routine"})
     rana = token(hub, "rana")
+    # a row opens the record the work walks (as in Jira), not the run's steps
+    gone_at, live_at = (hub.engine.run(r["id"])["record"].partition("/")[2] for r in (gone, live))
     _, page = call(server, "GET", "/runs?status=any", rana)
     assert '<option value="any" selected' in page
-    assert f'/runs/{gone["id"]}' in page and f'/runs/{live["id"]}' in page
+    assert gone_at in page and live_at in page and f'/runs/{live["id"]}' not in page
     _, page = call(server, "GET", "/runs", rana)
-    assert f'/runs/{gone["id"]}' not in page and f'/runs/{live["id"]}' in page  # the default: in progress
+    assert gone_at not in page and live_at in page  # the default: in progress
 
 
 # ---- 3. sentences, not code
