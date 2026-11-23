@@ -178,3 +178,13 @@ def test_a_patients_results_and_prescriptions_are_sections_of_their_chart(hub, s
     assert '<h2 id="link-Observation-h">Results' in page and '<h2 id="link-MedicationRequest-h">Prescriptions' in page
     own = page.split('class="subnav owner-rail"', 1)[1].split("</nav>", 1)[0].split('<div class="sec">Linked here', 1)[0]
     assert 'href="#link-Observation"' in own and 'href="#link-MedicationRequest"' in own
+
+
+def test_on_the_record_a_decision_leads_its_step_before_the_request_it_is_about(worked, server):
+    hub = worked
+    run = next(r for r in hub.engine.runs(limit=1000) if r["workflow_id"] == "prescription-renewal"
+               and r["steps"].get("decide", {}).get("state") == "active")
+    page = call(server, "GET", f"/records/{run['record']}", token(hub, "dr-amara"))[1]
+    step = page.split('class="rw-step"', 1)[1]
+    assert "<h2>Decide</h2>" in step and "<h2>The request</h2>" in step
+    assert step.index("<h2>Decide</h2>") < step.index("<h2>The request</h2>") < step.index("What this step reads")

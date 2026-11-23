@@ -1993,11 +1993,14 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                              + '</label>' for o in st["outcomes"])
             sign = ('<p class="sign">Deciding is your electronic signature, with the sentence beside your choice, '
                     if varied else f'<p class="sign">Deciding is your electronic signature: <b>“{e(st["meaning"])}”</b>, ')
-            parts.append(f'<div class="section"><h2>Decide</h2><form method="post" action="/items/{iid}/decide" class="card">{hidden}'
+            decide = (f'<div class="section"><h2>Decide</h2><form method="post" action="/items/{iid}/decide" class="card">{hidden}'
                          f'<fieldset class="choices options decide"><legend>Your decision<span class="req" aria-hidden="true"> *</span></legend>{radios}</fieldset><label>Comment<textarea name="comment" rows="3">{e(str(kept.get("comment", "")))}</textarea></label>'
                          f'{sign}over exactly what is shown on this page. If it changes before you decide, you are asked '
                          f'to read it again.</p>{self._sign_prompt(me)}<input type="hidden" name="seen" '
                          f'value="{e(eng.shown_digest(me, iid))}"><button class="primary">Sign and decide</button></form></div>')
+            # on the record's page the decision leads (the record is above it, its request and notes follow); on the
+            # step's own page it follows what it is about
+            parts.insert(0 if on_record else len(parts), decide)
         else:
             prefill = {k: v for k, v in (ctx.get("draft") or {}).items()}
             prefill.update(self._form_output(kept))  # what the person typed, sent back with an error: theirs
