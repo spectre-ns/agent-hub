@@ -260,6 +260,25 @@ def test_a_review_cancelled_after_the_physician_reviewed_leaves_the_patient_not_
     assert _read(hub, ref)["review"] == "not-told"
 
 
+@pytest.mark.parametrize("outcome,before", [("no-action-needed", "closed"), ("book-visit", "not-told")])
+def test_a_reviewed_result_the_lab_corrects_is_reviewed_again(hub, outcome, before):
+    """The lab corrects a result already reviewed (closed, or the patient not told) and sends it again naming it: a
+    new review walks it from waiting for review, and the physician reviews the corrected value."""
+    run, ref = _flagged_review(hub, outcome)
+    assert _read(hub, ref)["review"] == before and hub.engine.run(run["id"])["status"] == "completed"
+    hub.update_record(M(hub, "lab-feed"), ref, {"status": "corrected", "valueQuantity": {"value": 128, "unit": "mmol/L"}})
+    pat = _read(hub, ref)["subject"]["reference"]
+    (again,) = hub.engine.emit(M(hub, "lab-feed"), "lab.result", record=pat,
+                               data={**LAB, "value": "128", "flag": "abnormal", "observation": ref})
+    assert again["id"] != run["id"] and hub.engine.run(again["id"])["record"] == ref
+    assert _read(hub, ref)["review"] == "received"
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, again, "sort"),
+                        {"category": "abnormal", "rationale": "lower still"})
+    hub.engine.decide(M(hub, "dr-liam"), item_for(hub, again, "review-flagged"), "no-action-needed", "")
+    run_all_local(hub, log=quiet)
+    assert _read(hub, ref)["review"] == "closed" and hub.engine.run(again["id"])["status"] == "completed"
+
+
 def test_a_late_critical_review_reaches_the_medical_director_by_name_and_a_chaser(hub):
     """A critical review nobody has taken waits on every physician. Overdue, it still names the medical director
     (who is one of those physicians), and since that tells no one outside the physicians, the practice manager

@@ -7,7 +7,8 @@ waiting for review (received), reviewed by a physician (reviewed), the patient t
 only when the patient was told: a review that ends without that (the patient not reached, a visit booked, the review
 cancelled) leaves it "Patient not told" until a physician signs it closed. A result the lab
 files starts its review; a result the lab sends for a patient (the lab.result event) is filed as one, or, when it names
-the result it already filed, walks that one. The lab's own status stays the lab's.
+the result it already filed, walks that one; a result already reviewed that the lab sends again (corrected) is
+reviewed again, from waiting for review. The lab's own status stays the lab's.
 
 A result arrives from the lab. Code checks the value against its range and the practice's critical limits, whatever
 the lab's flag says; a result the lab or the check calls critical pages the physicians at once and goes straight to an urgent physician review, without waiting for the sort. Other
@@ -64,6 +65,15 @@ label = "Result record"
 type = "reference"
 target = ["Observation"]
 help = "The result the lab filed for this patient, if it filed one (another patient's is refused); else one is filed"
+
+# The lab sending a correction of a result already reviewed (input.observation names it): it is reviewed again,
+# from waiting for review, whatever the last review decided.
+[[steps]]
+id = "reopen"
+title = "Review the corrected result again"
+kind = "automation"
+when = "record.review != 'received'"
+state = "received"
 
 [[steps]]
 id = "check"
@@ -182,7 +192,7 @@ comment = "{{review.comment}}{{review-flagged.comment}}{{review-critical.comment
 id = "file-result"
 title = "File the review on the result"
 kind = "automation"
-after = ["reviewed"]
+after = ["reviewed", "reopen"]
 action = "record.update"
 state = "reviewed"
 [steps.params.set]
