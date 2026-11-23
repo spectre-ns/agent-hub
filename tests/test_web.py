@@ -1830,7 +1830,8 @@ def test_a_board_marks_where_each_card_may_be_dropped_by_the_same_rules_as_its_m
     page = call(server, "GET", "/views/dms-documents", rana)[1]
     assert all(f'data-col="{s}"' in page for s in ("draft", "in-review", "approved", "obsolete"))
     moves = _moves(page, f"Document/{doc['id']}")
-    assert set(moves) == {"in-review", "obsolete"} and moves["in-review"]["how"] == "post"  # approved: a workflow's
+    assert set(moves) == {"in-review", "retiring"} and moves["in-review"]["how"] == "post" \
+        and moves["retiring"]["how"] == "screen"  # approved: a workflow's; retiring asks for its reason
     card = page.split(f'data-card="Document/{doc["id"]}"')[1].split("</form>")[0]
     assert f'action="/records/Document/{doc["id"]}/move"' in card and '<select name="to"' in card \
         and '<option value="in-review">' in card and 'value="approved"' not in card and 'type="radio"' not in card
@@ -1864,7 +1865,7 @@ def test_a_move_from_a_board_applies_the_same_rules_and_a_refused_one_says_why(h
     other = hub.create_record(M(hub, "rana"), "Document", {"title": "Sharps"})
     hub.update_record(M(hub, "rana"), f"Document/{other['id']}", {"title": "Sharps disposal"})
     code, page = call(server, "POST", f"/records/Document/{other['id']}/move", rana,
-                      form={"to": "obsolete", "_version": str(other["meta"]["versionId"]), "_back": back, "_ask": "1"})
+                      form={"to": "in-review", "_version": str(other["meta"]["versionId"]), "_back": back, "_ask": "1"})
     assert code == 409 and "changed this record" in page and hub.records.read("Document", other["id"])["status"] == "draft"
     # a move that asks for fields: its screen first, which returns to the board once it is accepted
     capa = hub.create_record(M(hub, "rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})

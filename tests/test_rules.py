@@ -4848,6 +4848,41 @@ def test_a_step_lists_the_moves_it_waits_on_and_a_trigger_refuses_only_the_same_
     assert req.one_open_same == ["input.reason"] and req.one_open_within
 
 
+# ------------------------------------------------------------- passes kept, moves let through, nobody may take it
+def test_record_update_appends_one_entry_per_pass_and_never_an_empty_one():
+    """record.update's ``append`` (a table of list field = entry) adds each entry to the end of that list on the
+    record, so what every pass did is kept rather than written over; an empty entry adds nothing. A workflow that
+    gives it anything else is refused when it is read."""
+    from practicehub.engine import _record_update_append
+    from practicehub.workflows import DefinitionError, parse
+    rec = {"done": ["first"]}
+    assert _record_update_append(rec, {"append": {"done": "second"}})["set"] == {"done": ["first", "second"]}
+    assert _record_update_append(rec, {"append": {"done": ""}})["set"] == {"done": ["first"]}
+    assert _record_update_append({}, {"append": {"done": "one"}, "set": {"x": 1}})["set"] == {"x": 1, "done": ["one"]}
+    with pytest.raises(ValueError, match="not a list"):
+        _record_update_append({"done": "text"}, {"append": {"done": "more"}})
+    wf = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["front-desk"]\n[[steps]]\nid = "a"\ntitle = "A"\n'
+          'kind = "automation"\naction = "record.update"\n[steps.params]\nref = "x/1"\n{append}')
+    assert parse(wf.format(append='[steps.params.append]\ndone = "{{run.today}}"\n'))
+    with pytest.raises(DefinitionError) as exc:
+        parse(wf.format(append='append = "done"\n'))
+    assert any("append is a table" in p for p in exc.value.problems)
+
+
+def test_work_nobody_may_take_is_never_blocked_unseen(hub):
+    """An open task or decision whose role is held, but only by people separation of duties keeps out of it, is
+    reported with each of them and why (``blocked_holders``); a notice, work with no role, and work someone may take
+    are not. (A module's own test makes every holder of a role write the record its decision is about.)"""
+    eng = hub.engine
+    assert eng.blocked_holders({"kind": "notice", "role": "front-desk", "status": "open"}) is None
+    assert eng.blocked_holders({"kind": "task", "role": None, "status": "open"}) is None
+    open_items = [i for i in hub.db.items.find({"kind": {"$in": ["task", "gate"]}, "status": "open",
+                                               "role": {"$ne": None}}) if i.get("run_id")]
+    for i in open_items[:5]:  # the practice's open work: someone may take each
+        if any(eng.eligibility(m, eng.item(i["_id"]))[0] for m in hub.active_holders(i["role"])):
+            assert eng.blocked_holders(eng.item(i["_id"])) is None
+
+
 # ------------------------------------------------------------------------------------------- the booking portal
 def _portal_person(hub):
     rec = hub.create_record(M(hub, "jo"), "Patient", {
