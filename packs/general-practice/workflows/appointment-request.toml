@@ -477,6 +477,16 @@ name = "referrals"
 label = "Refer to"
 type = "list"
 help = "specialties to refer the patient to, one per line: once you sign, each is a referral of its own"
+[[steps.fields]]
+name = "prescriptions"
+label = "Prescribe"
+type = "list"
+help = "one medication per line, with its dose and directions: once you sign, each is a prescription of its own, written for you to check and issue"
+[[steps.fields]]
+name = "lab_orders"
+label = "Order lab tests"
+type = "list"
+help = "one test per line (e.g. CBC, HbA1c): once you sign, each is a lab order of its own, sent with the signed note"
 
 [[steps]]
 id = "sign"
@@ -621,12 +631,51 @@ type = "ServiceRequest"
 status = "draft"
 intent = "order"
 priority = "routine"
+kind = "referral"
 referral_to = "{{each}}"
 reason_text = "{{edit.assessment}}"
 [steps.params.input]
 specialty = "{{each}}"
 reason = "{{edit.assessment}}"
 urgency = "routine"
+
+# Each prescription written in the note is a prescription of its own (a sub-record of the visit), written (draft) for
+# the physician to check and issue on its page: the note's signature does not issue a prescription.
+[[steps]]
+id = "prescribe"
+title = "Write the prescriptions in the note"
+kind = "automation"
+after = ["finish"]
+for_each = "{{edit.prescriptions}}"
+action = "record.child"
+[steps.params]
+type = "MedicationRequest"
+[steps.params.data]
+status = "draft"
+intent = "order"
+medication = "{{each}}"
+requester = "Practitioner/{{edit.by}}"
+reason_text = "{{edit.assessment}}"
+
+# Each lab test ordered in the signed note is a lab order of its own (a sub-record of the visit), sent: the note it is
+# ordered in is signed.
+[[steps]]
+id = "order-labs"
+title = "Order the lab tests in the note"
+kind = "automation"
+after = ["finish"]
+for_each = "{{edit.lab_orders}}"
+action = "record.child"
+[steps.params]
+type = "ServiceRequest"
+[steps.params.data]
+status = "active"
+intent = "order"
+priority = "routine"
+kind = "lab-test"
+referral_to = "{{each}}"
+requester = "Practitioner/{{edit.by}}"
+reason_text = "{{edit.assessment}}"
 
 [[steps]]
 id = "code"

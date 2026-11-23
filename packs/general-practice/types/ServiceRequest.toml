@@ -33,6 +33,23 @@ name = "priority"
 type = "choice"
 choices = ["routine", "urgent", "asap", "stat"]
 
+# A referral to a specialist, or a lab test ordered (a requisition): the visit's signed note makes either.
+[[field]]
+name = "category"
+label = "Kind (as JSON)"
+type = "list"
+advanced = true
+help = "CodeableConcept list: [{text: referral | lab-test}]"
+
+[[field]]
+name = "kind"
+label = "Kind"
+path = "category.0.text"
+type = "choice"
+choices = ["referral", "lab-test"]
+labels = { referral = "Referral", "lab-test" = "Lab test" }
+help = "a referral to a specialist, or a lab test ordered (sent with the signed note)"
+
 [[field]]
 name = "code"
 label = "Referral to (coded)"

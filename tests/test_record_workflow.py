@@ -650,6 +650,33 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
     assert all(k["ref"] in chart for k in kids)
 
 
+def test_prescriptions_and_lab_orders_written_in_the_note_are_sub_records_of_the_visit(hub):
+    """The note starts prescriptions and lab orders as well as referrals: each is a sub-record of the visit, about the
+    same patient, linked to it. A prescription is written (draft) for the physician to issue on its own page (the
+    note's signature never issues one) and starts no renewal; a lab test ordered in the signed note is sent."""
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_note(hub, amara, prescriptions="Amoxicillin 500 mg three times a day for 10 days",
+                            lab_orders="CBC\nHbA1c")
+    hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    kids = hub.engine.children_of(ref)
+    by_type = {}
+    for k in kids:
+        by_type.setdefault(k["ref"].split("/")[0], []).append(k)
+    (rx,) = by_type["MedicationRequest"]
+    med = hub.records.read(*rx["ref"].split("/", 1))
+    assert med["status"] == "draft" and med["intent"] == "order" and rx["run"] is None
+    assert med["medicationCodeableConcept"]["text"].startswith("Amoxicillin")
+    assert med["subject"]["reference"] == run["subject"] and med["encounter"]["reference"] == ref
+    assert med["requester"]["reference"] == "Practitioner/dr-amara"
+    labs = [hub.records.read(*k["ref"].split("/", 1)) for k in by_type["ServiceRequest"]]
+    assert sorted(x["code"]["text"] for x in labs) == ["CBC", "HbA1c"]
+    assert all(x["status"] == "active" and x["category"][0]["text"] == "lab-test" for x in labs)
+    assert all(k["run"] is None for k in by_type["ServiceRequest"])  # a lab order is not walked as a referral
+    assert hub.engine.parent_record(rx["ref"]) == ref
+
+
 def test_a_visit_marked_entered_in_error_stops_its_run_on_the_track(hub):
     """Entered in error is open to whoever may write the visit, from any state, outside the workflow: its open run
     stops with it (its work cancelled), and the track says who stopped it and why."""
