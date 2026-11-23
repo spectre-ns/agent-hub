@@ -386,11 +386,14 @@ def _high_risk_renewal(hub):
     hub.approve_workflow(M(hub, "rana"), "prescription-renewal", out["version"])
     agent = M(hub, "clinical-admin-agent")
     hub.db.members.set(agent["id"], {"profile": {**agent["profile"], "max_risk": "high"}})
-    # an active order nobody has asked to renew yet (the demo's own request is for Ramipril), on its own patient
+    # an active order nobody has asked to renew yet (the demo's own request is for Ramipril), on its own patient, on a
+    # file the agent may work on: the demo's Nadia keeps her clinical care from agents (a consent directive), and
+    # records written in the same second come back in no set order, so the first active order may be hers
     asked = {(r.get("subject"), (r.get("ctx") or {}).get("input", {}).get("medication"))
              for r in hub.db.runs.find({"workflow_id": "prescription-renewal", "status": "running"})}
     med = next(m for m in hub.records.search("MedicationRequest", limit=None) if m["status"] == "active"
-               and (m["subject"]["reference"], m["medicationCodeableConcept"].get("text")) not in asked)
+               and (m["subject"]["reference"], m["medicationCodeableConcept"].get("text")) not in asked
+               and not hub.restrictions.withholds_from(agent, m["subject"]["reference"], reaching=True))
     pat = {"id": med["subject"]["reference"].split("/", 1)[1]}
     run = hub.engine.start(M(hub, "jo"), "prescription-renewal", record=f"Patient/{pat['id']}",
                            inputs={"medication": (med.get("medicationCodeableConcept") or {}).get("text", "x")})
