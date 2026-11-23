@@ -5214,6 +5214,409 @@ def test_a_new_portal_setting_on_an_existing_hub_is_not_taken_from_disk(tmp_path
     assert not hub.pack.portal and hub.pack_problem
 
 
+# ------------------------------------------------------------------ record transitions: moving a record on its page
+JOB = """id = "Job"
+data_class = "visits"
+{top}
+[[field]]
+name = "title"
+required = true
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "doing", "done", "approved", "cancelled"]
+[[field]]
+name = "outcome"
+label = "Outcome"
+type = "text"
+[[field]]
+name = "hours"
+label = "Hours worked"
+type = "number"
+min = 0
+[[signature]]
+meaning = "Approved"
+roles = ["medical-director"]
+states = ["done"]
+[lifecycle]
+field = "status"
+initial = "open"
+[[lifecycle.transition]]
+from = ["open"]
+to = "doing"
+label = "Start"
+[[lifecycle.transition]]
+from = ["doing"]
+to = "done"
+label = "Finish"
+asks = ["outcome", "hours"]
+requires = ["outcome"]
+[[lifecycle.transition]]
+from = ["done"]
+to = "approved"
+label = "Approve"
+sign = "Approved"
+[[lifecycle.transition]]
+from = ["*"]
+to = "cancelled"
+label = "Cancel"
+"""
+JOB_FLOW = """id = "job-flow"
+title = "Do the job"
+record = "Job"
+[trigger]
+starters = ["physician"]
+[[steps]]
+id = "work"
+title = "Do the work"
+kind = "task"
+role = "physician"
+moves = ["doing"]
+state = "done"
+context = ["record:clinical"]
+[[steps.fields]]
+name = "outcome"
+type = "text"
+required = true
+[[steps.fields]]
+name = "hours"
+type = "number"
+[[steps]]
+id = "file"
+title = "File the job sheet"
+kind = "task"
+role = "physician"
+after = ["work"]
+when = "record.status == 'done'"
+context = ["record:clinical"]
+[[steps.fields]]
+name = "filed"
+type = "boolean"
+"""
+
+
+def _jobs(hub, *, walked=True):
+    """A test fixture: a Job type whose lifecycle asks, requires and signs, and (walked) the workflow it names."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    p = hub.propose("type", rana, JOB.format(top=""), "jobs")
+    hub.approve(amara, "type", "Job", p["version"])
+    if walked:
+        w = hub.propose_workflow(rana, JOB_FLOW, "jobs")
+        hub.approve_workflow(amara, "job-flow", w["version"])
+        p = hub.propose("type", rana, JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }'),
+                        "walked")
+        hub.approve(amara, "type", "Job", p["version"])
+
+
+def test_a_transition_asks_requires_and_signs_and_a_move_missing_a_required_field_is_refused_in_words(hub):
+    """Rule: a lifecycle transition may declare ``asks`` (fields its screen asks for, written in the same move),
+    ``requires`` (fields that must be set once it has moved, checked by the type's own field rules) and ``sign`` (a
+    signature meaning, which must be one of the type's ``[[signature]]`` meanings when it lists any). A move that
+    leaves a required field empty is refused, naming the field in words, by hand or by a workflow; a signed move is
+    made only by a person's signature with that meaning."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    rt = schema.parse(JOB.format(top=""))
+    t = rt.transition("doing", "done")
+    assert t["fields"] == ["outcome", "hours"] and t["require"] == ["outcome"] and t["sign"] is None
+    assert rt.transition("done", "approved")["sign"] == "Approved"
+    for bad, says in ((JOB.format(top="").replace('sign = "Approved"', 'sign = "Okayed"'), "not one of its signatures"),
+                      (JOB.format(top="").replace('sign = "Approved"', 'sign = 3'), "sign is what"),
+                      (JOB.format(top="").replace('requires = ["outcome"]', 'requires = ["verdict"]'), "no field 'verdict'")):
+        with pytest.raises(DefinitionError) as exc:
+            schema.parse(bad)
+        assert any(says in p for p in exc.value.problems), (says, exc.value.problems)
+    _jobs(hub, walked=False)
+    amara = M(hub, "dr-amara")
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    hub.update_record(amara, ref, {"status": "doing"})
+    with pytest.raises(Invalid, match="fill in Outcome"):
+        hub.update_record(amara, ref, {"status": "done"})
+    with pytest.raises(Invalid) as exc:  # the type's own rules check what the move writes
+        hub.update_record(amara, ref, {"status": "done", "outcome": "Fixed", "hours": -1})
+    assert any("Hours worked" in p or "hours" in p for p in exc.value.problems), exc.value.problems
+    run = {"id": "r", "record": ref}
+    actor = {"id": "engine", "kind": "automation", "name": "Engine", "status": "active"}
+    with pytest.raises(Invalid, match="fill in Outcome"):  # a workflow's move too
+        hub.update_record(actor, ref, {"status": "done"})
+    hub.update_record(amara, ref, {"status": "done", "outcome": "Fixed"})
+    with pytest.raises(Denied, match="signed 'Approved'"):  # a plain edit never makes a signed move
+        hub.update_record(amara, ref, {"status": "approved"})
+    with pytest.raises(Denied, match="signed 'Approved'"):
+        hub.update_record(actor, ref, {"status": "approved"})
+    assert run and hub.records.read(*ref.split("/"))["status"] == "done"
+
+
+def _job(hub, title="Fix the autoclave"):
+    amara = M(hub, "dr-amara")
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': title})['id']}"
+    return ref, _own_run(hub, ref, "job-flow")
+
+
+def test_move_record_writes_what_the_move_asks_with_the_state_and_only_who_may_make_it(hub):
+    """Rule: ``Hub.move_record(actor, ref, to, values, signature)`` makes any lifecycle move: it writes the values
+    the move asks for and the state in one transaction, and is refused, in words, unless the actor may make that move
+    now: the transition's ``by``, a signature only a person gives (with the transition's meaning, by a role the
+    signature allows), the role of the open step of the record's own workflow, and whoever holds that step (named)."""
+    _jobs(hub, walked=False)
+    amara, liam, agent = (M(hub, m) for m in ("dr-amara", "dr-liam", "scribe-agent"))
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    hub.move_record(amara, ref, "doing")
+    with pytest.raises(Invalid, match="asks for Outcome, Hours worked, not Title"):
+        hub.move_record(amara, ref, "done", {"title": "Renamed"})
+    with pytest.raises(Invalid, match="fill in Outcome"):
+        hub.move_record(amara, ref, "done", {"hours": 2})
+    assert hub.records.read(*ref.split("/"))["status"] == "doing"  # nothing of a refused move is written
+    hub.move_record(amara, ref, "done", {"outcome": "New seal fitted", "hours": 2})
+    rec = hub.records.read(*ref.split("/"))
+    assert (rec["status"], rec["outcome"], rec["hours"]) == ("done", "New seal fitted", 2)
+    assert hub.record_version(ref) == 3  # created, doing, done: the values and the state are one version
+    with pytest.raises(Invalid, match="signed 'Approved'"):
+        hub.move_record(amara, ref, "approved")
+    with pytest.raises(Denied, match="only a person signs"):
+        hub.move_record(agent, ref, "approved", signature="Approved")
+    with pytest.raises(Denied, match="needs the medical-director role"):
+        hub.move_record(liam, ref, "approved", signature="Approved")
+    hub.move_record(amara, ref, "approved", signature={"meaning": "Approved", "comment": "Checked"})
+    sig = hub.signatures(amara, ref)[0]
+    assert sig["meaning"] == "Approved" and sig["by"] == "dr-amara" and sig["current"]
+    with pytest.raises(Denied, match="needs writing visits records"):
+        hub.move_record(M(hub, "sam"), ref, "cancelled")
+
+
+def test_the_move_a_step_makes_is_the_step_and_doing_the_step_makes_the_move(hub):
+    """Rule: a person's step declares the move it makes with ``state``. While it is open, moving the record to that
+    state (``move_record``, or the record's own edit) does the step, by whoever moved it, with the step's fields
+    taken from the transition's ``asks`` by name; finishing the step on its item makes the same move, through the
+    same transition, writing the step's answers into the fields the move asks for. A step that moves nothing (no
+    ``state``) is done on its item as ever; ``moves`` lists the moves that leave its step open."""
+    _jobs(hub)
+    amara, liam, noor = M(hub, "dr-amara"), M(hub, "dr-liam"), M(hub, "noor")
+    ref, run = _job(hub)
+    with pytest.raises(Denied, match="'Do the work' is for the physician role"):
+        hub.move_record(noor, ref, "doing")
+    hub.engine.claim(liam, run["item"])
+    with pytest.raises(Denied, match="Dr Liam|Liam"):  # the holder is named
+        hub.move_record(amara, ref, "doing")
+    hub.move_record(liam, ref, "doing")
+    with pytest.raises(Denied, match="Liam"):
+        hub.move_record(amara, ref, "done", {"outcome": "Done"})
+    hub.move_record(amara, ref, "cancelled")  # a correction stays anyone's who may write the record
+    ref, run = _job(hub)
+    hub.move_record(amara, ref, "doing")  # a move the step lets people make: the step stays open
+    assert hub.engine.run(run["id"])["steps"]["work"]["state"] == "active"
+    with pytest.raises(Invalid, match="fill in Outcome"):
+        hub.move_record(amara, ref, "done")
+    hub.move_record(amara, ref, "done", {"outcome": "New seal fitted", "hours": 3})
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["work"]["state"] == "done" and run["steps"]["work"]["by"] == "dr-amara"
+    assert run["ctx"]["work"]["outcome"] == "New seal fitted" and run["ctx"]["work"]["hours"] == 3
+    assert run["steps"]["file"]["state"] == "active"  # the run went on from it
+    assert hub.records.read(*ref.split("/"))["status"] == "done"
+    # the other way: the step done on its item moves the record, with its answers
+    ref2, run2 = _job(hub, "Service the fridge")
+    hub.move_record(amara, ref2, "doing")
+    hub.engine.complete(amara, run2["item"], {"outcome": "Coils cleaned", "hours": 1})
+    rec = hub.records.read(*ref2.split("/"))
+    assert (rec["status"], rec["outcome"], rec["hours"]) == ("done", "Coils cleaned", 1)
+    # a step that moves nothing is done on its item; the record stays where it is
+    i = item_for(hub, hub.engine.run(run2["id"]), "file")
+    hub.engine.complete(amara, i, {"filed": True})
+    assert hub.records.read(*ref2.split("/"))["status"] == "done"
+    assert hub.engine.run(run2["id"])["status"] == "completed"
+
+
+def test_the_transition_screen_lists_the_moves_a_member_may_make_and_why_not_the_others(hub):
+    """Rule: ``Hub.transition_screen(actor, ref)`` lists the moves out of where the record is that the actor may make
+    now, each with its label, the fields it asks for (their definitions), what it requires, the signature it asks
+    for and whether it is the forward move (the one the open step makes); and the moves they may not make, each with
+    why in words."""
+    _jobs(hub)
+    amara, liam, noor = M(hub, "dr-amara"), M(hub, "dr-liam"), M(hub, "noor")
+    ref, run = _job(hub)
+    hub.move_record(amara, ref, "doing")
+    scr = hub.transition_screen(amara, ref)
+    assert scr["state"] == "doing"
+    by = {m["to"]: m for m in scr["may"]}
+    done = by["done"]
+    assert done["label"] == "Finish" and done["forward"] and done["does"] == "Do the work"
+    assert [a["name"] for a in done["asks"]] == ["outcome", "hours"] and done["requires"] == ["Outcome"]
+    assert done["asks"][0]["label"] == "Outcome" and done["asks"][0]["type"] == "text" and done["asks"][0]["required"]
+    assert done["asks"][1]["min"] == 0 and not done["asks"][1]["required"] and done["sign"] is None
+    assert not by["cancelled"]["forward"]
+    why = {m["to"]: m["why"] for m in hub.transition_screen(noor, ref)["may_not"]}
+    assert why == {"done": "'Do the work' is for the physician role"}
+    hub.engine.claim(liam, run["item"])
+    why = {m["to"]: m["why"] for m in hub.transition_screen(amara, ref)["may_not"]}
+    assert "holds 'Do the work'" in why["done"] and "Liam" in why["done"]
+    hub.move_record(liam, ref, "done", {"outcome": "Fixed"})
+    why = {m["to"]: m["why"] for m in hub.transition_screen(amara, ref)["may_not"]}
+    assert why["approved"] == "a job is moved by its workflow; it is not waiting for approved now"
+    hub.engine.complete(liam, item_for(hub, run, "file"), {"filed": True})  # its work is over
+    scr = hub.transition_screen(amara, ref)
+    assert [(m["to"], m["sign"]) for m in scr["may"]] == [("approved", "Approved"), ("cancelled", None)]
+    why = {m["to"]: m["why"] for m in hub.transition_screen(liam, ref)["may_not"]}
+    assert why == {"approved": "signing 'Approved' needs the medical-director role"}
+    why = {m["to"]: m["why"] for m in hub.transition_screen(M(hub, "scribe-agent"), ref)["may_not"]}
+    assert "only a person signs" in why["approved"]
+
+
+def test_a_record_s_history_tells_its_edits_moves_and_steps_in_words_folding_what_the_viewer_may_not_read(hub):
+    """Rule: ``Hub.record_timeline(viewer, ref)`` is the record's history as one list in words, oldest first: its
+    edits, its moves (who, when, the values written, the signature), and its runs' steps (started, done by whom,
+    skipped, waiting). What the viewer may not read is folded to one line per hidden stretch ("3 clinical steps");
+    no raw JSON and no ids. (``Hub.record_history`` stays the list of versions that pages and exports read.)"""
+    _jobs(hub)
+    amara, liam = M(hub, "dr-amara"), M(hub, "dr-liam")
+    ref, run = _job(hub)
+    hub.update_record(amara, ref, {"title": "Fix the big autoclave"})
+    hub.move_record(amara, ref, "doing")
+    hub.move_record(liam, ref, "done", {"outcome": "New seal fitted", "hours": 3})
+    hub.engine.complete(amara, item_for(hub, run, "file"), {"filed": True})
+    hub.move_record(amara, ref, "approved", signature="Approved")
+    tl = hub.record_timeline(amara, ref)
+    text = [e["text"] for e in tl]
+    assert text[0] == "Job created (open)"
+    assert "Changed Title" in text
+    i = text.index("Moved from doing to done, with Outcome: New seal fitted; Hours worked: 3")
+    assert tl[i]["who"] == liam["name"] and tl[i]["at"]
+    assert "Moved from done to approved; signed 'Approved' by " + amara["name"] in text
+    assert "'Do the work' started, for the physician role" in text
+    assert f"'Do the work' done by {liam['name']}" in text
+    assert text.index("Moved from doing to done, with Outcome: New seal fitted; Hours worked: 3") < \
+        text.index(f"'Do the work' done by {liam['name']}")
+    assert "'File the job sheet' started, for the physician role" in text
+    blob = json.dumps(tl)
+    assert ref.split("/")[1] not in blob and "{" not in "".join(text) and run["id"] not in blob
+    # who may not read the clinical class sees the stretches folded, and nothing of what they hold
+    tl = hub.record_timeline(M(hub, "rana"), ref)  # a practice manager reads visits, not clinical records
+    text = [e["text"] for e in tl]
+    assert not any("Do the work" in t or "File the job sheet" in t for t in text)
+    folds = [e for e in tl if e.get("hidden")]
+    assert folds and all(re.fullmatch(r"\d+ clinical steps?", e["text"]) for e in folds)
+    assert sum(e["hidden"] for e in folds) >= 4 and len(folds) < sum(e["hidden"] for e in folds)
+
+
+# ------------------------------------------------------------------ cancelling a run: who may, and who is told
+JOB_CHECK = """id = "job-check"
+title = "Check the job"
+record = "Job"
+cancel_by = ["physician"]
+[trigger]
+starters = ["nurse", "physician"]
+[[steps]]
+id = "check"
+title = "Check the job"
+kind = "task"
+role = "physician"
+[[steps.fields]]
+name = "ok"
+type = "boolean"
+[[on_cancel]]
+id = "tell"
+title = "Tell the physicians"
+action = "message.send"
+[on_cancel.params]
+to = "role:physician"
+subject = "Job check cancelled"
+body = "{{cancel.by}} cancelled the check: {{cancel.reason}}"
+[[on_cancel]]
+id = "fails"
+title = "Tell nobody"
+action = "message.send"
+when = "cancel.reason == 'tell nobody'"
+[on_cancel.params]
+to = ""
+"""
+
+
+def test_on_cancel_actions_run_in_the_cancel_and_cancel_by_gives_cancelling_to_the_role_that_took_it_up(hub):
+    """Rule: a workflow's ``[[on_cancel]]`` actions run in the transaction that cancels a run (placeholders read
+    ``cancel.reason`` and ``cancel.by``); one that fails refuses the cancel, so nothing of it is kept. ``cancel_by``
+    lists roles: once a step for one of them is claimed, only someone holding that role, or a policy owner, may
+    cancel the run; until then, whoever started it or a policy owner (``Engine.cancel_refusal``, in words)."""
+    from practicehub.workflows import DefinitionError, parse
+    for bad, says in ((JOB_CHECK.replace('cancel_by = ["physician"]', 'cancel_by = ["nurse"]'), "no step"),
+                      (JOB_CHECK.replace('action = "message.send"\nwhen', 'when'), "name the action"),
+                      (JOB_CHECK.replace('id = "fails"', 'id = "check"'), "not a step's id")):
+        with pytest.raises(DefinitionError) as exc:
+            parse(bad)
+        assert any(says in p for p in exc.value.problems), (says, exc.value.problems)
+    _jobs(hub, walked=False)
+    rana, amara, liam, noor = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam"), M(hub, "noor")
+    w = hub.propose_workflow(rana, JOB_CHECK, "checks")
+    hub.approve_workflow(amara, "job-check", w["version"])
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    first = hub.engine.start(noor, "job-check", record=ref)
+    assert hub.engine.cancel_refusal(liam, first) == "only whoever started it or a policy owner may cancel a run"
+    hub.engine.cancel(noor, first["id"], "not needed")  # nobody took it up: its starter may
+    msg = hub.db.outbox.find_one({"run_id": first["id"]})
+    assert msg["recipient"] == "role:physician" and msg["body"] == f"{noor['name']} cancelled the check: not needed"
+    run = hub.engine.start(noor, "job-check", record=ref)
+    hub.engine.claim(liam, run["item"])
+    why = hub.engine.cancel_refusal(noor, run)
+    assert why == "its work was taken up by the physician role: only that role or a policy owner may cancel it now"
+    with pytest.raises(Denied, match="taken up by the physician role"):
+        hub.engine.cancel(noor, run["id"], "changed my mind")
+    with pytest.raises(Invalid, match="'Tell nobody' did not go through"):  # a told-nobody cancel keeps nothing
+        hub.engine.cancel(liam, run["id"], "tell nobody")
+    assert hub.engine.run(run["id"])["status"] == "running" and not hub.db.outbox.find_one({"run_id": run["id"]})
+    assert hub.db.items.get(run["item"])["status"] == "claimed"
+    hub.engine.cancel(amara, run["id"], "done another way")  # another physician
+    assert hub.engine.run(run["id"])["status"] == "cancelled"
+    assert hub.db.outbox.find_one({"run_id": run["id"]})["body"].endswith("done another way")
+    assert hub.engine.cancel_refusal(rana, run) is None  # a policy owner always may
+
+
+# ------------------------------------------------------------------ a write that is not a move starts the work again
+def test_a_write_that_makes_the_type_s_again_hold_starts_its_workflow_again_where_the_record_is(hub):
+    """Rule: a type's ``workflow = { id, when, again }``: a write that does not move the record and makes ``again``
+    hold, where it did not hold before (a lab writing status = "corrected" on a result already reviewed), starts the
+    type's workflow about the record again, from where it is, with the last run as its previous one, when no run of
+    it walks the record now; ``when`` does not apply to it. A write that leaves ``again`` as it was starts nothing."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    with pytest.raises(DefinitionError) as exc:
+        schema.parse(JOB.format(top='workflow = { id = "job-flow", again = "record.outcome ==" }'))
+    assert any("workflow.again" in p for p in exc.value.problems)
+    _jobs(hub)
+    rana, amara, liam = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam")
+    p = hub.propose("type", rana, JOB.format(
+        top='workflow = { id = "job-flow", when = "record.status == \'open\'", again = "record.outcome == \'redo\'" }'),
+        "again")
+    hub.approve(amara, "type", "Job", p["version"])
+    ref, run = _job(hub)
+    hub.update_record(amara, ref, {"outcome": "redo"})  # its run walks it now: nothing more starts
+    assert len(list(hub.db.runs.find({"record": ref}))) == 1
+    hub.update_record(amara, ref, {"outcome": ""})
+    hub.move_record(amara, ref, "doing")
+    hub.move_record(liam, ref, "done", {"outcome": "Fixed"})
+    hub.engine.complete(liam, item_for(hub, run, "file"), {"filed": True})
+    assert hub.engine.run(run["id"])["status"] == "completed" and not hub.open_step(hub._type("Job"), ref)
+    hub.update_record(amara, ref, {"hours": 2})  # again does not hold: nothing starts
+    assert len(list(hub.db.runs.find({"record": ref}))) == 1
+    hub.update_record(amara, ref, {"outcome": "redo"})  # done, and found wanting
+    again = _own_run(hub, ref, "job-flow")
+    assert again["id"] != run["id"] and again["ctx"]["run"]["previous"] == run["id"]
+    assert again["ctx"]["run"]["start_state"] == "done"
+    hub.engine.cancel(rana, again["id"], "test over")
+    hub.update_record(amara, ref, {"hours": 3})  # still redo: it did not just come to hold
+    assert not list(hub.db.runs.find({"record": ref, "status": "running"}))
+
+
+def test_a_move_its_run_finishes_on_starts_no_second_run(stock):
+    """Rule: a move a record's own run was waiting for, after which the run finishes at once (a delivery submitted
+    and posted in one go), leaves one run: the type's workflow is not started again over the record as the move
+    wrote it (submitted), only by the run's own end where the record is now (posted: nothing to walk)."""
+    hub, rana = stock, M(stock, "rana")
+    m = hub.create_record(rana, "StockMove", {"kind": "receive", "item": f"StockItem/{_item(hub, 'SY-3')['id']}",
+                                              "quantity": 10})
+    ref = f"StockMove/{m['id']}"
+    hub.update_record(rana, ref, {"status": "submitted"})
+    assert hub.records.read(*ref.split("/"))["status"] == "posted"
+    assert [r["status"] for r in hub.db.runs.find({"workflow_id": "inventory-post", "record": ref})] == ["completed"]
+
+
 # ------------------------------------------------------------------------------------------- a record walks its workflow
 def test_a_record_its_type_walks_starts_its_run_on_create_and_only_that_run_moves_it(hub):
     """A record whose type names its workflow starts that workflow when it is made (one run, about its subject), and

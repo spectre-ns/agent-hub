@@ -193,6 +193,8 @@ class Workflow:
     new_record: dict = field(default_factory=dict)  # [new_record]: started on its subject, the record it makes
     one_open_within: str | None = None  # trigger.one_open_within: ...only an open run started this recently
     one_open_same: list = field(default_factory=list)  # trigger.one_open_same: ...and with these same inputs
+    on_cancel: list = field(default_factory=list)  # [[on_cancel]]: actions run in the transaction that cancels a run
+    cancel_by: list = field(default_factory=list)  # cancel_by: roles that take cancelling over once their step is claimed
 
     def step(self, sid: str) -> Step:
         for s in self.steps:
@@ -485,6 +487,15 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
     if not steps:
         problems.append("steps: a workflow needs at least one step")
     by_id = {s.id: s for s in steps}
+    on_cancel = _on_cancel(doc.get("on_cancel"), ids, problems)
+    cancel_by = doc.get("cancel_by") or []
+    if not isinstance(cancel_by, list) or not all(isinstance(r, str) and r for r in cancel_by):
+        problems.append("cancel_by: a list of roles, e.g. [\"physician\"]: once a step for one of them is claimed, "
+                        "only that role or a policy owner may cancel the run")
+        cancel_by = []
+    for r in cancel_by:
+        if not any(s.role == r for s in steps):
+            problems.append(f"cancel_by: no step of this workflow is for the {r!r} role")
 
     def before(sid: str) -> set:
         """Every step a step waits on, directly or through others."""
@@ -528,7 +539,8 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
                   deadline=deadline.get("within") or None, deadline_escalate_to=deadline.get("escalate_to") or None,
                   one_open_per=one or None, allow_duplicate=trig.get("allow_duplicate") is True,
                   one_open_while=while_ or None, new_record=dict(new_record),
-                  one_open_within=str(within) if within else None, one_open_same=list(same))
+                  one_open_within=str(within) if within else None, one_open_same=list(same),
+                  on_cancel=on_cancel, cancel_by=list(cancel_by))
     if catalog is not None:  # report every problem at once, so an author fixes them in one go
         try:
             problems += [p for p in catalog.check_workflow(wf) if p not in problems]
@@ -537,6 +549,41 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
     if problems:
         raise DefinitionError(problems)
     return wf
+
+
+def _on_cancel(raw, ids: set, problems: list) -> list[Step]:
+    """``[[on_cancel]]``: what happens when a run is cancelled, in the same transaction (a cancelled renewal tells
+    the patient and the physician). Each is an action with its params, as an automation step's, and an optional
+    ``when``; placeholders read the run, the record and ``cancel`` (``cancel.reason``, ``cancel.by``). An action that
+    fails refuses the cancel, so nobody is left untold."""
+    out: list[Step] = []
+    if raw is None:
+        return out
+    if not isinstance(raw, list) or not all(isinstance(r, dict) for r in raw):
+        problems.append("on_cancel: a list of [[on_cancel]] tables, each an action with its params")
+        return out
+    for i, r in enumerate(raw):
+        sid = str(r.get("id") or f"on-cancel-{i + 1}")
+        where = f"on_cancel {sid}"
+        extra = sorted(set(r) - {"id", "title", "action", "params", "when"})
+        if extra:
+            problems.append(f"{where}: takes id, title, action, params and when, not {', '.join(extra)}")
+        if not ID.fullmatch(sid) or sid in ids or any(s.id == sid for s in out):
+            problems.append(f"{where}: an id is lower-case letters, digits and dashes, and not a step's id")
+        if not isinstance(r.get("action"), str) or not r.get("action"):
+            problems.append(f"{where}: name the action it runs, e.g. action = \"message.send\"")
+        if not isinstance(r.get("params", {}), dict):
+            problems.append(f"{where}: params is a table of the action's parameters")
+        when = r.get("when")
+        if when is not None:
+            try:
+                expr.check(str(when))
+            except expr.ExprError as exc:
+                problems.append(f"{where}: when: {exc}")
+        out.append(Step(id=sid, title=str(r.get("title") or sid), kind="automation", action=r.get("action") or None,
+                        params=dict(r.get("params") or {}) if isinstance(r.get("params", {}), dict) else {},
+                        when=str(when) if when is not None else None))
+    return out
 
 
 TEMPLATE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_\-\.]*)\s*(?:([+-])\s*(\d{1,4})\s*([dwmy]))?\s*\}\}")

@@ -29,6 +29,7 @@ from .store import ASC, DESC
 from .catalog import CatalogMixin
 from .credentials import CredentialsMixin
 from .outbox import OutboxMixin
+from .moves import MovesMixin
 from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
 
@@ -150,7 +151,7 @@ def _how(data: dict) -> str:
     return f"{how} ({data['format']})" if how == "export" and data.get("format") else how
 
 
-class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
+class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
     def __init__(self, state_dir: Path | str | None, *, pack: str | packmod.Pack | None = None,
                  authorizer: Authorizer | None = None, records: RecordStore | None = None, models=None):
         self.state_dir = Path(state_dir) if state_dir else None
@@ -3291,7 +3292,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return None
         if not walked:
             return self._unwalked_move_refusal(rt, ref, after, run) if run else None
-        if self.state_move_waited_on(rt, ref, after, t["to"]):
+        how = self.state_move_waited_on(rt, ref, after, t["to"])
+        if how == "step" and run:  # the move a person's step makes is that person's: no other run makes it
+            return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
+        if how:
             return None
         if run:
             return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
@@ -3315,7 +3319,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def state_move_waited_on(self, rt, ref: str, after: dict, new: str) -> str | None:
         """Whether the open run of the type's workflow about ``ref`` is waiting on the record moving to ``new``: how
-        ("until", a wait that then goes on; "moves", a state the open step lets people move it to), or None."""
+        ("until", a wait that then goes on; "moves", a state the open step lets people move it to; "step", the state
+        the open person's step makes with its ``state``, so the move does that step), or None."""
         from . import expr
         owner = (rt.workflow or {}).get("id")
         field = (rt.lifecycle or {}).get("field")
@@ -3337,6 +3342,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                         pass
                 if new in s.moves:
                     return "moves"
+                if st == "active" and self.step_makes_move(s, new) and not s.for_each:
+                    return "step"
         return None
 
     def record_workflow(self, rt) -> str | None:
@@ -3378,7 +3385,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         closing = not any(t["to"] in x["from"] for x in rt.lifecycle["transition"] if "*" not in x["from"])
         runs = [r["id"] for r in self.db.runs.find({"workflow_id": owner, "record": ref, "status": "running"},
                                                    fields=["id"])]
-        if runs and how != "until" and ("*" in t["from"] or closing):
+        walked = bool(runs)
+        if how == "step" and self._step_by_move(rt, ref, rec, member, t, cause):
+            runs = []  # the move was the step: its run has gone on from it
+        if runs and how not in ("until", "step") and ("*" in t["from"] or closing):
             why = f"moved to {rt.state_label(t['to']).lower()}" + (" (a correction)" if "*" in t["from"] else "")
             for r in runs:
                 self.engine.stop(member, r, why, cause)
@@ -3387,6 +3397,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if how == "moves":  # a move its open step let through: the step it finished, or one it made moot
                 self.engine.follow_let_through(member, r, t["to"], cause)
             self.engine.advance(r, cause)
+        if walked:
+            return  # a run walked it when it moved: that run's own end walks the next pass, if any (``_re_enter``)
+        rec = self.records.read(*ref.split("/", 1)) or rec  # as it is now, not as the move wrote it
         if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner \
                 or schema.starts_workflow(rt, rec) != owner \
                 or self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
@@ -3407,7 +3420,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             return first, schema.put(after, rt.lifecycle["path"], first), first
         return first, after, new
 
-    def _owner_picks_up(self, rt, ref: str, rec: dict, member: dict, cause: int) -> None:
+    def _owner_picks_up(self, rt, ref: str, rec: dict, member: dict, cause: int, *, before: dict | None = None) -> None:
         """A record filed before its type named a workflow (or before the version that walks it was approved), changed
         now, is picked up by that workflow where it is: the module upgrade's migration, done record by record as each
         is next written. It starts only where the type's ``when`` holds, nothing of its workflow is open about it and
@@ -3416,7 +3429,30 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         owner = rt.workflow["id"]
         if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner:
             return
-        self._pick_up(rt, ref, rec, member, cause)
+        if not self._pick_up(rt, ref, rec, member, cause) and before is not None:
+            self._start_again(rt, ref, before, rec, member, cause)
+
+    def _start_again(self, rt, ref: str, before: dict, rec: dict, member: dict, cause: int) -> bool:
+        """A write that did not move the record made its type's ``workflow.again`` hold (a lab correcting a result
+        already reviewed): its workflow starts about it again, from where it is, unless a run of it walks it now.
+        A start that fails is noted (``trigger.failed``) in a savepoint of its own, as a pick-up's is."""
+        owner = rt.workflow["id"]
+        if schema.starts_again(rt, before, rec) != owner \
+                or self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
+            return False
+        last = self.db.runs.find_one({"workflow_id": owner, "record": ref}, sort=[("created_at", DESC)],
+                                     fields=["id"])
+        starter = member if member.get("kind") in ("person", "agent", "service") else \
+            {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
+        try:
+            with self.db:
+                self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
+                                  previous=last["id"] if last else None)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.track.append(starter, "trigger.failed", ref, cause=cause,
+                              data={"workflow": owner, "error": f"starting it again: {exc}"})
+            return False
 
     def _pick_up(self, rt, ref: str, rec: dict, member: dict, cause: int | None) -> bool:
         """Start the workflow ``rt`` names about ``ref`` where it is, if its ``when`` holds, nothing of it is open
@@ -3658,6 +3694,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                              if schema.first(after, rt.field(n)["path"]) in (None, "", [], {})]
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
+                    self._move_signed(rt, t, _signature)
                     moved = (old, new)
             clashes, over = [], None
             if rt.is_a("Booking"):
@@ -3692,12 +3729,23 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             if moved and (rt.workflow or {}).get("id"):
                 self._owner_follows_move(rt, ref, rec, member, run_id, rt.transition(*moved), ev)
             elif (rt.workflow or {}).get("id"):
-                self._owner_picks_up(rt, ref, rec, member, ev)
+                self._owner_picks_up(rt, ref, rec, member, ev, before=before)
             self.engine.on_record("transitioned" if moved else "updated", rt, rec, before, member, ev)
         if rt.is_a("Restriction"):
             self.restrictions.reset()
             self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)
+
+    def _move_signed(self, rt, t: dict, signature: int | None) -> None:
+        """A transition with ``sign`` is made only by a person's signature with that meaning (``move_record`` with
+        one, or a ``[[signature]]`` that ``moves_to`` there): never by an agent, a workflow or a plain edit."""
+        if not t.get("sign"):
+            return
+        ev = self.db.events.find_one({"_id": signature}) if signature is not None else None
+        sg = ((ev or {}).get("data") or {}).get("signed") or {}
+        if not ev or not ev.get("signature") or ev.get("actor_kind") != "person" or sg.get("meaning") != t["sign"]:
+            raise Denied(f"moving a {rt.label.lower()} to {rt.state_label(t['to']).lower()} is signed "
+                         f"{t['sign']!r} by the person who moves it")
 
     # ------------------------------------------------------------------ signatures on any record
     def _record_digest(self, rec: dict) -> str:

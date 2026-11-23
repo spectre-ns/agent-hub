@@ -1172,9 +1172,18 @@ class Engine:
         rec = hub.records.read(*ref.split("/", 1))
         if rec is None:
             raise ValueError(f"state: there is no {ref}")
-        if schema.first(rec, rt.lifecycle["path"]) != step.state:
-            hub.update_record(actor, ref, schema.put(rec, rt.lifecycle["path"], step.state), cause=cause,
-                              run_id=run["id"])
+        now = schema.first(rec, rt.lifecycle["path"])
+        if now != step.state:
+            moved = schema.put(rec, rt.lifecycle["path"], step.state)
+            t = rt.transition(now, step.state)
+            # a person's step with a state is that move: what its form answered goes in as the fields the move asks
+            got = run["ctx"].get(step.id) if step.kind == "task" and isinstance(run["ctx"].get(step.id), dict) else {}
+            names = {f["name"] for f in self.fields_for(step, run)} if got else set()
+            for n in (t or {}).get("fields", []):
+                f = rt.field(n)
+                if f and n in names and got.get(n) not in (None, ""):
+                    moved = schema.put(moved, f["path"], got[n])
+            hub.update_record(actor, ref, moved, cause=cause, run_id=run["id"])
 
     def _moves_due(self, run: dict, wf, cause) -> bool:
         """Move the record for each step with a ``state`` that people or a wait finished (an automation moves it as it
@@ -1590,8 +1599,9 @@ class Engine:
         from .hub import Denied
         from .hub import Invalid
         run = self.run(run_id)
-        if run["started_by"] != actor["id"] and not self.hub.is_policy_owner(actor):
-            raise Denied("only whoever started it or a policy owner may cancel a run")
+        why = self.cancel_refusal(actor, run)
+        if why:
+            raise Denied(why)
         with self.hub.db:
             run = self.run(run_id)
             if run["status"] != "running":
@@ -1602,7 +1612,65 @@ class Engine:
                                      {"$set": {"status": "cancelled", "updated_at": utcnow()}}, many=True)
             seq = self.hub.track.append(actor, "run.cancelled", run["record"] or "", run_id=run_id,
                                         data={"reason": reason})
+            self._on_cancel(run, actor, reason, seq)
             self._abandon(run, seq)
+
+    def cancel_refusal(self, actor: dict, run: dict) -> str | None:
+        """Why ``actor`` may not cancel ``run``, in words, or None. A policy owner may; else whoever started it,
+        until a step for one of the workflow's ``cancel_by`` roles is claimed: from then on only someone holding
+        one of the roles whose step was claimed (a renewal a physician took up is the physician's to cancel)."""
+        if self.hub.is_policy_owner(actor):
+            return None
+        try:
+            wf = self.hub.workflow(run["workflow_id"], run["version"])[0]
+        except Exception:  # noqa: BLE001 - a run whose workflow cannot be read: the plain rule
+            wf = None
+        guarded = set(getattr(wf, "cancel_by", None) or [])
+        taken: list[str] = []
+        if guarded:
+            for ev in self.hub.db.events.find({"run_id": run["id"], "action": "item.claimed"}, sort=[("seq", 1)]):
+                try:
+                    role = wf.step((ev.get("data") or {}).get("step")).role
+                except KeyError:
+                    continue
+                if role in guarded and role not in taken:
+                    taken.append(role)
+        if taken:
+            if set(taken) & set(actor.get("roles") or []):
+                return None
+            names = " or ".join(taken)
+            return f"its work was taken up by the {names} role: only that role or a policy owner may cancel it now"
+        if run["started_by"] != actor["id"]:
+            return "only whoever started it or a policy owner may cancel a run"
+        return None
+
+    def _on_cancel(self, run: dict, actor: dict, reason: str, cause: int) -> None:
+        """The workflow's ``[[on_cancel]]`` actions, in the cancel's own transaction: one that fails refuses the
+        cancel (``Invalid``), so a cancel never leaves the people it tells untold."""
+        from .hub import Invalid
+        try:
+            wf = self.hub.workflow(run["workflow_id"], run["version"])[0]
+        except Exception:  # noqa: BLE001
+            return
+        if not getattr(wf, "on_cancel", None):
+            return
+        hub = self.hub
+        me = self.automation_actor(run)
+        live = {**self._live_ctx(run), "cancel": {"reason": reason, "by": actor.get("name") or actor.get("id")}}
+        for step in wf.on_cancel:
+            if step.when and not expr.holds(step.when, live):
+                continue
+            fn = CORE_ACTIONS.get(step.action) or (hub.pack.actions.get(step.action) if hub.pack else None)
+            params = wfmod.render(step.params, live)
+            try:
+                if fn is None:
+                    raise ValueError(f"there is no action {step.action!r}")
+                output = fn(self, run, step, params, me) or {}
+            except Exception as exc:  # noqa: BLE001 - said in words, and nothing of the cancel is kept
+                raise Invalid(f"it cannot be cancelled now: '{step.title}' did not go through ({exc})") from None
+            hub.track.append(me, "action.ran", f"step:{step.id}", run_id=run["id"], cause=cause,
+                             data={"step": step.id, "action": step.action, "params": params, "output": output,
+                                   "on_cancel": True})
 
     def retry(self, actor: dict, run_id: str, step_id: str, reason: str = "") -> None:
         """Run a failed step again (after its module, block or the record it needed was fixed). Policy owners only:

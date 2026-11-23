@@ -63,6 +63,10 @@ answer that becomes a record, an engine calling the API.
     to = "final"
     by = "workflow"               # "anyone" who may write the class (default), or only a "workflow" step
     # label = "Finalise"          # the move's words (default: the state it goes to, in words)
+    # asks = ["conclusion"]       # fields the move's screen asks for, written in the same move
+    # requires = ["conclusion"]   # fields that must be set once it has moved (whoever moves it, a workflow too);
+                                  #   the type's own field rules check what they hold
+    # sign = "Approved"           # the mover signs it with this meaning (a person: an agent never signs)
     # [lifecycle.labels]          # a state's words, where its code is not words: onleave = "On leave"
 
 A path may use ``*`` for every item of a list (``participant.*.actor``).
@@ -205,7 +209,7 @@ KEYS = {
               "roles", "required_unless"},
     "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "abandoned", "ended", "in_use",
                   "labels"},
-    "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment"},
+    "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment", "asks", "requires", "sign"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "screen": {"id", "on", "tab", "fields", "label"},
     "tab": {"label", "fields"},
@@ -488,19 +492,24 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                     problems.append(f"lifecycle.transition: {s!r} is not one of its states")
             if by not in BY:
                 problems.append(f"{where}: by is one of {', '.join(BY)}")
-            req = t.get("require", []) or []
-            req = [req] if isinstance(req, str) else req
-            tf = t.get("fields", []) or []
+            # asks/requires are the words a type author writes; fields/require the older names of the same lists
+            req = [x for k in ("require", "requires") for x in (lambda v: [v] if isinstance(v, str) else v)(t.get(k) or [])]
+            tf = [x for k in ("fields", "asks") for x in (lambda v: [v] if isinstance(v, str) else v)(t.get(k) or [])]
             if not _strings(req) or not _strings(tf):
-                problems.append(f"{where}: require and fields are lists of field names")
+                problems.append(f"{where}: asks and requires are lists of field names")
                 req, tf = [], []
+            sign = t.get("sign")
+            if sign is not None and not (isinstance(sign, str) and sign.strip()):
+                problems.append(f"{where}: sign is what the mover's signature means, e.g. sign = \"Approved\"")
+                sign = None
             if not isinstance(t.get("comment", False), bool):
                 problems.append(f"{where}: comment is true or false")
             if t.get("screen") is not None and not isinstance(t["screen"], str):
                 problems.append(f"{where}: screen is a screen id")
             trans.append({"from": frm, "to": to, "by": by, "label": str(t.get("label") or labels.get(to) or state_words(to)),
                           "screen": t.get("screen") if isinstance(t.get("screen"), str) else None,
-                          "fields": list(tf), "require": list(req), "comment": t.get("comment") is True})
+                          "fields": list(tf), "require": list(req), "comment": t.get("comment") is True,
+                          "sign": sign.strip() if sign else None})
         # further states a person may make a new record in, besides the initial one (a record of work already done,
         # filed after the fact), each starting whatever the type's workflow starts for it
         starts = lc.get("starts") or []
@@ -595,6 +604,10 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             problems.append(f"signature {meaning!r}: moves_to {g['moves_to']!r} is not one of its states")
         if g.get("moves_to") and not g.get("roles"):
             problems.append(f"signature {meaning!r}: a signature that moves the record says which roles may sign it")
+    for t in (lc or {}).get("transition", []):
+        if t.get("sign") and sigs and not any(g["meaning"] == t["sign"] for g in sigs):
+            problems.append(f"lifecycle.transition to {t['to']!r}: sign {t['sign']!r} is not one of its signatures' "
+                            f"meanings ({', '.join(repr(g['meaning']) for g in sigs)})")
     screens = _screens(doc, fields, base_map, lc, problems)
     label = str(doc.get("label") or tid)
     rt = RecordType(id=tid, label=label, plural=str(doc.get("plural") or label + "s"),
@@ -687,24 +700,33 @@ def _check_workflow(rt: RecordType, w) -> list[str]:
 
         workflow = "order-handling"
         workflow = { id = "order-handling", when = "record.status in ['requested', 'booked']" }   # only these start it
+        workflow = { id = "lab-result-review", again = "record.status == 'corrected'" }
+
+    ``again``: a write that does not move the record's state (a lab writing status = "corrected" on a result already
+    reviewed) and makes this condition hold, where it did not before, starts the workflow about the record again,
+    from where it is, when no run of it is walking it (``starts_again``). ``when`` does not apply to it.
     """
     if isinstance(w, str):
         w = {"id": w}
-    if not isinstance(w, dict) or set(w) - {"id", "when"} or not isinstance(w.get("id"), str) \
+    if not isinstance(w, dict) or set(w) - {"id", "when", "again"} or not isinstance(w.get("id"), str) \
             or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", w.get("id") or ""):
         return ["workflow: the id of a workflow, e.g. \"order-handling\", or { id = ..., when = \"<condition over "
                 "record>\" }"]
-    when = w.get("when")
-    if when is not None:
-        if not isinstance(when, str) or not when.strip():
-            return ["workflow.when: a condition over record, e.g. \"record.status == 'requested'\""]
+    conds = {}
+    for key in ("when", "again"):
+        cond = w.get(key)
+        if cond is None:
+            continue
+        if not isinstance(cond, str) or not cond.strip():
+            return [f"workflow.{key}: a condition over record, e.g. \"record.status == 'requested'\""]
         try:
-            expr.check(when)
+            expr.check(cond)
         except expr.ExprError as exc:
-            return [f"workflow.when: {exc}"]
+            return [f"workflow.{key}: {exc}"]
+        conds[key] = cond
     if not rt.lifecycle:
         return ["workflow: a record moved by a workflow has a lifecycle: its state is where the work is"]
-    rt.workflow = {"id": w["id"], "when": when}
+    rt.workflow = {"id": w["id"], "when": conds.get("when"), **({"again": conds["again"]} if "again" in conds else {})}
     return []
 
 
@@ -716,6 +738,19 @@ def starts_workflow(rt: RecordType, rec: dict) -> str | None:
     if not w or (w.get("when") and not expr.holds(w["when"], {"record": {**_named_values(rt, rec), **rec}})):
         return None
     return w["id"]
+
+
+def starts_again(rt: RecordType, before: dict, after: dict) -> str | None:
+    """The workflow a write of a record that did not move it starts again (its type's ``workflow.again``, which
+    holds of the record as written and did not hold of it before), or None."""
+    w = rt.workflow or {}
+    cond = w.get("again")
+    if not cond or before is None:
+        return None
+    ctx = lambda rec: {"record": {**_named_values(rt, rec), **rec}}  # noqa: E731
+    if expr.holds(cond, ctx(after)) and not expr.holds(cond, ctx(before)):
+        return w["id"]
+    return None
 
 
 def _named_values(rt: RecordType, rec: dict) -> dict:

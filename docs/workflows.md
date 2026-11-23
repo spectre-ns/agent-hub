@@ -35,6 +35,32 @@ true` does the form offer **Start another anyway** (the API: `"allow_duplicate":
 link. An event or a schedule always starts its run: a request that came in is never dropped. An empty value is never
 a duplicate. Forms also post once: a second press while one is being sent does nothing.
 
+### Cancelling a run
+
+Whoever started a run, or a policy owner, may cancel it. Two settings change what a cancel does:
+
+```toml
+cancel_by = ["physician"]            # once a step for this role is claimed, only this role or a policy owner cancels
+
+[[on_cancel]]                        # run in the transaction that cancels the run
+id = "tell"
+title = "Tell the patient and the physician"
+action = "message.send"
+when = "cancel.reason != ''"         # optional
+[on_cancel.params]
+to = "{{run.subject}}"
+body = "Your renewal was cancelled: {{cancel.reason}}"
+```
+
+- `cancel_by` lists roles. When someone claims a step for one of them, cancelling passes to that role. From then on,
+  only someone who holds it, or a policy owner, may cancel the run. Before anyone has claimed such a step, the usual
+  rule applies. `Engine.cancel_refusal(actor, run)` gives the reason in words, or None, so a page can leave out a
+  Cancel button that would be refused.
+- `[[on_cancel]]` actions are written like an automation's `action` and `params`. Their placeholders can also read
+  `cancel.reason` and `cancel.by` (the canceller's name). They run inside the cancel. If one fails, the cancel is
+  refused ("it cannot be cancelled now: 'Tell the patient' did not go through (...)") and nothing of it is kept, so
+  nobody is left untold.
+
 ## Steps
 
 ```toml
@@ -71,6 +97,79 @@ a reassignment or a take-over.
 Runs that were open before this (an item per step) are folded when the hub opens: the earliest item keeps its key
 and gains every item's history; the one open step moves onto it, and steps open side by side become its children.
 The other items are marked as moved, and their links lead to the run's item. It runs once per run.
+
+### Moving the record: transitions and the steps they do
+
+For a workflow about a record, people can do the work on the record's own page, as in an issue tracker: they move the
+record to its next state, and the move checks what the next state needs. The move is the record type's own lifecycle
+transition. It says what the move needs:
+
+```toml
+[[lifecycle.transition]]           # in the record type
+from = ["doing"]
+to = "done"
+label = "Finish"
+asks = ["outcome", "hours"]        # the move's screen asks for these, and they are written with the state, in one go
+requires = ["outcome"]             # these must hold something once it has moved; the type's field rules check them
+# sign = "Approved"                # the mover signs with this meaning (one of the type's [[signature]] meanings)
+```
+
+A move that leaves a `requires` field empty is refused, naming the field ("to move a job to 'done', fill in
+Outcome"). This applies to every move: by hand, by a workflow, or by a signature. A move with `sign` is made only by
+a person's signature with that meaning. An agent never signs, and neither does a plain edit or a workflow.
+
+`Hub.move_record(actor, ref, to, values, signature)` makes any move. It is refused, in words, unless the actor may
+make that move now:
+
+- the transition's `by` allows them;
+- the signature is a person's, by a role the signature allows;
+- they hold the role of the open step of the record's own workflow;
+- nobody else holds that step. If someone has claimed it or it is assigned to them, the refusal names that person.
+
+A correction open from every state (`from = ["*"]`) stays anyone's who may write the record.
+
+**A step declares the move it makes with `state`.** A task with `state = "done"` is done by the move to `done`. Doing
+the transition is doing the step, and the other way round:
+
+- If someone moves the record to that state while the step is open, the step is done by them. They can do this with
+  `move_record` or by editing the record. The step's fields are taken from the transition's `asks`, by field name.
+  The run then goes on.
+- If someone finishes the step on its item, the record makes the same move, through the same transition. The step's
+  answers go into the fields the move asks for, and `requires` and `sign` still apply.
+
+The transition holds what a move needs, and the step holds which move it is.
+
+The other steps keep working as before:
+
+- `moves` lists states people may move the record to while the step stays open. Examples are starting the work and
+  stepping out of a visit.
+- A step that moves nothing (no `state`) is done on its item.
+- A gate decides on its item, because a decision signs what the step showed. Its outcome moves the record through
+  the automation step it leads to.
+
+**A write that is not a move can start the work again.** A record type names its workflow with
+`workflow = { id = "...", when = "...", again = "..." }`. Take a write that does not move the record, such as a lab
+writing `status = "corrected"` on a result already reviewed. If `again` holds after that write and did not hold
+before it, the type's workflow starts about the record again, from where the record is. The last run becomes its
+previous run. This happens only when no run of the workflow is walking the record. `when` does not apply here, and a
+write that leaves `again` as it was starts nothing. The new run's own steps take it from there, for example an
+automation with `state` that moves the record back to waiting for review.
+
+`Hub.transition_screen(actor, ref)` returns two lists for the record page:
+
+- The moves the actor may make now. Each has its label, the fields it asks for (with their definitions and values),
+  what it requires, the signature it asks for, and whether it is the forward move. The forward move is the one the
+  open step makes, or else the first way on that is not a correction.
+- The moves they may not make, each with the reason in words.
+
+`Hub.record_timeline(viewer, ref)` tells the record's history in words, oldest first. It covers:
+
+- the record's edits;
+- its moves: who made each, when, the values it wrote and the signature it carried;
+- its runs' steps: started, done by whom, decided, skipped or waiting.
+
+What the viewer may not read is folded, one line per hidden stretch ("3 clinical steps"). (`Hub.record_history` stays
+the list of versions that pages and exports read.)
 
 ### task
 
