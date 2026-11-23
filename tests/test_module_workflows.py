@@ -141,7 +141,7 @@ def test_making_a_document_obsolete_is_a_controllers_signed_decision_with_a_reas
     d = hub.create_record(rana, "Document", {"title": "Old form"})
     ref = f"Document/{d['id']}"
     run = open_run(hub, "dms-review", ref)
-    with pytest.raises(Denied):  # nobody makes it obsolete by hand
+    with pytest.raises((Denied, Invalid)):  # nobody makes it obsolete by hand: no move from draft goes there
         hub.update_record(rana, ref, {"status": "obsolete"})
     with pytest.raises(Invalid):  # proposing it needs a reason
         hub.update_record(rana, ref, {"status": "retiring"})
@@ -702,7 +702,9 @@ def test_an_order_task_is_withdrawn_when_its_item_is_no_longer_low(stock):
     issue = hub.create_record(rana, "StockMove", {"kind": "issue", "item": ref, "quantity": 2})
     hub.update_record(rana, f"StockMove/{issue['id']}", {"status": "submitted"})
     order = item_for(hub, first, "order")
-    hub.update_record(rana, ref, {"status": "stocked"})  # cleared on its page: a move the order step lets through
+    rcv = hub.create_record(rana, "StockMove", {"kind": "receive", "item": ref, "quantity": 10})
+    hub.update_record(rana, f"StockMove/{rcv['id']}", {"status": "submitted"})  # a delivery posted before any order
+    assert _sku(hub, "SY-3")["status"] == "stocked"
     assert step_state(hub, first, "order") == "skipped"
     assert hub.engine.item(order)["status"] not in ("open", "claimed")  # no stale order left on anyone's list
     assert hub.db.events.find_one({"action": "step.withdrawn", "run_id": first["id"], "data.step": "order"})
