@@ -3384,6 +3384,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         closing = not any(t["to"] in x["from"] for x in rt.lifecycle["transition"] if "*" not in x["from"])
         runs = [r["id"] for r in self.db.runs.find({"workflow_id": owner, "record": ref, "status": "running"},
                                                    fields=["id"])]
+        walked = bool(runs)
         if how == "step" and self._step_by_move(rt, ref, rec, member, t, cause):
             runs = []  # the move was the step: its run has gone on from it
         if runs and how not in ("until", "step") and ("*" in t["from"] or closing):
@@ -3393,6 +3394,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             return
         for r in runs:
             self.engine.advance(r, cause)
+        if walked:
+            return  # a run walked it when it moved: that run's own end walks the next pass, if any (``_re_enter``)
+        rec = self.records.read(*ref.split("/", 1)) or rec  # as it is now, not as the move wrote it
         if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner \
                 or schema.starts_workflow(rt, rec) != owner \
                 or self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):

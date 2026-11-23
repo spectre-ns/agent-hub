@@ -5561,6 +5561,19 @@ def test_a_write_that_makes_the_type_s_again_hold_starts_its_workflow_again_wher
     assert not list(hub.db.runs.find({"record": ref, "status": "running"}))
 
 
+def test_a_move_its_run_finishes_on_starts_no_second_run(stock):
+    """Rule: a move a record's own run was waiting for, after which the run finishes at once (a delivery submitted
+    and posted in one go), leaves one run: the type's workflow is not started again over the record as the move
+    wrote it (submitted), only by the run's own end where the record is now (posted: nothing to walk)."""
+    hub, rana = stock, M(stock, "rana")
+    m = hub.create_record(rana, "StockMove", {"kind": "receive", "item": f"StockItem/{_item(hub, 'SY-3')['id']}",
+                                              "quantity": 10})
+    ref = f"StockMove/{m['id']}"
+    hub.update_record(rana, ref, {"status": "submitted"})
+    assert hub.records.read(*ref.split("/"))["status"] == "posted"
+    assert [r["status"] for r in hub.db.runs.find({"workflow_id": "inventory-post", "record": ref})] == ["completed"]
+
+
 # ------------------------------------------------------------------------------------------- a record walks its workflow
 def test_a_record_its_type_walks_starts_its_run_on_create_and_only_that_run_moves_it(hub):
     """A record whose type names its workflow starts that workflow when it is made (one run, about its subject), and
