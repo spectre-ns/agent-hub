@@ -1595,15 +1595,13 @@ class Engine:
         return self._did_before(run, step_id, mid)
 
     def _did_before(self, run: dict, step_id: str, mid: str) -> bool:
-        """A record's earlier passes (``run.previous``: a CAPA reopened, a revision sent back) are one piece of work:
-        the step done in a pass before this one, when this pass skipped it, still keeps its doer off a ``not_by``."""
+        """A record's earlier passes (``run.previous``: a CAPA reopened, a change order sent back) are one piece of
+        work: whoever did the step in any pass before this one is kept off a ``not_by`` naming it, all the way back
+        along the chain of passes, not only in the last pass that did it."""
         seen = {run["id"]}
         while True:
-            if (run["ctx"].get(step_id) or {}).get("by") or \
-                    (run["steps"].get(step_id) or {}).get("state") not in (None, "skipped", "pending"):
-                return False  # this pass did the step: its own doer is the one that counts
             prev = ((run.get("ctx") or {}).get("run") or {}).get("previous")
-            if not prev or prev in seen or len(seen) > 50:
+            if not prev or prev in seen or len(seen) > 200:
                 return False
             seen.add(prev)
             run = self.hub.db.runs.get(prev)

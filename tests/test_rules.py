@@ -3040,6 +3040,42 @@ def test_a_record_moved_out_of_its_workflow_s_hands_stops_its_open_run_on_the_tr
     assert hub.records.read("CAPA", capa["id"])["status"] == "cancelled"
 
 
+def test_not_by_keeps_off_whoever_did_the_step_in_any_earlier_pass_of_the_record(hub):
+    """Rule: the passes of a record (``run.previous``, all the way back) are one piece of work for ``not_by``:
+    whoever did a named step in any pass, not only the last pass that did it, does not take the step it names."""
+    from practicehub.hub import member_ref
+    install(hub, "dms")
+    install(hub, "qms")
+    for m in hub.pack.modules:
+        m.module.demo(hub)
+    hub.authz.write([("role:quality-manager", "assignee", member_ref(w)) for w in ("dr-liam", "noor")])
+    rana, amara, liam, noor = (M(hub, w) for w in ("rana", "dr-amara", "dr-liam", "noor"))
+    capa = hub.create_record(rana, "CAPA", {"title": "Three passes", "kind": "corrective", "problem": "P"})
+    ref = f"CAPA/{capa['id']}"
+
+    def take(run, step, who, *, decide=None, data=None):
+        i = item_for(hub, run, step)
+        hub.engine.claim(who, i)
+        if decide:
+            hub.engine.decide(who, i, decide, "again")
+        else:
+            hub.engine.complete(who, i, data or {})
+
+    run = _own_run(hub, ref, "qms-capa")
+    take(run, "investigate", rana, data={"root_cause": "R", "plan": "P1"})
+    take(run, "verify", noor, decide="not-effective")
+    run = _own_run(hub, ref, "qms-capa")                  # pass 2: amara acts
+    take(run, "act", amara, data={"plan": "P2"})
+    take(run, "verify", noor, decide="not-effective")
+    run = _own_run(hub, ref, "qms-capa")                  # pass 3: liam acts
+    take(run, "act", liam, data={"plan": "P3"})
+    v = item_for(hub, run, "verify")
+    for who in (rana, amara, liam):  # investigated in pass 1, acted in pass 2, acted now
+        with pytest.raises(Denied):
+            hub.engine.claim(who, v)
+    hub.engine.claim(noor, v)
+
+
 def test_increment_and_decrement_take_amounts_and_for_each_takes_one_reference(hub):
     from practicehub.workflows import parse
     base = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["physician"]\n[[steps]]\nid = "a"\n'
