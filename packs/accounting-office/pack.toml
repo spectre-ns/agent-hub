@@ -1,0 +1,398 @@
+# A general accounting office: personal tax (T1), monthly bookkeeping, corporate year-ends (T2), GST/HST and payroll.
+# Everything about accounting lives in this pack; the hub's core knows nothing about tax.
+#
+# The firm, its people and its clients are fictional.
+#
+# How work is split here: agents categorise, reconcile, chase missing slips and documents, and draft returns and
+# client messages. People review returns and anything over a risk line, and sign what is filed. An agent never signs
+# and never files: filing is a partner's signed move on the return's own page, and only then does the hub transmit.
+#
+# The pack is built in sections, one per service, so each can be worked on apart: FOUNDATION (the firm, clients,
+# engagements, billing, messages), T1 (personal tax), BOOKS (bookkeeping), T2 (corporate tax), GST-PAYROLL. A section
+# that is not built yet is a marked placeholder. pack.py is sectioned the same way.
+#
+# Modules that suit this practice (recommended, not required): crm (leads and proposals before a client signs an
+# engagement), dms (engagement letter templates, the firm's policies and procedures under document control).
+version = "1.0"
+
+[practice]
+requires_core = "1.0"
+id = "tidewater"
+kind = "accounting-office"
+name = "Tidewater Chartered Professional Accountants"
+jurisdiction = "Nova Scotia, Canada"
+privacy_law = "PIPEDA (Personal Information Protection and Electronic Documents Act)"
+data_residency = "Canada"
+timezone = "America/Halifax"
+escalation_role = "manager"
+shortcuts = ["T1Return", "Engagement"]
+message_class = "correspondence"
+free_text_class = "correspondence"
+notes = """Agents here do the preparation: they sort and read slips, chase what is missing, compare with last year,
+draft returns and client messages, and flag what changed. People review every return and approve anything over the
+risk line. Only a partner files, by signing; no agent ever signs, files, or tells a client what they owe as final."""
+agent_rules = [
+  "You never sign, file, or tell a client a return is final: a person reviews and a partner files.",
+  "You never give tax planning or legal advice: a question that needs a judgement is escalated to a person.",
+  "A SIN or business number is never written in a message.",
+]
+
+# How long a queued message may wait for its delivery connector before someone sends it by hand.
+[practice.outbox.email]
+deadline_minutes = 240
+deliver_role = "admin"
+task = "Email this to {to}"
+
+[practice.outbox.portal]
+deadline_minutes = 240
+deliver_role = "admin"
+task = "Reach the client another way"
+
+# ---------------------------------------------------------------------------------------------------------- subject
+[subject]
+type = "Client"
+label = "Client"
+plural = "Clients"
+path = "clients"
+registered_event = "client.registered"
+register_label = "Open a client file"
+
+# ------------------------------------------------------------------------------------------------------------ roles
+# FOUNDATION roles: the people of the firm.
+
+[[roles]]
+id = "partner"
+name = "Partner (CPA)"
+description = "Owns client relationships, signs engagements and returns, and files. The firm's policy owner."
+
+[[roles]]
+id = "manager"
+name = "Manager (reviewer)"
+description = "Reviews returns and year-ends before a partner files them; approves agent work over the risk line."
+
+[[roles]]
+id = "senior"
+name = "Senior accountant"
+description = "Prepares complex returns and year-ends, and checks the staff's and agents' work."
+
+[[roles]]
+id = "staff"
+name = "Staff accountant"
+description = "Prepares returns from the client's slips; takes what an agent could not do."
+
+[[roles]]
+id = "bookkeeper"
+name = "Bookkeeper"
+description = "Keeps clients' books: categorises transactions, reconciles accounts, closes the month."
+
+[[roles]]
+id = "payroll-admin"
+name = "Payroll administrator"
+description = "Runs clients' payrolls, remittances and year-end slips."
+
+[[roles]]
+id = "admin"
+name = "Office administrator"
+description = "Front desk: client files, engagement letters, invoices, messages and the phone."
+
+# Agent roles: narrower than any person's, each for one kind of work.
+
+[[roles]]
+id = "document-clerk"
+name = "Document clerk"
+description = "Sends organizers, reads incoming slips, chases what is missing, records notices of assessment."
+
+[[roles]]
+id = "tax-preparer"
+name = "Tax preparer (drafts)"
+description = "Drafts returns and client letters from the slips, for a person to review. Never files."
+
+[[roles]]
+id = "bookkeeping-assistant"
+name = "Bookkeeping assistant"
+description = "Categorises transactions and proposes reconciliations for a bookkeeper to approve."
+
+# Services.
+
+[[roles]]
+id = "client-portal"
+name = "Client portal"
+description = "The online portal: clients upload slips, approve returns (T183) and sign engagements. A service."
+
+# BOOKS roles: none beyond bookkeeper and bookkeeping-assistant yet.
+
+# T2 roles: none yet.
+
+# GST-PAYROLL roles: none beyond payroll-admin yet.
+
+# ----------------------------------------------------------------------------------------------------- data classes
+# Permissions are granted per data class. A record type's own data_class (types/*.toml) is what governs it; the
+# record_types here say the same, for anyone reading this file.
+
+[[data_classes]]
+id = "profile"
+name = "Client profile: names, contacts, who owns what"
+record_types = ["Client", "Relationship"]
+
+[[data_classes]]
+id = "documents"
+name = "Client documents: slips, receipts, notices of assessment"
+record_types = ["TaxSlip"]
+
+[[data_classes]]
+id = "tax"
+name = "Tax returns and working papers"
+record_types = ["T1Return"]
+
+[[data_classes]]
+id = "books"
+name = "Clients' books: transactions, reconciliations, month-ends"
+record_types = []
+
+[[data_classes]]
+id = "payroll"
+name = "Payroll and identity numbers: pay, SINs, business numbers"
+record_types = []      # fields of their own class: Client.sin, Client.bn
+
+[[data_classes]]
+id = "engagement"
+name = "Engagements and billing"
+record_types = ["Engagement", "Invoice"]
+
+[[data_classes]]
+id = "correspondence"
+name = "Messages with clients"
+record_types = ["Communication"]
+
+# ----------------------------------------------------------------------------------------------------------- grants
+# Writing a class implies reading it. Least privilege: an agent reads what its work needs and writes nothing (its
+# answers go in through its workflow steps); the portal writes what a client gives and reads nothing it did not.
+
+[grants.partner]
+write = ["profile", "documents", "tax", "books", "payroll", "engagement", "correspondence"]
+policy_owner = true
+member_admin = true
+
+[grants.manager]
+write = ["profile", "documents", "tax", "engagement", "correspondence"]
+read = ["books"]
+policy_owner = true              # a second policy owner: approvals never wait on one person
+
+[grants.senior]
+write = ["documents", "tax", "correspondence"]
+read = ["profile", "books", "engagement"]
+
+[grants.staff]
+write = ["documents", "tax", "correspondence"]
+read = ["profile", "engagement"]
+
+[grants.bookkeeper]
+write = ["books", "documents", "correspondence"]
+read = ["profile", "engagement"]
+
+[grants.payroll-admin]
+write = ["payroll", "correspondence"]
+read = ["profile", "engagement"]
+
+[grants.admin]
+write = ["profile", "documents", "engagement", "correspondence"]
+
+[grants.document-clerk]
+read = ["profile", "documents", "tax", "engagement"]
+
+[grants.tax-preparer]
+read = ["profile", "documents", "tax"]
+
+[grants.bookkeeping-assistant]
+read = ["profile", "books"]
+
+[grants.client-portal]
+write = ["documents", "correspondence"]
+
+# --------------------------------------------------------------------------------------------------------- calendar
+# Office hours, and the filing deadlines pack.py dates work by. Each deadline: a month and day of the year after the
+# tax year (T1) or counted from a fiscal year end (later sections). `who` says whom it applies to.
+[calendar]
+slot_minutes = 30
+hours = { mon = ["08:30", "17:00"], tue = ["08:30", "17:00"], wed = ["08:30", "17:00"], thu = ["08:30", "17:00"], fri = ["08:30", "16:00"] }
+
+# T1 deadlines
+[[calendar.deadlines]]
+id = "t1-filing"
+label = "T1 filing deadline"
+service = "t1"
+month = 4
+day = 30
+who = "everyone"
+
+[[calendar.deadlines]]
+id = "t1-filing-self-employed"
+label = "T1 filing deadline (self-employed and their spouses)"
+service = "t1"
+month = 6
+day = 15
+who = "self-employed"
+
+[[calendar.deadlines]]
+id = "t1-balance"
+label = "T1 balance owing due (everyone, self-employed too)"
+service = "t1"
+month = 4
+day = 30
+who = "everyone"
+
+# BOOKS deadlines: none yet.
+
+# T2 deadlines: none yet.
+
+# GST-PAYROLL deadlines: none yet.
+
+# ----------------------------------------------------------------------------------------------------------- portal
+# The client portal (practicehub portal serve; docs/portal.md). A client signs in with their client number, date of
+# birth and a code by email, and may approve a return (the T183 authorisation) or sign an engagement. It never
+# books time. A company's return is approved by its owner, signed in as themselves.
+[portal]
+member = "client-portal"
+title = "Tidewater CPA: client portal"
+welcome = "Approve your tax return, or sign this year's engagement. To send us slips, reply to our email."
+privacy = "What you give here is used only to prepare and file your returns with Tidewater CPA, under PIPEDA, and it stays in Canada."
+contact_line = "For anything else, call the office at 902-555-0140."
+
+[portal.wording]
+requested = "Thank you: we have your answer. If you asked a question, we will contact you within one working day."
+request_next = "We will contact you within one working day."
+
+[portal.identity]
+born = "birth_date"
+identifier_label = "Client number"
+identifier_help = "On every letter from us, for example TW-1042."
+
+[portal.code]
+channel = "email"
+minutes = 10
+length = 6
+
+[portal.kinds.approve-return]
+label = "Approve my tax return"
+description = "Your return is ready: read the summary we sent you, then authorise us to file it (form T183)."
+mode = "request"
+slot = "none"
+workflow = "client-sign"
+inputs = { what = "t183" }
+questions = [{ input = "answer", label = "Your answer", choices = { approve = "I have read the summary and authorise Tidewater CPA to file my return electronically (T183)", question = "I have a question first" } }]
+max_upcoming = 3
+
+[portal.kinds.sign-engagement]
+label = "Sign this year's engagement"
+description = "What we will do for you this year, and our fee. Signing lets us start."
+mode = "request"
+slot = "none"
+workflow = "client-sign"
+inputs = { what = "engagement" }
+questions = [{ input = "answer", label = "Your answer", choices = { approve = "I have read the engagement letter and accept it", question = "I have a question first" } }]
+max_upcoming = 3
+
+[record_labels]
+Client = "Client"
+Relationship = "Relationship"
+Engagement = "Engagement"
+TaxSlip = "Slip or document"
+T1Return = "T1 return"
+Invoice = "Invoice"
+Communication = "Message"
+
+# ----------------------------------------------------------------------------------------------------------- events
+[[events]]
+id = "client.registered"
+label = "A client file was opened"
+fields = []
+
+# ---------------------------------------------------------------------------------------------------------- members
+# People first; every agent and service has a person as sponsor, accountable for what it does.
+
+[[members]]
+id = "anne"
+name = "Anne Saulnier, CPA"
+title = "Partner"
+roles = ["partner"]
+owner = true
+
+[[members]]
+id = "rob"
+name = "Rob MacIntyre, CPA"
+title = "Tax manager"
+roles = ["manager"]
+
+[[members]]
+id = "priya"
+name = "Priya Das, CPA"
+title = "Senior accountant"
+roles = ["senior"]
+
+[[members]]
+id = "ethan"
+name = "Ethan Boudreau"
+title = "Staff accountant"
+roles = ["staff"]
+
+[[members]]
+id = "colleen"
+name = "Colleen Fraser"
+title = "Bookkeeper"
+roles = ["bookkeeper"]
+
+[[members]]
+id = "marc"
+name = "Marc Gaudet"
+title = "Payroll administrator"
+roles = ["payroll-admin"]
+
+[[members]]
+id = "sophie"
+name = "Sophie Comeau"
+title = "Office administrator"
+roles = ["admin"]
+
+# FOUNDATION and T1 agents
+
+[[members]]
+id = "documents-agent"
+kind = "agent"
+name = "Documents agent"
+title = "Sends organizers, reads slips, chases what is missing"
+sponsor = "sophie"
+roles = ["document-clerk"]
+profile = { model = "standin", max_risk = "low", skills = ["engagement-letter", "t1-organizer", "slip-extract", "slip-chase"] }
+
+[[members]]
+id = "tax-agent"
+kind = "agent"
+name = "Tax preparation agent"
+title = "Drafts returns and client letters for review"
+sponsor = "rob"
+roles = ["tax-preparer"]
+profile = { model = "standin", max_risk = "high", skills = ["t1-draft", "t1-client-letter"] }
+
+# BOOKS agents
+
+[[members]]
+id = "bookkeeping-agent"
+kind = "agent"
+name = "Bookkeeping agent"
+title = "Categorises transactions and proposes reconciliations"
+sponsor = "colleen"
+roles = ["bookkeeping-assistant"]
+profile = { model = "standin", max_risk = "medium", skills = [] }
+
+# T2 agents: none yet.
+
+# GST-PAYROLL agents: none yet.
+
+# Services
+
+[[members]]
+id = "client-portal"
+kind = "service"
+name = "Client portal"
+sponsor = "sophie"
+roles = ["client-portal"]

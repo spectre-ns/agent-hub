@@ -1,0 +1,266 @@
+# A person's income tax return (T1) for one year. It is part of its client, made when the year's T1 engagement is
+# signed, and walked by the t1-return workflow from gathering the slips to the notice of assessment.
+#
+# Two moves are signed by a person and never made by an agent or a workflow: the review ("I reviewed this return...",
+# a manager or partner) and filing ("I authorise filing...", a partner). Only after a partner's signature does the
+# hub transmit the return (an automation); the client's own authorisation (T183) comes in through the portal, or is
+# recorded from paper by the office.
+id = "T1Return"
+label = "T1 return"
+plural = "T1 returns"
+data_class = "tax"
+strict = true
+title = "T1 {year}[ · {client_name}]"
+short_title = "T1 {year}[ · {client_name}]"
+date = "due_date"
+flag = "attention"
+part_of = "client"
+order = 10
+summary = "A personal income tax return, from the slips to the notice of assessment."
+workflow = { id = "t1-return", when = "record.status == 'gathering'" }
+
+[[field]]
+name = "client"
+label = "Client"
+type = "reference"
+target = ["Client"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "client_name"
+label = "Client name"
+type = "string"
+help = "Copied from the client when the return is opened, for lists"
+
+[[field]]
+name = "year"
+label = "Tax year"
+type = "number"
+required = true
+min = 2000
+max = 2100
+
+[[field]]
+name = "engagement"
+label = "Engagement"
+type = "reference"
+target = ["Engagement"]
+rel = "engagement"
+
+[[field]]
+name = "status"
+label = "Status"
+type = "choice"
+choices = ["gathering", "preparing", "in-review", "client-approval", "client-signed", "filing", "filed", "assessed", "withdrawn"]
+required = true
+
+[[field]]
+name = "due_date"
+label = "Filing deadline"
+type = "date"
+
+[[field]]
+name = "balance_due_date"
+label = "Balance owing due"
+type = "date"
+
+[[field]]
+name = "self_employed"
+label = "Self-employed"
+type = "boolean"
+
+[[field]]
+name = "attention"
+label = "Attention"
+type = "string"
+help = "Why a person must look: over the risk line, a difference on the assessment"
+
+[[field]]
+name = "expected_slips"
+label = "Slips expected (from last year)"
+type = "list"
+help = "What came last year, as slip and issuer: what this year's organizer asks for"
+
+[[field]]
+name = "missing_slips"
+label = "Slips still missing"
+type = "list"
+
+[[field]]
+name = "slips_complete"
+label = "All expected slips are in"
+type = "boolean"
+
+[[field]]
+name = "total_income"
+label = "Total income (line 15000)"
+type = "number"
+
+[[field]]
+name = "taxable_income"
+label = "Taxable income (line 26000)"
+type = "number"
+
+[[field]]
+name = "tax_deducted"
+label = "Tax deducted at source"
+type = "number"
+min = 0
+
+[[field]]
+name = "net_refund"
+label = "Refund (negative: balance owing)"
+type = "number"
+
+[[field]]
+name = "last_year_refund"
+label = "Last year's refund"
+type = "number"
+
+[[field]]
+name = "flags"
+label = "What changed and why it was flagged"
+type = "text"
+
+[[field]]
+name = "draft_summary"
+label = "Preparer's summary"
+type = "text"
+
+[[field]]
+name = "review_notes"
+label = "Reviewer's notes"
+type = "text"
+
+[[field]]
+name = "t183_signed_on"
+label = "Client authorised filing (T183) on"
+type = "date"
+
+[[field]]
+name = "t183_how"
+label = "How the client authorised it"
+type = "choice"
+choices = ["portal", "paper", "email"]
+labels = { portal = "Signed on the portal", paper = "Signed on paper", email = "Signed form by email" }
+
+[[field]]
+name = "efile_confirmation"
+label = "EFILE confirmation number"
+type = "string"
+
+[[field]]
+name = "filed_on"
+label = "Filed on"
+type = "date"
+
+[[field]]
+name = "noa_date"
+label = "Notice of assessment dated"
+type = "date"
+
+[[field]]
+name = "noa_received"
+label = "Notice of assessment received"
+type = "boolean"
+
+[[field]]
+name = "assessed_refund"
+label = "Assessed refund (negative: owing)"
+type = "number"
+
+[[field]]
+name = "assessed_taxable_income"
+label = "Assessed taxable income"
+type = "number"
+
+[[field]]
+name = "assessment_notes"
+label = "Assessment: what differs and what was done"
+type = "text"
+
+[[field]]
+name = "note"
+label = "Note"
+type = "text"
+
+[[signature]]
+meaning = "I reviewed this return and it is ready for the client"
+roles = ["manager", "partner"]
+states = ["in-review"]
+
+[[signature]]
+meaning = "I authorise filing this return with the CRA"
+roles = ["partner"]
+states = ["client-signed"]
+
+[lifecycle]
+field = "status"
+initial = "gathering"
+labels = { gathering = "Gathering slips", preparing = "Preparing", in-review = "In review", client-approval = "With the client", client-signed = "Client authorised (T183)", filing = "Filing", filed = "Filed", assessed = "Assessed", withdrawn = "Withdrawn" }
+tones = { gathering = "waiting", preparing = "active", in-review = "attention", client-approval = "waiting", client-signed = "attention", filing = "active", filed = "done", assessed = "done", withdrawn = "ended" }
+abandoned = { filing = "client-signed" }   # its work cancelled mid-transmission, it waits for a partner again
+
+[[lifecycle.transition]]
+from = ["gathering"]
+to = "preparing"
+label = "Start preparing"
+
+[[lifecycle.transition]]
+from = ["preparing"]
+to = "in-review"
+label = "Ready for review"
+asks = ["total_income", "taxable_income", "tax_deducted", "net_refund", "flags", "draft_summary"]
+requires = ["total_income", "net_refund", "draft_summary"]
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "client-approval"
+label = "Approve the review"
+asks = ["total_income", "taxable_income", "tax_deducted", "net_refund", "review_notes"]
+requires = ["total_income", "net_refund"]
+sign = "I reviewed this return and it is ready for the client"
+
+[[lifecycle.transition]]
+from = ["client-approval"]
+to = "client-signed"
+label = "Record the client's authorisation (T183)"
+asks = ["t183_signed_on", "t183_how"]
+requires = ["t183_signed_on", "t183_how"]
+
+[[lifecycle.transition]]
+from = ["client-signed"]
+to = "filing"
+label = "File with the CRA"
+sign = "I authorise filing this return with the CRA"
+requires = ["t183_signed_on"]
+confirm = "The return is transmitted to the CRA as soon as you sign."
+
+[[lifecycle.transition]]
+from = ["filing"]
+to = "filed"
+by = "workflow"
+label = "Accepted by the CRA"
+asks = ["efile_confirmation", "filed_on"]
+requires = ["efile_confirmation", "filed_on"]
+
+[[lifecycle.transition]]
+from = ["filing"]
+to = "client-signed"
+by = "workflow"
+label = "Not transmitted: back to the partner"
+
+[[lifecycle.transition]]
+from = ["filed"]
+to = "assessed"
+label = "Record the notice of assessment"
+asks = ["noa_date", "assessed_refund", "assessed_taxable_income"]
+requires = ["noa_date", "assessed_refund"]
+
+[[lifecycle.transition]]
+from = ["gathering", "preparing", "in-review", "client-approval", "client-signed"]
+to = "withdrawn"
+label = "Withdraw (no return to file)"
+asks = ["note"]
+requires = ["note"]

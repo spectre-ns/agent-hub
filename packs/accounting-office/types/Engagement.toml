@@ -1,0 +1,148 @@
+# What the firm agreed to do for a client: one service for one year (a T1 for 2025, the 2025 bookkeeping, a T2 for
+# the year ending 2025-12-31). It is part of its client. The engagement workflow sends the letter, waits for the
+# client's signature (on the portal, or recorded from paper), then opens the work (for a T1, the year's T1 return) and,
+# once the work is done and the next season comes, proposes next year's.
+id = "Engagement"
+label = "Engagement"
+plural = "Engagements"
+data_class = "engagement"
+strict = true
+title = "{service} {year}[ · {client_name}]"
+short_title = "{service} {year}[ · {client_name}]"
+date = "sent_on"
+part_of = "client"
+order = 30
+summary = "One service for one year, as the client signed it."
+workflow = { id = "engagement", when = "record.status == 'proposed'" }
+
+[[field]]
+name = "client"
+label = "Client"
+type = "reference"
+target = ["Client"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "client_name"
+label = "Client name"
+type = "string"
+
+[[field]]
+name = "service"
+label = "Service"
+type = "choice"
+choices = ["t1", "bookkeeping", "t2", "gst-hst", "payroll"]
+labels = { t1 = "Personal tax (T1)", bookkeeping = "Bookkeeping", t2 = "Corporate year-end (T2)", gst-hst = "GST/HST", payroll = "Payroll" }
+required = true
+
+[[field]]
+name = "year"
+label = "Year"
+type = "number"
+required = true
+min = 2000
+max = 2100
+help = "The tax year (T1), the fiscal year (T2), or the calendar year the service runs in"
+
+[[field]]
+name = "status"
+label = "Status"
+type = "choice"
+choices = ["proposed", "signed", "active", "closed", "declined"]
+required = true
+
+[[field]]
+name = "fee"
+label = "Fee (before HST)"
+type = "number"
+min = 0
+
+[[field]]
+name = "fee_basis"
+label = "Fee basis"
+type = "choice"
+choices = ["fixed", "monthly", "hourly"]
+
+[[field]]
+name = "scope"
+label = "What we do"
+type = "text"
+
+[[field]]
+name = "letter"
+label = "Engagement letter"
+type = "markdown"
+
+[[field]]
+name = "sent_on"
+label = "Sent"
+type = "date"
+
+[[field]]
+name = "client_signed_on"
+label = "Client signed on"
+type = "date"
+
+[[field]]
+name = "client_signed_how"
+label = "How the client signed"
+type = "choice"
+choices = ["portal", "paper", "email"]
+labels = { portal = "On the portal", paper = "On paper", email = "Signed copy by email" }
+
+[[field]]
+name = "signed_by_name"
+label = "Signed by"
+type = "string"
+help = "The name of the person who signed: the client, or a company's signing officer"
+
+[[field]]
+name = "previous"
+label = "Last year's engagement"
+type = "reference"
+target = ["Engagement"]
+rel = "previous"
+
+[[field]]
+name = "work"
+label = "The work"
+type = "reference"
+target = ["*"]
+rel = "work"
+help = "The record the engagement opened: the year's T1 return, the year-end"
+
+[[field]]
+name = "note"
+label = "Note"
+type = "text"
+
+[lifecycle]
+field = "status"
+initial = "proposed"
+labels = { proposed = "Sent to the client", signed = "Signed", active = "In progress", closed = "Done", declined = "Declined" }
+tones = { proposed = "waiting", signed = "active", active = "active", closed = "done", declined = "ended" }
+
+[[lifecycle.transition]]
+from = ["proposed"]
+to = "signed"
+label = "Record the client's signature"
+asks = ["client_signed_on", "client_signed_how", "signed_by_name"]
+requires = ["client_signed_on", "client_signed_how"]
+
+[[lifecycle.transition]]
+from = ["signed"]
+to = "active"
+by = "workflow"
+label = "Start the work"
+
+[[lifecycle.transition]]
+from = ["active"]
+to = "closed"
+label = "Close: the work is done"
+
+[[lifecycle.transition]]
+from = ["proposed", "signed"]
+to = "declined"
+label = "Declined by the client"
+asks = ["note"]

@@ -1,0 +1,70 @@
+# A message to or from a client: an organizer, a request for a missing slip, a return's summary for approval, a
+# question from the portal. It is part of its client. What the firm sends is also queued on the outbox for delivery.
+id = "Communication"
+label = "Message"
+plural = "Messages"
+data_class = "correspondence"
+strict = true
+title = "{subject}"
+date = "at"
+part_of = "client"
+order = 50
+summary = "A message to or from a client."
+
+[[field]]
+name = "client"
+label = "Client"
+type = "reference"
+target = ["Client"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "direction"
+label = "Direction"
+type = "choice"
+choices = ["out", "in"]
+labels = { out = "To the client", in = "From the client" }
+required = true
+
+[[field]]
+name = "channel"
+label = "Channel"
+type = "choice"
+choices = ["email", "portal", "phone", "letter"]
+required = true
+
+[[field]]
+name = "subject"
+label = "Subject"
+type = "string"
+required = true
+
+[[field]]
+name = "body"
+label = "Message"
+type = "text"
+
+[[field]]
+name = "about"
+label = "About"
+type = "reference"
+target = ["*"]
+rel = "about"
+
+[[field]]
+name = "at"
+label = "When"
+type = "datetime"
+
+[[field]]
+name = "drafted_by"
+label = "Drafted by"
+type = "member"
+help = "The member who wrote it: an agent's drafts say so"
+
+[[field]]
+name = "outbox"
+label = "Outbox message"
+type = "string"
+advanced = true
