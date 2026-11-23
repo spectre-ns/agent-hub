@@ -483,6 +483,9 @@ input[type=hidden]{display:none}
 label.radio{font-weight:400;color:var(--fg);display:inline-flex;align-items:center;margin:4px 16px 4px 0;font-size:14px;line-height:20px}
 textarea.code{font:13px/20px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 fieldset.choices{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.slot-picker{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.slot-picker>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
+.slot-filters{display:flex;flex-wrap:wrap;gap:0 12px}.slot-filters label{flex:1 1 160px;margin-top:0}
 /* a screen's tabs: every part stays in the form (a required field is never hidden); the tab links jump to a part */
 fieldset.tabpanel{border:0;border-top:1px solid var(--border);margin:16px 0 0;padding:8px 0 0;min-width:0;scroll-margin-top:64px}
 fieldset.tabpanel:first-of-type{border-top:0;margin-top:0}
@@ -2078,6 +2081,30 @@ function formTabs(root) {
 
 // A field only some kinds need (a member's sponsor: agents and services): shown, and asked for, only for those kinds.
 // Without the script it is always shown, with its hint.
+function slotPickers(root) {  // a day and a person narrow the times offered; the slot is the only value sent
+  root.querySelectorAll("[data-slots]").forEach((box) => {
+    if (box.dataset.ready) return;
+    box.dataset.ready = "1";
+    const day = box.querySelector("[data-slot-day]"), who = box.querySelector("[data-slot-with]");
+    const time = box.querySelector("[data-slot-time]");
+    const sync = () => {
+      time.querySelectorAll("optgroup").forEach((g) => {
+        let any = false;
+        g.querySelectorAll("option").forEach((o) => {
+          const on = (!day.value || o.dataset.day === day.value) && (!who.value || o.dataset.with === who.value);
+          o.hidden = o.disabled = !on;
+          if (on) any = true;
+        });
+        g.hidden = !any;
+      });
+      const cur = time.selectedOptions[0];
+      if (cur && cur.disabled) time.value = "";
+    };
+    day.addEventListener("change", sync);
+    who.addEventListener("change", sync);
+    sync();
+  });
+}
 function kindFields(root) {
   root.querySelectorAll("[data-kinds]").forEach((box) => {
     const form = box.closest("form");
@@ -2142,6 +2169,7 @@ function formModal() {
     body.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
     formTabs(body);
     kindFields(body);
+    slotPickers(body);
     body.querySelectorAll("[data-modal-close]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); close(); }));
     if (back) body.querySelectorAll("form[method=post]").forEach((f) => {  // opened from a board: back to it after
       if (!f.querySelector("input[name=_back]")) f.appendChild(el("input", { type: "hidden", name: "_back", value: back }));
@@ -2402,6 +2430,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
   formTabs(document);
   kindFields(document);
+  slotPickers(document);
   document.querySelectorAll("svg[data-flow]").forEach((svg) => {
     const src = document.getElementById(svg.dataset.flow);
     if (src) drawFlow(svg, JSON.parse(src.textContent));

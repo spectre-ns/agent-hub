@@ -322,10 +322,18 @@ CORE_ACTIONS["booking.book"] = act_booking_book
 
 
 def prov_free_slots(engine, run, step, member):
-    """Free appointment slots in the practice calendar, for the next ``lookahead_days`` working days."""
+    """Free appointment slots in the practice calendar, for the next ``lookahead_days`` working days.
+
+    ``max_slots`` caps each provider's free slots on each day, never the whole list: every working day in the window
+    and every provider is offered, so a patient who asked for a later day or a named physician can have it (a cap on
+    the whole list offered only the first morning). Each option also says its day and whom it is with (``day``,
+    ``day_label``, ``time``, ``with``, ``with_name``), so a page can let the scheduler pick a day and a provider
+    first. Earliest first; at one time, providers in the role's order."""
     hub = engine.hub
     cal = hub.pack.calendar if hub.pack else {}
     minutes = int(cal.get("slot_minutes", 15))
+    stride = minutes * int(cal.get("slot_stride", 4))
+    cap = int(cal.get("max_slots", 24))
     hours = cal.get("hours", {})
     role = cal.get("provider_role")
     providers = [m for m in (hub.role(role)["holders"] if role else []) if m["kind"] == "person" and m["status"] == "active"]
@@ -334,27 +342,32 @@ def prov_free_slots(engine, run, step, member):
     for b in bookings(hub, since=now.date().isoformat()):
         for who in b["with"]:
             busy.add((who, b["start"][:16]))
-    now = engine.now()
     out = []
     day = now.date()
     days_seen = 0
-    while days_seen < int(cal.get("lookahead_days", 5)) and len(out) < int(cal.get("max_slots", 24)):
+    while days_seen < int(cal.get("lookahead_days", 5)):
         day += timedelta(days=1)
         key = day.strftime("%a").lower()[:3]
         if key not in hours:
             continue
         days_seen += 1
         start_s, end_s = hours[key]
-        t = datetime.combine(day, datetime.strptime(start_s, "%H:%M").time())
+        first = datetime.combine(day, datetime.strptime(start_s, "%H:%M").time())
         end = datetime.combine(day, datetime.strptime(end_s, "%H:%M").time())
-        while t + timedelta(minutes=minutes) <= end:
-            for prov in providers:
+        day_label = day.strftime("%a %b %d")
+        for order, prov in enumerate(providers):
+            t, n = first, 0
+            while t + timedelta(minutes=minutes) <= end and n < cap:
                 stamp = t.strftime("%Y-%m-%dT%H:%M")
                 if (prov["id"], stamp) not in busy:
                     out.append({"value": f"{stamp}|{prov['id']}",
-                                "label": f"{t.strftime('%a %b %d %H:%M')} with {prov['name']}"})
-            t += timedelta(minutes=minutes * int(cal.get("slot_stride", 4)))
-    return out[: int(cal.get("max_slots", 24))]
+                                "label": f"{day_label} {t.strftime('%H:%M')} with {prov['name']}",
+                                "day": day.isoformat(), "day_label": day_label, "time": t.strftime("%H:%M"),
+                                "with": prov["id"], "with_name": prov["name"], "_order": order})
+                    n += 1
+                t += timedelta(minutes=stride)
+    out.sort(key=lambda o: (o["value"][:16], o.pop("_order")))
+    return out
 
 
 def prov_members(engine, run, step, member):

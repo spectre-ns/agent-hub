@@ -2535,7 +2535,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         val = value if value is not None else f.get("default")
         req = " required" if f.get("required") and typ != "boolean" else ""
         helps = [f["help"]] if f.get("help") else []
-        cid, ids = self._control_id(name, bool(helps))
+        slots = bool(choices) and typ == "choice" and all("day" in c and "with" in c for c in choices)
+        cid, ids = self._control_id(name, bool(helps) or slots)
+        if slots:
+            return self._slot_picker(f, choices, val, cid, ids, req, helps)
         if choices is not None and typ != "member" and len(choices) <= self.CARDS:
             return self._option_cards(f, [(str(c["value"]), self.human(c["label"]) if str(c["label"]) == str(c["value"])
                                            else str(c["label"])) for c in choices],
@@ -2580,6 +2583,32 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             ctl = (f'<input type="{kind}" name="{e(name)}"{ids} value="{e(str(val if val is not None else ""))}"'
                    f'{req}{step}>')
         return self._labelled(f, ctl, cid, helps)
+
+    def _slot_picker(self, f, choices, val, cid, ids, req, helps) -> str:
+        """Appointment slots: pick a day and whom it is with, then the time. The filters have no name, so only the
+        slot is sent; without the script it is one list of every slot, grouped by day, and still works."""
+        days = list(dict.fromkeys((c["day"], c["day_label"]) for c in choices))
+        whom = list(dict.fromkeys((c["with"], c["with_name"]) for c in choices))
+        chosen = next((c for c in choices if str(c["value"]) == str(val)), None)
+        day_opts = "".join(f'<option value="{e(d)}"{" selected" if chosen and chosen["day"] == d else ""}>{e(lab)} '
+                           f'({sum(1 for c in choices if c["day"] == d)} free)</option>' for d, lab in days)
+        who_opts = "".join(f'<option value="{e(w)}"{" selected" if chosen and chosen["with"] == w else ""}>{e(n)}</option>'
+                           for w, n in whom)
+        groups = ""
+        for d, lab in days:
+            opts = "".join(f'<option value="{e(str(c["value"]))}" data-day="{e(d)}" data-with="{e(c["with"])}"'
+                           f'{" selected" if chosen is c else ""}>{e(c["time"])} with {e(c["with_name"])}</option>'
+                           for c in choices if c["day"] == d)
+            groups += f'<optgroup label="{e(lab)}">{opts}</optgroup>'
+        pick = (f'<div class="slot-filters"><label>Day<select data-slot-day><option value="">Any day</option>{day_opts}'
+                f'</select></label><label>With<select data-slot-with><option value="">Anyone</option>{who_opts}'
+                f'</select></label></div>')
+        ctl = f'<select name="{e(f["name"])}"{ids}{req} data-slot-time><option value=""></option>{groups}</select>'
+        count = (f'{len(choices)} free slots over {len(days)} days with {len(whom)} '
+                 f'{"person" if len(whom) == 1 else "people"}')
+        return (f'<fieldset class="slot-picker" data-slots><legend>{self._label_words(f)}</legend>{pick}'
+                f'<label>Time{ctl}</label>'
+                f'<small id="{cid}-help" class="help">{" · ".join(e(h) for h in [*helps, count])}</small></fieldset>')
 
     @staticmethod
     def _form_output(form: dict) -> dict:

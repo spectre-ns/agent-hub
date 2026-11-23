@@ -2478,3 +2478,31 @@ def test_the_client_address_trusts_a_forwarded_address_only_from_a_proxy_nearby(
     assert client_address("8.8.8.8", {"x-forwarded-for": "1.1.1.1"}) == "8.8.8.8"  # a public peer
     assert client_address("127.0.0.1", {"x-forwarded-for": "10.0.0.1, 198.51.100.4"}) == "198.51.100.4"
     assert client_address("192.168.1.5", {}) == "192.168.1.5"
+
+
+# ---------------------------------------------------------------------------------------------- MAIN-UX: staff pages
+
+def test_the_slot_picker_offers_every_day_and_every_physician(hub, server):
+    """The cap on free slots is per day and per physician, not on the whole list (which offered only Monday
+    morning); the scheduler picks a day and whom with, then the time, and only the slot is sent."""
+    cal = hub.pack.calendar
+    run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    iid = item_for(hub, run, "propose")
+    free = hub.engine.context(M(hub, "jo"), iid)["context"]["provider:free-slots"]
+    days = {c["day"] for c in free}
+    whom = {c["with"] for c in free}
+    assert len(days) == int(cal["lookahead_days"]) and len(whom) >= 2
+    for d in days:
+        for w in whom:
+            assert 0 < sum(1 for c in free if c["day"] == d and c["with"] == w) <= int(cal["max_slots"])
+    assert [c["value"][:16] for c in free] == sorted(c["value"][:16] for c in free)  # earliest first
+    status, page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))
+    assert status == 200
+    picker = page.split('class="slot-picker"', 1)[1].split("</fieldset>", 1)[0]
+    assert "data-slot-day" in picker and "data-slot-with" in picker and picker.count("<optgroup") == len(days)
+    assert picker.count('name="slot"') == 1  # the day and the person filters are not sent
+    last = free[-1]
+    hub.engine.claim(M(hub, "jo"), iid)
+    hub.engine.complete(M(hub, "jo"), iid, {"slot": last["value"], "why": "the patient asked for later in the week"})
+    assert hub.engine.run(run["id"])["ctx"]["book"]["member_name"] == last["with_name"]
