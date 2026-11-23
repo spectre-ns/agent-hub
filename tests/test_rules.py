@@ -5162,6 +5162,7 @@ id = "file"
 title = "File the job sheet"
 kind = "task"
 role = "physician"
+after = ["work"]
 when = "record.status == 'done'"
 context = ["record:clinical"]
 [[steps.fields]]
@@ -5220,3 +5221,41 @@ def test_a_transition_asks_requires_and_signs_and_a_move_missing_a_required_fiel
     with pytest.raises(Denied, match="signed 'Approved'"):
         hub.update_record(actor, ref, {"status": "approved"})
     assert run and hub.records.read(*ref.split("/"))["status"] == "done"
+
+
+def _job(hub, title="Fix the autoclave"):
+    amara = M(hub, "dr-amara")
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': title})['id']}"
+    return ref, _own_run(hub, ref, "job-flow")
+
+
+def test_move_record_writes_what_the_move_asks_with_the_state_and_only_who_may_make_it(hub):
+    """Rule: ``Hub.move_record(actor, ref, to, values, signature)`` makes any lifecycle move: it writes the values
+    the move asks for and the state in one transaction, and is refused, in words, unless the actor may make that move
+    now: the transition's ``by``, a signature only a person gives (with the transition's meaning, by a role the
+    signature allows), the role of the open step of the record's own workflow, and whoever holds that step (named)."""
+    _jobs(hub, walked=False)
+    amara, liam, agent = (M(hub, m) for m in ("dr-amara", "dr-liam", "scribe-agent"))
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    hub.move_record(amara, ref, "doing")
+    with pytest.raises(Invalid, match="asks for Outcome, Hours worked, not Title"):
+        hub.move_record(amara, ref, "done", {"title": "Renamed"})
+    with pytest.raises(Invalid, match="fill in Outcome"):
+        hub.move_record(amara, ref, "done", {"hours": 2})
+    assert hub.records.read(*ref.split("/"))["status"] == "doing"  # nothing of a refused move is written
+    hub.move_record(amara, ref, "done", {"outcome": "New seal fitted", "hours": 2})
+    rec = hub.records.read(*ref.split("/"))
+    assert (rec["status"], rec["outcome"], rec["hours"]) == ("done", "New seal fitted", 2)
+    assert hub.record_version(ref) == 3  # created, doing, done: the values and the state are one version
+    with pytest.raises(Invalid, match="signed 'Approved'"):
+        hub.move_record(amara, ref, "approved")
+    with pytest.raises(Denied, match="only a person signs"):
+        hub.move_record(agent, ref, "approved", signature="Approved")
+    with pytest.raises(Denied, match="needs the medical-director role"):
+        hub.move_record(liam, ref, "approved", signature="Approved")
+    hub.move_record(amara, ref, "approved", signature={"meaning": "Approved", "comment": "Checked"})
+    sig = hub.signatures(amara, ref)[0]
+    assert sig["meaning"] == "Approved" and sig["by"] == "dr-amara" and sig["current"]
+    with pytest.raises(Denied, match="needs writing visits records"):
+        hub.move_record(M(hub, "sam"), ref, "cancelled")
+

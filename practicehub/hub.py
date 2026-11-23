@@ -29,6 +29,7 @@ from .store import ASC, DESC
 from .catalog import CatalogMixin
 from .credentials import CredentialsMixin
 from .outbox import OutboxMixin
+from .moves import MovesMixin
 from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
 
@@ -150,7 +151,7 @@ def _how(data: dict) -> str:
     return f"{how} ({data['format']})" if how == "export" and data.get("format") else how
 
 
-class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
+class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
     def __init__(self, state_dir: Path | str | None, *, pack: str | packmod.Pack | None = None,
                  authorizer: Authorizer | None = None, records: RecordStore | None = None, models=None):
         self.state_dir = Path(state_dir) if state_dir else None
