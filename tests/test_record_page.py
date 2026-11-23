@@ -117,7 +117,7 @@ def test_work_is_cancelled_from_the_record_and_a_refusal_says_why_there(hub, ser
     run = hub.engine.start(M(hub, "jo"), "appointment-request", record=_ellen(hub),
                            inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
     run = hub.engine.run(run["id"])
-    back = f"/records/{run['record']}#work"
+    back = addr(hub, run['record']) + "#work"
     page = call(server, "GET", back.split("#")[0], token(hub, "jo"))[1]
     cancel = page.split('class="cancel-work"', 1)[1].split("</details>", 1)[0]
     assert f'action="/runs/{run["id"]}/cancel"' in cancel and f'name="_back" value="{back}"' in cancel
@@ -139,7 +139,7 @@ def test_a_step_is_done_on_the_record_and_its_verbs_return_there(hub, server):
                            inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
     run = hub.engine.run(run["id"])
     iid = item_for(hub, run, "propose")
-    back = f"/records/{run['record']}#work"
+    back = addr(hub, run['record']) + "#work"
     page = call(server, "GET", back.split("#")[0], token(hub, "jo"))[1]
     step = page.split('class="rw-step"', 1)[1]
     assert f'action="/items/{iid}/claim"' in step and f'name="_back" value="{back}"' in step
@@ -277,6 +277,12 @@ def test_a_part_is_addressed_under_its_owner_layer_by_layer(hub, server):
     assert code == 200
     crumbs = page.split('class="crumbs"', 1)[1].split("</nav>", 1)[0]
     assert f'href="/patients/{pid}"' in crumbs and "Lab results" in crumbs and "Records" not in crumbs
+    # it is read inside its patient: the patient's sections beside it, its own kind marked; its actions nested too
+    rail = page.split('class="subnav owner-rail"', 1)[1].split("</nav>", 1)[0]
+    assert f'href="/patients/{pid}#part-Encounter"' in rail
+    assert f'href="/patients/{pid}#part-Observation" aria-current="page"' in rail
+    assert f'href="{nested}/export"' in page and f'/records/{ref}/export' not in page
+    assert call(server, "GET", f"{nested}/export", tok)[0] == 200
     other = next(p["id"] for p in hub.records.search("Patient", limit=None) if p["id"] != pid)
     assert call(server, "GET", f"/patients/{other}/lab-results/{oid}", tok)[0] == 404  # not theirs
     assert call(server, "GET", f"/patients/{pid}/visits/{oid}", tok)[0] == 404

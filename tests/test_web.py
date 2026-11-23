@@ -1733,7 +1733,7 @@ def test_moving_a_visit(hub, server):
     (v,) = [v for v in hub.records.search("Encounter", limit=None) if v.get("plannedStartDate", "").startswith(DAY)]
     url = f"/records/Encounter/{v['id']}"
     page = call(server, "GET", url, token(hub, "jo"))[1]
-    assert f'href="{url}/reschedule" data-modal>Move</a>' in page
+    assert f'href="{addr(hub, "Encounter/" + v["id"])}/reschedule" data-modal>Move</a>' in page
     status, form = call(server, "GET", f"{url}/reschedule", token(hub, "jo"))
     assert status == 200 and "data-modal-body" in form and f'value="{DAY}T09:00"' in form
     _book(server, hub, at=f"{DAY}T11:00", member="dr-liam", reason="Flu shot")
@@ -1981,7 +1981,7 @@ def test_a_record_exports_from_the_api_and_its_page(server, hub):
     assert "default-src 'none'" in h["content-security-policy"]
     # the dialog: plain words, a button opening it on the record's page
     st, page = call(server, "GET", f"/records/MedicationRequest/{rec['id']}", tok)
-    assert f'href="/records/MedicationRequest/{rec["id"]}/export" data-modal>Export</a>' in page
+    assert f'href="{addr(hub, "MedicationRequest/" + rec["id"])}/export" data-modal>Export</a>' in page
     st, dlg = call(server, "GET", f"/records/MedicationRequest/{rec['id']}/export", tok)
     assert st == 200 and "data-modal-body" in dlg and 'type="radio"' not in dlg
     for words in ("FHIR (for another clinic&#x27;s system)", "Document (.odt)", "Print / save as PDF"):
@@ -2171,7 +2171,7 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     assert 'id="work"' in page and 'href="/runs/' not in page and "Open work" not in panel  # its work is above
     # being documented: its workflow waits on no pause now, so the page offers none (only its workflow moves it)
     assert ">Patient stepped out<" not in panel
-    assert "View workflow" in panel and f'/records/{visit}/workflow" data-modal' in panel
+    assert "View workflow" in panel and f'{addr(hub, visit)}/workflow" data-modal' in panel
     status, modal = call(server, "GET", f"/records/{visit}/workflow", token(hub, "dr-amara"))
     assert status == 200 and "data-modal-body" in modal and "<svg" in modal
     assert re.search(r'class="lc-node [a-z]+ current"><title>In progress', modal)

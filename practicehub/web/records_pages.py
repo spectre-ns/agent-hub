@@ -1230,6 +1230,29 @@ class RecordPages:
                 + (f'<div class="sec">Work</div><ul>{"".join(a(*x) for x in extra)}</ul>' if extra else "")
                 + "</nav>")
 
+    def part_rail(self, me, oref: str, rtype: str, rail: list, label: str) -> str:
+        """A part's second column: its owner's sections (the patient's chart: Allergies, Visits, Lab results...), each a
+        link back to it, with this part's own kind marked; then this part's own sections, if it has some."""
+        hub = self.hub
+        if not self._may_read(me, oref.split("/", 1)[0]):
+            return ""
+        owner = hub.redact(me, hub.records.read(*oref.split("/", 1)))
+        if not owner:
+            return ""
+        href = self.record_href(oref)
+        parts, _ = hub.parts(me, oref)
+        otitle = hub.short_title(owner)
+        a = lambda link, words, n, on=False: (f'<li><a href="{e(link)}"' + (' aria-current="page"' if on else "")
+                                              + f'>{e(words)}<span class="count">{n}</span></a></li>')
+        mine = [x for x in rail if x[0].startswith("part-") or (len(x) > 3 and x[3])]
+        return (f'<nav class="subnav owner-rail" aria-label="Sections of {e(otitle)}">'
+                f'<div class="sec">{e(otitle)}</div><ul>'
+                + "".join(a(f"{href}#part-{t}", hub.record_type(t).plural, len(recs), t == rtype)
+                          for t, recs in parts.items()) + "</ul>"
+                + (f'<div class="sec">On this {e(self._lower(label))}</div><ul>'
+                   + "".join(a(f"#{x[0]}", x[1], x[2]) for x in mine) + "</ul>" if mine else "")
+                + "</nav>")
+
     def alerts(self, me, ref: str) -> str:
         """Active records of ``alert`` types that are parts of (or link to) this record: one banner."""
         hub = self.hub
@@ -1472,7 +1495,8 @@ class RecordPages:
             f'<a href="?tab={t}"{" aria-current=page" if t == tab else ""}>{e(lbl)}</a>' for t, lbl in tabs) + "</nav>")
         main.insert(1, '<h2 class="visually-hidden">' + e(dict(tabs)[tab] if tab in dict(tabs) else "Details") + "</h2>")
         locked = bool(lc and st in lc.get("locked", []))
-        url = f"/records/{e(rtype)}/{e(rid)}"
+        # a part's actions are addressed under its owner, like its page
+        url = e(self.record_href(ref)) if rt.part_of else f"/records/{e(rtype)}/{e(rid)}"
         ver = e(str((rec.get("meta") or {}).get("versionId", "")))
         editable = may_write and not locked and bool(self._editable(rt)) and not (gone and gone.get("whole"))
         # one place for a record: it is read, and an Edit button turns it into its form where it stood (?edit=1)
@@ -1582,6 +1606,8 @@ class RecordPages:
             if subs and self._may_read(me, self.subj["type"]):
                 banner = self.subject_banner(me, subs[0][1])
         nav = self.navigator(me, rtype, ref)
+        if not nav and owner and not editing:  # a part is read inside its owner: the owner's sections beside it
+            nav = self.part_rail(me, owner, rtype, rail if tab == "details" else [], rt.label)
         if not nav and tab == "details" and not editing and len(rail) >= 3:  # a few sections need no column
             nav = self.owner_rail(title, rail, label=rt.label)
         if is_page:
