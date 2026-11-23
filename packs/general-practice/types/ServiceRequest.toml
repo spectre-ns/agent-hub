@@ -9,6 +9,10 @@ date = "authoredOn"
 active = "record.status in ['draft', 'active', 'on-hold']"
 order = 80
 summary = "A referral to a specialist (or a requisition), signed by the referring physician."
+# A referral being written (a draft order) is walked by its own workflow from asked for to the specialist's report:
+# its status is where that work is. Asked for on the chart or written at a visit (the visit makes it), either way the
+# referral starts its workflow when it is made; one the physician files as already sent (active) starts none.
+workflow = { id = "referral", when = "record.status == 'draft' and record.intent == 'order'" }
 
 [[field]]
 name = "status"
@@ -120,24 +124,37 @@ on = ["create"]
 fields = ["subject", "referral_to", "specialist", "priority", "intent", "reason_text", "requester", "authoredOn",
           "encounter", "note_text"]
 
+# The referral workflow moves it: signed and sent (active), the specialist's report filed (completed), or closed unsent
+# or declined (revoked). Its work cancelled, a referral not yet sent is revoked; one already sent stays sent (the
+# specialist has it). A run of an older version ending leaves it where it is.
 [lifecycle]
 field = "status"
 initial = "draft"
+labels = { draft = "Being written", active = "Sent", on-hold = "On hold", completed = "Report received", revoked = "Cancelled", entered-in-error = "Entered in error" }
+abandoned = { draft = "revoked" }
 [[lifecycle.transition]]
 from = ["draft"]
 to = "active"
+by = "workflow"
+label = "Signed and sent"
 [[lifecycle.transition]]
 from = ["active", "on-hold"]
 to = "completed"
+by = "workflow"
+label = "Report received"
 [[lifecycle.transition]]
 from = ["active"]
 to = "on-hold"
+label = "Put on hold"
 [[lifecycle.transition]]
 from = ["on-hold"]
 to = "active"
+label = "Resumed"
 [[lifecycle.transition]]
 from = ["draft", "active", "on-hold"]
 to = "revoked"
+by = "workflow"
+label = "Cancelled"
 [[lifecycle.transition]]
 from = ["*"]
 to = "entered-in-error"

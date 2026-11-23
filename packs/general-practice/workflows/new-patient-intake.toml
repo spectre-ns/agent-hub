@@ -1,7 +1,11 @@
 id = "new-patient-intake"
 title = "New patient intake"
-record = "Patient"
+record = "QuestionnaireResponse"
 summary = """
+One registration, from received to taken in: the registration form is this workflow's record (an intake form about
+the person, whose `registration` is where the work is: received, checked, then accepted, waitlisted or declined). The
+person's own record stays inactive (they cannot sign in or book) until the registration is accepted.
+
 A new patient registers (at the desk or on the portal). Their paperwork is checked, the patient is asked for anything
 missing, someone at the front desk accepts them into the practice, and their first visit is booked.
 """
@@ -9,6 +13,13 @@ missing, someone at the front desk accepts them into the practice, and their fir
 [trigger]
 starters = ["front-desk", "intake-coordinator", "patient-portal"]
 event = "patient.registered"
+
+# Started on the person (the portal's form, or the desk's "start intake"), the run files their registration form.
+[new_record]
+status = "completed"
+questionnaire = "registration"
+authored = "{{run.today}}"
+registration = "received"
 
 [[steps]]
 id = "review"
@@ -19,6 +30,7 @@ due = "3d"
 escalate_to = "practice-manager"
 skill = "intake-review"
 context = ["record:demographics", "record:intake"]
+state = "checked"
 
 [[steps]]
 id = "ask-for-missing"
@@ -29,7 +41,7 @@ when = "review.complete == false"
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your registration with Harbourview Family Medicine"
 body = "Thank you for registering. To finish, we still need: {{review.missing}}. Reply on the portal or call the front desk."
 
@@ -56,7 +68,9 @@ kind = "automation"
 after = ["accept"]
 when = "accept.outcome == 'accept'"
 action = "record.update"
+state = "accepted"
 [steps.params]
+ref = "{{run.subject}}"
 set = { active = true }
 
 [[steps]]
@@ -68,6 +82,7 @@ when = "accept.outcome == 'accept'"
 action = "workflow.start"
 [steps.params]
 workflow = "appointment-request"
+record = "{{run.subject}}"
 [steps.params.input]
 reason = "First visit (new patient)"
 urgency = "{{review.urgency}}"
@@ -80,8 +95,17 @@ kind = "automation"
 after = ["accept"]
 when = "accept.outcome == 'waitlist'"
 action = "message.send"
+state = "waitlisted"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "You are on our waitlist"
 body = "Thank you for registering. Our physicians' rosters are full; we will contact you as soon as a place opens."
+
+[[steps]]
+id = "declined"
+title = "Decline the registration"
+kind = "automation"
+after = ["accept"]
+when = "accept.outcome == 'decline'"
+state = "declined"

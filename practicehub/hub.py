@@ -202,6 +202,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             # an upgrade whose definitions were approved before this pack.py was running, or one a restart stopped
             # part way: the hub still opens if it fails, and the track says what did not happen
             self._upgrades_after(None)
+        elif self.pack and pack is None and self._pack_in_force() is not None and not self.db.in_transaction():
+            try:  # a sweep a restart cut short goes on (each type's is done once per version of its workflow)
+                self.walk_unwalked(None)
+            except Exception as exc:  # noqa: BLE001 - the hub still opens; each record is picked up when written
+                self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.walk_failed",
+                                  f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                                  data={"error": str(exc)[:500]})
 
     # ------------------------------------------------------------------ the practice pack, under change control
     PACK_CONFIG = ("practice", "subject", "calendar", "events", "record_labels", "roles", "data_classes", "grants",
@@ -392,6 +399,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.run_pack_upgrades(actor)
         except Exception as exc:  # noqa: BLE001 - what was approved stands; the upgrade goes on at the next start
             self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
+                              f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                              data={"error": str(exc)[:500]})
+        try:
+            self.walk_unwalked(actor)
+        except Exception as exc:  # noqa: BLE001 - goes on at the next approval or start; each record when written
+            self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.walk_failed",
                               f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
                               data={"error": str(exc)[:500]})
 
@@ -1170,6 +1183,56 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         self._modules_noted(new.id)
         return {"module": new.id, "version": new.version, "proposed": proposed, "plan": plan, **reach}
 
+    def roll_back_module(self, actor: dict, name: str, reason: str = "") -> dict:
+        """Undo a module upgrade's definitions: what its last upgrade proposed and is still proposed is withdrawn, and
+        for what was approved the version in force before it is proposed again (``roll_back``), for a policy owner to
+        approve as any change: the type first, then the workflow it no longer names. The module's code stays at the
+        version upgraded to (code goes back by upgrading to the older module). Runs the newer versions started go on
+        as they are; once the type in force stops naming a workflow its open runs on the type's records stop
+        (``_release_runs``), and the older workflow starts as it did."""
+        if actor.get("kind") != "person":
+            raise Denied("a module upgrade is rolled back by a person")
+        self.require(actor, "policy_owner", "practice:main", "roll back module upgrades")
+        up = self.db.events.find_one({"action": "module.upgraded", "subject": f"module:{name}"},
+                                     sort=[("seq", DESC)])
+        if not up:
+            raise Invalid(f"the {name} module has not been upgraded here")
+        mark = f"The {name} module {(up.get('data') or {}).get('version')}"
+        withdrawn, proposed = [], []
+        for kind, (table, col) in self.KINDS.items():
+            for row in self.db[table].find({"note": {"$regex": "^" + re.escape(mark)}}, sort=[(col, ASC)]):
+                did, v = row[col], row["version"]
+                if row["status"] == "proposed":
+                    self._withdraw(kind, actor, did, v, reason or f"Rolling back the {name} module upgrade")
+                    withdrawn.append({"kind": kind, "id": did, "version": v})
+                    continue
+                prev = self.db[table].find_one({col: did, "version": {"$lt": v}, "approved_at": {"$nin": [None]}},
+                                               sort=[("version", DESC)])
+                cur = self.db[table].find_one({col: did, "status": "active"})
+                if not prev or not cur or cur["version"] != v:
+                    continue  # nothing before it, or changed again since: left to the practice
+                got = self.roll_back(actor, kind, did, prev["version"],
+                                     reason or f"Rolling back the {name} module upgrade (back to v{prev['version']})")
+                proposed.append({"kind": kind, "id": did, **got})
+        self.track.append(actor, "module.rolled_back", f"module:{name}", data={
+            "module": name, "upgrade": up["seq"], "withdrawn": withdrawn, "proposed": proposed, "reason": reason})
+        return {"module": name, "withdrawn": withdrawn, "proposed": proposed}
+
+    def _release_runs(self, actor: dict, before, cause: int | None) -> int:
+        """A record type approved that no longer names the workflow it named (or names another): that workflow's open
+        runs on records of the type are stopped (``run.stopped``), so no record is walked by a workflow its type
+        does not name; the sweep after the approval (``walk_unwalked``) starts the one it names now."""
+        old = (before.workflow or {}).get("id") if before is not None else None
+        now = self.record_type(before.id) if before is not None else None
+        if not old or (now is not None and (now.workflow or {}).get("id") == old):
+            return 0
+        n = 0
+        for r in self.db.runs.find({"workflow_id": old, "status": "running",
+                                    "record": {"$regex": f"^{re.escape(before.id)}/"}}, fields=["id"]):
+            self.engine.stop(actor, r["id"], f"the {before.label} record type no longer names this workflow", cause)
+            n += 1
+        return n
+
     def uninstall_module(self, actor: dict, name: str, reason: str = "") -> dict:
         """Take a module out: its workflows, views, blocks, skills and types are retired (records stay, readable,
         with their history and signatures); what it added to other types and views is taken out of them. Roles and
@@ -1191,11 +1254,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         for kind, (table, col) in self.KINDS.items():
             owned[kind] = [r[col] for r in self.db[table].find({"module": name, "version": 1}, sort=[(col, ASC)])]
         running = [r for r in self.engine.runs(status="running", limit=10000) if r["workflow_id"] in owned["workflow"]]
-        if running:
-            raise Invalid(f"its work is under way ({len(running)} running): finish or cancel it first")
+        resting = [r for r in running if r.get("resting")]  # a document in force: nothing is under way
+        if len(running) > len(resting):
+            raise Invalid(f"its work is under way ({len(running) - len(resting)} running): finish or cancel it first")
         with self.db:
             root = self.track.append(actor, "module.removed", f"module:{name}", data={"module": name, "reason": reason},
                                      signed={"module": name, "meaning": f"I remove the {name} module"})
+            for r in resting:
+                self.engine.stop(actor, r["id"], f"the {name} module was removed", root)
             for kind in ("view", "workflow", "block", "skill", "type"):
                 table, col = self.KINDS[kind]
                 for did in owned[kind]:
@@ -1425,9 +1491,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def run_title(self, member: dict | None, run: dict) -> str:
         """A run's title as this member may see it: the workflow's title, and who or what it is about only if they
-        may read that record's data class (a name and birth date are themselves personal health information)."""
+        may read that record's data class (a name and birth date are themselves personal health information). A run
+        walking a record of its own (a message, an order) is named for whom that record is about: its subject."""
         base = str(run.get("title") or "").split(": ", 1)[0]
-        ref = run.get("record") or ""
+        ref = run.get("subject") or run.get("record") or ""
         if not member or not ref or not self.pack or "/" not in ref:
             return base
         rtype, _, rid = ref.partition("/")
@@ -3205,30 +3272,46 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
 
     def state_move_refusal(self, rt, ref: str, t: dict, after: dict, run_id: str | None) -> str | None:
         """Why a move of a record whose type names its workflow is refused, or None. That workflow alone moves its
-        state: its own run, or a person (an import, the portal, any other path) only through a move the run is
-        waiting on now (a wait whose ``until`` holds of the record as moved, or a state the open step lists in
-        ``moves``). Another workflow never moves it. A correction open from every state (``from = ["*"]``, entered
-        in error) stays anyone's who may write the record."""
+        state while a run of it walks the record: its own run, or a person or another workflow's run (an import, the
+        portal, a CAPA revising the documents it names) only through a move the run is waiting on now (a wait whose
+        ``until`` holds of the record as moved, or a state the open step lists in ``moves``). A correction open from
+        every state (``from = ["*"]``, entered in error) stays anyone's who may write the record.
+
+        When no run of it walks the record (one filed or approved before its type named a workflow, or one whose
+        run is over), the record is moved as any record is, and its workflow picks it up where it lands
+        (``_owner_follows_move``); a run moving it then must be about what the record is about
+        (``_unwalked_move_refusal``)."""
         owner = (rt.workflow or {}).get("id")
         if not owner or "*" in t["from"]:
             return None
         label = rt.label.lower()
-        if run_id:
-            run = self.db.runs.get(run_id)
-            if run and run["workflow_id"] == owner and run.get("record") == ref:
-                return None
-            if run and not self.state_move_waited_on(rt, ref, after, t["to"]):
-                # another workflow (a CAPA revising the documents it names) moves it only through a move the owner's
-                # open step waits on, as a person would
-                return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
-            if run:
-                return None
+        walked = self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"])
+        run = self.db.runs.get(run_id) if run_id else None
+        if run and run["workflow_id"] == owner and run.get("record") == ref:
+            return None
+        if not walked:
+            return self._unwalked_move_refusal(rt, ref, after, run) if run else None
         if self.state_move_waited_on(rt, ref, after, t["to"]):
             return None
-        if not self.db.runs.find_one({"workflow_id": owner, "record": ref, "status": "running"}, fields=["id"]):
-            return None  # its workflow is not walking it (filed before the type named one, or its run is over)
+        if run:
+            return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
         return (f"a {label} is moved by its workflow; it is not waiting for "
                 f"{rt.state_label(t['to']).lower()} now")
+
+    def _unwalked_move_refusal(self, rt, ref: str, rec: dict, run: dict) -> str | None:
+        """A run moving a record its type's workflow is not walking (a CAPA opening a document approved before the
+        upgrade, a renewal closing the order it replaces): only one about the same subject as the record, when the
+        record is about one (a renewal run never moves another patient's order)."""
+        about = self.subject_of({**rec, "resourceType": rt.id, "id": ref.split("/", 1)[1]})
+        if not about or about == ref:
+            return None
+        mine = run.get("subject")
+        if not mine and "/" in str(run.get("record") or ""):
+            got = self.records.read(*run["record"].split("/", 1))
+            mine = self.subject_of(got) if got else None
+        if mine != about:
+            return f"this {rt.label.lower()} is about someone else than the work moving it"
+        return None
 
     def state_move_waited_on(self, rt, ref: str, after: dict, new: str) -> str | None:
         """Whether the open run of the type's workflow about ``ref`` is waiting on the record moving to ``new``: how
@@ -3331,22 +3414,68 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         the active version has never walked it, so it is idempotent; it is retried on every write until it starts; and
         a start that fails is noted on the track (``trigger.failed``) without failing the write."""
         owner = rt.workflow["id"]
-        if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner \
-                or schema.starts_workflow(rt, rec) != owner:
+        if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner:
             return
+        self._pick_up(rt, ref, rec, member, cause)
+
+    def _pick_up(self, rt, ref: str, rec: dict, member: dict, cause: int | None) -> bool:
+        """Start the workflow ``rt`` names about ``ref`` where it is, if its ``when`` holds, nothing of it is open
+        about the record and its active version has never walked it (idempotent). A start that fails is noted
+        (``trigger.failed``) in a savepoint of its own. Whether it started."""
+        owner = rt.workflow["id"]
+        if schema.starts_workflow(rt, rec) != owner:
+            return False
         last = self.db.runs.find_one({"workflow_id": owner, "record": ref}, sort=[("created_at", DESC)],
                                      fields=["id", "status", "version"])
         if last and (last["status"] == "running" or last["version"] >= self.workflow(owner)[1]["version"]):
-            return
+            return False
         starter = member if member.get("kind") in ("person", "agent", "service") else \
             {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
         try:
             with self.db:  # a savepoint: a record its workflow cannot pick up is still written
                 self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
                                   previous=last["id"] if last else None)
+            return True
         except Exception as exc:  # noqa: BLE001
             self.track.append(starter, "trigger.failed", ref, cause=cause,
                               data={"workflow": owner, "error": f"picking it up: {exc}"})
+            return False
+
+    WALKED = "records_walked"  # setting: {type id: "workflow@version" whose sweep over the type's records is done}
+
+    def walk_unwalked(self, actor: dict | None = None) -> dict:
+        """Every record of a type whose workflow walks it now (``record_workflow``) that nothing walks yet (filed or
+        approved before its type named a workflow, a locked one included) is picked up where it is (``_pick_up``),
+        not only when it is next written: run when a type or a workflow is approved and when the hub opens, outside
+        any other transaction, a batch per transaction. Each type's sweep is done once per version of its workflow
+        (``records_walked``), and a sweep cut short goes on next time (a record already walked is skipped)."""
+        if self.db.in_transaction():
+            raise RuntimeError("the sweep runs in batches, each its own transaction: call this outside one")
+        member = {"id": "hub", "kind": "automation", "name": "Practice Hub"}
+        started: dict[str, int] = {}
+        for rt in self.record_types().values():
+            owner = (rt.workflow or {}).get("id")
+            if not owner or not rt.lifecycle or self.record_workflow(rt) != owner:
+                continue
+            mark = f"{owner}@{self.workflow(owner)[1]['version']}"
+            if (self.db.get_setting(self.WALKED) or {}).get(rt.id) == mark:
+                continue
+            recs = self.records.search(rt.id, limit=None)
+            for i in range(0, len(recs), self.UPGRADE_BATCH):
+                def batch(chunk=recs[i:i + self.UPGRADE_BATCH]):
+                    n = 0
+                    for rec in chunk:
+                        n += self._pick_up(rt, f"{rt.id}/{rec['id']}", rec, member, None)
+                    return n
+                got = self.db.atomic(batch)
+                if got:
+                    started[rt.id] = started.get(rt.id, 0) + got
+            self.db.atomic(lambda: self.db.set_setting(self.WALKED, {**(self.db.get_setting(self.WALKED) or {}),
+                                                                     rt.id: mark}))
+            if started.get(rt.id):
+                self.track.append(member, "practice.records_walked", f"type:{rt.id}",
+                                  data={"workflow": mark, "started": started[rt.id], "after": (actor or {}).get("id")})
+        return started
 
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
@@ -3419,7 +3548,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             st = schema.first(data, lc["path"])
             if st is None and lc.get("initial"):
                 data = schema.put(data, lc["path"], lc["initial"])
-            elif st is not None and lc.get("initial") and st != lc["initial"] and member.get("kind") != "automation":
+            elif st is not None and lc.get("initial") and st != lc["initial"] and member.get("kind") != "automation" \
+                    and st not in lc.get("starts", []):
                 # people start a record where its lifecycle starts; an automation (a workflow step, an import, a
                 # module's demo) may write one in any of its states
                 t = rt.transition(None, st)
@@ -4078,10 +4208,29 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         except wfmod.DefinitionError as exc:
             raise Invalid("the workflow no longer validates", exc.problems) from None
         meaning = meaning or f"I approve version {version} of the {wf.title} workflow"
+        self._check_hand_over(wf)
         with self.db:
             self._activate("workflow", actor, wid, version, row, meaning)
             self._sync_starters(wf)
+        self._upgrades_after(actor)  # records of its type that nothing walks yet are picked up now
         return {"workflow_id": wid, "version": version}
+
+    def _check_hand_over(self, wf) -> None:
+        """A version that stops starting itself on its record's events (``record.*:T``) leaves the starting to the
+        type, so the type in force must name it first; approved the other way round, new records of the type would
+        start nothing."""
+        try:
+            cur = self.workflow(wf.id)[0]
+        except NotFound:
+            return
+        t = cur.record or ""
+        before = (cur.event or "").startswith("record.") and (cur.event or "").endswith(f":{t}")
+        now = (wf.event or "").startswith("record.") and (wf.event or "").endswith(f":{t}")
+        rt = self.record_type(t) if t else None
+        if before and not now and rt is not None and (rt.workflow or {}).get("id") != wf.id:
+            raise Invalid(f"approve the {rt.label} record type first", [
+                f"this version of {wf.title} no longer starts itself on {rt.plural.lower()}; the {rt.label} record "
+                f"type in force does not name it yet, so new {rt.plural.lower()} would start nothing"])
 
     def withdraw_workflow(self, actor: dict, wid: str, version: int, reason: str = "") -> None:
         self._withdraw("workflow", actor, wid, version, reason)

@@ -80,7 +80,41 @@ class WorkPanel:
             cards = "".join(self.run_card(me, run, wf, viewer, ref) for run, wf in runs)
             out.append(f'<section class="wp-work" aria-labelledby="wp-work-h"><h2 id="wp-work-h">Open work '
                        f'<span class="count">{len(runs)}</span></h2>{cards}</section>')
+        out.append(self.family_panel(me, ref))
         return "".join(out)
+
+    # ---------------------------------------------------------------------------- sub-records and their parent
+    def family_panel(self, me, ref: str) -> str:
+        """The record a sub-record was made for (a link back), and the sub-records made for this one (``record.child``:
+        a visit's referrals), each with its state and who holds it now. A type the member may not read is left out."""
+        hub, out = self.hub, []
+        parent = hub.engine.parent_record(ref)
+        if parent and hub.may_read(me, parent.split("/", 1)[0]):
+            out.append(f'<p class="wp-parent"><span class="muted">Made for</span> {self._family_link(parent)}</p>')
+        rows = []
+        for kid in hub.engine.children_of(ref):
+            rtype = kid["ref"].split("/", 1)[0]
+            if not hub.may_read(me, rtype):
+                continue
+            rt = hub.record_type(rtype)
+            rec = hub.records.read(*kid["ref"].split("/", 1))
+            st = schema.first(rec, rt.lifecycle["path"]) if rec and rt and rt.lifecycle else None
+            state = self._state_loz(st, rt) if st else ""
+            run = kid["run"] or {}
+            item = hub.engine.item(run["item"]) if run.get("status") == "running" and run.get("item") else None
+            holder = self._holder(item) if item and item.get("status") in ("open", "claimed", "held") else \
+                '<span class="muted">nobody: it is done</span>' if run and run.get("status") != "running" else ""
+            rows.append(f"<li>{self._family_link(kid['ref'], rec)} {state} {holder}</li>")
+        if rows:
+            out.append(f'<section class="wp-children" aria-labelledby="wp-children-h"><h2 id="wp-children-h">'
+                       f'Made from this <span class="count">{len(rows)}</span></h2><ul class="plain">{"".join(rows)}'
+                       f'</ul></section>')
+        return "".join(out)
+
+    def _family_link(self, ref: str, rec: dict | None = None) -> str:
+        """A link to a parent or sub-record this member was checked for already, named by its title."""
+        rec = rec if rec is not None else self.hub.records.read(*ref.split("/", 1))
+        return f'<a href="{e(self.record_href(ref))}">{e(self.hub.short_title(rec) if rec else ref)}</a>'
 
     def _holder(self, item: dict) -> str:
         """Who holds a piece of work, in words: the member who took it or it was given to, else its role."""

@@ -10,6 +10,9 @@ active = "record.status != 'entered-in-error'"
 order = 95
 summary = "A completed intake form."
 part_of = "subject"
+# A registration (a person asking to join the practice) is walked by the new-patient intake until it is accepted,
+# waitlisted or declined; any other form starts nothing.
+workflow = { id = "new-patient-intake", when = "record.registration == 'received'" }
 
 [[field]]
 name = "status"
@@ -46,3 +49,49 @@ name = "item"
 label = "Answers"
 type = "list"
 help = "[{linkId, answer: [{valueString | valueBoolean | ...}]}]"
+
+[[field]]
+name = "registration"
+label = "Registration"
+type = "choice"
+choices = ["received", "checked", "accepted", "waitlisted", "declined", "withdrawn", "closed"]
+labels = { received = "Waiting to be checked", checked = "Checked", accepted = "Accepted", waitlisted = "Waitlisted", declined = "Declined", withdrawn = "Withdrawn", closed = "Closed" }
+help = "on a registration form only: where the practice's intake of the person is"
+
+# The registration: the new-patient intake moves it. A registration whose intake is cancelled is withdrawn (the person
+# stays inactive: never taken in silently); one an older intake (that walked the person's own record) finished is
+# closed, and the person's record says how it ended.
+[lifecycle]
+field = "registration"
+initial = "received"
+labels = { received = "Waiting to be checked", checked = "Checked", accepted = "Accepted", waitlisted = "Waitlisted", declined = "Declined", withdrawn = "Withdrawn", closed = "Closed" }
+abandoned = { received = "withdrawn", checked = "withdrawn" }
+ended = { received = "closed", checked = "closed" }
+[[lifecycle.transition]]
+from = ["received"]
+to = "checked"
+by = "workflow"
+label = "Paperwork checked"
+[[lifecycle.transition]]
+from = ["checked"]
+to = "accepted"
+by = "workflow"
+label = "Accepted"
+[[lifecycle.transition]]
+from = ["checked"]
+to = "waitlisted"
+by = "workflow"
+label = "Waitlisted"
+[[lifecycle.transition]]
+from = ["checked"]
+to = "declined"
+by = "workflow"
+label = "Declined"
+[[lifecycle.transition]]
+from = ["received", "checked"]
+to = "withdrawn"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["received", "checked"]
+to = "closed"
+by = "workflow"

@@ -487,12 +487,15 @@ class CatalogMixin:
         noun = DEFINITIONS[kind][2]
         title = getattr(d, "label", None) or getattr(d, "title", None) or did
         meaning = meaning or f"I approve version {version} of the {title} {noun}"
+        before = self.record_type(did) if kind == "type" else None
         with self.db:
             self._activate(kind, actor, did, version, row, meaning)
             self._defs_reset()
             broken = self._workflows_broken_by(kind, did)
             if broken:
                 raise Invalid(f"approving this {noun} would break workflows the practice runs", broken)
+            if kind == "type":
+                self._release_runs(actor, before, None)
         if kind == "type":  # a pack upgrade that waited for this type (records of a merged type become this one)
             self._upgrades_after(actor)
         return {f"{kind}_id": did, "version": version}

@@ -134,8 +134,11 @@ def test_the_pack_block_runs_in_the_sandbox():
     block = blocks.parse((ROOT / "packs/general-practice/blocks/missed-appointment-fee.toml").read_text())
     run = lambda **kw: sandbox.run_code(block.code, kw)["output"]  # noqa: E731
     assert run(notice_hours=2, missed_this_year=1, fee=50) == {
-        "charge": True, "amount": 50,
+        "charge": True, "amount": 50, "late": True,
         "reason": "less than 24 hours' notice and 1 earlier missed appointment(s) this year"}
+    # given the booked time and when it was cancelled, the block works out the notice
+    assert run(starts="2027-03-10T09:00", cancelled_at="2027-03-09T15:00:00", missed_this_year=1, fee=50)["charge"]
+    assert not run(starts="2027-03-10T09:00", cancelled_at="2027-03-08T09:00:00", fee=50)["late"]
     assert run(notice_hours=30, missed_this_year=3, fee=50)["charge"] is False
     out = backends.LocalPython().run(block, {"notice_hours": 0, "missed_this_year": 0, "fee": 50}, {})
     assert out["output"]["charge"] is False

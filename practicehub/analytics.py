@@ -125,7 +125,7 @@ def report(hub, member, *, days: int = DEFAULT_DAYS, now: datetime | None = None
     db = hub.db
     runs = db.runs.find({"created_at": {"$gte": _stamp(since)}, "version": {"$ne": 0}}, sort=[("created_at", -1)],
                         limit=max_runs + 1,
-                        fields=["workflow_id", "version", "status", "created_at", "updated_at", "deadline_at",
+                        fields=["workflow_id", "version", "status", "resting", "created_at", "updated_at", "deadline_at",
                                 "deadline_missed_at"])
     capped = len(runs) > max_runs
     runs = runs[:max_runs]
@@ -175,7 +175,7 @@ def report(hub, member, *, days: int = DEFAULT_DAYS, now: datetime | None = None
                 f["cycle"].append(secs)
         elif r["status"] == "cancelled":
             f["cancelled"] += 1
-        elif r["status"] == "running":
+        elif r["status"] == "running" and not r.get("resting"):  # a document in force is not open work
             f["open"] += 1
         if r.get("deadline_at"):
             f["with_deadline"] += 1

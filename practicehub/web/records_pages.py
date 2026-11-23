@@ -1663,7 +1663,7 @@ class RecordPages:
         if me["kind"] != "person":
             out.append("<p class='muted'>Only people sign records.</p>")
             return "".join(out)
-        open_work = [r for r in hub.engine.runs(mentions=ref, status="running")]
+        open_work = [r for r in hub.engine.runs(mentions=ref, status="running") if not r.get("resting")]
         if open_work:
             out.append('<div class="flash warning"><p><b>There is open work on this record.</b> A review, decision or '
                        'approval is made in that work, not by signing here: a signature on the record does not '
