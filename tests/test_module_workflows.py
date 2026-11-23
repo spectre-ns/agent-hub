@@ -395,10 +395,9 @@ def test_a_capa_is_walked_by_its_workflow_and_a_pass_found_not_effective_is_walk
 def test_a_later_capa_pass_reopens_only_the_documents_its_action_names(docs):
     hub = docs
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    approved = [f"Document/{d['id']}" for d in hub.records.search("Document", limit=None) if d["status"] == "approved"]
-    if len(approved) < 2:
-        pytest.skip("the demo has fewer than two approved documents")
-    d1, d2 = approved[:2]
+    d1, d2 = (f"Document/{hub.create_record(rana, 'Document', {'title': t, 'body': 'B.'})['id']}"
+              for t in ("Callbacks", "Weekend cover"))
+    _approve_docs(hub, [d1, d2], amara)  # two documents in force, whatever the demo holds
     capa = hub.create_record(rana, "CAPA", {"title": "Two docs", "kind": "corrective", "problem": "P",
                                             "documents": [d1, d2]})
     ref = f"CAPA/{capa['id']}"
