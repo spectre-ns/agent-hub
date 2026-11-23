@@ -33,6 +33,23 @@ name = "priority"
 type = "choice"
 choices = ["routine", "urgent", "asap", "stat"]
 
+# A referral to a specialist, or a lab test ordered (a requisition): the visit's signed note makes either.
+[[field]]
+name = "category"
+label = "Kind (as JSON)"
+type = "list"
+advanced = true
+help = "CodeableConcept list: [{text: referral | lab-test}]"
+
+[[field]]
+name = "kind"
+label = "Kind"
+path = "category.0.text"
+type = "choice"
+choices = ["referral", "lab-test"]
+labels = { referral = "Referral", "lab-test" = "Lab test" }
+help = "a referral to a specialist, or a lab test ordered (sent with the signed note)"
+
 [[field]]
 name = "code"
 label = "Referral to (coded)"
@@ -132,6 +149,8 @@ field = "status"
 initial = "draft"
 labels = { draft = "Being written", active = "Sent", on-hold = "On hold", completed = "Report received", revoked = "Cancelled", entered-in-error = "Entered in error" }
 abandoned = { draft = "revoked" }
+# Sent is under way (the specialist or the lab has it), not done: done is the report received.
+tones = { draft = "active", active = "active", "on-hold" = "waiting", completed = "done", revoked = "ended", "entered-in-error" = "ended" }
 [[lifecycle.transition]]
 from = ["draft"]
 to = "active"

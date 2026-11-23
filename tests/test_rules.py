@@ -876,7 +876,7 @@ def test_a_gate_decision_is_a_signature_on_its_record_and_survives_the_move_it_m
     d = hub.create_record(rana, "Document", {"title": "Hand hygiene", "body": "Wash."})
     ref = f"Document/{d['id']}"
     hub.update_record(rana, ref, {"status": "in-review"})
-    i = item_for(hub, run_of(hub, "dms-review"), "approve")
+    i = item_for(hub, hub.engine.runs(record=ref)[0], "approve")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "approve")
     assert hub.records.read("Document", d["id"])["status"] == "approved"
@@ -890,7 +890,7 @@ def test_cancelled_work_hands_the_record_back_instead_of_stranding_it(quality):
     d = hub.create_record(rana, "Document", {"title": "Sharps", "body": "Bin."})
     ref = f"Document/{d['id']}"
     hub.update_record(rana, ref, {"status": "in-review"})
-    hub.engine.cancel(rana, run_of(hub, "dms-review")["id"], "wrong draft")
+    hub.engine.cancel(rana, hub.engine.runs(record=ref)[0]["id"], "wrong draft")
     assert hub.records.read("Document", d["id"])["status"] == "draft"  # abandoned = { in-review = draft }
     hub.update_record(rana, ref, {"body": "Use the yellow bin."})  # editable again
 
@@ -1296,7 +1296,7 @@ def test_every_member_reads_documents_and_the_approver_sees_what_they_sign(quali
     hub.update_record(rana, dref, {"status": "draft"})
     hub.update_record(rana, dref, {"body": "Call back every critical result within one hour"})
     hub.update_record(rana, dref, {"status": "in-review"})
-    review = run_of(hub, "dms-review")
+    review = hub.engine.runs(record=dref)[0]
     i = item_for(hub, review, "approve")
     ctx = json.dumps(hub.engine.context(amara, i))
     assert "within one hour" in ctx  # what is signed is shown
@@ -3415,6 +3415,8 @@ def test_a_clinician_may_squeeze_in_an_urgent_visit_saying_why(hub):
     assert "chest pain" not in json.dumps(Viewer(hub, jo).event(ev))  # the reason is clinical: not the desk's
     assert "chest pain" in json.dumps(Viewer(hub, amara).event(ev))
     assert "text" not in hub.read_record(jo, f"Encounter/{over['id']}")["priority"]  # urgent, yes; why, no
+    from datetime import datetime
+    hub.engine._now = datetime(2027, 3, 2, 9, 0)  # at its time: it may be checked in (from two hours before)
     for st in ("arrived", "in-progress"):  # nothing about the first visit's time changed: no clash to refuse
         hub.update_record(jo, f"Encounter/{first['id']}", {"status": st})
     from practicehub.engine import bookings
@@ -3444,6 +3446,8 @@ def test_a_visit_that_is_over_or_cancelled_is_not_moved(hub):
     """The hub refuses moving a finished or cancelled visit (not only the page): it no longer holds its time."""
     jo = M(hub, "jo")
     pat = _pat(hub)
+    from datetime import datetime
+    hub.engine._now = datetime(2027, 3, 3, 9, 5)  # a no-show only once its time has come
     for end_state in ("cancelled", "noshow"):
         v = hub.create_record(jo, "Encounter", _visit(pat, "dr-liam", "2027-03-03T09:00"))
         hub.update_record(jo, f"Encounter/{v['id']}", {"status": end_state})
@@ -5707,6 +5711,94 @@ def test_a_person_makes_a_record_only_in_its_initial_state_or_one_its_lifecycle_
     with pytest.raises(Invalid, match="starts as 'requested'"):
         hub.create_record(rana, "Consent", dict(base, status="reviewed"))
     assert hub._type("Consent").lifecycle["starts"] == ["active"]
+
+
+# ============================================================== round 7, clinic visit: moves that open at a time
+_TIMED = '''
+id = "Slot"
+label = "Slot"
+data_class = "clinical"
+[[field]]
+name = "status"
+type = "choice"
+choices = ["booked", "here", "missed"]
+[[field]]
+name = "start"
+type = "datetime"
+[lifecycle]
+field = "status"
+initial = "booked"
+[[lifecycle.transition]]
+from = ["booked"]
+to = "here"
+opens = "start - 2h"
+[[lifecycle.transition]]
+from = ["booked"]
+to = "missed"
+opens = "start + 15m"
+confirm = "The {start:time} slot is freed."
+'''
+
+
+def test_a_move_may_open_only_at_a_time_its_record_keeps_and_say_what_follows():
+    """``opens`` on a transition: a person may make the move only from a time the record keeps, moved on or back by
+    minutes, hours or days; ``confirm`` is what the person is told follows. A malformed one is refused."""
+    from datetime import datetime
+    from practicehub import schema
+    rt = schema.parse(_TIMED)
+    here, missed = (rt.transition("booked", s) for s in ("here", "missed"))
+    assert here["opens"] == {"field": "start", "minutes": -120} and missed["opens"] == {"field": "start", "minutes": 15}
+    assert missed["confirm"] == "The {start:time} slot is freed."
+    rec = {"status": "booked", "start": "2026-11-23T09:00"}
+    assert schema.opens_at(rt, here, rec) == datetime(2026, 11, 23, 7, 0)
+    assert schema.opens_at(rt, missed, rec) == datetime(2026, 11, 23, 9, 15)
+    assert schema.opens_at(rt, here, {"status": "booked"}) is None  # no time kept: it waits for nothing
+    for bad in ('opens = "start - two hours"', 'opens = "nowhere"', "confirm = 3"):
+        with pytest.raises(Exception):
+            schema.parse(_TIMED.replace('opens = "start - 2h"', bad))
+
+
+def test_a_person_is_refused_a_move_before_it_opens_and_a_workflow_is_not(hub):
+    from datetime import datetime
+    jo = M(hub, "jo")
+    pat = next(p for p in hub.records.search("Patient", limit=None) if p["name"][0]["family"] == "MacLeod")
+    importer = {"id": "import", "kind": "automation", "name": "Import", "status": "active"}
+    visit = hub.create_record(importer, "Encounter", {
+        "status": "planned", "subject": {"reference": f"Patient/{pat['id']}"}, "plannedStartDate": "2027-03-09T11:00"})
+    ref = f"Encounter/{visit['id']}"
+    rt = hub.record_type("Encounter")
+    t = rt.transition("planned", "noshow")
+    hub.engine._now = datetime(2027, 3, 9, 10, 59)
+    assert "opens at 11:00 on 2027-03-09" in hub.move_not_open_yet(rt, t, visit, jo, None)
+    assert hub.move_not_open_yet(rt, t, visit, importer, None) is None
+    with pytest.raises(Invalid, match="opens at 11:00"):
+        hub.update_record(jo, ref, {"status": "noshow"})
+    hub.engine._now = datetime(2027, 3, 9, 11, 0)
+    assert hub.move_not_open_yet(rt, t, visit, jo, None) is None
+
+
+# ============================================================== round 7, clinic visit: state tones the lifecycle declares
+def test_a_lifecycle_declares_how_each_state_reads_not_guessed_from_its_words(hub):
+    """``tones`` on a lifecycle: each state is waiting, active, attention, done or ended, as the type says. A state it
+    declares none for falls back to the generic words; a tone that is not one of those, or a state it does not have,
+    is refused."""
+    from practicehub import schema
+    from practicehub.web.records_pages import RecordPages
+    rt = schema.parse(_TIMED.replace('initial = "booked"',
+                                     'initial = "booked"\ntones = { booked = "waiting", here = "active", missed = "ended" }'))
+    assert rt.lifecycle["tones"] == {"booked": "waiting", "here": "active", "missed": "ended"}
+    for bad in ('tones = { booked = "green" }', 'tones = { gone = "done" }', 'tones = "done"'):
+        with pytest.raises(Exception):
+            schema.parse(_TIMED.replace('initial = "booked"', 'initial = "booked"\n' + bad))
+    tone = RecordPages._state_tone
+    assert tone(RecordPages, "missed", rt) == "removed" and tone(RecordPages, "here", rt) == "inprogress"
+    assert tone(RecordPages, "booked", rt) == "default"
+    assert tone(RecordPages, "completed", schema.parse(_TIMED)) == "success"  # none declared: the words
+    # a referral sent is under way, not done (its code, active, reads as settled); a visit with no note needs action
+    sr, enc = hub.record_type("ServiceRequest"), hub.record_type("Encounter")
+    assert tone(RecordPages, "active", sr) == "inprogress" and tone(RecordPages, "completed", sr) == "success"
+    assert tone(RecordPages, "undocumented", enc) == "moved" and tone(RecordPages, "noshow", enc) == "removed"
+    assert tone(RecordPages, "finished", enc) == "success"
 
 
 # ------------------------------------------------------------------------- escalation: who hears, who takes it over

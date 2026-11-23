@@ -17,10 +17,11 @@ answer that becomes a record, an engine calling the API.
     short_title = "{name}"        # how it is named where a name travels on screen (tab title, breadcrumbs, headings,
                                   #   tooltips, notices): leave out an identifier that belongs only on the record itself
     parent = "parent"             # a reference field to the same type: its records form a tree (pages under pages, folders)
-    part_of = "subject"           # a reference field (or base field) naming the one record that owns it: an allergy is
-                                  #   part of its patient, a visit note part of its visit. It is reached only through its
-                                  #   owner (no list or create of its own). A record that merely refers to another (a
-                                  #   visit to its patient) links to it instead: ``rel`` on the reference field.
+    part_of = "subject"           # a reference field (or base field) naming the one record that owns it: an allergy or
+                                  #   a visit is part of its patient, a visit note part of its visit. It is reached only
+                                  #   through its owner (no list or create of its own). A record that merely refers to
+                                  #   another (a result to the order it answers) links to it instead: ``rel`` on the
+                                  #   reference field.
     [navigator]                   # with a tree: a second navigation column, its tops (spaces) and the open one's tree
     tops = "Spaces"               #   what the records at the top of the tree are called
     hide = ["archived"]           #   lifecycle states left out of it (a record in one still shows when it is open)
@@ -208,8 +209,9 @@ KEYS = {
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
               "roles", "required_unless"},
     "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "abandoned", "ended", "in_use",
-                  "labels"},
-    "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment", "asks", "requires", "sign"},
+                  "labels", "tones"},
+    "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment", "asks", "requires", "sign",
+                   "opens", "confirm"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "screen": {"id", "on", "tab", "fields", "label"},
     "tab": {"label", "fields"},
@@ -506,10 +508,15 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                 problems.append(f"{where}: comment is true or false")
             if t.get("screen") is not None and not isinstance(t["screen"], str):
                 problems.append(f"{where}: screen is a screen id")
+            opens = _transition_opens(t.get("opens"), where, problems)
+            if t.get("confirm") is not None and not isinstance(t["confirm"], str):
+                problems.append(f"{where}: confirm is what the person is told before the move, in words")
             trans.append({"from": frm, "to": to, "by": by, "label": str(t.get("label") or labels.get(to) or state_words(to)),
                           "screen": t.get("screen") if isinstance(t.get("screen"), str) else None,
                           "fields": list(tf), "require": list(req), "comment": t.get("comment") is True,
-                          "sign": sign.strip() if sign else None})
+                          "sign": sign.strip() if sign else None,
+                          **({"opens": opens} if opens else {}),
+                          **({"confirm": t["confirm"]} if isinstance(t.get("confirm"), str) else {})})
         # further states a person may make a new record in, besides the initial one (a record of work already done,
         # filed after the fact), each starting whatever the type's workflow starts for it
         starts = lc.get("starts") or []
@@ -570,7 +577,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                             reach.add(f)
                             grew = True
             revising = [x for x in states if x in reach and x != in_use]
-        lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial,
+        tones = _lifecycle_tones(lc.get("tones"), states, problems)
+        lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial, "tones": tones,
               "starts": list(starts), "transition": trans, "locked": locked, "abandoned": abandoned, "ended": ended, "in_use": in_use, "revising": revising,
               "labels": labels}
     for key in ("date", "flag"):
@@ -975,11 +983,61 @@ def _screens(doc: dict, fields: list[dict], base_map: dict, lc: dict | None, pro
                     out.append(r)
             return out
         t["require"] = ok(t["require"])
+        if t.get("opens") and resolve(t["opens"]["field"]) is None:
+            problems.append(f"lifecycle.transition to {t['to']!r}: opens names no field {t['opens']['field']!r}")
         # what a move requires, its screen asks for
         asked = ok(t["fields"])
         t["fields"] = asked + [n for n in t["require"] if n not in asked]
         t["comment"] = bool(t["comment"])
     return out
+
+
+# ---------------------------------------------------------------------------- a move's time and a state's tone
+TONES = ("waiting", "active", "attention", "done", "ended")  # a lifecycle's states, as a page marks them
+OPENS = re.compile(r"\s*([A-Za-z_][\w.]*)\s*(?:([+-])\s*(\d{1,4})\s*([mhd]))?\s*")
+
+
+def _transition_opens(value, where: str, problems: list) -> dict | None:
+    """``opens``: a move a person may make only from a time the record keeps, moved on or back by minutes, hours or
+    days (``"plannedStartDate - 2h"``: from two hours before it is booked for). As ``{field, minutes}``."""
+    if value is None:
+        return None
+    m = OPENS.fullmatch(value) if isinstance(value, str) else None
+    if not m:
+        problems.append(f"{where}: opens is a time field, moved by minutes, hours or days (plannedStartDate - 2h)")
+        return None
+    n = int(m.group(3) or 0) * {"m": 1, "h": 60, "d": 1440}[m.group(4) or "m"]
+    return {"field": m.group(1), "minutes": -n if m.group(2) == "-" else n}
+
+
+def opens_at(rt: "RecordType", t: dict, rec: dict):
+    """When a move with ``opens`` opens for this record, as the practice's wall time (None: it does not wait for a
+    time, or the record keeps no such time)."""
+    from datetime import datetime, timedelta
+    o = t.get("opens")
+    f = rt.field(o["field"]) if o else None
+    v = first(rec, f["path"]) if f else None
+    try:
+        at = datetime.fromisoformat(str(v)[:19]) if v else None
+    except ValueError:
+        return None
+    return at + timedelta(minutes=o["minutes"]) if at else None
+
+
+def _lifecycle_tones(value, states: list, problems: list) -> dict:
+    """``tones``: how each state reads at a glance, declared by the type rather than guessed from its words: waiting
+    (nobody has to act yet), active (work under way), attention (someone must act), done, ended (stopped, undone)."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+        problems.append("lifecycle.tones: a table of state = " + " | ".join(TONES))
+        return {}
+    for st, tone in value.items():
+        if st not in states:
+            problems.append(f"lifecycle.tones: {st!r} is not one of its states")
+        if tone not in TONES:
+            problems.append(f"lifecycle.tones: {st} is {tone!r}, not one of {', '.join(TONES)}")
+    return {st: tone for st, tone in value.items() if st in states and tone in TONES}
 
 
 def _fits(bf: dict, f: dict) -> bool:

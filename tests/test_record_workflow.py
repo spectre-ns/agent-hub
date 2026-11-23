@@ -1,6 +1,8 @@
 """A record type names the workflow that moves it from open to closed: creating the record starts it, about that
 record; the record's lifecycle state is where the work is; one run, one item, one record for the whole of its life.
 The general-practice pack's visit (Encounter) and its appointment workflow are the worked example."""
+import re
+
 import pytest
 
 from practicehub import schema
@@ -28,6 +30,14 @@ def _status(hub, ref):
 def _items(hub, run):
     """The run's work items (its one item and any children), notices apart."""
     return list(hub.db.items.find({"run_id": run["id"], "kind": {"$ne": "notice"}}))
+
+
+def _at_the_visit(hub, ref, minutes=0):
+    """The practice's clock at the time the visit is booked for (``minutes`` after it): a check-in opens two hours
+    before, a no-show at its time."""
+    from datetime import datetime, timedelta
+    start = datetime.fromisoformat(hub.records.read(*ref.split("/", 1))["plannedStartDate"][:16])
+    hub.engine._now = start + timedelta(minutes=minutes)
 
 
 def test_starting_a_request_makes_the_requested_visit_on_the_chart(hub):
@@ -193,8 +203,12 @@ def test_one_visit_walks_from_requested_to_completed_with_one_item(hub):
     assert _status(hub, ref) == "planned" and hub.records.read(*ref.split("/", 1))["plannedStartDate"]
     # checking in on the visit's own page (its lifecycle transition) moves the workflow on: no button of its own
     from practicehub.web.server import App
+    _at_the_visit(hub, ref, -180)
     page = App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
-    assert "Check in" in page
+    assert "Check in from" in page  # not yet: it opens two hours before the visit
+    _at_the_visit(hub, ref, -30)
+    page = App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert ">Check in</button>" in page
     hub.update_record(jo, ref, {"status": "arrived"})
     run = hub.engine.run(rid)
     assert run["steps"]["checked-in"]["state"] == "done" and run["steps"]["seen"]["state"] == "waiting"
@@ -231,11 +245,130 @@ def test_a_no_show_applies_the_policy_and_closes_the_run(hub):
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
         "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
     ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref, 5)
     hub.update_record(jo, ref, {"status": "noshow"})
     run = hub.engine.run(run["id"])
     assert run["steps"]["no-show"]["state"] == "done" and run["steps"]["tell-missed"]["state"] == "done"
     assert run["steps"]["end"]["state"] == "skipped" and run["status"] == "completed"
     assert _status(hub, ref) == "noshow"
+
+
+def test_a_visit_is_checked_in_from_two_hours_before_and_marked_a_no_show_only_once_its_time_has_come(hub):
+    """The desk who opens tomorrow's visit by mistake can neither check it in nor mark it missed: Check in opens two
+    hours before the time it is booked for, a no-show at that time; the page says when each opens, and the no-show's
+    confirm says what follows (the message, the slot freed)."""
+    from practicehub.hub import Invalid
+    from practicehub.web.server import App
+    jo = M(hub, "jo")
+    run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    ref = hub.engine.run(run["id"])["record"]
+    page = lambda: App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref},
+                                                   *ref.split("/", 1))
+    _at_the_visit(hub, ref, -24 * 60)  # the day before
+    for to in ("noshow", "arrived"):
+        with pytest.raises(Invalid, match="opens at"):
+            hub.update_record(jo, ref, {"status": to})
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert 'value="noshow"' not in side and 'value="arrived"' not in side
+    assert "Check in from Tue 09 Mar 09:00" in side and "Mark no-show from Tue 09 Mar 11:00" in side
+    _at_the_visit(hub, ref, -60)  # an hour before: checked in early, still not missed
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert 'value="arrived"' in side and 'value="noshow"' not in side and "Mark no-show from 11:00" in side
+    _at_the_visit(hub, ref, 10)  # ten minutes late: either
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert re.search(r'data-confirm="The patient will be messaged[^"]*the 11:00 slot freed[^"]*">Mark no-show…', side)
+    hub.update_record(jo, ref, {"status": "noshow"})
+    assert _status(hub, ref) == "noshow"
+
+
+@pytest.mark.parametrize("who,hours,late,told", [
+    ("patient", 20, True, "tell-late-cancel"),      # the patient, under a day before: the policy, on the visit's run
+    ("patient", 72, False, None),                   # the patient, with notice: nothing due, nothing sent
+    (None, 5, True, "tell-late-cancel"),            # not said (the portal: the patient themselves): the patient's
+    ("practice", 2, None, "tell-practice-cancelled"),  # the practice: no policy, the patient told to rebook
+])
+def test_cancelling_a_visit_asks_who_cancelled_and_works_out_the_notice(hub, who, hours, late, told):
+    """Cancel the visit asks who cancelled and says how much notice that is; only the patient's late cancellation runs
+    the missed-appointment policy, from the visit's own run. One the practice made tells the patient, with no fee."""
+    from practicehub.web.server import App
+    jo = M(hub, "jo")
+    run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref, -hours * 60)
+    page = App(hub, dev=False).page_record({"me": jo, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert "Cancel the visit…</a>" in page
+    screen = App(hub, dev=False).page_move({"me": jo, "query": {"to": "cancelled"}, "path": f"/records/{ref}/move"},
+                                           *ref.split("/", 1))
+    assert 'name="cancelled_by"' in screen and "The patient" in screen and "The practice" in screen
+    import html
+    assert f"that is {hours} hours' notice" in html.unescape(screen) and "11:00 slot is freed" in screen
+    hub.update_record(jo, ref, {"status": "cancelled", **({"cancelled_by": who} if who else {})})
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    steps = {k: (v or {}).get("state") for k, v in run["steps"].items()}
+    if late is None:
+        assert steps["late-cancel"] == "skipped"
+    else:
+        assert steps["late-cancel"] == "done" and run["ctx"]["late-cancel"]["late"] is late
+    for tell in ("tell-late-cancel", "tell-practice-cancelled"):
+        assert (steps.get(tell) == "done") is (tell == told), (tell, steps.get(tell))
+
+
+# ---------------------------------------------------------------------- visit: cancelled after check-in, missed count
+def test_a_visit_cancelled_after_check_in_is_a_late_cancellation(hub):
+    """The patient checked in and left before being seen: cancelled by the patient, it falls under the policy as a
+    late cancellation (the run no longer ends with nothing applied); one the practice cancels tells the patient."""
+    jo = M(hub, "jo")
+    for who, late_tell in (("patient", "tell-late-cancel"), ("practice", "tell-practice-cancelled")):
+        run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+            "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+        ref = hub.engine.run(run["id"])["record"]
+        _at_the_visit(hub, ref, -20)
+        hub.update_record(jo, ref, {"status": "arrived"})
+        _at_the_visit(hub, ref, 15)
+        hub.update_record(jo, ref, {"status": "cancelled", "cancelled_by": who})
+        run_all_local(hub, log=quiet)
+        run = hub.engine.run(run["id"])
+        steps = {k: (v or {}).get("state") for k, v in run["steps"].items()}
+        assert steps[late_tell] == "done" and run["status"] == "completed", steps
+        if who == "patient":
+            assert run["ctx"]["late-cancel"]["late"] is True
+            assert hub.records.read(*ref.split("/", 1))["cancelled_late"] is True
+        else:
+            assert steps["late-cancel"] == "skipped" and steps["tell-late-cancel"] == "skipped"
+
+
+def test_the_policy_counts_the_patients_earlier_missed_appointments(hub):
+    """missed_this_year is the patient's no-shows and late cancellations in the year before this visit, not always 0:
+    the first missed one is a reminder, the next one is charged."""
+    jo = M(hub, "jo")
+    pat = _pat(hub, "MacLeod")
+
+    def missed(slot, status, **more):
+        run = hub.engine.start(jo, "appointment-request", record=pat, inputs={
+            "reason": "a form for work", "kind": "forms", "slot": slot})
+        ref = hub.engine.run(run["id"])["record"]
+        _at_the_visit(hub, ref, 5 if status == "noshow" else -60)
+        hub.update_record(jo, ref, {"status": status, **more})
+        run_all_local(hub, log=quiet)
+        return hub.engine.run(run["id"])
+
+    first = missed("2027-03-02T11:00|dr-amara", "noshow")
+    assert first["ctx"]["missed-before"]["count"] == 0 and first["ctx"]["no-show"]["charge"] is False
+    late = missed("2027-03-05T11:00|dr-amara", "cancelled", cancelled_by="patient")
+    assert late["ctx"]["missed-before"]["count"] == 1 and late["ctx"]["late-cancel"]["charge"] is True
+    again = missed("2027-03-09T11:00|dr-amara", "noshow")
+    assert again["ctx"]["missed-before"]["count"] == 2 and again["ctx"]["no-show"]["amount"] == 50
+    # another patient's missed visits are not this one's
+    other = hub.engine.start(jo, "appointment-request", record=_pat(hub, "Rahimi"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-10T11:00|dr-amara"})
+    ref = hub.engine.run(other["id"])["record"]
+    _at_the_visit(hub, ref, 5)
+    hub.update_record(jo, ref, {"status": "noshow"})
+    run_all_local(hub, log=quiet)
+    assert hub.engine.run(other["id"])["ctx"]["missed-before"]["count"] == 0
 
 
 def test_a_visit_booked_on_the_calendar_starts_its_workflow_booked(hub):
@@ -291,9 +424,27 @@ def _to_the_visit(hub, by):
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
         "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
     ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref, -10)
     hub.update_record(jo, ref, {"status": "arrived"})
     hub.update_record(by, ref, {"status": "in-progress"})
     return run, ref
+
+
+def test_the_patient_stepping_out_is_a_side_move_named_as_an_action(hub):
+    """A visit in progress offers the pause as a secondary button named for what happened, never as the main one;
+    back from it, the visit is in progress again."""
+    from practicehub.web.server import App
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_visit(hub, amara)
+    page = lambda: App(hub, dev=False).page_record({"me": amara, "query": {}, "path": "/records/" + ref},
+                                                   *ref.split("/", 1))
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert re.search(r'<button class="secondary"[^>]*>Patient stepped out</button>', side)
+    assert 'class="primary"' not in side
+    hub.update_record(amara, ref, {"status": "onleave"})
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert ">Patient is back</button>" in side and 'class="primary"' not in side
+    hub.update_record(amara, ref, {"status": "in-progress"})
 
 
 def test_only_its_workflow_moves_the_visit_and_a_person_only_through_a_move_it_waits_on(hub):
@@ -328,6 +479,7 @@ def test_a_move_its_workflow_waits_on_and_the_step_it_takes_are_one_transaction(
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
         "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
     ref = hub.engine.run(run["id"])["record"]
+    _at_the_visit(hub, ref)
     real = hub.engine._advance
 
     def broken(run_id, cause):
@@ -388,6 +540,7 @@ def test_the_record_page_says_who_holds_it_what_is_next_and_when_it_is_due_even_
     def down(*a, **k):
         raise RuntimeError("the portal is down")
     monkeypatch.setitem(engine.CORE_ACTIONS, "message.send", down)
+    _at_the_visit(hub, vref, 5)
     hub.update_record(jo, vref, {"status": "noshow"})
     assert hub.engine.run(other["id"])["steps"]["tell-missed"]["state"] == "failed"
     app._local.me = amara
@@ -504,6 +657,7 @@ def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_vis
     assert hub.engine.run(rid)["status"] == "completed"
     (walk,) = hub.engine.runs(record=ref, status="running")
     assert walk["version"] == cur["version"] and walk["steps"]["checked-in"]["state"] == "waiting"
+    _at_the_visit(hub, ref)
     hub.update_record(jo, ref, {"status": "arrived"})
     assert hub.engine.run(walk["id"])["steps"]["checked-in"]["state"] == "done"
 
@@ -521,20 +675,55 @@ def _to_the_note(hub, amara, **more):
     return run, ref
 
 
-def test_a_discarded_note_completes_the_visit_without_a_note_and_tells_the_physician(hub):
-    """Discarding the draft never leaves the visit in progress: the visit took place, so it is completed (a workflow
-    has no going back a step); no note is filed, nothing is billed, and the physician is told to write the note."""
+def test_the_front_desk_sees_where_a_visit_is_on_the_chart_but_not_the_clinical_step(hub):
+    """On the patient's chart the front desk sees each visit's work with the visit's state, who holds it and when it
+    is due, so they can answer "where is it"; the step itself (editing the clinical note) is a step they may not see:
+    neither its title nor what it needs access to. The physician sees the step."""
+    from practicehub.web.server import App
+    amara, jo = M(hub, "dr-amara"), M(hub, "jo")
+    run, ref = _to_the_visit(hub, amara)
+    hub.engine.complete(amara, item_for(hub, run, "end"), {"transcript": TRANSCRIPT, "visit_type": "minor",
+                                                           "minutes": 10})
+    run_all_local(hub, log=quiet)
+    assert hub.engine.run(run["id"])["steps"]["edit"]["state"] == "active"
+    pat = hub.engine.run(run["id"])["subject"]
+    app = App(hub, dev=False)
+    chart = app.page_record({"me": jo, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
+    now = chart[chart.index('class="wnow"'):]
+    now = now[:now.index("</div>")]
+    assert "At a step you may not see" in now and "Edit the note" not in now and "needs access to" not in now
+    assert "Physician" in now  # who holds it (the role, until someone takes it)
+    assert "Due" in now or "Overdue" in now
+    assert ">In progress<" in chart  # the visit's state, on its card
+    mine = app.page_record({"me": amara, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
+    assert "Edit the note" in mine
+
+
+@pytest.mark.parametrize("then,ends", [("i-wrote-it-on-the-visit", "finished"), ("no-note-needed", "undocumented")])
+def test_a_discarded_note_leaves_the_visit_completed_without_a_note_flagged_for_the_physician(hub, then, ends):
+    """Discarding the draft never leaves the visit in progress, and never plain Completed: it is Completed: no note,
+    and the physician has a task to write it (on their work, due); no note is filed from the draft, nothing is
+    billed. Once they have written it, the visit is completed; one that needs none stays Completed: no note."""
+    from practicehub.web.server import App
     amara = M(hub, "dr-amara")
     run, ref = _to_the_note(hub, amara)
     hub.engine.decide(amara, item_for(hub, run, "sign"), "discard", "wrong patient's transcript")
     run_all_local(hub, log=quiet)
     run = hub.engine.run(run["id"])
-    assert _status(hub, ref) == "finished" and run["status"] == "completed"
+    assert _status(hub, ref) == "undocumented" and run["status"] == "running"
+    assert hub.record_type("Encounter").state_label("undocumented") == "Completed: no note"
     assert run["steps"]["file-note"]["state"] == "skipped" and run["steps"]["code"]["state"] == "skipped"
     assert not [c for c in hub.records.search("Composition", limit=None)
                 if (c.get("encounter") or {}).get("reference") == ref]
     told = hub.db.items.find({"run_id": run["id"], "kind": "notice", "assignee": "dr-amara"})
     assert any("has no note" in n["title"] for n in told)
+    task = hub.engine.item(item_for(hub, run, "write-note"))
+    assert task["assignee"] == "dr-amara" and task.get("due_at")
+    page = App(hub, dev=False).page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert "Completed: no note" in page and "Write the note for this visit" in page
+    hub.engine.complete(amara, task["id"], {"done": then, "why": "" if ends == "finished" else "another patient's"})
+    run_all_local(hub, log=quiet)
+    assert _status(hub, ref) == ends and hub.engine.run(run["id"])["status"] == "completed"
 
 
 def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_referral_workflow(hub):
@@ -566,12 +755,49 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
     from practicehub.web.server import App
     app = App(hub, dev=False)
     page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
-    assert "Made from this" in page and kids[0]["ref"] in page and "Being written" in page
+    # in the page's main column, before the side panel: what was started from the visit, and where each one is
+    started = page.index("Started from this visit")
+    assert started < page.index('class="wp-status"') and kids[0]["ref"] in page[started:] and "Being written" in page
+    from practicehub.visibility import Viewer
+    viewer = Viewer(hub, amara)
+    stuck, rank = app._child_work({**kids[0]["run"], "steps": {"draft": {"state": "failed"}}}, viewer)
+    assert "Stuck: " in stuck and "failed" in stuck and rank[0] == 0  # stuck ones first
+    assert app._child_work({**kids[0]["run"], "status": "completed"}, viewer)[0].endswith("Done</span>")
+    assert "Stopped" in app._child_work({**kids[0]["run"], "status": "cancelled"}, viewer)[0]
+    live, rank = app._child_work(kids[1]["run"], viewer)
+    assert ("Due in" in live or "Overdue" in live) and rank[0] in (1, 2)
     back = app.page_record({"me": amara, "query": {}, "path": "/records/" + kids[0]["ref"]},
                            *kids[0]["ref"].split("/", 1))
     assert "Made for" in back and ref.split("/", 1)[1] in back
     chart = app.page_record({"me": amara, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
     assert all(k["ref"] in chart for k in kids)
+
+
+def test_prescriptions_and_lab_orders_written_in_the_note_are_sub_records_of_the_visit(hub):
+    """The note starts prescriptions and lab orders as well as referrals: each is a sub-record of the visit, about the
+    same patient, linked to it. A prescription is written (draft) for the physician to issue on its own page (the
+    note's signature never issues one) and starts no renewal; a lab test ordered in the signed note is sent."""
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_note(hub, amara, prescriptions="Amoxicillin 500 mg three times a day for 10 days",
+                            lab_orders="CBC\nHbA1c")
+    hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    kids = hub.engine.children_of(ref)
+    by_type = {}
+    for k in kids:
+        by_type.setdefault(k["ref"].split("/")[0], []).append(k)
+    (rx,) = by_type["MedicationRequest"]
+    med = hub.records.read(*rx["ref"].split("/", 1))
+    assert med["status"] == "draft" and med["intent"] == "order" and rx["run"] is None
+    assert med["medicationCodeableConcept"]["text"].startswith("Amoxicillin")
+    assert med["subject"]["reference"] == run["subject"] and med["encounter"]["reference"] == ref
+    assert med["requester"]["reference"] == "Practitioner/dr-amara"
+    labs = [hub.records.read(*k["ref"].split("/", 1)) for k in by_type["ServiceRequest"]]
+    assert sorted(x["code"]["text"] for x in labs) == ["CBC", "HbA1c"]
+    assert all(x["status"] == "active" and x["category"][0]["text"] == "lab-test" for x in labs)
+    assert all(k["run"] is None for k in by_type["ServiceRequest"])  # a lab order is not walked as a referral
+    assert hub.engine.parent_record(rx["ref"]) == ref
 
 
 def test_a_visit_marked_entered_in_error_stops_its_run_on_the_track(hub):
@@ -587,3 +813,45 @@ def test_a_visit_marked_entered_in_error_stops_its_run_on_the_track(hub):
     assert stop["actor"] == "jo" and "entered in error" in stop["data"]["reason"]
     moved = hub.db.events.find_one({"seq": stop["cause"]})
     assert moved["action"] == "record.transitioned" and moved["data"]["to"] == "entered-in-error"
+
+
+# ------------------------------------------------------------------------------------ visit: part of its patient
+def test_a_visit_is_part_of_its_patient(hub):
+    """A visit is a part of its patient (``part_of = "subject"``): reached through their chart (Patient > Visits >
+    Visit, the sidebar lit on the patients), listed once in the chart's Visits section, never moved to another
+    patient, and with no Create of its own; its note, a part of the visit, is reached through both."""
+    import re as _re
+    from practicehub.hub import Invalid
+    from practicehub.web.server import App
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_note(hub, amara)
+    hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
+    run_all_local(hub, log=quiet)
+    pat = hub.engine.run(run["id"])["subject"]
+    app = App(hub, dev=False)
+    req = lambda path: {"me": amara, "query": {}, "path": path}
+    visit = hub.records.read(*ref.split("/", 1))
+    ptitle, vtitle = hub.short_title(hub.records.read(*pat.split("/", 1))), hub.short_title(visit)
+    page = app.page_record(req("/records/" + ref), *ref.split("/", 1))
+    crumbs = page.split('class="crumbs"', 1)[1].split("</div>", 1)[0]
+    assert crumbs.index(ptitle) < crumbs.index("Visits") < crumbs.index(vtitle), crumbs
+    side = page.split('<aside class="side"', 1)[1].split("</nav>", 1)[0]
+    lit = _re.findall(r'<a class="nav on" href="([^"]+)"', side)
+    assert lit == [f"/{hub.pack.subject['path']}"], lit
+    chart = app.page_subject(req(app.record_href(pat)), pat.split("/", 1)[1])
+    assert chart.count('id="part-Encounter"') == 1 and 'id="link-Encounter"' not in chart
+    assert ref.split("/", 1)[1] in chart.split('id="part-Encounter"', 1)[1]
+    (note,) = [c for c in hub.records.search("Composition", limit=None)
+               if (c.get("encounter") or {}).get("reference") == ref]
+    npage = app.page_record(req(f"/records/Composition/{note['id']}"), "Composition", note["id"])
+    ncrumbs = npage.split('class="crumbs"', 1)[1].split("</div>", 1)[0]
+    assert ncrumbs.index(ptitle) < ncrumbs.index("Visits") < ncrumbs.index(vtitle) < ncrumbs.index("Notes"), ncrumbs
+    nside = npage.split('<aside class="side"', 1)[1].split("</nav>", 1)[0]
+    assert _re.findall(r'<a class="nav on" href="([^"]+)"', nside) == [f"/{hub.pack.subject['path']}"]
+    other = _pat(hub, "Rahimi")
+    with pytest.raises(Invalid, match="stays part of"):
+        hub.update_record(amara, ref, {"subject": {"reference": other}})
+    listing = app.page_records(req("/records/Encounter"), "Encounter")
+    assert '/records/Encounter/new"' not in listing and "part of a patient" in listing
+    home = app.page_record_types(req("/records"))
+    assert 'href="/records/Encounter"' not in home

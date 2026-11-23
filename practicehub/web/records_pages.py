@@ -1005,16 +1005,27 @@ class RecordPages:
         return t["to"] in self.UNDOING or words.startswith(("cancel", "discontinue", "make obsolete", "withdraw",
                                                             "revoke", "retire", "void", "mark entered in error"))
 
-    def _state_loz(self, st, rt=None) -> str:
-        """A status lozenge, in words (the lifecycle's label for it). Its tone comes from common, generic state words;
-        a state it does not know is grey."""
-        if st is None:
-            return ""
+    # a tone the type's lifecycle declares for a state, as the page draws it
+    TONE_CLASS = {"waiting": "default", "active": "inprogress", "attention": "moved", "done": "success",
+                  "ended": "removed"}
+
+    def _state_tone(self, st, rt=None) -> str:
+        """How a state reads at a glance: the tone its type's lifecycle declares for it (``tones``); a type that
+        declares none for it falls back to common, generic state words, and a state it does not know is grey."""
+        declared = ((getattr(rt, "lifecycle", None) or {}).get("tones") or {}).get(str(st))
+        if declared:
+            return self.TONE_CLASS[declared]
         s = str(st).lower()
-        tone = ("success" if s in self.SETTLED else
+        return ("success" if s in self.SETTLED else
                 "removed" if s in self.UNDONE else
                 "inprogress" if "review" in s or s in self.UNDERWAY else
                 "default")
+
+    def _state_loz(self, st, rt=None) -> str:
+        """A status lozenge, in words (the lifecycle's label for it), in its state's tone."""
+        if st is None:
+            return ""
+        tone = self._state_tone(st, rt)
         words = rt.state_label(st) if rt is not None else schema.state_words(st)
         return f'<span class="loz {tone}">{e(words)}</span>'
 
@@ -1463,6 +1474,7 @@ class RecordPages:
                         for k in kids) + "</ul>" if kids else "<p class='muted'>Nothing yet.</p>") + "</section>")
             if not editing:  # what is part of it, then what links to it
                 sections, rail, hidden = self.owner_sections(me, ref) if not is_page else ("", [], 0)
+                main.append(self.started_from(me, ref, rt))  # what was made from it (a visit's referrals, orders)
                 main.append(sections)
                 if hidden:
                     main.append('<p class="muted">Some records are kept from your role and are not shown.</p>')
@@ -1488,10 +1500,12 @@ class RecordPages:
             if t["fields"] or t["comment"]:  # a transition screen asks for what the move needs first
                 return (f'<a class="btn {kind}" href="{url}/move?to={e(urllib.parse.quote(t["to"]))}" data-modal>'
                         f'{e(t["label"])}…</a>')
-            confirm = f' data-confirm="Move it to {e(rt.state_label(t["to"]).lower())}?"' if kind != "primary" else ""
+            said = self.move_confirm(rt, t, rec)  # what follows, as the type says it
+            confirm = (f' data-confirm="{e(said)}"' if said else
+                       f' data-confirm="Move it to {e(rt.state_label(t["to"]).lower())}?"' if kind != "primary" else "")
             return (f'<form method="post" action="{url}/move" class="inline">'
                     f'<input type="hidden" name="to" value="{e(t["to"])}"><button class="{kind}"{confirm}>'
-                    f'{e(t["label"])}</button></form>')
+                    f'{e(t["label"])}{"…" if said else ""}</button></form>')
 
         moves = [t for t in lc.get("transition", []) if (st in t["from"] or "*" in t["from"]) and t["to"] != st] \
             if lc else []
@@ -1499,8 +1513,9 @@ class RecordPages:
         if rt.workflow:  # its workflow moves it: only the moves it waits on now (no button beside the work)
             mine = [t for t in mine if not hub.state_move_refusal(rt, ref, t, rec, None)]
         auto = [t for t in moves if t["by"] == "workflow"]
+        mine, later = self.moves_open_now(rt, mine, rec)  # a check-in from two hours before, a no-show after
         ahead = self.forward_move(lc, st, mine) if mine else None
-        moves_html = "".join(move(t) for t in mine) if not editing else ""
+        moves_html = "".join(move(t) for t in mine) + later if not editing else ""
         sigs = hub.signatures(me, ref)
         cur = [s for s in sigs if s["current"]]
         title = hub.short_title(rec, seen=True)
@@ -1779,7 +1794,9 @@ class RecordPages:
         err = f'<div class="flash error" role="alert"><p>{e(problem)}</p></div>' if problem else ""
         ver = e(str((rec.get("meta") or {}).get("versionId", "")))
         st = schema.first(rec, rt.lifecycle["path"])
+        said = self.move_confirm(rt, t, rec)  # what follows the move, as the type says it
         body = (f'<div data-modal-body>{err}<p>{e(self.hub.short_title(rec))}: from {self._state_loz(st, rt)} to {self._state_loz(t["to"], rt)}.</p>'
+                + (f'<p class="move-follows">{e(said)}</p>' if said else "") +
                 f'<form method="post" action="/records/{e(rt.id)}/{e(rec["id"])}/move" class="card stack">'
                 f'<input type="hidden" name="to" value="{e(t["to"])}"><input type="hidden" name="_version" '
                 f'value="{ver}">' + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")

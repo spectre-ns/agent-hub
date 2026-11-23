@@ -13,9 +13,10 @@ placed and not dated, and a conditional step they may not see the reason for is 
 from __future__ import annotations
 
 import html
+import re
 
 from .. import schema
-from ..visibility import Viewer, workflow_classes
+from ..visibility import Viewer
 
 e = html.escape
 
@@ -40,9 +41,9 @@ class WorkPanel:
 
     def forward_move(self, lc: dict, st, moves: list[dict]):
         """The one move from ``st`` drawn as the main button; the rest are secondary. Read from the lifecycle's shape,
-        not from state names: not a move that undoes or ends the record (cancel, entered in error), not one that
-        leads back here (a pause that returns), and a state that leads on before an end no move leaves (a no-show).
-        Ties go to the lifecycle's own order. None when every move undoes."""
+        not from state names: never a move that undoes or ends the record (cancel, entered in error), one into a
+        state no move leaves (a no-show), or a side move that leads back here (the patient stepping out and back).
+        Ties go to the lifecycle's own order. None when no move goes forward: then every button is secondary."""
         trans = [t for t in lc.get("transition", []) if "*" not in t["from"]]
 
         def reach(s):
@@ -55,11 +56,57 @@ class WorkPanel:
                         todo.append(t["to"])
             return seen
 
-        ok = [t for t in moves if not self._undoing(t)]
-        if not ok:
-            return None
-        rank = lambda t: (st in reach(t["to"]), not any(t["to"] in x["from"] for x in trans), moves.index(t))
-        return min(ok, key=rank)
+        ok = [t for t in moves if not self._undoing(t) and st not in reach(t["to"])
+              and any(t["to"] in x["from"] for x in trans)]
+        return min(ok, key=moves.index) if ok else None
+
+    # ------------------------------------------------------------------------------------ a move's time and words
+    def moves_open_now(self, rt, moves: list[dict], rec: dict) -> tuple[list[dict], str]:
+        """The moves a person may make now, and a line saying when the others open (a move with ``opens``: a visit's
+        check-in from two hours before it is booked for, a no-show from its time)."""
+        now = self.hub.engine.now()
+        ok, later = [], []
+        for t in moves:
+            at = schema.opens_at(rt, t, rec)
+            if at is not None and now < at:
+                same = at.date() == now.date()
+                later.append(f"{t['label']} from {at.strftime('%H:%M') if same else at.strftime('%a %d %b %H:%M')}")
+            else:
+                ok.append(t)
+        note = f'<p class="muted small moves-later">{e("; ".join(later))}</p>' if later else ""
+        return ok, note
+
+    _CONFIRM = re.compile(r"\{([A-Za-z_][\w.]*)(?::(time|notice))?\}")
+
+    def move_confirm(self, rt, t: dict, rec: dict) -> str:
+        """What follows a move, as its type says it (``confirm``), with the record's own values in it: ``{field}``
+        as the page shows it, ``{field:time}`` a time's hour and minute, ``{field:notice}`` how long from now until
+        that time, in hours ("20 hours' notice"). Empty when the type says nothing."""
+        text = t.get("confirm") or ""
+        if not text:
+            return ""
+        from datetime import datetime
+
+        def fill(m):
+            f = rt.field(m.group(1))
+            v = schema.first(rec, f["path"]) if f else None
+            if v in (None, ""):
+                return "its time" if m.group(2) else ""
+            try:
+                at = datetime.fromisoformat(str(v)[:19])
+            except ValueError:
+                at = None
+            if m.group(2) == "time" and at:
+                return at.strftime("%H:%M")
+            if m.group(2) == "notice" and at:
+                hours = (at - self.hub.engine.now()).total_seconds() / 3600
+                if hours <= 0:
+                    return "no notice (its time has passed)"
+                n = int(hours)
+                return "less than an hour's notice" if n < 1 else f"{n} hour's notice" if n == 1 else \
+                    f"{n} hours' notice"
+            return str(v)[:16].replace("T", " ")
+        return self._CONFIRM.sub(fill, text)
 
     def work_panel(self, me, ref: str, *, rt=None, st=None, moves_html: str = "", auto=(), url: str = "") -> str:
         """The side panel's lifecycle and open-work sections, as HTML (empty when there is neither)."""
@@ -85,31 +132,59 @@ class WorkPanel:
 
     # ---------------------------------------------------------------------------- sub-records and their parent
     def family_panel(self, me, ref: str) -> str:
-        """The record a sub-record was made for (a link back), and the sub-records made for this one (``record.child``:
-        a visit's referrals), each with its state and who holds it now. A type the member may not read is left out."""
-        hub, out = self.hub, []
-        parent = hub.engine.parent_record(ref)
-        if parent and hub.may_read(me, parent.split("/", 1)[0]):
-            out.append(f'<p class="wp-parent"><span class="muted">Made for</span> {self._family_link(parent)}</p>')
-        rows = []
-        for kid in hub.engine.children_of(ref):
+        """The record a sub-record was made for (a link back), in the side panel. The sub-records made from this one
+        are in the page's main column (``started_from``)."""
+        parent = self.hub.engine.parent_record(ref)
+        if parent and self.hub.may_read(me, parent.split("/", 1)[0]):
+            return f'<p class="wp-parent"><span class="muted">Made for</span> {self._family_link(parent)}</p>'
+        return ""
+
+    def started_from(self, me, ref: str, rt=None) -> str:
+        """The sub-records made from this record (``record.child``: a visit's referrals, prescriptions and lab
+        orders), for the main column: each with its state and, in words, where its own work is (Done, Stopped,
+        Stuck: <step> failed, or who holds it and when it is due), stuck, urgent and overdue first. One of a type the
+        member may not read keeps its kind, its state and who holds it, but neither its title nor a link."""
+        hub, rows = self.hub, []
+        viewer = Viewer(hub, me)
+        for n, kid in enumerate(hub.engine.children_of(ref)):
             rtype = kid["ref"].split("/", 1)[0]
-            if not hub.may_read(me, rtype):
-                continue
-            rt = hub.record_type(rtype)
+            krt = hub.record_type(rtype)
             rec = hub.records.read(*kid["ref"].split("/", 1))
-            st = schema.first(rec, rt.lifecycle["path"]) if rec and rt and rt.lifecycle else None
-            state = self._state_loz(st, rt) if st else ""
-            run = kid["run"] or {}
-            item = hub.engine.item(run["item"]) if run.get("status") == "running" and run.get("item") else None
-            holder = self._holder(item) if item and item.get("status") in ("open", "claimed", "held") else \
-                '<span class="muted">nobody: it is done</span>' if run and run.get("status") != "running" else ""
-            rows.append(f"<li>{self._family_link(kid['ref'], rec)} {state} {holder}</li>")
-        if rows:
-            out.append(f'<section class="wp-children" aria-labelledby="wp-children-h"><h2 id="wp-children-h">'
-                       f'Made from this <span class="count">{len(rows)}</span></h2><ul class="plain">{"".join(rows)}'
-                       f'</ul></section>')
-        return "".join(out)
+            st = schema.first(rec, krt.lifecycle["path"]) if rec and krt and krt.lifecycle else None
+            name = self._family_link(kid["ref"], rec) if hub.may_read(me, rtype) else \
+                f'<span class="muted">{e(krt.label if krt else rtype)}</span>'
+            work, rank = self._child_work(kid["run"] or {}, viewer)
+            rows.append((rank, n, f'<li>{name} {self._state_loz(st, krt) if st else ""} {work}</li>'))
+        if not rows:
+            return ""
+        what = rt.label.lower() if rt is not None else "record"
+        rows.sort(key=lambda r: r[:2])
+        return (f'<section class="children started-from" aria-labelledby="started-from-h"><h2 id="started-from-h">'
+                f'Started from this {e(what)} <span class="count">{len(rows)}</span></h2><ul class="plain">'
+                + "".join(r[2] for r in rows) + "</ul></section>")
+
+    def _child_work(self, run: dict, viewer) -> tuple[str, tuple]:
+        """Where a sub-record's own work is, in words, and its rank in the list: stuck first, then urgent, then due
+        soonest (overdue before due); one with no work of its own after those, finished last."""
+        if not run:
+            return "", (3, "")
+        if run.get("status") == "completed":
+            return '<span class="muted">Done</span>', (4, "")
+        if run.get("status") != "running":
+            return '<span class="loz removed">Stopped</span>', (4, "")
+        wf = viewer.workflow_of_run(run["id"])
+        for sid, sst in (run.get("steps") or {}).items():
+            if (sst or {}).get("state") == "failed":
+                shown = wf is not None and viewer.step_state(wf, run, sid) is not None
+                title = wf.step(sid).title if shown else "a step you may not see"
+                return f'<span class="loz removed">Stuck: {e(title)} failed</span>', (0, "")
+        live = [it for sst in (run.get("steps") or {}).values() if (sst or {}).get("item")
+                for it in [self.hub.db.items.get(sst["item"])]
+                if it and it.get("status") in ("open", "claimed", "held") and it.get("kind") != "notice"]
+        if not live:
+            return '<span class="muted">waiting</span>', (3, "")
+        it = min(live, key=lambda i: (i.get("priority") != "urgent", i.get("due_at") or "~"))
+        return self._holder(it) + self._urgency(it), (1 if it.get("priority") == "urgent" else 2, it.get("due_at") or "~")
 
     def _family_link(self, ref: str, rec: dict | None = None) -> str:
         """A link to a parent or sub-record this member was checked for already, named by its title."""
@@ -181,6 +256,36 @@ class WorkPanel:
             out.append(f"{s.title}{who}{label}")
         return out
 
+    def _record_state(self, me, run: dict, rt, ref: str) -> str:
+        """The state of the record a run walks, in words, when the card is not on that record's own page (a visit's
+        work on the patient's chart): the state is not clinical, so whoever may read the type sees it."""
+        rec_ref = str(run.get("record") or "")
+        if rt is None or not rt.lifecycle or rec_ref == ref or "/" not in rec_ref \
+                or not self.hub.may_read(me, rt.id):
+            return ""
+        rec = self.hub.records.read(*rec_ref.split("/", 1))
+        st = schema.first(rec, rt.lifecycle["path"]) if rec else None
+        return f" {self._state_loz(st, rt)}" if st else ""
+
+    def _hidden_now(self, run: dict, hidden: list) -> list[str]:
+        """Where a run is when it is at a step the member may not see: not the step (its title, its branch), but who
+        holds it and when it is due, so the front desk can say "with the nurse, due by 3" without the clinical part."""
+        out = []
+        for s in hidden:
+            sst = run["steps"].get(s.id) or {}
+            if sst.get("state") not in ("active", "waiting", "failed"):
+                continue
+            item = self.hub.db.items.get(sst["item"]) if sst.get("item") else None
+            bits = ['<span class="muted">At a step you may not see</span>']
+            if sst.get("state") == "failed":
+                bits.append('<span class="loz removed">Stopped</span>')
+            if item and item.get("status") in ("open", "claimed", "held"):
+                bits.append(self._holder(item) + self._urgency(item))
+            elif s.role and sst.get("state") != "waiting":
+                bits.append(f'<span class="muted">for</span> {e(self._role_name(s.role))}')
+            out.append(f'<li>{" ".join(bits)}</li>')
+        return list(dict.fromkeys(out))  # two hidden branches at once read as one
+
     def run_card(self, me, run: dict, wf, viewer: Viewer, ref: str) -> str:
         """One open run: where it is now, who holds it, its steps in a strip, the viewer's own piece of it."""
         eng = self.hub.engine
@@ -223,9 +328,7 @@ class WorkPanel:
                     mine.append((s, item))
             now_html.append(f'<li>{" ".join(bits)}</li>')
         if hidden_now:
-            missing = viewer.missing(workflow_classes(wf))
-            now_html.append(f'<li class="muted">At a step you may not see (it needs access to {e(", ".join(missing))})'
-                            f'</li>')
+            now_html += self._hidden_now(run, hidden)
         if not now_html:
             now_html.append('<li class="muted">Between steps</li>')
         ahead = self._next_steps(wf, run, {s.id for s in now_steps}, rt, {s.id for s, _ in seen}) \
@@ -264,8 +367,9 @@ class WorkPanel:
                    + (f' <span class="muted">{left} of {len(kids)} parts open</span>' if left else ""))
         act = "".join(f'<a class="btn primary wp-mine" href="/items/{e(item["id"])}">Your turn: {e(s.title)}</a>'
                       for s, item in mine)
+        state = self._record_state(me, run, rt, ref)
         return (f'<article class="wcard">'
-                f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a>{key}</div>'
+                f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a>{key}{state}</div>'
                 f'<div class="wnow"><span class="k">Now</span><ul class="plain">{"".join(now_html)}</ul></div>'
                 f'{next_html}'
                 f'<ol class="wstrip" aria-hidden="true">{"".join(segs)}</ol>'
@@ -353,8 +457,7 @@ class WorkPanel:
             p_[0] += gl
         width = gl + inner + gr
         height = PAD + 22 + len(rows) * (H + GY) - GY + PAD
-        tone = lambda s: ("success" if s.lower() in self.SETTLED else "removed" if s.lower() in self.UNDONE else
-                          "inprogress" if "review" in s.lower() or s.lower() in self.UNDERWAY else "default")
+        tone = lambda s: self._state_tone(s, rt)
         edges, any_tabs = [], []
         for t in trans:
             # "a move from here" is per source: only the arrow that leaves the current state, and never one only a

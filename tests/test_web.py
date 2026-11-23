@@ -1740,7 +1740,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """Version 2 of the clinic pack merged Appointment into Visit (tests/test_rules.py upgrades a version 1)."""
-    assert hub.pack.version == "4.0" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "4.1" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do
@@ -2129,7 +2129,7 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     assert "Open work" in panel and f'href="/runs/{run["id"]}"' in panel and "Draft the note" in panel
     assert "In progress" in panel and "Move to" not in page  # words, not codes
     # being documented: its workflow waits on no pause now, so the page offers none (only its workflow moves it)
-    assert ">On leave<" not in panel
+    assert ">Patient stepped out<" not in panel
     assert "View workflow" in panel and f'/records/{visit}/workflow" data-modal' in panel
     status, modal = call(server, "GET", f"/records/{visit}/workflow", token(hub, "dr-amara"))
     assert status == 200 and "data-modal-body" in modal and "<svg" in modal

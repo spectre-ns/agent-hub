@@ -23,6 +23,9 @@ active = "record.status in ['requested', 'planned', 'arrived', 'triaged', 'in-pr
 # completed (finished, from an old chart) is not walked.
 workflow = { id = "appointment-request", when = "record.status in ['requested', 'planned', 'arrived', 'in-progress']" }
 order = 70
+# A visit is part of its patient: reached through their chart (Patient > Visits > Visit), listed there, never moved
+# to another patient. The calendar, the schedule and the desk still list every visit.
+part_of = "subject"
 summary = "A visit, from booking to the end: when and with whom, then what billing needs, never the note itself."
 
 # The calendar reads a visit through the core's Booking: booked start and end, the reason, the patient, the
@@ -53,10 +56,10 @@ request_inputs = ["kind", "reason", "urgency"]
 [[field]]
 name = "status"
 type = "choice"
-choices = ["requested", "planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled", "noshow",
+choices = ["requested", "planned", "arrived", "triaged", "in-progress", "onleave", "finished", "undocumented", "cancelled", "noshow",
            "entered-in-error", "unknown"]
 required = true
-help = "planned is booked, arrived checked in, finished completed; requested (asked for, no time yet) and noshow are the practice's own"
+help = "planned is booked, arrived checked in, finished completed; requested (asked for, no time yet), undocumented (completed, its note discarded) and noshow are the practice's own"
 
 [[field]]
 name = "plannedStartDate"
@@ -247,6 +250,25 @@ type = "member"
 by = "workflow"
 help = "the member who took the request (the patient on the portal, the front desk on the phone)"
 
+# Who cancelled a booking: the patient (on the phone, the portal) or the practice (the physician away). Only the
+# patient's late cancellation falls under the missed-appointment policy; one the practice made never does.
+[[field]]
+name = "cancelled_by"
+label = "Cancelled by"
+type = "choice"
+choices = ["patient", "practice"]
+labels = { patient = "The patient", practice = "The practice" }
+help = "the patient (the policy's notice applies) or the practice (no fee; the patient is told and asked to rebook)"
+
+# A patient's cancellation with less than the policy's notice, marked by the visit's workflow: with the no-shows, what
+# the missed-appointment policy counts as the patient's earlier missed appointments.
+[[field]]
+name = "cancelled_late"
+label = "Cancelled late"
+type = "boolean"
+by = "workflow"
+help = "cancelled by the patient with less than 24 hours' notice (or after checking in): counted as a missed appointment"
+
 [[field]]
 name = "serviceProvider"
 label = "Service provider"
@@ -267,8 +289,10 @@ fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "book
 starts = ["in-progress"]   # a visit filed after the fact: under way, documented, signed and billed like any other
 field = "status"
 initial = "planned"
-labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", onleave = "On leave", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
+labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", undocumented = "Completed: no note", onleave = "Patient stepped out", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
 abandoned = { requested = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
+# How each state reads at a glance: a visit no-showed or cancelled has ended, one with no note needs the physician.
+tones = { requested = "waiting", planned = "waiting", arrived = "active", triaged = "active", "in-progress" = "active", onleave = "active", finished = "done", undocumented = "attention", cancelled = "ended", noshow = "ended", "entered-in-error" = "ended" }
 [[lifecycle.transition]]
 from = ["requested"]
 to = "planned"
@@ -283,20 +307,30 @@ label = "Handled on the phone"
 from = ["requested"]
 to = "cancelled"
 by = "workflow"
+# Checking in opens two hours before the visit is booked for, and a no-show only once its time has come: the desk who
+# opens tomorrow's visit by mistake cannot mark it missed (which messages the patient and frees the slot).
 [[lifecycle.transition]]
 from = ["planned"]
 to = "arrived"
 label = "Check in"
+opens = "plannedStartDate - 2h"
 [[lifecycle.transition]]
 from = ["arrived"]
 to = "triaged"
+label = "Mark triaged"
 [[lifecycle.transition]]
-from = ["arrived", "triaged", "onleave"]
+from = ["arrived", "triaged"]
 to = "in-progress"
 label = "Start the visit"
 [[lifecycle.transition]]
+from = ["onleave"]
+to = "in-progress"
+label = "Patient is back"
+# The patient steps out (for a urine sample, to the lab) and comes back: a side move, never the main button.
+[[lifecycle.transition]]
 from = ["in-progress"]
 to = "onleave"
+label = "Patient stepped out"
 [[lifecycle.transition]]
 from = ["in-progress", "onleave"]
 to = "finished"
@@ -305,13 +339,33 @@ by = "workflow"
 from = ["planned", "arrived", "triaged"]
 to = "finished"
 by = "workflow"
+# Its draft note discarded: the visit took place but has no note (Completed: no note, never plain Completed), with
+# the physician asked to write it; once they have, it is completed.
+[[lifecycle.transition]]
+from = ["in-progress", "onleave"]
+to = "undocumented"
+by = "workflow"
+label = "Complete without a note"
+[[lifecycle.transition]]
+from = ["undocumented"]
+to = "finished"
+by = "workflow"
+label = "Note written"
+# Cancelling asks who cancelled, and says how much notice that is: a patient's cancellation with less than 24 hours'
+# notice runs the missed-appointment policy on the visit's own run. Without an answer (the portal: the patient
+# themselves) it is the patient's.
 [[lifecycle.transition]]
 from = ["planned", "arrived"]
 to = "cancelled"
+label = "Cancel the visit"
+fields = ["cancelled_by"]
+confirm = "Cancelled now, that is {plannedStartDate:notice}. Cancelled by the patient with less than 24 hours' notice, the missed-appointment policy applies (a reminder, or a fee) and the patient is told; cancelled by the practice, no fee, and the patient is told and asked to rebook. The {plannedStartDate:time} slot is freed."
 [[lifecycle.transition]]
 from = ["planned"]
 to = "noshow"
-label = "No-show"
+label = "Mark no-show"
+opens = "plannedStartDate"
+confirm = "The patient will be messaged under the missed-appointment policy (a fee may apply), and the {plannedStartDate:time} slot freed for someone else."
 [[lifecycle.transition]]
 from = ["*"]
 to = "entered-in-error"

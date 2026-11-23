@@ -3302,6 +3302,18 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         return (f"a {label} is moved by its workflow; it is not waiting for "
                 f"{rt.state_label(t['to']).lower()} now")
 
+    def move_not_open_yet(self, rt, t: dict, rec: dict, member: dict | None, run_id: str | None) -> str | None:
+        """Why a person may not make a move yet, or None: a move with ``opens`` waits for a time the record keeps (a
+        visit's check-in from two hours before it is booked for, a no-show only once that time has come). A workflow,
+        an import or a module's demo moves it whenever it must."""
+        if not t.get("opens") or (member is not None and self._by_workflow(member, run_id)):
+            return None
+        at = schema.opens_at(rt, t, rec)
+        if at is None or self.engine.now() >= at:
+            return None
+        return (f"{t['label']} opens at {at.strftime('%H:%M')} on {at.strftime('%Y-%m-%d')}: "
+                f"not before then")
+
     def _unwalked_move_refusal(self, rt, ref: str, rec: dict, run: dict) -> str | None:
         """A run moving a record its type's workflow is not walking (a CAPA opening a document approved before the
         upgrade, a renewal closing the order it replaces): only one about the same subject as the record, when the
@@ -3689,6 +3701,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
                     why = self.state_move_refusal(rt, ref, t, after, run_id) if _signature is None else None
                     if why:
                         raise Denied(why)
+                    early = self.move_not_open_yet(rt, t, before, member, run_id)
+                    if early:
+                        raise Invalid(early)
                     # the move's own rule (a transition's require), whoever makes it: a person, a workflow, a signature
                     empty = [rt.field(n)["label"] for n in t.get("require", [])
                              if schema.first(after, rt.field(n)["path"]) in (None, "", [], {})]

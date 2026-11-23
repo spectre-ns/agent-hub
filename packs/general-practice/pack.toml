@@ -21,7 +21,9 @@
 # by a physician's signature "I prescribe this medication as written", never by setting its status; a renewal for a
 # drug not on the chart is written in full, signed as written, faxed and told to the patient; a second renewal for
 # the same drug is flagged to the physician. A visit note's "Refer to" list makes referrals of their own.
-version = "4.0"
+# 4.1: a visit is part of its patient (part_of): reached through and listed on their chart, never moved to another
+# patient; the calendar, the schedule and the desk still list every visit.
+version = "4.1"
 
 [practice]
 requires_core = "1.0"
