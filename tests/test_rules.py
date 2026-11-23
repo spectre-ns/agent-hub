@@ -5048,3 +5048,26 @@ def test_repeated_escalations_of_one_item_are_one_notice_row_with_a_count(hub):
     hub.engine.acknowledge(M(hub, "dr-liam"), rows[0]["_id"])   # acknowledged, the next one is a new row
     hub.engine.tick(now + timedelta(hours=6))
     assert len(hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})) == 2
+
+
+# ---------------------------------------------------------------------------- a lab result: closed only when told
+def test_a_reviewed_result_is_closed_only_once_the_patient_was_told(hub):
+    """A review that ends without the patient told (a visit booked) leaves the result "Patient not told": its review
+    ending does not close it, nor does anyone by hand. Only a physician's "Patient told" signature closes it."""
+    from practicehub.agents.runner import run_all_local
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_patient(hub),
+                           inputs={"test": "Sodium", "value": "131", "unit": "mmol/L", "range": "135-145",
+                                   "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), "book-visit", "")
+    run_all_local(hub, log=quiet)
+    ref = hub.engine.run(run["id"])["record"]
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    assert hub.records.read(*ref.split("/", 1))["review"] == "not-told"
+    with pytest.raises(Denied):
+        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})
+    with pytest.raises(Denied):
+        hub.sign_record(M(hub, "noor"), ref, "Patient told")
+    hub.sign_record(M(hub, "dr-amara"), ref, "Patient told")
+    assert hub.records.read(*ref.split("/", 1))["review"] == "closed"

@@ -214,6 +214,52 @@ def test_a_result_named_for_another_patient_is_refused(hub):
     assert any("someone else" in p for p in refused.value.problems)
 
 
+def _flagged_review(hub, outcome):
+    """An abnormal sodium the physician has reviewed with ``outcome``: (run, result ref)."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), outcome, "")
+    run_all_local(hub, log=quiet)
+    return run, hub.engine.run(run["id"])["record"]
+
+
+@pytest.mark.parametrize("action,want", [("reached-the-patient", "closed"), ("letter-sent", "not-told"),
+                                         ("booked-a-visit", "not-told"), ("no-further-action", "not-told")])
+def test_a_result_is_closed_only_when_the_patient_was_told(hub, action, want):
+    """The nurse could not reach the patient: only the physician reaching them closes the result. Any other way the
+    review ends leaves it "Patient not told"."""
+    run, ref = _flagged_review(hub, "call-patient")
+    hub.engine.complete(M(hub, "noor"), item_for(hub, run, "call"), {"reached": False, "notes": "no answer"})
+    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"action": action, "notes": "done"})
+    run_all_local(hub, log=quiet)
+    assert _read(hub, ref)["review"] == want
+    assert hub.engine.run(run["id"])["status"] == "completed"
+
+
+def test_a_result_with_a_visit_booked_is_not_told_until_a_physician_signs_it_closed(hub):
+    """A visit booked to talk a result over has not told the patient: the result is "Patient not told" until a
+    physician signs that they were told. Nobody else closes it, by hand or by signature."""
+    run, ref = _flagged_review(hub, "book-visit")
+    assert _read(hub, ref)["review"] == "not-told"
+    assert hub.record_type("Observation").state_label("not-told") == "Patient not told"
+    with pytest.raises(Denied):
+        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})  # not a hand move
+    with pytest.raises(Denied):
+        hub.sign_record(M(hub, "noor"), ref, "Patient told")  # a nurse does not close it
+    hub.sign_record(M(hub, "dr-amara"), ref, "Patient told", "Told at the visit")
+    assert _read(hub, ref)["review"] == "closed"
+
+
+def test_a_review_cancelled_after_the_physician_reviewed_leaves_the_patient_not_told(hub):
+    """Cancelled before anyone told the patient, a reviewed result is "Patient not told", never closed."""
+    run, ref = _flagged_review(hub, "call-patient")
+    assert _read(hub, ref)["review"] == "reviewed"
+    hub.engine.cancel(M(hub, "rana"), run["id"], "the patient moved away")
+    assert _read(hub, ref)["review"] == "not-told"
+
+
 def test_a_late_critical_review_reaches_the_medical_director_by_name_and_a_chaser(hub):
     """A critical review nobody has taken waits on every physician. Overdue, it still names the medical director
     (who is one of those physicians), and since that tells no one outside the physicians, the practice manager
