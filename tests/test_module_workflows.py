@@ -176,6 +176,8 @@ def test_upgrading_dms_proposes_the_type_and_workflow_and_work_under_way_goes_on
     old = open_run(hub, "dms-review", ref)  # started by its event, version 1
     proposed = old_modules(hub, "dms")
     assert ("type", "Document") in proposed and ("workflow", "dms-review") in proposed
+    with pytest.raises(Invalid, match="record type first"):  # else new ones start nothing
+        hub.approve_workflow(amara, "dms-review", proposed[("workflow", "dms-review")])
     hub.approve(amara, "type", "Document", proposed[("type", "Document")])
     # the type now names the workflow, whose new version is not approved yet: the old one goes on alone
     d2 = hub.create_record(rana, "Document", {"title": "Interim"})
@@ -189,9 +191,10 @@ def test_upgrading_dms_proposes_the_type_and_workflow_and_work_under_way_goes_on
     assert hub.engine.run(old["id"])["status"] == "completed"
     new = open_run(hub, "dms-review", ref)  # handed on to the new version, which walks it from in force
     assert new["version"] > old["version"] and step_state(hub, new, "in-force") == "waiting"
-    # a record filed before is walked from its next move
-    hub.update_record(rana, f"Document/{d2['id']}", {"status": "in-review"})
-    assert item_for(hub, open_run(hub, "dms-review", f"Document/{d2['id']}"), "approve")
+    # a record filed before is picked up where it is when the workflow is approved, not only at its next write
+    walk = open_run(hub, "dms-review", f"Document/{d2['id']}")
+    assert step_state(hub, walk, "revise") in ("active", "waiting")
+    assert hub.walk_unwalked() == {}  # once
 
 
 def approve_all(hub, proposed, by):

@@ -3076,6 +3076,25 @@ def test_not_by_keeps_off_whoever_did_the_step_in_any_earlier_pass_of_the_record
     hub.engine.claim(noor, v)
 
 
+# ------------------------------------------------------------------ round 7 core: records their workflows walk
+def test_records_nothing_walks_are_picked_up_after_an_approval_once_per_version_of_their_workflow(hub):
+    """Rule: after a type or a workflow is approved (and when the hub opens), every record whose type's workflow
+    walks it now and whose ``when`` holds, but that nothing walks (filed before), is picked up where it is, in
+    batches; once per version of the workflow. A workflow version that stops starting itself is approved only
+    after the type that names it (``Hub._check_hand_over``; tests/test_module_workflows.py)."""
+    install(hub, "dms")
+    doc = hub.records.create("Document", {"resourceType": "Document", "title": "Filed before", "body": "B",
+                                          "status": "draft", "owner": "rana"})
+    ref = f"Document/{doc['id']}"
+    assert not hub.db.runs.find_one({"record": ref})
+    hub.db.set_setting(hub.WALKED, {})
+    assert hub.walk_unwalked() == {"Document": 1}
+    assert _own_run(hub, ref, "dms-review")
+    assert hub.walk_unwalked() == {}
+    hub.db.set_setting(hub.WALKED, {})
+    assert hub.walk_unwalked() == {}  # it is walked: never a second run
+
+
 def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_up_where_it_lands(hub):
     """Rule: a record its type's workflow is not walking (approved before an upgrade, or its run is over) is moved
     by another workflow's run as any record is, rather than refused, and its own workflow starts where it lands; a

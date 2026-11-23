@@ -394,6 +394,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
             self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.upgrade_failed",
                               f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
                               data={"error": str(exc)[:500]})
+        try:
+            self.walk_unwalked(actor)
+        except Exception as exc:  # noqa: BLE001 - goes on at the next approval or start; each record when written
+            self.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "practice.walk_failed",
+                              f"practice:{(self.pack.practice or {}).get('id', self.pack.id)}",
+                              data={"error": str(exc)[:500]})
 
     UPGRADE_PROGRESS = "pack_upgrade_progress"  # setting: {upgrade id: {"batches": n, "state": {...}, "done": {...}}}
 
@@ -3344,22 +3350,68 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         the active version has never walked it, so it is idempotent; it is retried on every write until it starts; and
         a start that fails is noted on the track (``trigger.failed``) without failing the write."""
         owner = rt.workflow["id"]
-        if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner \
-                or schema.starts_workflow(rt, rec) != owner:
+        if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner:
             return
+        self._pick_up(rt, ref, rec, member, cause)
+
+    def _pick_up(self, rt, ref: str, rec: dict, member: dict, cause: int | None) -> bool:
+        """Start the workflow ``rt`` names about ``ref`` where it is, if its ``when`` holds, nothing of it is open
+        about the record and its active version has never walked it (idempotent). A start that fails is noted
+        (``trigger.failed``) in a savepoint of its own. Whether it started."""
+        owner = rt.workflow["id"]
+        if schema.starts_workflow(rt, rec) != owner:
+            return False
         last = self.db.runs.find_one({"workflow_id": owner, "record": ref}, sort=[("created_at", DESC)],
                                      fields=["id", "status", "version"])
         if last and (last["status"] == "running" or last["version"] >= self.workflow(owner)[1]["version"]):
-            return
+            return False
         starter = member if member.get("kind") in ("person", "agent", "service") else \
             {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
         try:
             with self.db:  # a savepoint: a record its workflow cannot pick up is still written
                 self.engine.start(starter, owner, record=ref, cause=cause, via_automation=True, on_create=True,
                                   previous=last["id"] if last else None)
+            return True
         except Exception as exc:  # noqa: BLE001
             self.track.append(starter, "trigger.failed", ref, cause=cause,
                               data={"workflow": owner, "error": f"picking it up: {exc}"})
+            return False
+
+    WALKED = "records_walked"  # setting: {type id: "workflow@version" whose sweep over the type's records is done}
+
+    def walk_unwalked(self, actor: dict | None = None) -> dict:
+        """Every record of a type whose workflow walks it now (``record_workflow``) that nothing walks yet (filed or
+        approved before its type named a workflow, a locked one included) is picked up where it is (``_pick_up``),
+        not only when it is next written: run when a type or a workflow is approved and when the hub opens, outside
+        any other transaction, a batch per transaction. Each type's sweep is done once per version of its workflow
+        (``records_walked``), and a sweep cut short goes on next time (a record already walked is skipped)."""
+        if self.db.in_transaction():
+            raise RuntimeError("the sweep runs in batches, each its own transaction: call this outside one")
+        member = {"id": "hub", "kind": "automation", "name": "Practice Hub"}
+        started: dict[str, int] = {}
+        for rt in self.record_types().values():
+            owner = (rt.workflow or {}).get("id")
+            if not owner or not rt.lifecycle or self.record_workflow(rt) != owner:
+                continue
+            mark = f"{owner}@{self.workflow(owner)[1]['version']}"
+            if (self.db.get_setting(self.WALKED) or {}).get(rt.id) == mark:
+                continue
+            recs = self.records.search(rt.id, limit=None)
+            for i in range(0, len(recs), self.UPGRADE_BATCH):
+                def batch(chunk=recs[i:i + self.UPGRADE_BATCH]):
+                    n = 0
+                    for rec in chunk:
+                        n += self._pick_up(rt, f"{rt.id}/{rec['id']}", rec, member, None)
+                    return n
+                got = self.db.atomic(batch)
+                if got:
+                    started[rt.id] = started.get(rt.id, 0) + got
+            self.db.atomic(lambda: self.db.set_setting(self.WALKED, {**(self.db.get_setting(self.WALKED) or {}),
+                                                                     rt.id: mark}))
+            if started.get(rt.id):
+                self.track.append(member, "practice.records_walked", f"type:{rt.id}",
+                                  data={"workflow": mark, "started": started[rt.id], "after": (actor or {}).get("id")})
+        return started
 
     def _by_workflow(self, member: dict, run_id: str | None) -> bool:
         return member.get("kind") == "automation" or run_id is not None
@@ -4091,10 +4143,29 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
         except wfmod.DefinitionError as exc:
             raise Invalid("the workflow no longer validates", exc.problems) from None
         meaning = meaning or f"I approve version {version} of the {wf.title} workflow"
+        self._check_hand_over(wf)
         with self.db:
             self._activate("workflow", actor, wid, version, row, meaning)
             self._sync_starters(wf)
+        self._upgrades_after(actor)  # records of its type that nothing walks yet are picked up now
         return {"workflow_id": wid, "version": version}
+
+    def _check_hand_over(self, wf) -> None:
+        """A version that stops starting itself on its record's events (``record.*:T``) leaves the starting to the
+        type, so the type in force must name it first; approved the other way round, new records of the type would
+        start nothing."""
+        try:
+            cur = self.workflow(wf.id)[0]
+        except NotFound:
+            return
+        t = cur.record or ""
+        before = (cur.event or "").startswith("record.") and (cur.event or "").endswith(f":{t}")
+        now = (wf.event or "").startswith("record.") and (wf.event or "").endswith(f":{t}")
+        rt = self.record_type(t) if t else None
+        if before and not now and rt is not None and (rt.workflow or {}).get("id") != wf.id:
+            raise Invalid(f"approve the {rt.label} record type first", [
+                f"this version of {wf.title} no longer starts itself on {rt.plural.lower()}; the {rt.label} record "
+                f"type in force does not name it yet, so new {rt.plural.lower()} would start nothing"])
 
     def withdraw_workflow(self, actor: dict, wid: str, version: int, reason: str = "") -> None:
         self._withdraw("workflow", actor, wid, version, reason)
