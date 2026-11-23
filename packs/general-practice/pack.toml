@@ -259,10 +259,21 @@ intake_workflow = "new-patient-intake"
 [portal.wording]
 booking = "Visit"
 requested = "We have your request. A member of our team reads it and contacts you, usually within one working day."
+visit_next = "Come to the practice 10 minutes before your time, with your health card."
+request_next = "A member of our team contacts you to arrange a time, usually within one working day."
+safety = "If this is an emergency, call 911 or go to the nearest emergency department now. For health advice at any hour, call 811."
+
+# A person who already has as many open as a kind allows (max_upcoming) may still write: nothing more is booked, but
+# what they wrote is screened at once and, unless it is plainly paperwork, goes to a nurse as a patient question.
+[portal.over_limit]
+workflow = "patient-question"
+input = "question"
 
 [portal.identity]
 born = "birthDate"            # with the health card ([base] identifier) and a code sent to the phone ([base] contact)
 inputmode = "numeric"         # a health card number: the phone shows digits
+digits = 10                   # checked on the sign-in form, before anything is asked of the hub
+identifier_help = "10 digits, as on your Nova Scotia health card. Spaces are fine."
 
 [portal.code]
 channel = "sms"               # no SMS provider is connected yet: the code waits on the outbox (see docs/portal.md)
@@ -270,7 +281,7 @@ minutes = 10
 length = 6
 
 [portal.register]
-fields = ["given", "family", "birthDate", "health_card", "phone"]
+fields = [{ field = "given", label = "First name" }, { field = "family", label = "Last name" }, "birthDate", { field = "health_card", help = "10 digits, as on your Nova Scotia health card." }, { field = "phone", label = "Mobile phone", required = true, help = "We text your sign-in code to this number." }]
 pending = { active = false }  # a request to join: no sign-in, no booking, until the intake accepts the patient
 
 # A new concern goes in as a request: the appointment request screens the reason for red flags (and says at once

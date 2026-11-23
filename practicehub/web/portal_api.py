@@ -120,12 +120,18 @@ def op_sign_out(p: Portal, data: dict) -> dict:
 
 def op_me(p: Portal, data: dict) -> dict:
     row = _session(p, data)
-    return {"form": row["form"], "upcoming": p.upcoming(row["record"]), "requests": p.open_requests(row["record"])}
+    return {"form": row["form"], "upcoming": p.upcoming(row["record"]), "requests": p.open_requests(row["record"]),
+            "limits": p.limits(row["record"])}
 
 
 def op_slots(p: Portal, data: dict) -> dict:
-    _session(p, data)
-    return {"slots": p.free_slots(_s(data, "kind"))}
+    row = _session(p, data)
+    kid = _s(data, "kind")
+    days = p.free_days(kid)
+    want = _s(data, "day")
+    day = want if any(d["date"] == want for d in days) else (days[0]["date"] if days else None)
+    return {"days": days, "day": day, "slots": p.free_slots(kid, day=day) if day else [],
+            "limit": p.limits(row["record"]).get(kid)}
 
 
 def op_book(p: Portal, data: dict) -> dict:
