@@ -3095,6 +3095,36 @@ def test_records_nothing_walks_are_picked_up_after_an_approval_once_per_version_
     assert hub.walk_unwalked() == {}  # it is walked: never a second run
 
 
+def test_a_resting_wait_is_rechecked_only_by_its_own_record_is_not_open_work_and_does_not_block_removal(hub,
+                                                                                                     monkeypatch):
+    """Rule: a wait no one is asked to watch and no time ends (a document in force) rests: a write rechecks only the
+    runs whose waits can see the record written (``waits_on``: their record, or "*" for a wait over a list); a
+    resting run is not open work on the record's page, the board's Waiting lane or the metrics; and removing its
+    module stops it rather than being refused."""
+    install(hub, "dms")
+    rana = M(hub, "rana")
+    docs = [hub.records.create("Document", {"resourceType": "Document", "title": f"SOP {n}", "body": "B",
+                                            "status": "approved", "revision": 1, "owner": "rana"}) for n in (1, 2)]
+    hub.db.set_setting(hub.WALKED, {})
+    hub.walk_unwalked()
+    refs = [f"Document/{d['id']}" for d in docs]
+    runs = [_own_run(hub, r, "dms-review") for r in refs]
+    for r, ref in zip(runs, refs):
+        assert r["steps"]["in-force"]["state"] == "waiting" and r["waits_on"] == ref and r["resting"] is True
+        assert hub.engine.item(r["item"])["resting"] is True
+    woke = []
+    real = hub.engine.advance
+    monkeypatch.setattr(hub.engine, "advance", lambda rid, cause=None, *a, **k: (woke.append(rid),
+                                                                                real(rid, cause, *a, **k))[1])
+    hub.engine.recheck_waits(None, refs[0])
+    assert woke == [runs[0]["id"]]  # the other document's wait cannot see this write
+    monkeypatch.setattr(hub.engine, "advance", real)
+    from practicehub import analytics
+    assert all(f["open"] == 0 for f in analytics.report(hub, rana)["workflows"] if f["id"] == "dms-review")
+    hub.uninstall_module(rana, "dms", "no longer needed")
+    assert all(hub.engine.run(r["id"])["status"] == "cancelled" for r in runs)
+
+
 def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_up_where_it_lands(hub):
     """Rule: a record its type's workflow is not walking (approved before an upgrade, or its run is over) is moved
     by another workflow's run as any record is, rather than refused, and its own workflow starts where it lands; a

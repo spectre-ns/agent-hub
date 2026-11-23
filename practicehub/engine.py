@@ -422,6 +422,22 @@ _WAITING = {"$expr": {"$in": ["waiting", {"$map": {"input": {"$objectToArray": {
 OPEN_WORK = ("open", "claimed", "held")
 
 
+def _waits(run: dict) -> dict:
+    """What a run's waits depend on, kept on the run so a write rechecks only the runs it can wake: ``waits_on`` is
+    its record (a wait's ``until`` is pure, and sees only the run's own record, its context and the time), or "*"
+    for a wait over a list (``for_each`` reads other records) or a run with no record; None when nothing waits.
+    ``resting``: every step still open is a wait no one is asked to watch (no role, no time it ends): a document in
+    force, an item in stock. Nothing is to be done about it, so it is not open work on the record's page, on the
+    board or in the metrics."""
+    st = [v for v in (run.get("steps") or {}).values() if isinstance(v, dict)]
+    waiting = [v for v in st if v.get("state") == "waiting"]
+    if not waiting or run.get("status") != "running":
+        return {"waits_on": None, "resting": False}
+    on = "*" if any(v.get("each") for v in waiting) or not run.get("record") else run["record"]
+    rests = all(v.get("rests") for v in waiting) and not any(v.get("state") in ("active", "failed") for v in st)
+    return {"waits_on": on, "resting": rests}
+
+
 def _item_doc(hub, **fields) -> dict:
     """A new work item with every field it has: what is not given takes its default."""
     doc = {"id": None, "n": hub.db.next_seq("items"), "run_id": None, "step_id": "", "kind": None, "title": "",
@@ -505,7 +521,7 @@ class Engine:
 
     def _save(self, run: dict) -> None:
         self.hub.db.runs.set(run["id"], {"ctx": run["ctx"], "steps": run["steps"], "status": run["status"],
-                                         "refs": run_refs(run), "updated_at": utcnow()})
+                                         "refs": run_refs(run), **_waits(run), "updated_at": utcnow()})
 
     def automation_actor(self, run: dict) -> dict:
         return {"id": f"workflow:{run['workflow_id']}@v{run['version']}", "kind": "automation", "name": run["title"],
@@ -1016,15 +1032,21 @@ class Engine:
                                      cause=cause, data={"step": step.id, "when": step.when})
                     break
                 if step.kind == "wait":
-                    st.update(state="waiting")
+                    st.update(state="waiting", **({"each": True} if step.for_each else {}))
                     self._save(run)
                     self._hist_note(run, step, done=False)
                     hub.track.append(self.automation_actor(run), "step.waiting", f"step:{step.id}", run_id=run_id,
                                      cause=cause, data={"step": step.id, "until": step.until,
                                                         **({"for_each": step.for_each} if step.for_each else {}),
                                                         **_timing(step)})
-                    if not self._wait_over(run, step, cause) and step.role:
-                        self._notice(run, step, f"Waiting: {step.title}", role=step.role, cause=cause)
+                    if not self._wait_over(run, step, cause):
+                        if step.role:
+                            self._notice(run, step, f"Waiting: {step.title}", role=step.role, cause=cause)
+                        elif not step.for_each and not getattr(step, "timeout", None) \
+                                and not run["steps"][step.id].get("wake_at") \
+                                and run["steps"][step.id].get("state") == "waiting":
+                            run["steps"][step.id]["rests"] = True  # no one watches it, and no time ends it
+                            self._save(run)
                     break
                 if step.kind == "automation":
                     actor = self.automation_actor(run)
@@ -1248,9 +1270,14 @@ class Engine:
             out.append(run["id"])
         return out
 
-    def recheck_waits(self, cause: int | None) -> None:
-        """Something changed: let every run that is waiting see whether what it waits for now holds."""
-        rows = self.hub.db.runs.find({"status": "running", **_WAITING}, fields=["id"])
+    def recheck_waits(self, cause: int | None, ref: str | None = None) -> None:
+        """Something changed: let every run that is waiting see whether what it waits for now holds. ``ref``: the
+        record that changed; only the runs whose waits can see it are rechecked (``waits_on``: that record, or "*"),
+        and runs saved before it was kept; the tick rechecks every waiting run (time, and changes made outside)."""
+        q = {"status": "running", **_WAITING}
+        if ref:
+            q["$or"] = [{"waits_on": {"$in": [ref, "*"]}}, {"waits_on": {"$exists": False}}]
+        rows = self.hub.db.runs.find(q, fields=["id"])
         for r in rows:
             if r["id"] in self._advancing:
                 continue  # that run is advancing now and checks its waits itself
@@ -1612,7 +1639,8 @@ class Engine:
         hub.db.items.set(item_id, {"waiting": "; ".join(words), "kind": "wait", "step_id": step.id if step else "",
                                    "step_title": step.title if step else "", "role": None, "assignee": None,
                                    "claimed_by": None, "due_at": None, "escalated": 0, "escalate_next": None,
-                                   "persons_only": 0, "updated_at": utcnow()})
+                                   "persons_only": 0, "resting": bool(_waits(run)["resting"]),
+                                   "updated_at": utcnow()})
 
     def _hist_note(self, run: dict, step, *, done: bool = True, outcome: str | None = None,
                    by: str | None = None) -> None:
@@ -2612,7 +2640,7 @@ class Engine:
             except Exception as exc:  # noqa: BLE001 - a trigger that cannot start is reported, not fatal to the write
                 self.hub.track.append(self.automation_actor_for(wf), "trigger.failed", ref, cause=cause,
                                       data={"workflow": wf.id, "event": wf.event, "error": str(exc)})
-        self.recheck_waits(cause)
+        self.recheck_waits(cause, ref)
         return started
 
     def automation_actor_for(self, wf) -> dict:
