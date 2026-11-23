@@ -889,49 +889,77 @@ class Portal:
                     out.append(m)
         return out
 
-    def free_slots(self, kid: str, *, limit: int | None = None) -> list[dict]:
+    def free_slots(self, kid: str, *, day: str | None = None, limit: int | None = None) -> list[dict]:
         """The times free for this kind: its length, with the members of its roles, between the practice's hours,
-        from now to its horizon. Each is ``{value, label, day, time, with}``; ``value`` is ``YYYY-MM-DDTHH:MM|member``,
-        as the core's ``booking.book`` takes it."""
-        from .engine import bookings
+        from now to its horizon, or on ``day`` (``YYYY-MM-DD``) alone. Each is ``{value, label, day, date, time,
+        with}``; ``value`` is ``YYYY-MM-DDTHH:MM|member``, as the core's ``booking.book`` takes it. ``max_slots`` caps
+        what one day offers (a page lists one day at a time: ``free_days`` lists the days)."""
         k = self.kind(kid)
         if self.slot_mode(k) == "none":
             return []
+        now = self.hub.engine.now().replace(second=0, microsecond=0)
+        last = now.date() + timedelta(days=int(k.get("horizon_days", 14)))
+        if day is not None:
+            try:
+                first = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+            except ValueError:
+                return []
+            if not now.date() <= first <= last:
+                return []
+            last = first
+        else:
+            first = now.date()
+        per_day = limit or int(k.get("max_slots", 60))
+        out = []
+        for d, slots in self._free(k, first, last, now):
+            out += slots[:per_day]
+        return out
+
+    def free_days(self, kid: str) -> list[dict]:
+        """The working days in the kind's horizon that have a free time, first to last: ``{date, label, count}``."""
+        k = self.kind(kid)
+        if self.slot_mode(k) == "none":
+            return []
+        now = self.hub.engine.now().replace(second=0, microsecond=0)
+        last = now.date() + timedelta(days=int(k.get("horizon_days", 14)))
+        return [{"date": d.isoformat(), "label": slots[0]["day"], "count": len(slots)}
+                for d, slots in self._free(k, now.date(), last, now) if slots]
+
+    def _free(self, k: dict, first, last, now: datetime):
+        """Each working day from ``first`` to ``last``, with its free times (every member of the kind's roles)."""
+        from .engine import bookings
         cal = (self.hub.pack.calendar or {}) if self.hub.pack else {}
         hours = cal.get("hours") or {}
         step = int(k.get("minutes") or cal.get("slot_minutes", 15))
         size = int(cal.get("slot_minutes", 15))
-        now = self.hub.engine.now().replace(second=0, microsecond=0)
-        last = now.date() + timedelta(days=int(k.get("horizon_days", 14)))
         busy: dict[str, list[tuple[datetime, datetime]]] = {}
-        for b in bookings(self.hub, since=now.date().isoformat(), until=(last + timedelta(days=1)).isoformat()):
+        for b in bookings(self.hub, since=first.isoformat(), until=(last + timedelta(days=1)).isoformat()):
             span = self.hub.booking_span(b, size)
             if span:
                 for who in b["with"]:
                     busy.setdefault(who, []).append(span)
-        cap = limit or int(k.get("max_slots", 60))
         people = self._holders(k)
-        out = []
-        day = now.date()
-        while day <= last and len(out) < cap:
+        day = first
+        while day <= last:
             key = day.strftime("%a").lower()[:3]
             if key in hours:
+                out = []
                 opens, closes = (datetime.combine(day, datetime.strptime(x, "%H:%M").time()) for x in hours[key])
                 t = opens
-                while t + timedelta(minutes=step) <= closes and len(out) < cap:
+                while t + timedelta(minutes=step) <= closes:
                     end = t + timedelta(minutes=step)
                     if t > now:
                         for m in people:
                             if not any(s < end and t < e for s, e in busy.get(m["id"], [])):
                                 out.append({"value": f"{t:%Y-%m-%dT%H:%M}|{m['id']}", "day": day_words(t),
-                                            "time": clock(t), "with": m["name"],
+                                            "date": day.isoformat(), "time": clock(t), "with": m["name"],
                                             "label": f"{when_words(t)} with {m['name']}"})
                     t = end
+                yield day, out
             day += timedelta(days=1)
-        return out[:cap]
 
     def slot_free(self, kid: str, value: str) -> bool:
-        return any(s["value"] == value for s in self.free_slots(kid, limit=10000))
+        return any(s["value"] == value for s in self.free_slots(kid, day=str(value)[:10], limit=10000))
 
     # --- booking: always through the kind's workflow
     def _runs(self, person: str, k: dict) -> list[dict]:
@@ -995,7 +1023,7 @@ class Portal:
         if problems:
             raise Invalid("the form has problems", problems)
         if slot and (mode == "none" or not self.slot_free(kid, slot)):
-            raise Clash(self.free_slots(kid))
+            raise Clash(self.free_slots(kid, day=slot[:10]) if slot else [])
         if full:
             return self.over_limit(k, person, answers)
         try:

@@ -127,7 +127,11 @@ def op_me(p: Portal, data: dict) -> dict:
 def op_slots(p: Portal, data: dict) -> dict:
     row = _session(p, data)
     kid = _s(data, "kind")
-    return {"slots": p.free_slots(kid), "limit": p.limits(row["record"]).get(kid)}
+    days = p.free_days(kid)
+    want = _s(data, "day")
+    day = want if any(d["date"] == want for d in days) else (days[0]["date"] if days else None)
+    return {"days": days, "day": day, "slots": p.free_slots(kid, day=day) if day else [],
+            "limit": p.limits(row["record"]).get(kid)}
 
 
 def op_book(p: Portal, data: dict) -> dict:

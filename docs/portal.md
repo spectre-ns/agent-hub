@@ -212,8 +212,12 @@ Each `[portal.kinds.<id>]` takes these keys.
 
 **Its times:**
 
-- `roles`, `minutes`, `horizon_days`, `max_slots`: whose free time is offered, how long a visit is, and how far
-  ahead.
+- `roles`, `minutes`, `horizon_days`, `max_slots`: whose free time is offered, how long a visit is, how far ahead,
+  and how many times one day offers (default 60).
+- The form asks its questions first, then lists the working days in the horizon that have free time. Choosing a
+  day shows the form again, with what was written kept, and that day's times grouped by the person who gives them.
+  Nothing is sent until the person presses the form's own button (Enter presses it too). If the time has gone by
+  then, the form comes back with that day's times free now.
 - `slot`: `required`, `optional` or `none`. The input the time goes to is `slot_input` (default `slot`).
 
 **What it asks:**

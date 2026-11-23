@@ -877,3 +877,41 @@ def test_the_portal_knows_when_the_practice_is_closed(hub):
     assert p.opens(saturday) == datetime(2026, 11, 23, *map(int, hours["mon"][0].split(":")))
     assert p.opens(datetime(2026, 11, 23, 10, 0)) is None, "open now"
     assert p.opens(datetime(2026, 11, 23, 7, 30)).date() == datetime(2026, 11, 23).date()
+
+
+def test_booking_is_day_first_with_each_days_times_under_its_physician(hub):
+    """Round 7 blocker: the form listed only the first max_slots times (about a day), so other days never showed
+    and a visit booked online was never far enough off to cancel online."""
+    p = Portal(hub)
+    days = p.free_days("forms")
+    assert len(days) >= 10, "every working day of the horizon with free time"
+    assert all(d["count"] > 0 for d in days) and [d["date"] for d in days] == sorted(d["date"] for d in days)
+    later = days[-1]["date"]
+    slots = p.free_slots("forms", day=later)
+    assert slots and {s["date"] for s in slots} == {later}
+    assert len(slots) <= int(p.kind("forms").get("max_slots", 60)), "the cap is per day"
+    assert p.slot_free("forms", slots[0]["value"])
+    assert p.free_slots("forms", day="1999-01-01") == [] and p.free_slots("forms", day="nonsense") == []
+
+    app = portal_app(hub)
+    person(hub)
+    b = Browser(app)
+    _sign_in(b)
+    page = b.go("GET", "/book/forms")[2]
+    assert page.index('name="reason"') < page.index('name="_day"'), "what it is about, before when"
+    assert page.index('class="enter-default"') < page.index('name="_day"'), "Enter books, it does not pick a day"
+    assert "You can cancel online up to 24 hours before" in page
+    status, _, page = b.go("POST", "/book/forms", {"_form": _field(page, "_form"), "_submit": _field(page, "_submit"),
+                                                   "reason": "a sick note for work", "_day": later})
+    assert status == 200 and "a sick note for work" in page, "what they wrote is kept"
+    assert f'value="{later}" formnovalidate aria-pressed="true"' in page
+    values = [v for v in re.findall(r'name="slot" value="([^"]*)"', page) if v]
+    assert values and all(v.startswith(later) for v in values)
+    assert "<h4>" in page, "the times are under each physician"
+    status, h, _ = b.go("POST", "/book/forms", {"_form": _field(page, "_form"), "_submit": _field(page, "_submit"),
+                                                "reason": "a sick note for work", "slot": values[0], "_go": "1"})
+    assert status == 303
+    page = b.go("GET", h["Location"])[2]
+    assert "<title>Booked" in page
+    page = b.go("GET", "/me")[2]
+    assert "/cancel?" in page, "booked days ahead: it can be cancelled online"

@@ -57,6 +57,12 @@ PORTAL_CSS = """
 .portal .dob>div{flex:1}
 .portal .dob>div.month{flex:2}
 .portal .btn{min-height:44px}
+.portal .days{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 12px}
+.portal .days .btn{text-align:left}
+.portal .days .btn.on{outline:3px solid var(--focus,var(--brand));outline-offset:1px;font-weight:700}
+.portal h4{margin:10px 0 4px;font-size:1em}
+.portal .slot-none{display:flex;gap:6px;align-items:center;min-height:44px}
+.portal .enter-default{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
 .portal .limit{display:block;padding:8px 12px;margin:8px 0;border-radius:6px;background:var(--warning-bg);color:var(--fg)}
 """
 
@@ -512,64 +518,88 @@ class PortalApp:
                      f'{e(val)}</textarea>')
         return self._label(fid, label, bool(q.get("required"))) + help_ + err + field
 
-    def _slots(self, k: dict, slots: list[dict], chosen: str = "", problem: bool = False) -> str:
+    def _slots(self, k: dict, got: dict, chosen: str = "", problem: bool = False) -> str:
+        """Day first: the working days with free time, as buttons that show that day (no script: the form comes back
+        with what was written kept), then that day's times, under each person who gives them."""
         mode = k["slot"]
         if mode == "none":
             return ""
-        days: dict[str, list[dict]] = {}
-        for s in slots:
-            days.setdefault(s["day"], []).append(s)
+        days, day, slots = got.get("days") or [], got.get("day"), got.get("slots") or []
         if not days:
-            grid = '<p class="muted">No times are free online just now.</p>'
+            grid = '<p class="muted">No times are free online just now. Call the practice.</p>'
         else:
-            grid = "".join(
-                f'<h3>{e(day)}</h3><div class="slots">' + "".join(
-                    f'<label><input type="radio" name="slot" value="{e(s["value"])}"'
-                    f'{" checked" if s["value"] == chosen else ""}{" required" if mode == "required" else ""}> '
-                    f'{e(s["time"])}, {e(s["with"])}</label>' for s in day_slots) + "</div>"
-                for day, day_slots in days.items())
+            picker = "".join(
+                f'<button class="btn day{" on" if d["date"] == day else ""}" name="_day" value="{e(d["date"])}" '
+                f'formnovalidate aria-pressed="{"true" if d["date"] == day else "false"}">{e(d["label"])}'
+                f'<span class="muted"> {d["count"]} free</span></button>' for d in days)
+            by: dict[str, list[dict]] = {}
+            for s in slots:
+                by.setdefault(s["with"], []).append(s)
+            when = next((d["label"] for d in days if d["date"] == day), "")
+            grid = (f'<p class="help" id="days-help">Choose a day to see its times.</p>'
+                    f'<div class="days" role="group" aria-label="Days with free times">{picker}</div>'
+                    f'<h3>{e(when)}</h3>' + ("".join(
+                        f'<h4>{e(who)}</h4><div class="slots">' + "".join(
+                            f'<label><input type="radio" name="slot" value="{e(s["value"])}"'
+                            f'{" checked" if s["value"] == chosen else ""}{" required" if mode == "required" else ""}>'
+                            f' {e(s["time"])}</label>' for s in mine) + "</div>"
+                        for who, mine in by.items()) or '<p class="muted">No times are free on this day now.</p>'))
         if mode == "optional":
-            grid = (f'<label><input type="radio" name="slot" value=""{" checked" if not chosen else ""}> '
-                    f'No time now: the practice contacts you</label>{grid}')
+            grid = (f'<label class="slot-none"><input type="radio" name="slot" value=""{" checked" if not chosen else ""}>'
+                    f' No time now: the practice contacts you</label>{grid}')
         inv = ' aria-invalid="true" aria-describedby="problems"' if problem else ""
         return (f'<fieldset{inv}><legend class="q">Choose a time'
                 f'{" <span class=req>(required)</span>" if mode == "required" else ""}</legend>{grid}</fieldset>')
 
     def book_form(self, req, kid: str, problems=(), values=None, slots=None) -> str:
+        """Questions first, then the day and its times: what the person needs is asked before when."""
         self.signed_in(req)
         s = self.me(req)
         k = self.kind(kid)
         values = values or {}
-        got = self.call(req, "slots", kind=kid)
-        slots = got["slots"] if slots is None else slots
+        day = values.get("_day") or (values.get("slot") or "")[:10]
+        got = self.call(req, "slots", kind=kid, **({"day": day} if day else {}))
+        if slots is not None:
+            got = {**got, "slots": [x for x in slots if x.get("date") == got.get("day")] or got.get("slots")}
         lim = got.get("limit") or {}
         full = bool(lim) and lim.get("open", 0) >= lim.get("max", 1)
         qs = "".join(self._question(q, values.get(q["name"]), problems) for q in k["questions"])
         desc = f'<p>{e(k["description"])}</p>' if k.get("description") else ""
         note = (f'<p class="limit" role="status">{e(self.say("at_limit", open=lim["open"]))}</p>'
                 f'<p class="safety"><strong>{e(self.say("safety"))}</strong></p>') if full else ""
+        rule = ""
+        if k.get("cancel_before_hours") and not full and k["slot"] != "none":
+            rule = (f'<p class="help">You can cancel online up to {int(k["cancel_before_hours"])} hours before. '
+                    f'After that, call the practice.</p>')
         no_slot = any("time" in str(p).lower() for p in problems or ())
-        times = "" if full else self._slots(k, slots, values.get("slot", ""), no_slot)
+        chosen = values.get("slot", "") if (values.get("slot") or "")[:10] == got.get("day") else ""
+        times = "" if full else self._slots(k, got, chosen, no_slot)
         button = "Send to the practice" if full else "Book" if k["mode"] == "book" else "Send my request"
+        # The first submit button in a form is what Enter presses: the real one, not a day.
+        default = (f'<button class="enter-default" name="_go" value="1" tabindex="-1" aria-hidden="true">'
+                   f'{e(button)}</button>') if times else ""
         return self.page(req, k["label"], desc + note + self._problems(problems) + (
-            f'<form method="post" action="/book/{e(kid)}" class="card">'
+            f'<form method="post" action="/book/{e(kid)}" class="card">{default}'
             f'<input type="hidden" name="_form" value="{e(s["form"])}">'
             f'<input type="hidden" name="_submit" value="{e(values.get("_submit") or secrets.token_urlsafe(16))}">'
-            f'{qs}{times}'
-            f'<p><button class="btn primary">{e(button)}</button></p>'
+            f'{qs}{times}{rule}'
+            f'<p><button class="btn primary" name="_go" value="1">{e(button)}</button></p>'
             f'</form>'))
 
     def book(self, req, kid: str) -> str:
         self.signed_in(req)
         f = self.form(req)
         k = self.kind(kid)
+        if f.get("_day") and not f.get("_go"):  # a day was chosen: the same form, that day's times, nothing sent
+            return self.book_form(req, kid, (), {**f, "slot": ""})
         answers = {q["name"]: f[q["name"]] for q in k["questions"] if f.get(q["name"]) not in (None, "")}
         try:
             got = self.call(req, "book", form=f.get("_form", ""), submit=f.get("_submit", ""), kind=kid,
                             slot=f.get("slot") or None, answers=answers)
         except HubSaid as exc:
-            if exc.status == 409:  # the time went: the form again, with the times free now, as a new form
-                raise _Page(409, self.book_form(req, kid, [self.say("taken")], {**f, "slot": "", "_submit": ""},
+            if exc.status == 409:  # the time went: the form again, with that day's times free now, as a new form
+                raise _Page(409, self.book_form(req, kid, [self.say("taken")],
+                                                {**f, "_day": (f.get("slot") or "")[:10], "slot": "", "_submit": ""},
                                                 exc.data.get("slots") or [])) from None
             if exc.status == 422:
                 raise _Page(422, self.book_form(req, kid, exc.data.get("problems") or [str(exc)], f)) from None
