@@ -41,9 +41,9 @@ class WorkPanel:
 
     def forward_move(self, lc: dict, st, moves: list[dict]):
         """The one move from ``st`` drawn as the main button; the rest are secondary. Read from the lifecycle's shape,
-        not from state names: not a move that undoes or ends the record (cancel, entered in error), not one that
-        leads back here (a pause that returns), and a state that leads on before an end no move leaves (a no-show).
-        Ties go to the lifecycle's own order. None when every move undoes."""
+        not from state names: never a move that undoes or ends the record (cancel, entered in error), one into a
+        state no move leaves (a no-show), or a side move that leads back here (the patient stepping out and back).
+        Ties go to the lifecycle's own order. None when no move goes forward: then every button is secondary."""
         trans = [t for t in lc.get("transition", []) if "*" not in t["from"]]
 
         def reach(s):
@@ -56,11 +56,9 @@ class WorkPanel:
                         todo.append(t["to"])
             return seen
 
-        ok = [t for t in moves if not self._undoing(t)]
-        if not ok:
-            return None
-        rank = lambda t: (st in reach(t["to"]), not any(t["to"] in x["from"] for x in trans), moves.index(t))
-        return min(ok, key=rank)
+        ok = [t for t in moves if not self._undoing(t) and st not in reach(t["to"])
+              and any(t["to"] in x["from"] for x in trans)]
+        return min(ok, key=moves.index) if ok else None
 
     # ------------------------------------------------------------------------------------ a move's time and words
     def moves_open_now(self, rt, moves: list[dict], rec: dict) -> tuple[list[dict], str]:

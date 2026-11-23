@@ -43,12 +43,18 @@ def test_only_the_forward_move_is_primary(hub):
     def ahead(st):
         moves = [t for t in lc["transition"] if (st in t["from"] or "*" in t["from"]) and t["to"] != st
                  and t["by"] != "workflow"]
-        return app.forward_move(lc, st, moves)["to"]
+        t = app.forward_move(lc, st, moves)
+        return t and t["to"]
 
     assert ahead("planned") == "arrived"  # not the no-show, not cancelled, not entered in error
     assert ahead("arrived") == "triaged"
-    # finishing a visit in progress is the note workflow's move, never a button; the pause is all a person may do
-    assert ahead("in-progress") == "onleave"
+    # finishing a visit in progress is the note workflow's move, never a button; the patient stepping out (and back)
+    # is a side move, never the main button: nothing is primary then
+    assert ahead("in-progress") is None and ahead("onleave") is None
+    labels = {(t["from"][0], t["to"]): t["label"] for t in lc["transition"]}
+    assert labels[("in-progress", "onleave")] == "Patient stepped out"
+    assert labels[("planned", "cancelled")] == "Cancel the visit" and labels[("planned", "noshow")] == "Mark no-show"
+    assert hub.record_type("Encounter").state_label("onleave") == "Patient stepped out"
 
 
 @pytest.fixture

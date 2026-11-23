@@ -277,7 +277,7 @@ fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "book
 starts = ["in-progress"]   # a visit filed after the fact: under way, documented, signed and billed like any other
 field = "status"
 initial = "planned"
-labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", onleave = "On leave", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
+labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", onleave = "Patient stepped out", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
 abandoned = { requested = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
 [[lifecycle.transition]]
 from = ["requested"]
@@ -303,13 +303,20 @@ opens = "plannedStartDate - 2h"
 [[lifecycle.transition]]
 from = ["arrived"]
 to = "triaged"
+label = "Mark triaged"
 [[lifecycle.transition]]
-from = ["arrived", "triaged", "onleave"]
+from = ["arrived", "triaged"]
 to = "in-progress"
 label = "Start the visit"
 [[lifecycle.transition]]
+from = ["onleave"]
+to = "in-progress"
+label = "Patient is back"
+# The patient steps out (for a urine sample, to the lab) and comes back: a side move, never the main button.
+[[lifecycle.transition]]
 from = ["in-progress"]
 to = "onleave"
+label = "Patient stepped out"
 [[lifecycle.transition]]
 from = ["in-progress", "onleave"]
 to = "finished"

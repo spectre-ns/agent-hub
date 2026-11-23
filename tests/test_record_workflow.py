@@ -375,6 +375,23 @@ def _to_the_visit(hub, by):
     return run, ref
 
 
+def test_the_patient_stepping_out_is_a_side_move_named_as_an_action(hub):
+    """A visit in progress offers the pause as a secondary button named for what happened, never as the main one;
+    back from it, the visit is in progress again."""
+    from practicehub.web.server import App
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_visit(hub, amara)
+    page = lambda: App(hub, dev=False).page_record({"me": amara, "query": {}, "path": "/records/" + ref},
+                                                   *ref.split("/", 1))
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert re.search(r'<button class="secondary"[^>]*>Patient stepped out</button>', side)
+    assert 'class="primary"' not in side
+    hub.update_record(amara, ref, {"status": "onleave"})
+    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    assert ">Patient is back</button>" in side and 'class="primary"' not in side
+    hub.update_record(amara, ref, {"status": "in-progress"})
+
+
 def test_only_its_workflow_moves_the_visit_and_a_person_only_through_a_move_it_waits_on(hub):
     """A type that names its workflow lets that workflow alone move its state: a person's move goes through only when
     the open step waits on it (a wait's until, a step's moves), never another workflow's run, never a move the work
