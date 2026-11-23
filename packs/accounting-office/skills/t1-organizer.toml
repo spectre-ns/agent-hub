@@ -1,0 +1,37 @@
+id = "t1-organizer"
+title = "Write a client's T1 organizer"
+instructions = """
+Write the organizer for this client's return: the list of slips and receipts to send for the tax year, and a short,
+plain email asking for them. Base the list on what came last year (last year's slips on file, as slip type and issuer,
+e.g. "T4 · Harbour Logistics Ltd."), and say which of them are already in for this year (missing_slips are those not
+yet received). Ask also for anything new: a new job, a new investment account, a property sold, RRSP contributions,
+childcare, medical, donations. Never quote a SIN or a business number. Do not estimate a refund or give tax advice.
+"""
+
+[[output]]
+name = "expected_slips"
+label = "Slips expected"
+type = "list"
+required = true
+help = "what came last year, one per slip: 'T4 · Issuer'"
+
+[[output]]
+name = "missing_slips"
+label = "Still missing"
+type = "list"
+help = "the expected slips not yet received for this year"
+
+[[output]]
+name = "subject"
+type = "string"
+required = true
+
+[[output]]
+name = "body"
+type = "text"
+required = true
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

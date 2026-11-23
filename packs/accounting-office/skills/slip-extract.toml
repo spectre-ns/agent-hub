@@ -1,0 +1,49 @@
+id = "slip-extract"
+title = "Read a tax slip or notice"
+instructions = """
+Read the document (its text, from the file): which slip it is (T4, T5, an RRSP receipt, a notice of assessment...),
+the tax year, who issued it, the main amount (employment income on a T4, box 14; interest on a T5, box 13; the
+contribution or donation; on a notice of assessment, the refund, negative if the client owes), the income tax deducted,
+and every other box by its number. Copy numbers exactly as printed; never compute or guess one. A document you cannot
+read, or that is for someone else, is escalated to a person.
+"""
+
+[[output]]
+name = "slip_type"
+label = "Slip"
+type = "choice"
+choices = ["T4", "T4A", "T4A-P", "T4A-OAS", "T4E", "T5", "T3", "T5008", "T2202", "RRSP", "donation", "medical", "childcare", "business-income", "NOA", "other"]
+required = true
+
+[[output]]
+name = "year"
+label = "Tax year"
+type = "number"
+required = true
+
+[[output]]
+name = "issuer"
+label = "Issued by"
+type = "string"
+
+[[output]]
+name = "amount"
+label = "Amount"
+type = "number"
+required = true
+
+[[output]]
+name = "tax_deducted"
+label = "Tax deducted"
+type = "number"
+
+[[output]]
+name = "boxes"
+label = "Other boxes"
+type = "text"
+help = "one a line, as `box: amount`, e.g. 16: 1250.00; on a notice of assessment also 26000 (taxable income) and date"
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

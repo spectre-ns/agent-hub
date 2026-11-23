@@ -1,0 +1,31 @@
+id = "slip-intake"
+title = "Read a slip or document"
+record = "TaxSlip"
+summary = """
+A slip, receipt or notice that came in (the portal, email, an upload) is read by the documents agent: what it is,
+for which year, from whom, its amounts. The client's return for that year then counts it: a slip it was waiting for is
+no longer missing, and a notice of assessment is recorded on the return it assesses. A document the agent cannot read
+goes to the office.
+"""
+
+[trigger]
+starters = ["partner", "manager", "senior", "staff", "bookkeeper", "admin", "client-portal"]
+
+[[steps]]
+id = "extract"
+title = "Read the slip"
+kind = "task"
+role = "document-clerk"
+skill = "slip-extract"
+risk = "low"
+state = "extracted"
+due = "1d"
+people_role = "admin"
+context = ["record:documents"]
+
+[[steps]]
+id = "file-slip"
+title = "Count it on the client's return"
+kind = "automation"
+after = ["extract"]
+action = "t1.slip_filed"
