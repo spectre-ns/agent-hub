@@ -113,6 +113,12 @@ rel = "work"
 help = "The record the engagement opened: the year's T1 return, the year-end"
 
 [[field]]
+name = "completed_on"
+label = "Work done on"
+type = "date"
+help = "When the work it opened was done (a T1: assessed); the engagement then closes"
+
+[[field]]
 name = "note"
 label = "Note"
 type = "text"
@@ -140,6 +146,7 @@ label = "Start the work"
 from = ["active"]
 to = "closed"
 label = "Close: the work is done"
+asks = ["completed_on"]
 
 [[lifecycle.transition]]
 from = ["proposed", "signed"]

@@ -41,8 +41,16 @@ id = "await-signature"
 title = "Wait for the client to sign"
 kind = "wait"
 after = ["send-letter"]
-until = "record.status in ['signed', 'declined']"
+until = "record.client_signed_on != null or record.status in ['signed', 'declined']"
 timeout = "14d"
+
+[[steps]]
+id = "record-signature"
+title = "Record the client's signature"
+kind = "automation"
+after = ["await-signature"]
+when = "record.status == 'proposed' and record.client_signed_on != null"
+state = "signed"
 
 [[steps]]
 id = "chase-signature"
@@ -51,7 +59,7 @@ kind = "task"
 role = "admin"
 persons_only = true
 after = ["await-signature"]
-when = "await-signature.timed_out == true and record.status == 'proposed'"
+when = "await-signature.timed_out == true and record.status == 'proposed' and record.client_signed_on == null"
 state = "signed"
 moves = ["declined"]
 due = "5d"
@@ -73,7 +81,7 @@ choices = ["paper", "email", "portal"]
 id = "activate"
 title = "Open the work"
 kind = "automation"
-after = ["await-signature", "chase-signature"]
+after = ["record-signature", "chase-signature"]
 when = "record.status == 'signed'"
 action = "engagement.activate"
 state = "active"
@@ -83,13 +91,21 @@ id = "await-close"
 title = "Wait for the work to be done"
 kind = "wait"
 after = ["activate"]
-until = "record.status == 'closed'"
+until = "record.completed_on != null or record.status == 'closed'"
+
+[[steps]]
+id = "close"
+title = "Close the engagement"
+kind = "automation"
+after = ["await-close"]
+when = "record.status == 'active'"
+state = "closed"
 
 [[steps]]
 id = "renewal-date"
 title = "Work out when to propose next year's"
 kind = "automation"
-after = ["await-close"]
+after = ["await-close", "close"]
 action = "engagement.renewal_date"
 
 [[steps]]

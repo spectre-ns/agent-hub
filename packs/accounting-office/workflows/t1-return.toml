@@ -222,8 +222,16 @@ id = "await-t183"
 title = "Wait for the client to authorise filing (T183)"
 kind = "wait"
 after = ["send-letter"]
-until = "record.status == 'client-signed'"
+until = "record.t183_signed_on != null or record.status == 'client-signed'"
 timeout = "14d"
+
+[[steps]]
+id = "t183-recorded"
+title = "Record the client's authorisation"
+kind = "automation"
+after = ["await-t183"]
+when = "record.status == 'client-approval' and record.t183_signed_on != null"
+state = "client-signed"
 
 [[steps]]
 id = "t183-chase"
@@ -232,7 +240,7 @@ kind = "task"
 role = "admin"
 persons_only = true
 after = ["await-t183"]
-when = "await-t183.timed_out == true and record.status == 'client-approval'"
+when = "await-t183.timed_out == true and record.status == 'client-approval' and record.t183_signed_on == null"
 state = "client-signed"
 due = "5d"
 escalate_to = "manager"
@@ -256,7 +264,7 @@ title = "File the return"
 kind = "task"
 role = "partner"
 persons_only = true
-after = ["await-t183", "t183-chase"]
+after = ["t183-recorded", "t183-chase"]
 when = "record.status == 'client-signed'"
 state = "filing"
 due = "3d"
