@@ -1,13 +1,28 @@
 id = "referral"
 title = "Referral to a specialist"
-record = "Patient"
+record = "ServiceRequest"
 summary = """
+One referral, from asked for to closed: the referral is this workflow's record, about the patient, and its status is
+where the work is: being written (draft), sent to the specialist (active), the specialist's report received
+(completed), or not sent (revoked). Asked for on the patient's chart, the run makes the referral; written at a visit,
+the visit makes it (a sub-record of the visit) and this workflow walks it.
+
 A physician refers a patient. The clinical admin agent drafts the letter from the chart; the physician corrects and
-signs it; the referral is filed and sent, and the patient is told.
+signs it; the referral is sent and the patient is told. The front desk notes when the specialist books the patient,
+and the specialist's report closes the referral.
 """
 
 [trigger]
 starters = ["physician"]
+
+# Started on the patient, the run makes the referral: a draft order for the specialty asked for.
+[new_record]
+status = "draft"
+intent = "order"
+priority = "{{input.urgency}}"
+referral_to = "{{input.specialty}}"
+specialist = "{{input.specialist}}"
+reason_text = "{{input.reason}}"
 
 [[input]]
 name = "specialty"
@@ -74,6 +89,14 @@ not_by = []
 context = ["finalize"]
 
 [[steps]]
+id = "not-sent"
+title = "Close the referral (not sent)"
+kind = "automation"
+after = ["sign"]
+when = "sign.outcome != 'send'"
+state = "revoked"
+
+[[steps]]
 id = "timing"
 title = "Note the date of the referral"
 kind = "automation"
@@ -81,30 +104,29 @@ after = ["sign"]
 when = "sign.outcome == 'send'"
 action = "clock.now"
 
+# Signed: the referral is the order sent, with the signed letter on it.
 [[steps]]
 id = "file"
 title = "File the referral"
 kind = "automation"
 after = ["timing"]
-action = "record.create"
-[steps.params]
-type = "ServiceRequest"
-[steps.params.data]
-status = "active"
+action = "record.update"
+state = "active"
+[steps.params.set]
 intent = "order"
 priority = "{{input.urgency}}"
 authoredOn = "{{timing.now}}"
-subject = { reference = "{{run.record}}" }
 requester = { reference = "Practitioner/{{sign.by}}" }
-code = { text = "Referral to {{input.specialty}}" }
-reasonCode = [{ text = "{{input.reason}}" }]
 note = [{ text = "{{finalize.letter}}" }, { text = "Sent with: {{finalize.attachments}}" }]
 
+# Sent by fax when the specialist was named; a referral made from a visit note names only the specialty, and the
+# front desk finds the specialist and sends the signed letter itself (the booked step says so).
 [[steps]]
 id = "send"
 title = "Send to the specialist"
 kind = "automation"
 after = ["file"]
+when = "input.specialist != null and input.specialist != ''"
 action = "message.send"
 [steps.params]
 channel = "fax"
@@ -122,6 +144,69 @@ after = ["file"]
 action = "message.send"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your referral"
 body = "Your physician has referred you to {{input.specialty}}. Their office will contact you with an appointment."
+
+[[steps]]
+id = "booked"
+title = "Note the specialist's appointment"
+kind = "task"
+role = "front-desk"
+due = "30d"
+escalate_to = "physician"
+after = ["file"]
+persons_only = true
+context = ["record:demographics", "input.specialty", "input.specialist"]
+instructions = """When the specialist's office books the patient (or says it will not see them), note it here. Not
+seen: say why; the referring physician decides what to do next. No specialist named on the referral: find one for the
+specialty, fax them the signed letter on the referral, and note who in the notes."""
+[[steps.fields]]
+name = "seen"
+label = "Will the specialist see the patient?"
+type = "choice"
+choices = ["booked", "declined"]
+required = true
+[[steps.fields]]
+name = "appointment"
+type = "datetime"
+help = "when the patient is booked with the specialist"
+[[steps.fields]]
+name = "notes"
+type = "text"
+
+[[steps]]
+id = "declined"
+title = "The specialist will not see the patient"
+kind = "task"
+role = "physician"
+due = "2d"
+escalate_to = "medical-director"
+after = ["booked"]
+when = "booked.seen == 'declined'"
+persons_only = true
+context = ["record:clinical", "input", "booked"]
+instructions = "The specialist declined this referral. Close it; refer the patient again (a new referral) if they need one."
+state = "revoked"
+[[steps.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[steps]]
+id = "report"
+title = "File the specialist's report"
+kind = "task"
+role = "nurse"
+due = "90d"
+escalate_to = "physician"
+after = ["booked"]
+when = "booked.seen == 'booked'"
+persons_only = true
+context = ["record:clinical", "input", "booked"]
+instructions = "When the specialist's report arrives, file it on the chart and summarize it here; this closes the referral."
+state = "completed"
+[[steps.fields]]
+name = "summary"
+type = "text"
+required = true

@@ -1,4 +1,5 @@
-# A prescription. A renewal writes a new order and marks the one it replaces completed.
+# A prescription. A renewal request is a proposal (draft) that its workflow walks: prescribed, it becomes the active
+# order and the one it replaces is marked completed; declined, or a visit booked instead, it is cancelled.
 id = "MedicationRequest"
 label = "Prescription"
 plural = "Prescriptions"
@@ -8,7 +9,12 @@ strict = true
 date = "authoredOn"
 active = "record.status == 'active'"
 order = 30
-summary = "A prescription. A renewal writes a new order and marks the one it replaces completed."
+summary = "A prescription. A renewal request is a proposal its workflow prescribes or closes."
+# A renewal request (a draft proposal) is walked by its own workflow from asked for to prescribed or closed: the
+# request made, from the portal, the pharmacy or a person at the desk, is this record, and its status is where the work
+# is. A prescription a physician writes by hand (an order, not a proposal) starts no workflow: it is issued (made
+# active) only by a physician's signature, "I prescribe this medication as written", with its directions and quantity.
+workflow = { id = "prescription-renewal", when = "record.status == 'draft' and record.intent == 'proposal'" }
 
 [[field]]
 name = "status"
@@ -149,9 +155,18 @@ fields = ["subject", "medication", "directions", "quantity", "quantity_unit", "r
 [lifecycle]
 field = "status"
 initial = "draft"
+# Its renewal cancelled, the request is closed; a renewal run of an older version that ended without moving it (it
+# wrote a separate order, or declined) closes it too.
+abandoned = { draft = "cancelled" }
+ended = { draft = "cancelled" }
+# Issued only by the renewal workflow (its prescriber signed for it) or by a physician signing the order: never moved
+# to active by hand, by a nurse or a service that writes clinical records.
 [[lifecycle.transition]]
 from = ["draft"]
 to = "active"
+by = "workflow"
+label = "Issued"
+require = ["medication", "directions", "quantity"]
 [[lifecycle.transition]]
 from = ["active"]
 to = "completed"
@@ -165,9 +180,19 @@ to = "on-hold"
 [[lifecycle.transition]]
 from = ["on-hold"]
 to = "active"
+by = "workflow"
+label = "Back in force"
 [[lifecycle.transition]]
 from = ["draft"]
 to = "cancelled"
 [[lifecycle.transition]]
 from = ["*"]
 to = "entered-in-error"
+
+# A prescription written by hand is issued by its prescriber's signature: a physician signs the draft order and it is
+# active. On hold, the physician who signs it again puts it back in force.
+[[signature]]
+meaning = "I prescribe this medication as written"
+roles = ["physician"]
+states = ["draft", "on-hold"]
+moves_to = "active"

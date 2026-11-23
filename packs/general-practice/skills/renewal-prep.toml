@@ -7,7 +7,10 @@ unit, repeats and days' supply exactly as written there; never invent or change 
 and by whom, and the last visit. If there is no active prescription for it, say so (found_in_chart false, no
 current_order). Say whether the patient is due for a visit
 (no visit in the last 12 months, or the prescription says a review is due). List anything the physician should know:
-allergies that mention the drug, a recent abnormal result related to it, a dose that does not match the request.
+allergies that mention the drug, a recent abnormal result related to it, a dose that does not match the request,
+and any other renewal work on the same drug: another renewal request still open ("Another renewal request for this
+medication is open: MedicationRequest/<id>") or an order for it issued today ("This medication was already prescribed
+today: MedicationRequest/<id>"). An answer that leaves one of those out is refused.
 Do not recommend renewing or declining; the physician decides.
 """
 

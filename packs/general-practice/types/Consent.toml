@@ -15,6 +15,9 @@ active = "record.status == 'active'"
 order = 5
 part_of = "patient"
 summary = "A patient's limit on who sees what of their file: what is withheld, and who is still allowed."
+# A directive the patient asks for (requested) is walked by its own workflow until it is in force or refused; one the
+# privacy officer records straight away (active) starts none.
+workflow = { id = "privacy-request", when = "record.status == 'requested'" }
 
 [base]
 subject = "patient"
@@ -37,9 +40,10 @@ required = true
 [[field]]
 name = "status"
 type = "choice"
-choices = ["active", "withdrawn"]
+choices = ["requested", "reviewed", "active", "refused", "withdrawn"]
+labels = { requested = "Requested", reviewed = "Reviewed", active = "In force", refused = "Refused", withdrawn = "Withdrawn" }
 required = true
-help = "withdrawn: the patient lifted it; what it withheld is seen again as the roles allow"
+help = "requested: asked for, not yet in force; withdrawn: the patient lifted it; what it withheld is seen again as the roles allow"
 
 [[field]]
 name = "received"
@@ -102,3 +106,42 @@ id = "directive"
 on = ["create", "edit"]
 fields = ["patient", "status", "received", "request", "withhold_classes", "withhold_records", "withhold_types",
           "allow_members", "allow_roles", "told"]
+
+# The privacy-request workflow reviews a request and puts it in force or refuses it; the privacy officer lifts one in
+# force (and may put a lifted one back). A request whose work is cancelled is withdrawn, never silently refused or
+# put in force. A run of an older version (which put a directive of its own in force) that ends leaves its request
+# withdrawn.
+[lifecycle]
+field = "status"
+initial = "requested"
+starts = ["active"]   # the privacy officer records one the patient signed on paper straight in force
+labels = { requested = "Requested", reviewed = "Reviewed", active = "In force", refused = "Refused", withdrawn = "Withdrawn" }
+abandoned = { requested = "withdrawn", reviewed = "withdrawn" }
+ended = { requested = "withdrawn", reviewed = "withdrawn" }
+[[lifecycle.transition]]
+from = ["requested"]
+to = "reviewed"
+by = "workflow"
+label = "Reviewed"
+[[lifecycle.transition]]
+from = ["reviewed"]
+to = "active"
+by = "workflow"
+label = "Put in force"
+[[lifecycle.transition]]
+from = ["reviewed"]
+to = "refused"
+by = "workflow"
+label = "Refused"
+[[lifecycle.transition]]
+from = ["requested", "reviewed"]
+to = "withdrawn"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["active"]
+to = "withdrawn"
+label = "Lift"
+[[lifecycle.transition]]
+from = ["withdrawn"]
+to = "active"
+label = "Put back in force"

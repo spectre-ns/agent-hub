@@ -1491,9 +1491,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
 
     def run_title(self, member: dict | None, run: dict) -> str:
         """A run's title as this member may see it: the workflow's title, and who or what it is about only if they
-        may read that record's data class (a name and birth date are themselves personal health information)."""
+        may read that record's data class (a name and birth date are themselves personal health information). A run
+        walking a record of its own (a message, an order) is named for whom that record is about: its subject."""
         base = str(run.get("title") or "").split(": ", 1)[0]
-        ref = run.get("record") or ""
+        ref = run.get("subject") or run.get("record") or ""
         if not member or not ref or not self.pack or "/" not in ref:
             return base
         rtype, _, rid = ref.partition("/")
@@ -3553,7 +3554,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             st = schema.first(data, lc["path"])
             if st is None and lc.get("initial"):
                 data = schema.put(data, lc["path"], lc["initial"])
-            elif st is not None and lc.get("initial") and st != lc["initial"] and member.get("kind") != "automation":
+            elif st is not None and lc.get("initial") and st != lc["initial"] and member.get("kind") != "automation" \
+                    and st not in lc.get("starts", []):
                 # people start a record where its lifecycle starts; an automation (a workflow step, an import, a
                 # module's demo) may write one in any of its states
                 t = rt.transition(None, st)
