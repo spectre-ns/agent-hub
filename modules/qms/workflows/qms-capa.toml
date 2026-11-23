@@ -1,11 +1,15 @@
 id = "qms-capa"
 title = "Corrective or preventive action"
 summary = """Investigate and plan; open the affected controlled documents for revision; once every one has been
-reviewed and approved again (the dms module's review), a quality manager decides whether the action worked."""
+reviewed and approved again (the dms module's review), a quality manager who did not investigate decides whether the
+action worked. Not effective: the next pass takes further action and is verified again."""
 record = "CAPA"
 
+# The CAPA type names this workflow: making a CAPA starts it, and the CAPA's status is its position. A CAPA found
+# not effective goes back to actions and the next run walks that pass (the hub starts it; a workflow has no loops):
+# whoever investigated or took the action, in any pass, does not verify it. A quality manager may also start it by
+# hand on a CAPA nothing walks (one whose work was cancelled).
 [trigger]
-event = "record.created:CAPA"
 starters = ["quality-manager"]
 
 [[steps]]
@@ -13,6 +17,8 @@ id = "investigate"
 title = "Investigate the root cause and plan the action"
 kind = "task"
 role = "quality-manager"
+when = "record.status in ['open', 'investigating']"
+moves = ["investigating", "cancelled"]   # started on its page (naming its owner), or cancelled: that ends the work
 context = ["record:quality", "record:documents"]
 due = "5d"
 escalate_to = "quality-manager"
@@ -33,18 +39,47 @@ title = "Write the plan into the CAPA"
 kind = "automation"
 after = ["investigate"]
 action = "record.update"
+state = "actions"
 [steps.params]
 ref = "{{run.record}}"
 [steps.params.set]
-status = "actions"
 root_cause = "{{investigate.root_cause}}"
 plan = "{{investigate.plan}}"
+
+[[steps]]
+id = "act"
+title = "Take further action"
+kind = "task"
+role = "quality-manager"
+when = "run.start_state == 'actions'"   # a pass after one found not effective
+context = ["record:quality", "record:documents"]
+due = "14d"
+escalate_to = "quality-manager"
+instructions = """The action was found not effective. Say what further action is taken; the affected documents are
+opened for revision again, and it is verified again by someone who did not take it."""
+[[steps.fields]]
+name = "plan"
+label = "Further action"
+type = "text"
+required = true
+
+[[steps]]
+id = "record-more"
+title = "Write the further action into the CAPA"
+kind = "automation"
+after = ["act"]
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+plan = "{{act.plan}}"
 
 [[steps]]
 id = "revise-documents"
 title = "Open the affected documents for revision"
 kind = "automation"
-after = ["record-plan"]
+after = ["record-plan", "record-more"]
+when = "record.status == 'actions'"
 action = "record.update"
 for_each = "{{record.documents}}"
 where = "each_record.status == 'approved'"  # a draft or one already in review is left as it is
@@ -52,7 +87,7 @@ where = "each_record.status == 'approved'"  # a draft or one already in review i
 ref = "{{each}}"
 increment = ["revision"]
 [steps.params.set]
-status = "draft"   # its author revises it and sends it for review; staff keep reading the approved revision
+status = "draft"   # a move the document's own workflow waits on: its author revises it and sends it for review
 
 [[steps]]
 id = "documents-approved"
@@ -68,11 +103,7 @@ id = "to-verification"
 title = "Ready for verification"
 kind = "automation"
 after = ["documents-approved"]
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "verification"
+state = "verification"
 
 [[steps]]
 id = "verify"
@@ -86,7 +117,7 @@ signer = "person"
 meaning = "I have checked whether this action was effective"
 outcomes = ["effective", "not-effective"]
 context = ["record:quality", "record:documents"]
-not_by = ["investigate"]
+not_by = ["investigate", "act"]   # in this pass or an earlier one
 
 [[steps]]
 id = "close"
@@ -94,11 +125,7 @@ title = "Close the CAPA"
 kind = "automation"
 after = ["verify"]
 when = "verify.outcome == 'effective'"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "closed"
+state = "closed"
 
 [[steps]]
 id = "reopen"
@@ -106,8 +133,4 @@ title = "Back to actions"
 kind = "automation"
 after = ["verify"]
 when = "verify.outcome == 'not-effective'"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "actions"
+state = "actions"   # the next pass is the next run's

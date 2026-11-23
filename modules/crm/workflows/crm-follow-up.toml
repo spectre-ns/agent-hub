@@ -5,26 +5,45 @@ logged it). An agent may draft the message; a person reads it and sends it, or f
 message goes only to a contact whose consent to it holds (CASL): the hub refuses it otherwise."""
 record = "Interaction"
 
-[trigger]
-schedule = "daily 07:00"
-for_each = "Interaction"
-where = "record.follow_up != null and record.follow_up <= run.today and record.follow_up_asked != record.follow_up"
+# The Interaction type names this workflow: logging an interaction starts it, and its status is this work's position.
+# One run is one follow-up: it notes who logged it, waits for its follow-up date (marked by the daily
+# crm-follow-up-due sweep, which never moves the status), and follows it up; followed up, the next run waits for the
+# next date. It replaces crm-interaction-logged, which only noted who logged it.
 
 [[steps]]
-id = "asked"
-title = "Note that the follow-up was asked for"
+id = "logged"
+title = "Note who logged it"
 kind = "automation"
+when = "record.logged_by == null"
 action = "record.update"
 [steps.params]
 ref = "{{run.record}}"
 [steps.params.set]
-follow_up_asked = "{{record.follow_up}}"
+logged_by = "{{run.started_by}}"
+
+[[steps]]
+id = "due"
+title = "Wait for the follow-up date"
+kind = "wait"
+until = """record.status != 'logged' or (record.follow_up != null and record.follow_up_asked == record.follow_up
+and record.follow_up_done != record.follow_up)"""
+instructions = """Nothing to do until its follow-up date: set one on the interaction, and on that day it goes to its
+owner."""
+
+[[steps]]
+id = "asked"
+title = "The follow-up date came"
+kind = "automation"
+after = ["due"]
+when = "record.status == 'logged'"
+state = "follow-up"
 
 [[steps]]
 id = "who"
 title = "Find the owner and whom to write to"
 kind = "automation"
-after = ["asked"]
+after = ["due", "asked"]   # its date came, or a person followed it up now
+when = "record.status == 'follow-up'"
 action = "crm.follow-up-who"
 
 [[steps]]
@@ -87,6 +106,7 @@ title = "Mark it followed up"
 kind = "automation"
 after = ["send", "email"]
 action = "record.update"
+state = "logged"   # the next run waits for its next date
 [steps.params]
 ref = "{{run.record}}"
 [steps.params.set]

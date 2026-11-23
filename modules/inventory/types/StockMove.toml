@@ -1,5 +1,6 @@
 # One movement of stock: a delivery received, stock issued for use, a write-off (damaged, expired, lost), stock found, or a count.
-# Submitting it posts it: the inventory-post workflow changes the item's on hand.
+# It names the inventory-post workflow, which walks its status: making one starts it, submitting it posts it (the
+# item's on hand changes), and one rejected and revised is walked again.
 id = "StockMove"
 label = "Stock move"
 plural = "Stock moves"
@@ -8,6 +9,7 @@ title = "{kind} {quantity} {item}"
 date = "moved"
 flag = "status"
 order = 41
+workflow = { id = "inventory-post", when = "record.status in ['draft', 'submitted', 'rejected']" }
 summary = "Stock received, issued, written off, found or counted. Posting it changes what is on hand."
 
 [[field]]

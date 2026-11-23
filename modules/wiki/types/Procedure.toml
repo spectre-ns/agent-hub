@@ -10,6 +10,10 @@ parent = "parent"
 flag = "status"
 date = "effective"
 order = 21
+# One revision of a SOP is walked by the wiki-sop-release workflow, from draft through release to in use; its status
+# is that work's position. The periodic review (wiki-sop-review) is a companion started by the clock: it never moves
+# the status, it only asks for a revision (revise_asked), and the revision's own workflow opens it.
+workflow = { id = "wiki-sop-release", when = "record.status in ['draft', 'in-review', 'released']" }
 summary = "A standard operating procedure: a page released by an approver, revised under control, read and signed."
 layout = "page"
 
@@ -89,6 +93,13 @@ by = "workflow"
 name = "review_asked"
 label = "Review asked for"
 type = "date"
+by = "workflow"
+show = false
+
+[[field]]
+name = "revise_asked"
+label = "Revision asked for by its review"
+type = "boolean"
 by = "workflow"
 show = false
 

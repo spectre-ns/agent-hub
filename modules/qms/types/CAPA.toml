@@ -6,6 +6,10 @@ data_class = "quality"
 date = "opened"
 flag = "status"
 order = 20
+# Every CAPA is worked from open to closed by one workflow: investigated and planned, its documents revised and
+# approved again, verified by someone who did not investigate; found not effective, the next pass acts again. Its
+# status is where that work is.
+workflow = { id = "qms-capa", when = "record.status in ['open', 'investigating', 'actions']" }
 summary = "A corrective or preventive action, and the documents it changes."
 
 [[field]]
@@ -89,7 +93,7 @@ label = "Plan agreed"
 [[lifecycle.transition]]
 from = ["actions"]
 to = "investigating"
-by = "workflow"            # its run was cancelled: the plan is reopened, and a person may then cancel the CAPA
+by = "workflow"            # its run was cancelled: the plan is reopened (a quality manager may start it again, or cancel it)
 label = "Back to investigating"
 
 [[lifecycle.transition]]

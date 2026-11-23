@@ -5,7 +5,7 @@
 requires_core = "1.0"
 id = "dms"
 name = "Document control"
-version = "1"
+version = "2"
 summary = "Controlled documents with review, approval, publication and read-and-understood signatures."
 shortcuts = ["Document"]
 

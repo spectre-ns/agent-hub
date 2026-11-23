@@ -7,6 +7,9 @@ title = "{title}"
 parent = "parent"
 flag = "status"
 order = 20
+# A page flagged as out of date is walked by the wiki-check workflow until a wiki owner confirms or archives it; a
+# page being written or in use is no one else's work, so nothing walks it then. Each flag is one pass.
+workflow = { id = "wiki-check", when = "record.status == 'needs-check'" }
 summary = "A page of the practice's wiki: a handbook, a guide, a how-to or notes."
 layout = "page"
 
