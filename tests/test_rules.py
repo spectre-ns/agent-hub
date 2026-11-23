@@ -3328,6 +3328,31 @@ def test_a_record_type_stored_before_a_stricter_check_is_set_aside_not_a_failure
     assert listed["Condition"]["definition"] is None and "initial" in listed["Condition"]["problem"]
 
 
+# --------------------------------------------------------------- lifecycle.ended: where an old run's record goes
+
+_ENDED_TYPE = ('id = "Widget"\ndata_class = "clinical"\n[[field]]\nname = "status"\ntype = "choice"\n'
+               'choices = ["a", "b", "c"]\n[lifecycle]\nfield = "status"\ninitial = "a"\n'
+               'abandoned = { b = "a" }\n'
+               '[[lifecycle.transition]]\nfrom = ["a"]\nto = "b"\n'
+               '[[lifecycle.transition]]\nfrom = ["b"]\nto = "c"\nby = "workflow"\n'
+               '[[lifecycle.transition]]\nfrom = ["b"]\nto = "a"\nby = "workflow"\n')
+
+
+def test_a_lifecycle_ended_names_only_its_own_states_and_moves_it_has(hub):
+    """``lifecycle.ended`` says where a record goes when an older version's run ends without moving it: each entry
+    is state = state, both the type's, with a move between them. Anything else is refused when proposed."""
+    rana = M(hub, "rana")
+    for ended, why in (('"c"', "a table"), ('{ b = "gone" }', "both must be its states"),
+                       ('{ nowhere = "a" }', "both must be its states"), ('{ a = "c" }', "no move from 'a' to 'c'")):
+        src = _ENDED_TYPE.replace('abandoned = { b = "a" }\n', f'abandoned = {{ b = "a" }}\nended = {ended}\n')
+        with pytest.raises(Invalid) as e:
+            hub.propose("type", rana, src)
+        assert any(p.startswith("lifecycle.ended") and why in p for p in e.value.problems), (ended, e.value.problems)
+    src = _ENDED_TYPE.replace('abandoned = { b = "a" }\n', 'abandoned = { b = "a" }\nended = { b = "c" }\n')
+    p = hub.propose("type", rana, src)  # a real move from a state it is in: accepted
+    assert p["version"]
+
+
 # ------------------------------------------------------------------------------------------- the calendar
 def _visit(pat, who, start, end=None, status="planned"):
     rec = {"status": status, "subject": {"reference": pat}, "plannedStartDate": start,
