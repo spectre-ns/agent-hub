@@ -276,7 +276,7 @@ def test_the_run_page_and_the_visit_show_the_one_item_and_where_it_is(hub):
     head = page.split('class="card run-head"', 1)[1].split("</div>", 1)[0]
     assert app._key(run["item"]) in head and f'href="/items/{run["item"]}"' in head
     step = hub.workflow("appointment-request")[0].step(hub.engine.item(run["item"])["step_id"])
-    assert f"now at <b>{step.title}</b>" in head
+    assert "<dt>Now</dt>" in head and f"<b>{step.title}</b>" in head  # where it is now, in words
     assert f'/records/{ref}' in head and "Requested" in head
     visit = app.page_record(req(f"/records/{ref}"), *ref.split("/", 1))
     assert "Requested" in visit and "Open work" in visit and f'href="/runs/{run["id"]}"' in visit
