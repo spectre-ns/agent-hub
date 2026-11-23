@@ -316,6 +316,61 @@ def test_cancelling_a_visit_asks_who_cancelled_and_works_out_the_notice(hub, who
         assert (steps.get(tell) == "done") is (tell == told), (tell, steps.get(tell))
 
 
+# ---------------------------------------------------------------------- visit: cancelled after check-in, missed count
+def test_a_visit_cancelled_after_check_in_is_a_late_cancellation(hub):
+    """The patient checked in and left before being seen: cancelled by the patient, it falls under the policy as a
+    late cancellation (the run no longer ends with nothing applied); one the practice cancels tells the patient."""
+    jo = M(hub, "jo")
+    for who, late_tell in (("patient", "tell-late-cancel"), ("practice", "tell-practice-cancelled")):
+        run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"), inputs={
+            "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+        ref = hub.engine.run(run["id"])["record"]
+        _at_the_visit(hub, ref, -20)
+        hub.update_record(jo, ref, {"status": "arrived"})
+        _at_the_visit(hub, ref, 15)
+        hub.update_record(jo, ref, {"status": "cancelled", "cancelled_by": who})
+        run_all_local(hub, log=quiet)
+        run = hub.engine.run(run["id"])
+        steps = {k: (v or {}).get("state") for k, v in run["steps"].items()}
+        assert steps[late_tell] == "done" and run["status"] == "completed", steps
+        if who == "patient":
+            assert run["ctx"]["late-cancel"]["late"] is True
+            assert hub.records.read(*ref.split("/", 1))["cancelled_late"] is True
+        else:
+            assert steps["late-cancel"] == "skipped" and steps["tell-late-cancel"] == "skipped"
+
+
+def test_the_policy_counts_the_patients_earlier_missed_appointments(hub):
+    """missed_this_year is the patient's no-shows and late cancellations in the year before this visit, not always 0:
+    the first missed one is a reminder, the next one is charged."""
+    jo = M(hub, "jo")
+    pat = _pat(hub, "MacLeod")
+
+    def missed(slot, status, **more):
+        run = hub.engine.start(jo, "appointment-request", record=pat, inputs={
+            "reason": "a form for work", "kind": "forms", "slot": slot})
+        ref = hub.engine.run(run["id"])["record"]
+        _at_the_visit(hub, ref, 5 if status == "noshow" else -60)
+        hub.update_record(jo, ref, {"status": status, **more})
+        run_all_local(hub, log=quiet)
+        return hub.engine.run(run["id"])
+
+    first = missed("2027-03-02T11:00|dr-amara", "noshow")
+    assert first["ctx"]["missed-before"]["count"] == 0 and first["ctx"]["no-show"]["charge"] is False
+    late = missed("2027-03-05T11:00|dr-amara", "cancelled", cancelled_by="patient")
+    assert late["ctx"]["missed-before"]["count"] == 1 and late["ctx"]["late-cancel"]["charge"] is True
+    again = missed("2027-03-09T11:00|dr-amara", "noshow")
+    assert again["ctx"]["missed-before"]["count"] == 2 and again["ctx"]["no-show"]["amount"] == 50
+    # another patient's missed visits are not this one's
+    other = hub.engine.start(jo, "appointment-request", record=_pat(hub, "Rahimi"), inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-10T11:00|dr-amara"})
+    ref = hub.engine.run(other["id"])["record"]
+    _at_the_visit(hub, ref, 5)
+    hub.update_record(jo, ref, {"status": "noshow"})
+    run_all_local(hub, log=quiet)
+    assert hub.engine.run(other["id"])["ctx"]["missed-before"]["count"] == 0
+
+
 def test_a_visit_booked_on_the_calendar_starts_its_workflow_booked(hub):
     jo = M(hub, "jo")
     pat = _pat(hub, "MacLeod")

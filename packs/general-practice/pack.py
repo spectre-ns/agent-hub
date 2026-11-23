@@ -315,9 +315,35 @@ def act_notice_send(engine, run, step, params, actor):
     return out
 
 
+def act_visits_missed(engine, run, step, params, actor):
+    """For the missed-appointment policy: how many appointments the visit's patient missed in the year before the time
+    ``visit`` was booked for (no-shows, and their own cancellations marked late), this visit left out: ``count``."""
+    hub = engine.hub
+    ref = str(params.get("visit") or "")
+    if not ref.startswith("Encounter/"):
+        raise ValueError(f"visits.missed: {ref!r} is not a visit")
+    visit = hub.records.read(*ref.split("/", 1))
+    if not visit:
+        raise ValueError(f"visits.missed: there is no {ref}")
+    subject = (visit.get("subject") or {}).get("reference")
+    start = str(visit.get("plannedStartDate") or engine.now().isoformat(timespec="minutes"))[:16]
+    try:
+        since = (datetime.fromisoformat(start) - timedelta(days=365)).isoformat(timespec="minutes")
+    except ValueError:
+        raise ValueError(f"visits.missed: {ref} is booked for {start!r}, not a time") from None
+    if not subject:
+        return {"count": 0}
+    earlier = hub.records.search("Encounter", subject=subject, limit=None, field="plannedStartDate", since=since,
+                                 until=start)
+    count = sum(1 for v in earlier if f"Encounter/{v.get('id')}" != ref and (
+        v.get("status") == "noshow" or (v.get("status") == "cancelled" and v.get("cancelled_late") is True)))
+    return {"count": count}
+
+
 ACTIONS = {"clock.now": act_clock_now,
            "notice.send": act_notice_send,
-           "patient.details": act_patient_details}
+           "patient.details": act_patient_details,
+           "visits.missed": act_visits_missed}
 PROVIDERS: dict = {}
 
 

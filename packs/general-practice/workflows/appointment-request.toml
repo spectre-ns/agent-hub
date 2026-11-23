@@ -311,16 +311,28 @@ title = "Wait for the patient to be checked in"
 kind = "wait"
 until = "record.status in ['arrived', 'triaged', 'in-progress', 'onleave', 'finished', 'cancelled', 'noshow', 'entered-in-error']"
 
+# Missed (a no-show) or cancelled by the patient, before the visit started or after checking in: the policy counts the
+# patient's earlier missed appointments in the year before this one (no-shows and late cancellations).
+[[steps]]
+id = "missed-before"
+title = "Count the patient's missed appointments this year"
+kind = "automation"
+after = ["checked-in", "seen"]
+when = "record.status == 'noshow' or (record.status == 'cancelled' and record.cancelled_by != 'practice')"
+action = "visits.missed"
+[steps.params]
+visit = "{{run.record}}"
+
 [[steps]]
 id = "no-show"
 title = "Apply the missed-appointment policy"
 kind = "automation"
-after = ["checked-in"]
+after = ["missed-before"]
 when = "record.status == 'noshow'"
 block = "missed-appointment-fee"
 [steps.params]
 notice_hours = 0
-missed_this_year = 0
+missed_this_year = "{{missed-before.count}}"
 fee = 50
 
 [[steps]]
@@ -335,22 +347,35 @@ to = "{{run.subject}}"
 subject = "Your missed appointment"
 body = "We missed you at your appointment. {{no-show.reason}}. Amount due: ${{no-show.amount}}. Reply to rebook."
 
-# Cancelled while booked by the patient: late (less than the policy's notice before the time it was booked for), the
-# patient is told under the missed-appointment policy; with notice, nothing is due and nothing is sent. The notice is
-# worked out from when it was cancelled (the wait's end) to the time it was booked for. Cancelled by the practice, no
-# policy applies: the patient is told and asked to rebook.
+# Cancelled by the patient: late (less than the policy's notice before the time it was booked for), the patient is
+# told under the missed-appointment policy; with notice, nothing is due and nothing is sent. The notice is worked out
+# from when it was cancelled (the first wait's end) to the time it was booked for. One cancelled after checking in
+# (the patient left before being seen) is late: the first wait ended at the check-in, two hours before at most.
+# Cancelled by the practice, no policy applies: the patient is told and asked to rebook.
 [[steps]]
 id = "late-cancel"
 title = "Apply the missed-appointment policy to a cancellation"
 kind = "automation"
-after = ["checked-in"]
-when = "record.status == 'cancelled' and record.cancelled_by != 'practice'"
+after = ["missed-before"]
+when = "record.status == 'cancelled'"
 block = "missed-appointment-fee"
 [steps.params]
 starts = "{{record.plannedStartDate}}"
 cancelled_at = "{{checked-in.ended_at}}"
-missed_this_year = 0
+missed_this_year = "{{missed-before.count}}"
 fee = 50
+
+[[steps]]
+id = "mark-late-cancel"
+title = "Mark the visit cancelled late"
+kind = "automation"
+after = ["late-cancel"]
+when = "late-cancel.late == true"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+cancelled_late = true
 
 [[steps]]
 id = "tell-late-cancel"
@@ -369,7 +394,7 @@ body = "Your appointment was cancelled with less than 24 hours' notice. {{late-c
 id = "tell-practice-cancelled"
 title = "Tell the patient the practice cancelled"
 kind = "automation"
-after = ["checked-in"]
+after = ["checked-in", "seen"]
 when = "record.status == 'cancelled' and record.cancelled_by == 'practice'"
 action = "message.send"
 [steps.params]

@@ -257,6 +257,15 @@ choices = ["patient", "practice"]
 labels = { patient = "The patient", practice = "The practice" }
 help = "the patient (the policy's notice applies) or the practice (no fee; the patient is told and asked to rebook)"
 
+# A patient's cancellation with less than the policy's notice, marked by the visit's workflow: with the no-shows, what
+# the missed-appointment policy counts as the patient's earlier missed appointments.
+[[field]]
+name = "cancelled_late"
+label = "Cancelled late"
+type = "boolean"
+by = "workflow"
+help = "cancelled by the patient with less than 24 hours' notice (or after checking in): counted as a missed appointment"
+
 [[field]]
 name = "serviceProvider"
 label = "Service provider"
