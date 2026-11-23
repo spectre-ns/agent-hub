@@ -2950,6 +2950,96 @@ def test_an_item_at_its_reorder_point_is_ordered_and_restocked_by_a_delivery(sto
     assert item["on_hand"] == 13 and item["status"] == "stocked"
 
 
+# ------------------------------------------------------------------------------------------- a record walked by its workflow
+def _own_run(hub, ref, wid):
+    got = [r for r in hub.db.runs.find({"workflow_id": wid, "record": ref, "status": "running"})]
+    assert len(got) == 1, got
+    return got[0]
+
+
+def test_a_record_s_state_has_one_owning_workflow_and_others_move_it_only_through_a_move_it_waits_on(stock):
+    """Rule: a record whose type names its workflow (``workflow = {id, when}``) is walked by one running run of it at
+    a time (a second is refused), and its state moves with that run's steps in the same write. Another workflow, or a
+    person, moves it only through a move the owner's open step waits on (a wait's ``until``, a step's ``moves``);
+    anything else is refused. A non-lifecycle workflow (a sweep, a reaction) may start on its schedule or event, but
+    writes only fields the owner's wait watches, never the state."""
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    syr = _item(hub, "SY-3")
+    ref = f"StockItem/{syr['id']}"
+    owner = _own_run(hub, ref, "inventory-reorder")
+    with pytest.raises((Denied, Invalid)):
+        hub.engine.start(rana, "inventory-reorder", record=ref, via_automation=True)
+    with pytest.raises((Denied, Invalid)):  # by its workflow only
+        hub.update_record(rana, ref, {"status": "low"})
+    _move(hub, rana, "SY-3", "issue", 2)  # on hand at its reorder point: the open wait ends, the run marks it low
+    low = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "low"})
+    assert low["run_id"] == owner["id"]
+    i = item_for(hub, owner, "order")
+    hub.engine.claim(amara, i)
+    hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-9"})
+    _move(hub, rana, "SY-3", "receive", 10)  # another workflow restocks it: a move the owner's wait takes
+    back = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "stocked"})
+    assert back["run_id"] != owner["id"] and hub.engine.run(owner["id"])["status"] == "completed"
+
+
+def test_a_loop_is_walked_by_the_next_run_which_knows_who_did_what_before(stock):
+    """Rule: a workflow has no loops, so a lifecycle that comes back (a move rejected and revised) is walked one pass
+    per run: a run that moved its record and ends with it back where its type's ``when`` holds starts the next run,
+    whose ``run.previous`` is the one before, so ``not_by`` holds across passes. A run that never moved its record
+    ends for good, and a companion's open run never holds the next pass back."""
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    count = _move(hub, rana, "GL-M", "count", 18, reason="shelf count")
+    ref = f"StockMove/{count['id']}"
+    first = _post_run(hub, count)
+    i = item_for(hub, first, "sign-off")
+    hub.engine.claim(amara, i)
+    hub.engine.decide(amara, i, "reject", "count again")
+    second = _own_run(hub, ref, "inventory-post")
+    assert second["id"] != first["id"] and second["ctx"]["run"]["previous"] == first["id"]
+    hub.update_record(rana, ref, {"status": "draft"})
+    hub.update_record(rana, ref, {"status": "submitted"})
+    with pytest.raises(Denied):
+        hub.engine.claim(rana, item_for(hub, second, "sign-off"))
+
+
+def test_a_record_filed_before_its_type_named_a_workflow_or_had_a_lifecycle_is_picked_up_on_its_next_write(stock):
+    """Rule: the migration a module upgrade needs is done record by record: a record with no state (filed before its
+    type had a lifecycle) is in its type's first state, written so on its next change; and a record its type's
+    workflow has never walked at the active version is picked up there, once (idempotent, retried on each write
+    until it starts, and never failing the write)."""
+    hub, rana = stock, M(stock, "rana")
+    rec = hub.records.create("StockItem", {"resourceType": "StockItem", "sku": "OLD-1", "name": "Old stock",
+                                           "on_hand": 50, "reorder_point": 5})  # the store, as an old hub left it
+    ref = f"StockItem/{rec['id']}"
+    assert not hub.db.runs.find_one({"record": ref})
+    hub.update_record(rana, ref, {"supplier": "Bluenose Supply"})
+    assert hub.records.read("StockItem", rec["id"])["status"] == "stocked"
+    run = _own_run(hub, ref, "inventory-reorder")
+    assert hub.engine.run(run["id"])["steps"]["watch"]["state"] == "waiting"
+    hub.update_record(rana, ref, {"supplier": "Another supplier"})
+    assert len(list(hub.db.runs.find({"record": ref}))) == 1
+
+
+def test_a_record_moved_out_of_its_workflow_s_hands_stops_its_open_run_on_the_track(hub):
+    """Rule: a correction (a move from any state, such as entered in error) or a move to a closing state, open to
+    whoever may write the record, stops its open run: its items are cancelled and ``run.stopped`` goes on the track,
+    caused by the move. Nothing is abandoned: the move already says where the record is."""
+    install(hub, "dms")
+    install(hub, "qms")
+    for m in hub.pack.modules:
+        m.module.demo(hub)
+    rana = M(hub, "rana")
+    capa = hub.create_record(rana, "CAPA", {"title": "Duplicate", "kind": "preventive", "problem": "P"})
+    ref = f"CAPA/{capa['id']}"
+    run = _own_run(hub, ref, "qms-capa")
+    hub.update_record(rana, ref, {"status": "cancelled", "cancel_reason": "A duplicate"})
+    stopped = hub.db.events.find_one({"action": "run.stopped", "run_id": run["id"]})
+    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "cancelled"})
+    assert stopped and stopped["cause"] == moved["seq"] and hub.engine.run(run["id"])["status"] == "cancelled"
+    assert not hub.db.items.find_one({"run_id": run["id"], "status": {"$in": ["open", "claimed", "waiting"]}})
+    assert hub.records.read("CAPA", capa["id"])["status"] == "cancelled"
+
+
 def test_increment_and_decrement_take_amounts_and_for_each_takes_one_reference(hub):
     from practicehub.workflows import parse
     base = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["physician"]\n[[steps]]\nid = "a"\n'
