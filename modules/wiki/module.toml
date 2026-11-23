@@ -7,7 +7,8 @@
 requires_core = "1.0"
 id = "wiki"
 name = "Wiki"
-version = "2"
+version = "3"
+changes = """A page flagged as out of date is archived only through its check, a wiki owner's signed decision."""
 summary = "Pages of formatted text in spaces and trees, linked to records and work, checked for being out of date."
 shortcuts = ["WikiPage", "Procedure"]
 

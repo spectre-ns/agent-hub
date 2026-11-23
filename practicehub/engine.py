@@ -167,6 +167,24 @@ def act_record_create(engine, run, step, params, actor):
     return {"id": rec["id"], "reference": ref}
 
 
+def _record_update_append(rec: dict, params: dict) -> dict:
+    """record.update's ``append``: a table of list field = entry, each entry added to the end of that list on the
+    record (what every pass of a record did, kept one entry per pass rather than written over). An entry whose text
+    is all empty (nothing to keep) is left out."""
+    add = params.get("append") or {}
+    if not isinstance(add, dict):
+        raise ValueError("record.update: append is a table of list field = entry")
+    out = dict(params.get("set") or {})
+    for path, entry in add.items():
+        cur = out[path] if path in out else expr.lookup(rec, path)
+        if cur is not None and not isinstance(cur, list):
+            raise ValueError(f"record.update: {path} is not a list")
+        empty = entry in (None, "", [], {}) or (isinstance(entry, dict) and not any(
+            v not in (None, "", [], {}) for v in entry.values()))
+        out[path] = list(cur or []) + ([] if empty else [entry])
+    return {**params, "set": out} if add else params
+
+
 def act_record_update(engine, run, step, params, actor):
     # a step that names its record must name one: an empty ref never falls back to the run's record
     # no ref: what the run's own steps call its record (``run.record``): for a run moved onto a record of its own
@@ -201,6 +219,7 @@ def act_record_update(engine, run, step, params, actor):
         if isinstance(cur, bool) or (cur is not None and not isinstance(cur, (int, float))):
             raise ValueError(f"record.update: {path} is not a number")
         params = {**params, "set": {**(params.get("set") or {}), path: (cur or 0) + by}}
+    params = _record_update_append(rec, params)
     for path, value in (params.get("set") or {}).items():
         cur = rec
         parts = path.split(".")
@@ -827,6 +846,49 @@ class Engine:
                                  {"$set": {"status": "cancelled", "updated_at": utcnow()}}, many=True)
         self.hub.track.append(actor, "run.stopped", run["record"] or "", run_id=run_id, cause=cause,
                               data={"reason": why})
+
+    def follow_let_through(self, actor: dict, run_id: str, new_state: str, cause: int | None) -> None:
+        """The run's record was moved to ``new_state`` by a person or another run, through a state its open step
+        lists in ``moves``. A task (with nothing it must ask) whose own ``state`` is where the record went is done
+        by that move, by whoever made it: an author who sends a revision for review on its page has done the step
+        that asked them to. A task or decision whose ``when`` no longer holds of the record as it is now is
+        withdrawn (``step.withdrawn``): a purchaser's order for an item a person cleared or discontinued is nobody's
+        work, and the steps after it go on as if it were not needed."""
+        hub = self.hub
+        run = self.run(run_id)
+        if run["status"] != "running":
+            return
+        wf, _ = hub.workflow(run["workflow_id"], run["version"])
+        live = self._live_ctx(run)
+        changed = []
+        for s in wf.steps:
+            st = run["steps"].get(s.id) or {}
+            if st.get("state") != "active" or s.kind not in ("task", "gate") or s.for_each:
+                continue
+            if s.kind == "task" and s.state == new_state and not any(f.get("required") for f in s.fields):
+                how, done = "moved", {"state": "done", "item": st.get("item"), "by": actor["id"], "moved": True}
+                run["ctx"][s.id] = {"by": actor["id"], "by_kind": actor.get("kind"), "moved_to": new_state}
+            elif s.when and not expr.holds(s.when, live):
+                how, done = "withdrawn", {"state": "skipped", "item": st.get("item"), "withdrawn": True}
+                run["ctx"][s.id] = {"withdrawn": True, "moved_to": new_state, "moved_by": actor["id"]}
+            else:
+                continue
+            run["steps"][s.id] = done
+            changed.append((s, how, st.get("item")))
+        if not changed:
+            return
+        self._save(run)
+        for s, how, item_id in changed:
+            if item_id:
+                walks = item_id == run.get("item")
+                hub.db.items.set(item_id, {"status": "waiting" if walks else ("done" if how == "moved" else "cancelled"),
+                                           "claimed_by": actor["id"] if how == "moved" else None,
+                                           "updated_at": utcnow()})
+                self._hist_update(item_id, s.id, done_at=utcnow(), by=actor["id"] if how == "moved" else None,
+                                  outcome="done" if how == "moved" else "withdrawn")
+            hub.track.append(actor, "step.done" if how == "moved" else "step.withdrawn", f"step:{s.id}",
+                             run_id=run_id, cause=cause, data={"step": s.id, "moved_to": new_state,
+                                                               **({"when": s.when} if how == "withdrawn" else {})})
 
     def _hand_on(self, run: dict, cause) -> None:
         """A run of an older version of a type's own workflow that ends with its record still where that workflow
@@ -1773,6 +1835,8 @@ class Engine:
         if not route["assignee"] and route["role"] and not self.hub.active_holders(
                 route["role"], persons_only=bool(route["persons_only"])):
             self._nobody_holds(run, step, item_id, cause)
+        else:
+            self._nobody_may_take(run, step, item_id, cause)
         self.hub.wake_agents()
         return item_id
 
@@ -1791,6 +1855,8 @@ class Engine:
         if not route["assignee"] and route["role"] and not hub.active_holders(
                 route["role"], persons_only=bool(route["persons_only"])):
             self._nobody_holds(run, step, parent["id"], cause)
+        else:
+            self._nobody_may_take(run, step, parent["id"], cause)
 
     def _people_of(self, run: dict, step) -> list[str]:
         """The members a step done once per person is for: its ``for_each``, as member ids."""
@@ -1933,6 +1999,46 @@ class Engine:
                                f"item:{item_id}", cause=cause,
                                data={"role": step.role, "escalated_to": step.escalate_to, "priority": step.priority})
         self.alert(run, step, text, role=step.escalate_to, cause=seq)
+
+    def blocked_holders(self, item: dict) -> list[tuple[dict, str]] | None:
+        """When people on duty hold an open task's or decision's role but none of them may take it (separation of
+        duties: each wrote the record, or did an earlier step), each of them with why; None when someone may (or
+        the role is held by nobody: ``_nobody_holds`` raises that)."""
+        if item.get("kind") not in ("task", "gate") or not item.get("role") or item.get("status") not in OPEN_WORK:
+            return None
+        holders = self.hub.active_holders(item["role"], persons_only=bool(item.get("persons_only")))
+        free = {**item, "status": "open", "claimed_by": None, "assignee": None}
+        out = []
+        for m in holders:
+            ok, why = self.eligibility(m, free)
+            if ok:
+                return None
+            out.append((m, why))
+        return out or None
+
+    def _nobody_may_take(self, run: dict, step, item_id: str, cause: int) -> None:
+        """Work whose role is held, but by nobody who may take it (each holder is kept out by separation of duties),
+        never waits unseen: each policy owner on duty is told by name, with who is kept out and why, and
+        ``item.blocked`` goes on the track. Someone must give the role to another person."""
+        if step.kind not in ("task", "gate"):
+            return
+        item = self.hub.db.items.get(item_id)
+        blocked = self.blocked_holders(_plain(item)) if item else None
+        if not blocked:
+            return
+        hub = self.hub
+        who = "; ".join(f"{m['name']} ({why})" for m, why in blocked)
+        seq = hub.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "item.blocked",
+                               f"item:{item_id}", run_id=run["id"], cause=cause,
+                               data={"role": step.role, "kept_out": [{"member": m["id"], "why": why}
+                                                                     for m, why in blocked]})
+        text = (f"Nobody may take \u201c{step.title}\u201d ({item_id}): everyone holding the role {step.role} is "
+                f"kept out: {who}. Give the role to someone else.")
+        owners = [m["id"] for m in hub.members("person") if m.get("status") == "active" and hub.is_policy_owner(m)]
+        for mid in owners:
+            self._notice(run, step, text, assignee=mid, cause=seq, priority="urgent", about=f"item:{item_id}")
+        if not owners:
+            self.alert(run, step, text, role=step.escalate_to, cause=seq, priority="urgent")
 
     def _notice(self, run: dict, step, text: str, *, role: str | None = None, assignee: str | None = None,
                 cause: int | None = None, priority: str | None = None, about: str | None = None,

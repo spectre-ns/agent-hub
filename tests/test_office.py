@@ -324,8 +324,9 @@ def test_a_signed_file_saved_again_is_said_to_be_unsigned(docs, mock_cool, monke
     ref, blob = f"Document/{hub.create_record(installer, 'Document', {'title': 'S', 'status': 'approved', 'file': att})['id']}", att["blob"]
     hub.sign_record(M(hub, "dr-amara"), ref, "I have read and understood this document")
     assert "Revise" in _page(app, f"/records/{ref}/office/file/{blob}")[2].decode()  # released: read-only, says why
-    hub.update_record(M(hub, "dr-amara"), ref, {"status": "draft"})  # Revise
-    assert "Saving a change makes a new version, which is not signed" in _page(app, f"/records/{ref}/office/file/{blob}")[2].decode()
+    hub.update_record(M(hub, "dr-amara"), ref, {"status": "draft"})  # Revise: numbered as the next revision
+    assert hub.records.read(*ref.split("/", 1))["revision"] == 1
+    assert "This version is signed" not in _page(app, f"/records/{ref}/office/file/{blob}")[2].decode()  # the signature is the last revision's
     fid, token = _open(app.wopi, hub, ref, blob, "rana")
     assert _call(app.wopi, "POST", fid, token, _odt("changed"), x_cool_wopi_isexitsave="true")[0] == 200
     assert "this version is not signed" in _page(app, f"/records/{ref}")[2].decode()

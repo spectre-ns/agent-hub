@@ -213,6 +213,10 @@ class WorkPanel:
             elif sst.get("state") == "waiting":
                 bits.append('<span class="muted">waiting</span>')
             bits += self._step_facts(run, s, item, rt)
+            if sst.get("state") == "waiting":  # a wait over several records: each, where it is, who has it
+                bits.append(self._wait_records_html(me, run, s))
+            elif item and item.get("step_id") == s.id:  # nobody may take it: who is kept out, and why
+                bits.append(self._blocked_html(item))
             if item and item.get("status") in ("open", "claimed", "held") and item.get("step_id") == s.id:
                 if item.get("claimed_by") == me["id"] or item.get("assignee") == me["id"] or (
                         item["status"] == "open" and not item.get("claimed_by") and eng.eligibility(me, item)[0]):

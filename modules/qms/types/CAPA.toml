@@ -57,11 +57,27 @@ rel = "affects"
 name = "root_cause"
 label = "Root cause"
 type = "text"
+by = "workflow"   # the investigation's answer; kept as it was agreed once actions are under way
 
 [[field]]
 name = "plan"
 label = "Action plan"
 type = "text"
+by = "workflow"   # the latest pass's action; every pass's is in actions
+
+[[field]]
+name = "actions"
+label = "Actions taken"
+type = "list"
+by = "workflow"   # one entry per pass: when, who, and what was done
+show = true
+
+[[field]]
+name = "not_effective_because"
+label = "Found not effective because"
+type = "text"
+by = "workflow"   # the verifier's comment, shown to whoever takes the further action
+show = true
 
 [[field]]
 name = "cancel_reason"
@@ -72,7 +88,7 @@ show = true
 [lifecycle]
 field = "status"
 initial = "open"
-locked = ["closed", "cancelled"]
+locked = ["actions", "verification", "closed", "cancelled"]   # once the plan is agreed, the root cause, plan and documents are what is acted on and verified
 abandoned = { "verification" = "actions", "actions" = "investigating" }   # cancelled verification leaves the actions open; cancelled actions go back to investigating, which a person may cancel
 
 [[lifecycle.transition]]
@@ -123,9 +139,5 @@ require = ["cancel_reason"]
 id = "start"
 fields = ["owner", "opened"]
 
-[[signature]]
-meaning = "I verify that this action was effective"
-roles = ["quality-manager"]
-states = ["verification"]
-# No moves_to: the qms-capa workflow's verify gate closes a CAPA (and keeps the investigator out of it). This is a
-# further attestation a quality manager may add while it is in verification.
+# No [[signature]]: the qms-capa workflow's verify gate is where a quality manager signs whether the action worked
+# (and it keeps the investigator out of it). A second meaning here only said the same thing twice.

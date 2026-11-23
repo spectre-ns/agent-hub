@@ -1739,21 +1739,7 @@ class RecordPages:
 
     def _history_panel(self, me, rt, ref) -> str:
         versions = self.hub.record_history(me, ref)
-        rows = []
-        for i, v in enumerate(versions):
-            prev = versions[i + 1]["data"] if i + 1 < len(versions) else {}
-            changed = [f["label"] for f in rt.fields
-                       if schema.get(v["data"], schema.locate(v["data"], f["path"], f.get("with")))
-                       != schema.get(prev, schema.locate(prev, f["path"], f.get("with")))]
-            via = f' · <a href="/runs/{e(v["run_id"])}">in a run</a>' if v.get("run_id") else ""
-            note = f'<br><span class="muted">{e(v["comment"])}</span>' if v.get("comment") else ""
-            cmp_ = (f' <a href="/records/{e(rt.id)}/{e(ref.split("/", 1)[1])}/compare?a={versions[i + 1]["version"]}'
-                    f'&amp;b={v["version"]}">Compare</a>') if i + 1 < len(versions) else ""
-            rows.append(f'<tr><td>v{v["version"]}</td><td>{self.who(v["actor"]) if v["actor"] else ""}{via}</td>'
-                        f'<td>{e(", ".join(changed) or "—")}{note}{cmp_}</td><td class="muted">{self._at(v["at"])}</td>'
-                        f'<td><details><summary>Details</summary><pre>{e(json.dumps(v["data"], indent=1))}</pre></details></td></tr>')
-        out = ("<div class='tablewrap'><table><tr><th>Version</th><th>By</th><th>Changed</th><th>When</th><th><span class='visually-hidden'>Record</span></th></tr>"
-               + "".join(rows) + "</table></div>") if rows else "<p class='muted'>No history.</p>"
+        out = self._history_in_words(me, rt, ref, versions)  # in words, with its workflows' decisions; Raw behind
         if self.hub.is_policy_owner(me):  # the privacy officer answers "who looked at my chart?"
             seen = self.hub.views_of(me, ref)
             vrows = "".join(f'<tr><td>{self.who(v["actor"])}</td><td>{e((v.get("data") or {}).get("how", ""))}</td>'
@@ -2095,6 +2081,15 @@ class RecordPages:
                 "Status</span></th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
         return self.layout(req, "Modules", body)
 
+    @staticmethod
+    def _module_changes_html(plan: dict) -> str:
+        """The module's own note of what this version changed (``changes`` in its module.toml), in its words."""
+        note = (plan or {}).get("changes") or ""
+        if not note:
+            return ""
+        paras = "".join(f"<p>{e(p.strip())}</p>" for p in note.split("\n\n") if p.strip())
+        return f"<div class='card module-changes'><h3>What changed in version {e(plan['version'])}</h3>{paras}</div>"
+
     def page_module(self, req, mid):
         from ..hub import Denied, NotFound
         me, hub = req["me"], self.hub
@@ -2137,6 +2132,7 @@ class RecordPages:
                        "upgrade." if st["running"] else "Its files are the ones put into force, but this hub is not "
                        "running its code.") + "</p>")
         else:
+            out.append(self._module_changes_html(plan))
             out.append(f"<p>Its code (pack.py) is <b>{'changed' if plan['code_changed'] else 'unchanged'}</b>. "
                        f"{review}</p>")
             for key, label in rows:

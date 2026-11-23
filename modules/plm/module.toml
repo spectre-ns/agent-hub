@@ -9,7 +9,10 @@
 requires_core = "1.0"
 id = "plm"
 name = "Product lifecycle"
-version = "2"
+version = "3"
+changes = """The change board's comment on its decision is written on the change order (Board's note), and its
+review has its own meanings for approval and rejection. Changed documents are numbered by their own workflow, not by
+the change order. The record's own signature meaning, which repeated the review's, is removed."""
 summary = "Products at revisions, their parts and specifications, and change orders that release new revisions."
 shortcuts = ["Product", "ChangeOrder"]
 requires = ["dms", "qms"]

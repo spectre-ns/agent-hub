@@ -5,7 +5,11 @@
 requires_core = "1.0"
 id = "qms"
 name = "Quality"
-version = "2"
+version = "3"
+changes = """Root cause and plan are written by the CAPA's workflow and locked while it is in actions or verification.
+Every pass's action is kept under Actions taken. Found not effective, the verifier's comment is written on the CAPA
+(Found not effective because), and the next pass reopens only the documents its further action names. The record's
+own signature meaning, which repeated the verification gate's, is removed."""
 summary = "Corrective and preventive actions, linked to the controlled documents they change."
 shortcuts = ["CAPA"]
 requires = ["dms"]

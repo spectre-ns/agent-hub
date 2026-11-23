@@ -29,13 +29,15 @@ when = "record.status == 'review'"
 role = "change-board"
 signer = "person"
 not_by = ["record.editors"]   # whoever wrote the change does not approve it
-meaning = "I have reviewed this change order"
+meaning = "I approve this change order"
+meanings = { reject = "I reject this change order and return it to its author" }
 outcomes = ["approve", "reject"]
 context = ["record:products", "record:documents", "record:quality"]
 due = "5d"
 escalate_to = "change-board"
 instructions = """Read why it changes and what else it touches. Approve it, and its products and documents open at
-their next revision; or reject it with what is missing, and it goes back to its author."""
+their next revision; or reject it with what is missing, and it goes back to its author. Your comment is written on the
+change order as the board's note."""
 
 [[steps]]
 id = "reject"
@@ -43,7 +45,12 @@ title = "Return the change to its author"
 kind = "automation"
 after = ["review"]
 when = "review.outcome == 'reject'"
+action = "record.update"
 state = "rejected"   # back with its author: the next pass is the next run's
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+decision = "Rejected: {{review.comment}}"
 
 [[steps]]
 id = "approve"
@@ -51,7 +58,12 @@ title = "Record the approval"
 kind = "automation"
 after = ["review"]
 when = "review.outcome == 'approve'"
+action = "record.update"
 state = "approved"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+decision = "Approved: {{review.comment}}"
 
 [[steps]]
 id = "open-products"
@@ -79,7 +91,6 @@ for_each = "{{record.documents}}"
 where = "each_record.status == 'approved'"
 [steps.params]
 ref = "{{each}}"
-increment = ["revision"]
 [steps.params.set]
 status = "draft"   # a move the document's own workflow waits on: its author revises it and sends it for review
 
@@ -102,6 +113,8 @@ role = "document-controller"
 after = ["approve", "mark-opened"]   # on a second pass nothing is opened again, and this still waits
 for_each = "{{record.documents}}"
 until = "each_record.status == 'approved' or each_record.status == 'obsolete'"
+instructions = """Each changed document is listed with where it is and who holds it: its owner revises it and a
+document controller approves it, in its own work."""
 
 [[steps]]
 id = "release"
@@ -141,7 +154,12 @@ title = "Return the change to its author"
 kind = "automation"
 after = ["release"]
 when = "release.outcome == 'return'"
+action = "record.update"
 state = "draft"   # the next pass is the next run's
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+decision = "Returned at release: {{release.comment}}"
 
 [[steps]]
 id = "implemented"

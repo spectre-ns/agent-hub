@@ -859,11 +859,15 @@ def test_an_office_document_saved_in_collabora_becomes_a_new_version_by_its_edit
 def test_a_signature_can_be_limited_to_a_role_and_a_state(quality):
     hub = quality
     rana = M(hub, "rana")
-    capa = hub.create_record(rana, "CAPA", {"title": "T", "kind": "preventive", "problem": "P"})
-    with pytest.raises(Invalid):  # only in verification
-        hub.sign_record(rana, f"CAPA/{capa['id']}", "I verify that this action was effective")
+    meaning = "I checked this document against the audit"  # the modules' own meanings are their gates' now
+    src = (hub.record_type("Document").source
+           + f'\n[[signature]]\nmeaning = "{meaning}"\nstates = ["approved"]\nroles = ["quality-manager"]\n')
+    hub.approve(M(hub, "dr-amara"), "type", "Document", hub.propose("type", rana, src, "an audit check")["version"])
+    draft = hub.create_record(rana, "Document", {"title": "T", "body": "B"})
+    with pytest.raises(Invalid):  # only while it is in force
+        hub.sign_record(rana, f"Document/{draft['id']}", meaning)
     with pytest.raises(Denied):  # only a quality manager
-        hub.sign_record(M(hub, "dr-liam"), f"CAPA/{capa['id']}", "I verify that this action was effective")
+        hub.sign_record(M(hub, "dr-liam"), _doc(hub), meaning)
 
 
 def test_a_gate_decision_is_a_signature_on_its_record_and_survives_the_move_it_makes(quality):
@@ -1315,7 +1319,11 @@ def test_staff_keep_the_approved_version_while_a_document_is_revised(quality):
     hub.update_record(rana, dref, {"body": "A half-written revision"})
     used = hub.in_use_version(liam, dref)
     assert used["data"]["status"] == "approved" and used["data"].get("body") == old
-    hub.update_record(rana, dref, {"status": "obsolete"})
+    hub.update_record(rana, dref, {"status": "retiring", "obsolete_reason": "Replaced"})  # proposed obsolete
+    g = item_for(hub, _own_run(hub, dref, "dms-review"), "retire")
+    hub.engine.claim(M(hub, "dr-amara"), g)
+    hub.engine.decide(M(hub, "dr-amara"), g, "obsolete")  # a document controller's signed decision
+    assert hub.records.read(*dref.split("/", 1))["status"] == "obsolete"
     assert hub.in_use_version(liam, dref) is None  # a withdrawn document has no version in use
 
 
@@ -3220,7 +3228,7 @@ def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_
     assert hub.records.read("Document", doc["id"])["status"] == "draft"
     assert hub.engine.run(run["id"])["steps"]["revise-documents"]["state"] == "done"
     walk = _own_run(hub, dref, "dms-review")
-    assert hub.engine.run(walk["id"])["steps"]["revise"]["state"] == "waiting"
+    assert hub.engine.run(walk["id"])["steps"]["revise"]["state"] == "active"  # a task, the revision with its owner
 
     jo = M(hub, "jo")
     pats = hub.records.search("Patient")
@@ -5072,6 +5080,41 @@ def test_a_step_lists_the_moves_it_waits_on_and_a_trigger_refuses_only_the_same_
     # the practice's request refuses only the same reason a moment ago: any other is a new, screened request
     req = hub.workflow("appointment-request")[0]
     assert req.one_open_same == ["input.reason"] and req.one_open_within
+
+
+# ------------------------------------------------------------- passes kept, moves let through, nobody may take it
+def test_record_update_appends_one_entry_per_pass_and_never_an_empty_one():
+    """record.update's ``append`` (a table of list field = entry) adds each entry to the end of that list on the
+    record, so what every pass did is kept rather than written over; an empty entry adds nothing. A workflow that
+    gives it anything else is refused when it is read."""
+    from practicehub.engine import _record_update_append
+    from practicehub.workflows import DefinitionError, parse
+    rec = {"done": ["first"]}
+    assert _record_update_append(rec, {"append": {"done": "second"}})["set"] == {"done": ["first", "second"]}
+    assert _record_update_append(rec, {"append": {"done": ""}})["set"] == {"done": ["first"]}
+    assert _record_update_append({}, {"append": {"done": "one"}, "set": {"x": 1}})["set"] == {"x": 1, "done": ["one"]}
+    with pytest.raises(ValueError, match="not a list"):
+        _record_update_append({"done": "text"}, {"append": {"done": "more"}})
+    wf = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["front-desk"]\n[[steps]]\nid = "a"\ntitle = "A"\n'
+          'kind = "automation"\naction = "record.update"\n[steps.params]\nref = "x/1"\n{append}')
+    assert parse(wf.format(append='[steps.params.append]\ndone = "{{run.today}}"\n'))
+    with pytest.raises(DefinitionError) as exc:
+        parse(wf.format(append='append = "done"\n'))
+    assert any("append is a table" in p for p in exc.value.problems)
+
+
+def test_work_nobody_may_take_is_never_blocked_unseen(hub):
+    """An open task or decision whose role is held, but only by people separation of duties keeps out of it, is
+    reported with each of them and why (``blocked_holders``); a notice, work with no role, and work someone may take
+    are not. (A module's own test makes every holder of a role write the record its decision is about.)"""
+    eng = hub.engine
+    assert eng.blocked_holders({"kind": "notice", "role": "front-desk", "status": "open"}) is None
+    assert eng.blocked_holders({"kind": "task", "role": None, "status": "open"}) is None
+    open_items = [i for i in hub.db.items.find({"kind": {"$in": ["task", "gate"]}, "status": "open",
+                                               "role": {"$ne": None}}) if i.get("run_id")]
+    for i in open_items[:5]:  # the practice's open work: someone may take each
+        if any(eng.eligibility(m, eng.item(i["_id"]))[0] for m in hub.active_holders(i["role"])):
+            assert eng.blocked_holders(eng.item(i["_id"])) is None
 
 
 # ------------------------------------------------------------------------------------------- the booking portal

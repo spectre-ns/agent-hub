@@ -1006,6 +1006,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 "code_changed": m.module_sha256 != (self._module_code_sha(m.id) or ""), "roles": [],
                 "data_classes": [], "grants_added": [], "grants_removed": []}
         plan["reviewed_by"] = self.module_code_reviewers(m.id, m.digest)
+        plan["changes"] = str(m.practice.get("changes") or "").strip()  # its own note of what this version changed
         plan["needs_review"] = m.digest != self._module_digest(m.id)
         old_grants, new_grants = set(map(tuple, self._module_grants(m.id))), set(self._grant_tuples(m))
         plan["grants_added"] = sorted(map(list, new_grants - old_grants))
@@ -3383,6 +3384,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin):
                 self.engine.stop(member, r, why, cause)
             return
         for r in runs:
+            if how == "moves":  # a move its open step let through: the step it finished, or one it made moot
+                self.engine.follow_let_through(member, r, t["to"], cause)
             self.engine.advance(r, cause)
         if getattr(self, "_upgrading", False) or self.record_workflow(rt) != owner \
                 or schema.starts_workflow(rt, rec) != owner \

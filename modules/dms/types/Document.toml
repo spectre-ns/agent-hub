@@ -6,10 +6,11 @@ data_class = "documents"
 date = "effective"
 flag = "status"
 order = 10
-# Every revision is worked from draft to in force by one workflow: written, sent for review, approved (signed) by a
-# controller who did not write it, or returned; in force until revised or made obsolete. Its status is where that
-# work is. An obsolete document is not walked.
-workflow = { id = "dms-review", when = "record.status in ['draft', 'in-review', 'approved']" }
+# Every revision is worked from draft to in force by one workflow: written by its owner, sent for review, approved
+# (signed) by a controller who did not write it, or returned with the reason; in force until revised or made obsolete.
+# Its status is where that work is. Making it obsolete is a document controller's signed decision too. An obsolete
+# document is not walked.
+workflow = { id = "dms-review", when = "record.status in ['draft', 'in-review', 'approved', 'retiring']" }
 summary = "A policy, procedure or form under document control."
 
 [[field]]
@@ -24,15 +25,17 @@ help = "e.g. SOP-014"
 [[field]]
 name = "revision"
 type = "number"
+help = "its workflow adds one when it is revised after approval"
 
 [[field]]
 name = "status"
 type = "choice"
-choices = ["draft", "in-review", "approved", "obsolete"]
+choices = ["draft", "in-review", "approved", "retiring", "obsolete"]
 
 [[field]]
 name = "owner"
 type = "member"
+help = "who writes its revisions: each revision is their work"
 
 [[field]]
 name = "effective"
@@ -48,12 +51,23 @@ help = "the document itself, by its SHA-256 in the blob store"
 name = "body"
 type = "markdown"
 
+[[field]]
+name = "returned_because"
+label = "Returned because"
+type = "text"
+by = "workflow"   # the controller's comment when they returned it, shown to its author while they revise it
+
+[[field]]
+name = "obsolete_reason"
+label = "Why make it obsolete"
+type = "text"
+
 [lifecycle]
 field = "status"
 initial = "draft"
 in_use = "approved"   # while a document is revised, staff keep reading its last approved revision
-locked = ["in-review", "approved", "obsolete"]   # what was reviewed is what gets approved
-abandoned = { "in-review" = "draft" }            # a review that is cancelled hands the document back
+locked = ["in-review", "approved", "retiring", "obsolete"]   # what was reviewed is what gets approved
+abandoned = { "in-review" = "draft", "retiring" = "draft" }  # cancelled work hands it back as a draft: never approved or obsolete by a cancel, and no more than Revise already lets a person do
 
 [[lifecycle.transition]]
 from = ["draft"]
@@ -75,7 +89,7 @@ label = "Return to the author"
 [[lifecycle.transition]]
 from = ["approved"]
 to = "draft"
-label = "Revise"
+label = "Revise"        # its workflow numbers the new revision
 
 [[lifecycle.transition]]
 from = ["approved"]
@@ -83,10 +97,32 @@ to = "in-review"
 by = "workflow"         # a CAPA sends an approved document straight back for review
 label = "Send back for review"
 
+# Making a document obsolete takes it out of use: whoever works on it proposes it and says why, and a document
+# controller decides it and signs (the dms-review workflow's retire step). Kept, it goes back to where it was.
 [[lifecycle.transition]]
 from = ["draft", "approved"]
+to = "retiring"
+label = "Propose making it obsolete"
+fields = ["obsolete_reason"]
+require = ["obsolete_reason"]
+
+[[lifecycle.transition]]
+from = ["retiring"]
 to = "obsolete"
+by = "workflow"         # only a document controller's signed decision gets here
 label = "Make obsolete"
+
+[[lifecycle.transition]]
+from = ["retiring"]
+to = "approved"
+by = "workflow"
+label = "Keep it in use"
+
+[[lifecycle.transition]]
+from = ["retiring"]
+to = "draft"
+by = "workflow"
+label = "Keep the draft"
 
 [[signature]]
 meaning = "I have read and understood this document"

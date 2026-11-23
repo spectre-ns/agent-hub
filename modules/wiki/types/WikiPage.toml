@@ -60,6 +60,7 @@ help = "when a wiki owner last confirmed the page is current"
 [lifecycle]
 field = "status"
 initial = "draft"
+abandoned = { "needs-check" = "published" }   # a check cancelled leaves the page as it was before it was flagged; flag it again to have it checked
 
 [[lifecycle.transition]]
 from = ["draft"]
@@ -78,8 +79,14 @@ by = "workflow"         # a wiki owner's check puts it back
 label = "Confirm it is current"
 
 [[lifecycle.transition]]
-from = ["draft", "published", "needs-check"]
+from = ["draft", "published"]
 to = "archived"
+label = "Archive"
+
+[[lifecycle.transition]]
+from = ["needs-check"]
+to = "archived"
+by = "workflow"         # a flagged page is archived only by its check: a wiki owner's signed decision
 label = "Archive"
 
 [[lifecycle.transition]]

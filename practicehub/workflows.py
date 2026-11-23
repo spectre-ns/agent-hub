@@ -405,6 +405,10 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
                 problems.append(f"{where}: {op} is a list of field names, like [\"revision\"] (by one), or a table of "
                                 f"field = amount, the amount a number or one placeholder, like "
                                 f"{{on_hand = \"{{{{record.quantity}}}}\"}}")
+        add = (step.params or {}).get("append") if kind == "automation" else None
+        if add is not None and (not isinstance(add, dict) or not add or not all(k for k in add)):
+            problems.append(f"{where}: append is a table of list field = entry, each entry added to the end of that "
+                            f"list, like {{actions = \"{{{{run.today}}}}: {{{{act.plan}}}}\"}}")
         if step.for_each and step.block:
             problems.append(f"{where}: for_each runs an action; a block step runs once")
         if step.due and duration_seconds(step.due) is None:
