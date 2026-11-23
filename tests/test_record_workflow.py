@@ -586,6 +586,30 @@ def _to_the_note(hub, amara, **more):
     return run, ref
 
 
+def test_the_front_desk_sees_where_a_visit_is_on_the_chart_but_not_the_clinical_step(hub):
+    """On the patient's chart the front desk sees each visit's work with the visit's state, who holds it and when it
+    is due, so they can answer "where is it"; the step itself (editing the clinical note) is a step they may not see:
+    neither its title nor what it needs access to. The physician sees the step."""
+    from practicehub.web.server import App
+    amara, jo = M(hub, "dr-amara"), M(hub, "jo")
+    run, ref = _to_the_visit(hub, amara)
+    hub.engine.complete(amara, item_for(hub, run, "end"), {"transcript": TRANSCRIPT, "visit_type": "minor",
+                                                           "minutes": 10})
+    run_all_local(hub, log=quiet)
+    assert hub.engine.run(run["id"])["steps"]["edit"]["state"] == "active"
+    pat = hub.engine.run(run["id"])["subject"]
+    app = App(hub, dev=False)
+    chart = app.page_record({"me": jo, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
+    now = chart[chart.index('class="wnow"'):]
+    now = now[:now.index("</div>")]
+    assert "At a step you may not see" in now and "Edit the note" not in now and "needs access to" not in now
+    assert "Physician" in now  # who holds it (the role, until someone takes it)
+    assert "Due" in now or "Overdue" in now
+    assert ">In progress<" in chart  # the visit's state, on its card
+    mine = app.page_record({"me": amara, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
+    assert "Edit the note" in mine
+
+
 @pytest.mark.parametrize("then,ends", [("i-wrote-it-on-the-visit", "finished"), ("no-note-needed", "undocumented")])
 def test_a_discarded_note_leaves_the_visit_completed_without_a_note_flagged_for_the_physician(hub, then, ends):
     """Discarding the draft never leaves the visit in progress, and never plain Completed: it is Completed: no note,

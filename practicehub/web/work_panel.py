@@ -16,7 +16,7 @@ import html
 import re
 
 from .. import schema
-from ..visibility import Viewer, workflow_classes
+from ..visibility import Viewer
 
 e = html.escape
 
@@ -228,6 +228,36 @@ class WorkPanel:
             out.append(f"{s.title}{who}{label}")
         return out
 
+    def _record_state(self, me, run: dict, rt, ref: str) -> str:
+        """The state of the record a run walks, in words, when the card is not on that record's own page (a visit's
+        work on the patient's chart): the state is not clinical, so whoever may read the type sees it."""
+        rec_ref = str(run.get("record") or "")
+        if rt is None or not rt.lifecycle or rec_ref == ref or "/" not in rec_ref \
+                or not self.hub.may_read(me, rt.id):
+            return ""
+        rec = self.hub.records.read(*rec_ref.split("/", 1))
+        st = schema.first(rec, rt.lifecycle["path"]) if rec else None
+        return f" {self._state_loz(st, rt)}" if st else ""
+
+    def _hidden_now(self, run: dict, hidden: list) -> list[str]:
+        """Where a run is when it is at a step the member may not see: not the step (its title, its branch), but who
+        holds it and when it is due, so the front desk can say "with the nurse, due by 3" without the clinical part."""
+        out = []
+        for s in hidden:
+            sst = run["steps"].get(s.id) or {}
+            if sst.get("state") not in ("active", "waiting", "failed"):
+                continue
+            item = self.hub.db.items.get(sst["item"]) if sst.get("item") else None
+            bits = ['<span class="muted">At a step you may not see</span>']
+            if sst.get("state") == "failed":
+                bits.append('<span class="loz removed">Stopped</span>')
+            if item and item.get("status") in ("open", "claimed", "held"):
+                bits.append(self._holder(item) + self._urgency(item))
+            elif s.role and sst.get("state") != "waiting":
+                bits.append(f'<span class="muted">for</span> {e(self._role_name(s.role))}')
+            out.append(f'<li>{" ".join(bits)}</li>')
+        return list(dict.fromkeys(out))  # two hidden branches at once read as one
+
     def run_card(self, me, run: dict, wf, viewer: Viewer, ref: str) -> str:
         """One open run: where it is now, who holds it, its steps in a strip, the viewer's own piece of it."""
         eng = self.hub.engine
@@ -266,9 +296,7 @@ class WorkPanel:
                     mine.append((s, item))
             now_html.append(f'<li>{" ".join(bits)}</li>')
         if hidden_now:
-            missing = viewer.missing(workflow_classes(wf))
-            now_html.append(f'<li class="muted">At a step you may not see (it needs access to {e(", ".join(missing))})'
-                            f'</li>')
+            now_html += self._hidden_now(run, hidden)
         if not now_html:
             now_html.append('<li class="muted">Between steps</li>')
         ahead = self._next_steps(wf, run, {s.id for s in now_steps}, rt, {s.id for s, _ in seen}) \
@@ -307,8 +335,9 @@ class WorkPanel:
                    + (f' <span class="muted">{left} of {len(kids)} parts open</span>' if left else ""))
         act = "".join(f'<a class="btn primary wp-mine" href="/items/{e(item["id"])}">Your turn: {e(s.title)}</a>'
                       for s, item in mine)
+        state = self._record_state(me, run, rt, ref)
         return (f'<article class="wcard">'
-                f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a>{key}</div>'
+                f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a>{key}{state}</div>'
                 f'<div class="wnow"><span class="k">Now</span><ul class="plain">{"".join(now_html)}</ul></div>'
                 f'{next_html}'
                 f'<ol class="wstrip" aria-hidden="true">{"".join(segs)}</ol>'
