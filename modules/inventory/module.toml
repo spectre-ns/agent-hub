@@ -8,7 +8,8 @@
 requires_core = "1.0"
 id = "inventory"
 name = "Inventory"
-version = "2"
+version = "3"
+changes = """An order task whose item is no longer low (stocked or discontinued on its page) is withdrawn."""
 summary = "Stock items, where they are kept, and the moves that receive, issue, adjust and count them."
 requires = []
 shortcuts = ["StockItem", "StockMove"]

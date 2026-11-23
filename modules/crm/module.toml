@@ -15,7 +15,9 @@
 requires_core = "1.0"
 id = "crm"
 name = "Relationships"
-version = "2"
+version = "3"
+changes = """A follow-up cancelled part way waits for the next follow-up date, as Not needed does, instead of
+coming straight back."""
 summary = "Organisations, contacts, their interactions and enquiries, with consent to commercial messages (CASL)."
 requires = []
 shortcuts = ["Organization", "Person", "Enquiry"]
