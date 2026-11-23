@@ -762,33 +762,91 @@ class Engine:
             hub.track.append(self.automation_actor(run), "trigger.failed", ref, run_id=run["id"], cause=cause,
                              data={"workflow": run["workflow_id"], "error": f"handing the record on: {exc}"})
 
+    RELINK_ALERT_AFTER = 3        # failed tries before the escalation role is told, once
+    RELINK_BACKOFF_MAX = 24 * 60  # minutes: a run that cannot be moved is tried at most daily
+
     def relink_runs(self) -> dict:
         """Move running runs that are about the subject itself onto a record of their own: a workflow whose current
         version makes its record (``[new_record]``) but whose older runs, started before it did, have the subject as
         their record. Each run is re-read and moved in its own transaction, and skipped when already moved, so it is
-        safe to repeat (every tick does) with one writer; a run that cannot be moved is noted and tried again next
-        time, never holding up the others. A run keeps its version, its item and key, its steps (who did what,
-        ``ctx[step].by``) and ``ctx.run.record`` (what its pinned steps say); it gains ``record`` (the record it
-        walks: the one it already made, else one made now from ``[new_record]``) and ``subject``."""
+        safe to repeat (every tick does) with one writer. A run keeps its version, its item and key, its steps (who
+        did what, ``ctx[step].by``) and ``ctx.run.record`` (what its pinned steps say); it gains ``record`` (the record
+        it walks: the one it already made, else one made now from ``[new_record]``) and ``subject``.
+
+        Only once the record type is ready for it (``_relink_ready``: its type names the workflow and that version is
+        about it, and a record made in its first state has somewhere to go when the old run ends or is cancelled);
+        until then each run stays on its subject. The runs are chosen in the database (only those not on a record of
+        the type yet, not noted as unmovable, and due a try). A run that can never move (its subject is not what the
+        type is about) is noted once (``run.relink_skipped``) and not looked at again; one whose move fails is tried
+        again later and later (``_relink_failed``)."""
         hub = self.hub
-        moved, failed = [], []
+        moved, failed, skipped = [], [], []
+        now = utcnow()
         for w in hub.workflows():
             wf = w["workflow"]
-            if not wf.new_record or not wf.record:
+            if not wf.new_record or not wf.record or not self._relink_ready(wf):
                 continue
-            for r in hub.db.runs.find({"workflow_id": wf.id, "status": "running"},
-                                      fields=["id", "record"]):
-                if str(r.get("record") or "").split("/", 1)[0] == wf.record:
+            q = {"workflow_id": wf.id, "status": "running", "relink_skipped": {"$ne": True},
+                 "record": {"$not": {"$regex": f"^{re.escape(wf.record)}/"}},
+                 "$or": [{"relink_next_at": None}, {"relink_next_at": {"$lte": now}}]}
+            for r in hub.db.runs.find(q, fields=["id", "record", "relink_attempts", "relink_error"]):
+                subject = str(r.get("record") or "")
+                if "/" not in subject or self._new_record_field(wf, subject.split("/", 1)[0]) is None:
+                    hub.db.runs.set(r["id"], {"relink_skipped": True})
+                    hub.track.append({"id": "engine", "kind": "automation"}, "run.relink_skipped", r["id"],
+                                     run_id=r["id"], data={"record": subject or None,
+                                                           "why": f"it is not about what a {wf.record} is about"})
+                    skipped.append(r["id"])
                     continue
                 try:
                     with hub.db:
                         if self._relink(wf, w["row"], r["id"]):
                             moved.append(r["id"])
-                except Exception as exc:  # noqa: BLE001 - tried again next time
+                except Exception as exc:  # noqa: BLE001 - tried again later
                     failed.append(r["id"])
-                    hub.track.append({"id": "engine", "kind": "automation"}, "run.relink_failed", r["id"],
-                                     run_id=r["id"], data={"error": str(exc)})
-        return {"moved": moved, "failed": failed}
+                    self._relink_failed(r, str(exc))
+        return {"moved": moved, "failed": failed, "skipped": skipped}
+
+    def _relink_ready(self, wf) -> bool:
+        """Whether runs of ``wf`` may be moved onto records of its type now: the type in force names ``wf`` and the
+        workflow's active version is about it (``Hub.record_workflow``), and a record made in the state ``[new_record]``
+        gives it, when only workflows move it on, has a place in the lifecycle's ``abandoned`` (an old run cancelled)
+        and, where the lifecycle has one, ``ended`` (an old run that ends without moving it). Until then a run moved
+        would leave a record nothing walks, that anyone could move."""
+        hub = self.hub
+        rt = hub.record_type(wf.record)
+        if rt is None or hub.record_workflow(rt) != wf.id:
+            return False
+        lc = rt.lifecycle
+        if not lc:
+            return True
+        made = (wf.new_record or {}).get(lc["field"])
+        if not isinstance(made, str) or "{{" in made:
+            made = lc["initial"]
+        exits = [t for t in lc["transition"] if (made in t["from"] or "*" in t["from"]) and t["to"] != made
+                 and "*" not in t["from"]]
+        if not exits or any(t["by"] != "workflow" for t in exits):
+            return True  # people move it on from there
+        return made in (lc.get("abandoned") or {}) and ("ended" not in lc or made in (lc.get("ended") or {}))
+
+    def _relink_failed(self, row: dict, error: str) -> None:
+        """A run that could not be moved: tried again after a wait that doubles each time (up to a day), noted on the
+        track only when the error is new, and the escalation role is told once, after a few tries."""
+        hub = self.hub
+        n = int(row.get("relink_attempts") or 0) + 1
+        wait = min(2 ** n, self.RELINK_BACKOFF_MAX)
+        at = (datetime.now(timezone.utc) + timedelta(minutes=wait)).replace(microsecond=0)
+        hub.db.runs.set(row["id"], {"relink_attempts": n, "relink_error": error[:500],
+                                    "relink_next_at": at.isoformat().replace("+00:00", "Z")})
+        if error[:500] != (row.get("relink_error") or ""):
+            seq = hub.track.append({"id": "engine", "kind": "automation"}, "run.relink_failed", row["id"],
+                                   run_id=row["id"], data={"error": error[:500], "attempt": n})
+        else:
+            seq = None
+        if n == self.RELINK_ALERT_AFTER:
+            run = self.run(row["id"])
+            self.alert(run, None, f"{run['title']} could not be moved onto a record of its own ({n} tries): "
+                                  f"{error[:200]}", role=hub.practice.get("escalation_role"), cause=seq)
 
     def _relink(self, wf, row, run_id: str) -> bool:
         hub = self.hub
