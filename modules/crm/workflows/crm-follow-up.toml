@@ -39,10 +39,22 @@ when = "record.status == 'logged'"
 state = "follow-up"
 
 [[steps]]
+id = "taken"
+title = "Note the date it is followed up for"
+kind = "automation"
+after = ["due", "asked"]   # its date came, or a person followed it up now
+when = "record.status == 'follow-up'"
+action = "record.update"
+[steps.params]
+ref = "{{run.record}}"
+[steps.params.set]
+follow_up_done = "{{record.follow_up}}"   # so a follow-up cancelled part way waits for the next date, as Not needed does
+
+[[steps]]
 id = "who"
 title = "Find the owner and whom to write to"
 kind = "automation"
-after = ["due", "asked"]   # its date came, or a person followed it up now
+after = ["taken"]
 when = "record.status == 'follow-up'"
 action = "crm.follow-up-who"
 
