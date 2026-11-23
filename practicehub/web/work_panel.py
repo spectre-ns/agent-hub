@@ -108,8 +108,10 @@ class WorkPanel:
             return str(v)[:16].replace("T", " ")
         return self._CONFIRM.sub(fill, text)
 
-    def work_panel(self, me, ref: str, *, rt=None, st=None, moves_html: str = "", auto=(), url: str = "") -> str:
-        """The side panel's lifecycle and open-work sections, as HTML (empty when there is neither)."""
+    def work_panel(self, me, ref: str, *, rt=None, st=None, moves_html: str = "", auto=(), url: str = "",
+                   own: bool = True) -> str:
+        """The side panel's lifecycle and open-work sections, as HTML (empty when there is neither). ``own``: False on
+        the record's own page, where the work walking it is at the top (``record_work``), not a card beside it."""
         out = []
         if rt is not None and rt.lifecycle:
             lc_link = (f'<a class="wf-link" href="{e(url)}/workflow" data-modal>View workflow</a>' if url else "")
@@ -121,7 +123,7 @@ class WorkPanel:
                 out.append("<p class='muted small'>A workflow moves it to "
                            + e(", ".join(rt.state_label(t["to"]) for t in auto)) + ".</p>")
             out.append("</section>")
-        runs = self.open_runs(me, ref)
+        runs = [(r, w) for r, w in self.open_runs(me, ref) if own or r.get("record") != ref]
         if runs:
             viewer = Viewer(self.hub, me)
             cards = "".join(self.run_card(me, run, wf, viewer, ref) for run, wf in runs)
@@ -229,7 +231,7 @@ class WorkPanel:
             role = self._role_name(s.role) if s.role else ""
             out.append(("for " + e(role) + "; " if role else "")
                        + ("being fixed by " + e(", ".join(fixers)) if fixers else
-                          '<span class="muted">retry it from the run\'s page</span>'))
+                          '<span class="muted">a policy owner can try it again from its page</span>'))
             if sst.get("error"):
                 out.append(f'<span class="muted small">{e(str(sst["error"])[:160])}</span>')
         elif s.role and sst.get("state") != "waiting":
@@ -369,7 +371,7 @@ class WorkPanel:
                       for s, item in mine)
         state = self._record_state(me, run, rt, ref)
         return (f'<article class="wcard">'
-                f'<div class="wcard-head"><a href="/runs/{e(run["id"])}">{e(title)}</a>{key}{state}</div>'
+                f'<div class="wcard-head"><a href="{e(self.run_href(run))}">{e(title)}</a>{key}{state}</div>'
                 f'<div class="wnow"><span class="k">Now</span><ul class="plain">{"".join(now_html)}</ul></div>'
                 f'{next_html}'
                 f'<ol class="wstrip" aria-hidden="true">{"".join(segs)}</ol>'

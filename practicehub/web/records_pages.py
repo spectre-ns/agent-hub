@@ -376,7 +376,7 @@ class RecordPages:
                     run = hub.engine.run(rid) if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rid) else None
                 except Exception:  # noqa: BLE001 - no such work
                     run = None
-                return (f"/runs/{rid}", hub.run_title(me, run), True) if run else None
+                return (self.run_href(run), hub.run_title(me, run), True) if run else None
             ref = hub.mention_ref(rt, target) if rt else (target if schema.REF_TEXT.fullmatch(target) else None)
             if not ref:
                 return None
@@ -774,11 +774,22 @@ class RecordPages:
         q = req["query"].get("q", "").lower()
         from .server import SHOWN
         linked = req["query"].get("linked", "")
+        # a booked thing (a visit): in time order, and Today, the day's in the order they come
+        timed = bool(rt.date and "start" in (rt.base_map or {}))
+        today = timed and req["query"].get("when") == "today"
         if linked:  # every one linked to a record ("Show all" under its links): the record's page shows 50
             recs, more = self._linked_records(me, rtype, rt, linked), False
+        elif today:
+            day = hub.engine.now().date().isoformat()
+            recs = [r for r in hub.search_records(me, rtype, limit=None, text=q or None)
+                    if schema.record_date(rt, r)[:10] == day]
+            recs.sort(key=lambda r: schema.record_date(rt, r))
+            more = False
         else:
             recs = hub.search_records(me, rtype, limit=SHOWN + 1, text=q or None)  # without what they may not read
             more, recs = len(recs) > SHOWN, recs[:SHOWN]
+            if timed:
+                recs.sort(key=lambda r: schema.record_date(rt, r), reverse=True)
         hub.note_list(me, recs, how="search" if q else "list", what=f"records:{rtype}", text=q or None)
         lc = rt.lifecycle
         heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
@@ -798,9 +809,19 @@ class RecordPages:
             table = (f'<div class="flash info"><p>Each {e(self._lower(rt.label))} is part of {e(a_an(ol))}: open one '
                      f'from its {e(ol)}, and add one there.</p></div>' + table)
         search = (f'<form class="inline"><input name="q" value="{e(q)}" placeholder="Search {e(self._lower(rt.plural))}" aria-label="Search {e(self._lower(rt.plural))}">'
-                  f'<button class="secondary">Search</button></form>')
+                  + (f'<input type="hidden" name="when" value="today">' if today else "")
+                  + f'<button class="secondary">Search</button></form>')
+        if timed and not linked:  # all of them, latest first, or today's in the order they come
+            qq = f"&q={urllib.parse.quote(q)}" if q else ""
+            search += (f'<nav class="filters when" aria-label="Which ones">'
+                       f'<a class="btn {"secondary" if today else "selected"}" href="/records/{e(rtype)}{"?q=" + e(urllib.parse.quote(q)) if q else ""}"'
+                       f'{"" if today else " aria-current=page"}>All, latest first</a>'
+                       f'<a class="btn {"selected" if today else "secondary"}" href="/records/{e(rtype)}?when=today{e(qq)}"'
+                       f'{" aria-current=page" if today else ""}>Today</a></nav>')
         note = (f"<p class='muted'>The {SHOWN} most recently changed are shown: search to find any other.</p>"
                 if more else "")
+        if today and not recs:
+            table = f"<p class='muted'>No {e(self._lower(rt.plural))} today.</p>"
         qs = f"?q={urllib.parse.quote(q)}" if q else ""
         export = (f'<a class="btn secondary" href="/records/{e(rtype)}/export{e(qs)}" data-modal>Export</a>'
                   if recs or hub.is_policy_owner(me) else "")
@@ -1105,6 +1126,7 @@ class RecordPages:
         out, rail = [], []
         for t, recs in parts.items():
             rt = hub.record_type(t)
+            recs = sorted(recs, key=lambda r: schema.record_date(rt, r), reverse=True)  # by when, latest first
             f = self._owner_field(rt)
             add = (f'<a class="btn secondary" href="/records/{e(t)}/new?{e(f["name"])}={e(q)}" data-modal>'
                    f'Add {e(self._lower(rt.label))}</a>' if self._may_write(me, t) else "")
@@ -1129,22 +1151,31 @@ class RecordPages:
                     g["recs"][rid] = r
                     if not (visibility.withheld(r) or {}).get("whole"):
                         hub.note_view(me, x["ref"], how=f"linked to {ref}")
-        links = []
+        links, own = [], []
+        subject = rtype == self.subj["type"]
         for t in sorted(groups, key=lambda t: (hub.record_type(t).order, t)):
             rt, g = hub.record_type(t), groups[t]
+            # on a subject's chart, what is about them (their results, their prescriptions: linked by the field that
+            # names them as its subject) is a section of the chart, like a part; anything else is "Linked here"
+            about = subject and any(f["type"] == "reference" and not f["path"].endswith(".*")
+                                    and f.get("rel") in g["rels"] and rtype in hub.concrete(f["target"])
+                                    for f in rt.fields)
             recs = sorted(g["recs"].values(), key=lambda r: schema.record_date(rt, r), reverse=True)
             # the field a new one names this record in: a single reference, of a rel seen, that may point here
             fld = next((f for f in rt.fields if f["type"] == "reference" and not f["path"].endswith(".*")
                         and f["rel"] in g["rels"] and rtype in hub.concrete(f["target"])), None)
             new = (f'<a class="btn subtle" href="/records/{e(t)}/new?{e(fld["name"])}={e(q)}" data-modal>'
                    f'New {e(self._lower(rt.label))}</a>' if fld and self._may_write(me, t) else "")
-            links.append(f'<section class="chart-section" id="link-{e(t)}" aria-labelledby="link-{e(t)}-h"><header>'
-                         f'<h3 id="link-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></h3>'
+            hn = "h2" if about else "h3"
+            (own if about else links).append(
+                         f'<section class="chart-section" id="link-{e(t)}" aria-labelledby="link-{e(t)}-h"><header>'
+                         f'<{hn} id="link-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></{hn}>'
                          f'{new}</header>{self._part_rows(rt, recs[:50])}'
                          + (f'<p class="muted body">The 50 most recent of {len(recs)}. <a href="/records/{e(t)}?linked='
                             f'{e(urllib.parse.quote(ref, safe=""))}">Show all {len(recs)}</a></p>' if len(recs) > 50 else "")
                          + '</section>')
-            rail.append((f"link-{t}", rt.plural, len(recs)))
+            rail.append((f"link-{t}", rt.plural, len(recs), about))  # about them: listed with the chart's own
+        out += own
         if links:
             out.append('<h2 class="links-head" id="links">Linked here</h2>' + "".join(links))
         hidden += sum(1 for x in hub.db.links.find({"to_ref": ref}, fields=["from_ref"])
@@ -1158,11 +1189,12 @@ class RecordPages:
             return ""
         a = lambda anchor, words, n: (f'<li><a href="#{e(anchor)}">{e(words)}'
                                       + (f'<span class="count">{n}</span>' if n is not None else "") + '</a></li>')
-        own = [x for x in rail if x[0].startswith("part-")]
-        linked = [x for x in rail if x[0].startswith("link-")]
+        mine = lambda x: x[0].startswith("part-") or (len(x) > 3 and x[3])
+        own = [x for x in rail if mine(x)]
+        linked = [x for x in rail if x[0].startswith("link-") and not mine(x)]
         return (f'<nav class="subnav owner-rail" aria-label="Sections of {e(title)}">'
-                + (f'<div class="sec">On this {e(self._lower(label))}</div><ul>{"".join(a(*x) for x in own)}</ul>' if own else "")
-                + (f'<div class="sec">Linked here</div><ul>{"".join(a(*x) for x in linked)}</ul>' if linked else "")
+                + (f'<div class="sec">On this {e(self._lower(label))}</div><ul>{"".join(a(*x[:3]) for x in own)}</ul>' if own else "")
+                + (f'<div class="sec">Linked here</div><ul>{"".join(a(*x[:3]) for x in linked)}</ul>' if linked else "")
                 + (f'<div class="sec">Work</div><ul>{"".join(a(*x) for x in extra)}</ul>' if extra else "")
                 + "</nav>")
 
@@ -1432,8 +1464,8 @@ class RecordPages:
                                for f in rt.fields if f.get("show", True) is not False
                                and not (lc and f["path"] == lc["path"]) and schema.first(d, schema.locate(d, f["path"], f.get("with"))) not in (None, ""))
                 main.append(f'<section class="card in-use"><h3>In use: the {e(lc["in_use"])} version</h3>'
-                            f'<p class="muted">This {e(rt.label.lower())} is being revised ({e(str(st))}). Until the '
-                            f'revision is {e(lc["in_use"])}, work from this version (saved {e(str(used["at"])[:16])}).'
+                            f'<p class="muted">This {e(rt.label.lower())} is being revised ({e(rt.state_label(st).lower())}). Until the '
+                            f'revision is {e(lc["in_use"])}, work from this version (saved {self._at(used["at"])}).'
                             f'</p><table class="kv">{body}</table></section>')
             if locked:
                 main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(rt.state_label(st))}</b> is not edited. '
@@ -1486,36 +1518,25 @@ class RecordPages:
             main.append(self._history_panel(me, rt, ref))
         else:
             runs = hub.engine.runs(mentions=ref)
+
+            def work_name(r):
+                name = e(self.hub.run_title(req["me"], r))
+                if r.get("record") == ref:  # its own work: its steps are in History, where it is now at the top
+                    return name
+                return f'<a href="{e(self.run_href(r))}">{name}</a>'
             main.append(("<div class='tablewrap'><table><tr><th>Work</th><th>Status</th><th>Started</th></tr>" + "".join(
-                f'<tr><td><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
+                f'<tr><td>{work_name(r)}</td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'
                 f'<td class="muted">{self._at(r["created_at"])}</td></tr>' for r in runs)
                 + "</table></div>") if runs else "<p class='muted'>No work about this record.</p>")
             starts = self.start_buttons(me, rtype, ref)
             if starts:
                 main.append(f"<div class='starts' role='group' aria-label='Start work'>{starts}</div>")
 
-        def move(t):
-            # only the forward move is loud; the others (a no-show, a pause) are secondary, undoing ones in red
-            kind = "danger-subtle" if self._undoing(t) else "primary" if t is ahead else "secondary"
-            if t["fields"] or t["comment"]:  # a transition screen asks for what the move needs first
-                return (f'<a class="btn {kind}" href="{url}/move?to={e(urllib.parse.quote(t["to"]))}" data-modal>'
-                        f'{e(t["label"])}…</a>')
-            said = self.move_confirm(rt, t, rec)  # what follows, as the type says it
-            confirm = (f' data-confirm="{e(said)}"' if said else
-                       f' data-confirm="Move it to {e(rt.state_label(t["to"]).lower())}?"' if kind != "primary" else "")
-            return (f'<form method="post" action="{url}/move" class="inline">'
-                    f'<input type="hidden" name="to" value="{e(t["to"])}"><button class="{kind}"{confirm}>'
-                    f'{e(t["label"])}{"…" if said else ""}</button></form>')
-
         moves = [t for t in lc.get("transition", []) if (st in t["from"] or "*" in t["from"]) and t["to"] != st] \
             if lc else []
-        mine = [t for t in moves if t["by"] != "workflow"] if may_write else []
-        if rt.workflow:  # its workflow moves it: only the moves it waits on now (no button beside the work)
-            mine = [t for t in mine if not hub.state_move_refusal(rt, ref, t, rec, None)]
         auto = [t for t in moves if t["by"] == "workflow"]
-        mine, later = self.moves_open_now(rt, mine, rec)  # a check-in from two hours before, a no-show after
-        ahead = self.forward_move(lc, st, mine) if mine else None
-        moves_html = "".join(move(t) for t in mine) + later if not editing else ""
+        status, work = self.record_work(req, ref, rt, rec, st, url, editing=editing)
+        moves_html = ""
         sigs = hub.signatures(me, ref)
         cur = [s for s in sigs if s["current"]]
         title = hub.short_title(rec, seen=True)
@@ -1535,19 +1556,26 @@ class RecordPages:
             lp = self.live_parts(req, rt, rec, ref, st, tab, may_write, locked) if not editing else {}
             if lc and not editing:  # its lifecycle, drawn, beside its moves
                 moves_html = f'<a class="btn subtle" href="{url}/workflow" data-modal>View workflow</a>' + moves_html
-            work = self.work_panel(me, ref) if not editing and tab == "details" else ""
+            panel = self.work_panel(me, ref, own=False) if not editing and tab == "details" else ""
+            work = (work if not editing else "") + (f'<div class="wp-inline">{panel}</div>' if panel else "")
             body = refused + self._page_body(req, rt, shown if editing else lp.get("rec", rec), main, prose, st, tab,
                                              editing, url, ver, moves_html, lp.get("edit") or edit_btn, auto, sigs,
                                              cur, may_write, live=lp, work=work)
             above = [(self.record_href(f"{a['resourceType']}/{a['id']}"), hub.short_title(a)) for a in hub.ancestors(me, ref)]
             return self.layout(req, hub.short_title(rec), body, heading=not editing,
                                crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural), *above,
-                                                      (None, hub.short_title(rec))], subnav=nav, above=banner)
+                                                      (None, hub.short_title(rec))], subnav=nav, above=banner,
+                               status=status if not editing else "")
 
         # side column: state, moves a person may make, signatures at a glance
         # side column: the lifecycle (state, moves a person may make, the diagram), the open work about it, then
         # signatures at a glance
-        side = [self.work_panel(me, ref, rt=rt, st=st, moves_html=moves_html, auto=auto, url=url)]
+        side = [self.work_panel(me, ref, own=False)]
+        if lc:  # its lifecycle, drawn; what only its workflow moves it to
+            side.insert(0, f'<p class="wp-lifecycle"><a href="{url}/workflow" data-modal>View workflow</a>'
+                        + (f'<br><span class="muted small">Its workflow moves it to '
+                           f'{e(", ".join(rt.state_label(t["to"]) for t in auto))}.</span>' if auto else "")
+                        + "</p>")
         side.append(f"<h2>Signatures</h2><p>{len(cur)} on this version"
                     + (f", {len(sigs) - len(cur)} on earlier ones" if len(sigs) > len(cur) else "") + "</p>")
         side.append(f'<h2>Record</h2><p class="muted">{e(rt.label)}, kept with {e(self._class_name(rt.data_class))}<br>version '
@@ -1559,12 +1587,13 @@ class RecordPages:
             side.insert(0, "<h2>On this page</h2><ul class='plain toc'>" + "".join(
                 f'<li class="l{lvl}"><a href="#{e(anchor)}">{e(words)}</a></li>' for lvl, words, anchor in heads)
                 + "</ul>")
-        body = (f'<div class="issue"><div>{"".join(main)}</div><aside class="issue-side">{"".join(side)}'
+        body = ((work if not editing else "")
+                + f'<div class="issue"><div>{"".join(main)}</div><aside class="issue-side">{"".join(side)}'
                 f'</aside></div>')
         above = [(self.record_href(f"{rtype}/{a['id']}"), hub.short_title(a)) for a in hub.ancestors(me, ref)]
         return self.layout(req, title, body, crumbs=part_crumbs or [("/records", "Records"), (f"/records/{rtype}", rt.plural),
                                                                     *above, (None, title)], subnav=nav,
-                           actions=edit_btn, above=banner)
+                           actions=edit_btn, above=banner, status=status if not editing else "")
 
     def _page_body(self, req, rt, rec, main, prose, st, tab, editing, url, ver, moves_html, edit_btn, auto, sigs, cur,
                    may_write, live=None, work: str = "") -> str:
@@ -1574,7 +1603,7 @@ class RecordPages:
         from .. import markup
         me = req["me"]
         lc = rt.lifecycle
-        meta = [self._state_loz(st, rt)] if lc else []
+        meta = [self._state_loz(st, rt)] if lc and editing else []
         if editing:
             meta.insert(0, '<span class="lozenge editing-flag">Editing</span>')
         else:
@@ -1617,7 +1646,6 @@ class RecordPages:
                     + self._value_html(f, rec) for f in prose) + "</article>"
                 if live.get("side"):  # its comments beside it
                     rest[1] = f'<div class="page-with-side">{rest[1]}{live["side"]}</div>'
-            work = f'<div class="wp-inline">{work}</div>' if work else ""
             return bar + live.get("banner", "") + work + "".join(rest) + live.get("after", "")
         fields = self._editable(rt)
         title_f = next((f for f in fields if f["name"] == "title"), None)
@@ -1689,7 +1717,7 @@ class RecordPages:
         hub = self.hub
         sigs = hub.signatures(me, ref)
         def row(s):
-            decided = (f' <span class="loz">{e(s["outcome"])}</span> <a href="/runs/{e(s["run"])}">in the work</a>'
+            decided = (f' <span class="loz">{e(s["outcome"])}</span> <a href="{e(self.run_href(s["run"]))}">in the work</a>'
                        if s.get("outcome") else "")
             covers = ('<span class="loz success">current</span>' if s["current"]
                       else '<span class="loz moved">earlier version</span>')
@@ -1711,7 +1739,7 @@ class RecordPages:
             out.append('<div class="flash warning"><p><b>There is open work on this record.</b> A review, decision or '
                        'approval is made in that work, not by signing here: a signature on the record does not '
                        'complete it.</p><ul class="plain">' + "".join(
-                           f'<li><a href="/runs/{e(r["id"])}">{e(self.hub.run_title(me, r))}</a></li>' for r in open_work) + "</ul></div>")
+                           f'<li><a href="{e(self.run_href(r))}">{e(self.hub.run_title(me, r))}</a></li>' for r in open_work) + "</ul></div>")
         if rt.signatures:
             open_ = [g for g in rt.signatures if (not g["states"] or st in g["states"])
                      and (not g["roles"] or set(g["roles"]) & set(me["roles"]))]
@@ -1753,8 +1781,21 @@ class RecordPages:
         return "".join(out) or "<p class='muted'>Nothing links to or from this record.</p>"
 
     def _history_panel(self, me, rt, ref) -> str:
+        """Its history as one list, oldest first (``Hub.record_timeline``): its edits, its moves with what they wrote
+        and the signature they carried, and the steps of the work walking it; a stretch the member may not read is one
+        quiet line. Each version, in detail, is folded below."""
         versions = self.hub.record_history(me, ref)
-        out = self._history_in_words(me, rt, ref, versions)  # in words, with its workflows' decisions; Raw behind
+        rows = []
+        for t in self.hub.record_timeline(me, ref):
+            if t.get("hidden"):
+                rows.append(f'<li class="tl-hidden muted">{e(t["text"])}, not shown to you</li>')
+                continue
+            rows.append(f'<li><span class="tl-at muted">{self._at(t["at"])}</span> {e(t["text"])}'
+                        + (f' <span class="muted">— {e(t["who"])}</span>' if t.get("who") and t["who"] not in t["text"] else "")
+                        + "</li>")
+        out = (f'<ol class="timeline">{"".join(rows)}</ol>' if rows else "<p class='muted'>Nothing yet.</p>")
+        out += (f'<details class="tl-versions"><summary>Each version, in detail</summary>'
+                f'{self._history_in_words(me, rt, ref, versions)}</details>')
         if self.hub.is_policy_owner(me):  # the privacy officer answers "who looked at my chart?"
             seen = self.hub.views_of(me, ref)
             vrows = "".join(f'<tr><td>{self.who(v["actor"])}</td><td>{e((v.get("data") or {}).get("how", ""))}</td>'
@@ -1765,47 +1806,82 @@ class RecordPages:
         return out
 
     def page_move(self, req, rtype, rid):
-        """A transition screen: what a move asks for (its fields, a comment) before the record moves."""
+        """A transition screen: what a move asks for (its fields, a comment, a signature) before the record moves."""
         me, hub = req["me"], self.hub
         rt = hub.record_type(rtype)
         if not rt or not rt.lifecycle:
             raise Invalid(f"a {rtype} has no lifecycle")
         rec = hub.read_record(me, f"{rtype}/{rid}")
-        t = rt.transition(schema.first(rec, rt.lifecycle["path"]), req["query"].get("to", ""))
-        if t is None or t["by"] == "workflow":
-            raise Invalid(f"{a_an(rt.label.lower())} does not move there from here")
-        return self._move_page(req, rt, rec, t, back=self.safe_back(req["query"].get("_back")))
+        return self._move_page(req, rt, rec, req["query"].get("to", ""),
+                               back=self.safe_back(req["query"].get("_back")))
 
-    def _move_page(self, req, rt, rec, t, *, form: dict | None = None, problem: str = "", back: str = ""):
-        me = req["me"]
+    def _move_page(self, req, rt, rec, to: str, *, form: dict | None = None, problem: str = "", back: str = ""):
+        """The screen of the move to ``to`` (``Hub.transition_screen``): the fields it asks for with what they hold
+        now (what was typed, after a refusal), the required ones marked, a comment, and for a signed move the meaning
+        signed with a confirmation. A move the member may not make says why, and has no form."""
+        me, hub = req["me"], self.hub
         ref = f"{rt.id}/{rec['id']}"
+        url = f"/records/{e(rt.id)}/{e(rec['id'])}"
+        screen = hub.transition_screen(me, ref)
+        m = next((x for x in screen["may"] if x["to"] == to), None)
+        part = self.owner_crumbs(me, rt, rec)  # a part (a visit) sits under its owner (the patient)
+        crumbs = ([*part[:-1], (self.record_href(ref), hub.short_title(rec))] if part else
+                  [("/records", "Records"), (f"/records/{rt.id}", rt.plural), (self.record_href(ref), hub.short_title(rec))])
+        here = self._state_loz(screen["state"], rt)
+        if m is None:
+            no = next((x for x in screen["may_not"] if x["to"] == to), None)
+            if no is None:
+                raise Invalid(f"{a_an(rt.label.lower())} does not move to {rt.state_label(to).lower()} from "
+                              f"{rt.state_label(screen['state']).lower()}")
+            body = (f'<div data-modal-body>' + (f'<div class="flash error" role="alert"><p>{e(problem)}</p></div>'
+                                                 if problem else "")
+                    + f'<p>{e(hub.short_title(rec))} is {here}. You may not move it to '
+                    f'{self._state_loz(to, rt)}: {e(no["why"])}.</p><div class="filters"><a class="btn secondary" '
+                    f'href="{e(back or url)}" data-modal-close>Back</a></div></div>')
+            return self.layout(req, no["label"], body, crumbs=crumbs + [(None, no["label"])])
+        t = rt.transition(screen["state"], to)
+        names = [a["name"] for a in m["asks"]]
         shown = rec
         if form is not None:  # after a refusal: what the member typed, not what is saved
-            shown = self._typed(rt, form, before=rec, only=t["fields"])
-        need = set(t["require"])
+            shown = self._typed(rt, form, before=rec, only=names)
         editable = {f["name"] for f in self._editable(rt)}
-        inputs = "".join(self._input({**rt.field(n), "required": rt.field(n)["required"] or n in need}, shown, me)
-                         for n in t["fields"] if n in editable)  # in the transition's order
+        inputs = "".join(self._input({**rt.field(a["name"]), "required": a["required"]}, shown, me)
+                         for a in m["asks"] if a["name"] in editable)  # in the transition's order
+        asked = {a["label"] for a in m["asks"]}
+        unasked = [lbl for lbl in m["requires"] if lbl not in asked]
+        need = (f'<p class="muted">It needs {e(", ".join(unasked))} filled in first.</p>' if unasked else "")
+        typed = (form or {}).get("_comment", "")
+        typed = typed if isinstance(typed, str) else ""
         comment = ""
-        if t["comment"]:
-            typed = (form or {}).get("_comment", "")
-            comment = (f'<label>Comment<textarea name="_comment" rows="3">{e(typed if isinstance(typed, str) else "")}'
-                       f'</textarea><small>Kept with the move in the record\'s history.</small></label>')
+        if m["comment"] or m["sign"]:
+            comment = (f'<label>Comment<textarea name="_comment" rows="3">{e(typed)}</textarea>'
+                       f'<small>Kept with the move in the record\'s history.</small></label>')
+        sign = ""
+        if m["sign"]:
+            raw = hub.records.read(rt.id, rec["id"]) or rec
+            ticked = " checked" if (form or {}).get("_sign_ok") else ""
+            sign = (f'<div class="sign-move"><p class="sign">Moving it is your electronic signature: '
+                    f'<b>“{e(m["sign"])}”</b>, over this {e(rt.label.lower())} as it is now. If it changes before you '
+                    f'move it, you are asked to read it again.</p>'
+                    f'<label class="check"><input type="checkbox" name="_sign_ok" value="1" required{ticked}> '
+                    f'I have read it, and I sign it “{e(m["sign"])}”</label>{self._sign_prompt(me)}'
+                    f'<input type="hidden" name="_seen" value="{e(hub._record_digest(raw))}"></div>')
         err = f'<div class="flash error" role="alert"><p>{e(problem)}</p></div>' if problem else ""
         ver = e(str((rec.get("meta") or {}).get("versionId", "")))
-        st = schema.first(rec, rt.lifecycle["path"])
-        said = self.move_confirm(rt, t, rec)  # what follows the move, as the type says it
-        body = (f'<div data-modal-body>{err}<p>{e(self.hub.short_title(rec))}: from {self._state_loz(st, rt)} to {self._state_loz(t["to"], rt)}.</p>'
+        said = self.move_confirm(rt, t, rec) if t else ""  # what follows the move, as the type says it
+        does = (f'<p class="muted">This is the step “{e(m["does"])}”.</p>' if m.get("does") else "")
+        body = (f'<div data-modal-body>{err}<p>{e(hub.short_title(rec))}: from {here} to '
+                f'{self._state_loz(to, rt)}.</p>{does}'
                 + (f'<p class="move-follows">{e(said)}</p>' if said else "") +
-                f'<form method="post" action="/records/{e(rt.id)}/{e(rec["id"])}/move" class="card stack">'
-                f'<input type="hidden" name="to" value="{e(t["to"])}"><input type="hidden" name="_version" '
-                f'value="{ver}">' + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")
-                + f'{self._req_note(inputs)}{inputs}{comment}<div class="filters"><button class="primary">{e(t["label"])}</button>'
-                f'<a class="btn secondary" href="{e(back or f"/records/{rt.id}/{rec['id']}")}" data-modal-close>Cancel</a></div>'
+                f'<form method="post" action="{url}/move" class="card stack">'
+                f'<input type="hidden" name="to" value="{e(to)}"><input type="hidden" name="_version" '
+                f'value="{ver}"><input type="hidden" name="_screen" value="1">'
+                + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")
+                + f'{self._req_note(inputs)}{need}{inputs}{comment}{sign}<div class="filters">'
+                f'<button class="primary">{e(m["label"])}</button>'
+                f'<a class="btn secondary" href="{e(back or url)}" data-modal-close>Cancel</a></div>'
                 f'</form></div>')
-        return self.layout(req, t["label"], body, crumbs=[("/records", "Records"),
-                                                          (f"/records/{rt.id}", rt.plural),
-                                                          (f"/records/{ref}", self.hub.short_title(rec)), (None, t["label"])])
+        return self.layout(req, m["label"], body, crumbs=crumbs + [(None, m["label"])])
 
     def post_record(self, req, rtype, rid, verb):
         me, hub = req["me"], self.hub
@@ -1828,31 +1904,7 @@ class RecordPages:
                 raise Rendered(422, page) from None
             raise self._redirect(f"/records/{rtype}/{rid}")
         if verb == "move":
-            if not rt.lifecycle:
-                raise Invalid(f"{a_an(rt.label.lower())} has no lifecycle")
-            rec = hub.read_record(me, ref)
-            st, to = schema.first(rec, rt.lifecycle["path"]), f.get("to", "")
-            t = rt.transition(st, to)
-            asked = t["fields"] if t else []
-            back = self.safe_back(f.get("_back"))  # from a board: back to it
-            if f.get("_ask") and t and t["by"] != "workflow" and (asked or t["comment"]):
-                # a board's Move to…: a move that asks for fields or a comment shows its screen first
-                q = urllib.parse.urlencode({"to": to, **({"_back": back} if back else {})})
-                raise self._redirect(f"/records/{rtype}/{rid}/move?{q}")
-            try:
-                changes = self._from_form(rt, f, partial=True, before=rec, only=asked) if asked else {}
-                after = schema.put({**rec, **changes}, rt.lifecycle["path"], to)
-                hub.update_record(me, ref, after, comment=f.get("_comment") if t and t["comment"] else None,
-                                  expected_version=f.get("_version") or None)
-            except (Denied, Invalid) as exc:
-                if not (t and (asked or t["comment"])) or isinstance(exc, Denied):
-                    if back:  # from a board: why, in the dialog, the card back where it was
-                        raise self.refused_move(req, hub.title(rec), exc, back) from None
-                    raise
-                from .server import Rendered  # the move's screen again, in the dialog, saying why
-                raise Rendered(409 if isinstance(exc, Conflict) else 422,
-                               self._move_page(req, rt, rec, t, form=f, problem=str(exc), back=back)) from None
-            raise self._redirect(back or f"/records/{rtype}/{rid}")
+            return self._post_move(req, rt, ref, f)
         try:
             self._confirm_signer(req, f)
             hub.sign_record(me, ref, f.get("meaning", ""), f.get("comment", ""), seen=f.get("seen") or "-")
@@ -1862,6 +1914,55 @@ class RecordPages:
             page = self.page_record({**req, "query": {"tab": "signatures"}}, rtype, rid, kept=kept, error=exc)
             raise Rendered(403 if isinstance(exc, Denied) else 422, page) from None
         raise self._redirect(f"/records/{rtype}/{rid}?tab=signatures")
+
+    def _post_move(self, req, rt, ref: str, f: dict):
+        """A move from the record's page, its transition screen or a board (``Hub.move_record``): the values its
+        screen asked for by field name, its comment and, for a signed move, the mover's signature over what they read.
+        Refused, it says why where it was asked: on its screen with what was typed kept, on the board, or at the top of
+        the record's page."""
+        from .server import Rendered
+        me, hub = req["me"], self.hub
+        rtype, _, rid = ref.partition("/")
+        if not rt.lifecycle:
+            raise Invalid(f"{a_an(rt.label.lower())} has no lifecycle")
+        rec = hub.read_record(me, ref)
+        st, to = schema.first(rec, rt.lifecycle["path"]), f.get("to", "")
+        t = rt.transition(st, to)
+        asked = t["fields"] if t else []
+        screened = bool(t and (asked or t["comment"] or t.get("sign") or t["require"]))
+        back = self.safe_back(f.get("_back"))  # from a board: back to it
+        if f.get("_ask") and screened and t["by"] != "workflow":
+            # a board's Move to…: a move that asks for something shows its screen first
+            q = urllib.parse.urlencode({"to": to, **({"_back": back} if back else {})})
+            raise self._redirect(f"/records/{rtype}/{rid}/move?{q}")
+        try:
+            values = {}
+            if asked:
+                changes = self._from_form(rt, f, partial=True, before=rec, only=asked)
+                merged = {**rec, **changes}
+                for n in asked:
+                    fd = rt.field(n)
+                    if fd and fd["path"].split(".")[0] in changes:
+                        values[n] = schema.first(merged, fd["path"])
+            signature = None
+            if t and t.get("sign"):
+                if not f.get("_sign_ok"):
+                    raise Invalid(f"tick that you have read it and sign it {t['sign']!r}")
+                self._confirm_signer(req, f)
+                signature = {"meaning": t["sign"], "comment": str(f.get("_comment") or ""),
+                             "seen": f.get("_seen") or None}
+            hub.move_record(me, ref, to, values, signature,
+                            comment=(f.get("_comment") or None) if t and t["comment"] else None,
+                            expected_version=f.get("_version") or None)
+        except (Denied, Invalid) as exc:
+            code = 409 if isinstance(exc, Conflict) else 403 if isinstance(exc, Denied) else 422
+            if f.get("_screen") or screened:  # the move's screen again, saying why, typed kept
+                raise Rendered(code, self._move_page(req, rt, rec, to, form=f, problem=str(exc), back=back)) from None
+            if back:  # from a board: why, in the dialog, the card back where it was
+                raise self.refused_move(req, hub.title(rec), exc, back) from None
+            page = self.page_record({**req, "query": {}, "_work": {"error": exc}}, rtype, rid)
+            raise Rendered(code, page) from None
+        raise self._redirect(back or f"{self.record_href(ref)}")
 
     def post_attach(self, req, rtype, rid):
         """A file from the record page: kept in the hub, then put in the record's attachment field (a list field
@@ -2006,7 +2107,7 @@ class RecordPages:
     def _view_href(self, w, r) -> str:
         if w["source"] == "records":
             return self.record_href(f"{w['type']}/{r['id']}")
-        return f"/items/{r['id']}" if w["source"] == "items" else f"/runs/{r['id']}"
+        return f"/items/{r['id']}" if w["source"] == "items" else self.run_href(r)
 
     def _view_cell(self, w, r, c, first) -> str:
         val = w["value"](r, c["path"])

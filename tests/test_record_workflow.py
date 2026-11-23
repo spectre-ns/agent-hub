@@ -269,14 +269,14 @@ def test_a_visit_is_checked_in_from_two_hours_before_and_marked_a_no_show_only_o
     for to in ("noshow", "arrived"):
         with pytest.raises(Invalid, match="opens at"):
             hub.update_record(jo, ref, {"status": to})
-    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    side = page().split('class="rw-moves"', 1)[1].split("</div>", 1)[0]
     assert 'value="noshow"' not in side and 'value="arrived"' not in side
     assert "Check in from Tue 09 Mar 09:00" in side and "Mark no-show from Tue 09 Mar 11:00" in side
     _at_the_visit(hub, ref, -60)  # an hour before: checked in early, still not missed
-    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    side = page().split('class="rw-moves"', 1)[1].split("</div>", 1)[0]
     assert 'value="arrived"' in side and 'value="noshow"' not in side and "Mark no-show from 11:00" in side
     _at_the_visit(hub, ref, 10)  # ten minutes late: either
-    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    side = page().split('class="rw-moves"', 1)[1].split("</div>", 1)[0]
     assert re.search(r'data-confirm="The patient will be messaged[^"]*the 11:00 slot freed[^"]*">Mark no-show…', side)
     hub.update_record(jo, ref, {"status": "noshow"})
     assert _status(hub, ref) == "noshow"
@@ -405,15 +405,16 @@ def test_the_run_page_and_the_visit_show_the_one_item_and_where_it_is(hub):
     ref = run["record"]
     req = lambda path: {"me": amara, "query": {}, "path": path}
     app._local.me = amara  # who reads, as the server sets it per request
-    page = app.page_run(req(f"/runs/{run['id']}"), run["id"])
-    head = page.split('class="card run-head"', 1)[1].split("</div>", 1)[0]
-    assert app._key(run["item"]) in head and f'href="/items/{run["item"]}"' in head
+    from practicehub.web.server import Redirect
+    with pytest.raises(Redirect) as went:  # the run's page is the record's: there its work is worked on
+        app.page_run(req(f"/runs/{run['id']}"), run["id"])
+    assert went.value.to == f"{app.record_href(ref)}#work"
     step = hub.workflow("appointment-request")[0].step(hub.engine.item(run["item"])["step_id"])
-    assert "<dt>Now</dt>" in head and f"<b>{step.title}</b>" in head  # where it is now, in words
-    assert f'/records/{ref}' in head and "Requested" in head
     visit = app.page_record(req(f"/records/{ref}"), *ref.split("/", 1))
-    assert "Requested" in visit and "Open work" in visit and f'href="/runs/{run["id"]}"' in visit
-    assert "waiting for someone in" in visit or "with " in visit  # who holds it
+    head = visit.split('class="rec-status"', 1)[1].split("</div>", 1)[0]
+    assert "Requested" in head and f"<b>{step.title}</b>" in head  # where it is now, in words, beside the title
+    assert "waiting for someone in" in head or "with " in head or "Waiting for" in head  # who holds it
+    assert 'href="/runs/' not in visit
     board = app.page_board(req("/board"))
     assert f'/items/{run["item"]}' in board
 
@@ -438,11 +439,11 @@ def test_the_patient_stepping_out_is_a_side_move_named_as_an_action(hub):
     run, ref = _to_the_visit(hub, amara)
     page = lambda: App(hub, dev=False).page_record({"me": amara, "query": {}, "path": "/records/" + ref},
                                                    *ref.split("/", 1))
-    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    side = page().split('class="rw-moves"', 1)[1].split("</div>", 1)[0]
     assert re.search(r'<button class="secondary"[^>]*>Patient stepped out</button>', side)
     assert 'class="primary"' not in side
     hub.update_record(amara, ref, {"status": "onleave"})
-    side = page().split('class="side-actions"', 1)[1].split("</div>", 1)[0]
+    side = page().split('class="rw-moves"', 1)[1].split("</div>", 1)[0]
     assert ">Patient is back</button>" in side and 'class="primary"' not in side
     hub.update_record(amara, ref, {"status": "in-progress"})
 
@@ -757,7 +758,7 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
     page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
     # in the page's main column, before the side panel: what was started from the visit, and where each one is
     started = page.index("Started from this visit")
-    assert started < page.index('class="wp-status"') and kids[0]["ref"] in page[started:] and "Being written" in page
+    assert started < page.index('class="issue-side"') and kids[0]["ref"] in page[started:] and "Being written" in page
     from practicehub.visibility import Viewer
     viewer = Viewer(hub, amara)
     stuck, rank = app._child_work({**kids[0]["run"], "steps": {"draft": {"state": "failed"}}}, viewer)

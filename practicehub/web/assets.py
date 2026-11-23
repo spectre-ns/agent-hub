@@ -226,7 +226,7 @@ ul.admin-cards a:hover,ul.admin-cards a:focus-visible{background:var(--raised-ho
 .crumbs a[aria-current=page]{color:var(--subtle)}
 .crumbs span.sep{margin:0 8px;color:var(--subtlest)}
 .pagehead{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 16px}
-.pagehead h1{flex:1;min-width:min(240px,100%)}
+.pagehead h1{flex:1;min-width:min(420px,100%)}
 .pagehead .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 #proposed-profile .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 #proposed-profile td{overflow-wrap:anywhere}#proposed-profile tbody th{vertical-align:top}
@@ -4820,3 +4820,26 @@ padding:6px;background:var(--sunken);border-radius:3px}
 """
 
 CSS = CSS + DASH_CSS
+
+# a record's work, on its own page: where it is beside the title, what can be done now under it
+RECWORK_CSS = r"""
+.rec-status{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;min-height:32px}
+.rs-item{display:inline-flex;gap:6px;align-items:center}
+.rec-work{border:1px solid var(--line);border-radius:6px;background:var(--sunken);padding:12px 16px;margin:0 0 16px}
+.rec-work>*+*{margin-top:12px}
+.rw-moves{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rw-moves form.inline{margin:0}
+.rw-step{border-top:1px solid var(--line);padding-top:12px}.rw-step>h3{margin:0 0 8px}
+.rw-verbs{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+.rw-not>summary,.cancel-work>summary{cursor:pointer;color:var(--subtle);font-size:13px}
+.rw-not ul{margin:8px 0 0}
+.sign-move{border-left:3px solid var(--line-2);padding-left:12px}
+.wp-lifecycle{margin:0 0 12px}
+ol.timeline{list-style:none;padding:0;margin:0}
+ol.timeline li{padding:6px 0;border-bottom:1px solid var(--line)}
+.tl-at{display:inline-block;min-width:9em;font-size:13px}
+.tl-versions{margin-top:16px}
+.filters.when{display:inline-flex;gap:4px;margin-left:8px}.filters.when .btn.selected{background:var(--selected-bg);color:var(--selected-fg)}
+"""
+
+CSS = CSS + RECWORK_CSS

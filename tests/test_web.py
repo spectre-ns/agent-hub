@@ -52,6 +52,20 @@ def call(base, method, path, token=None, body=None, form=None):
         return exc.code, exc.read().decode()
 
 
+def follow(base, path, token=None):
+    """GET ``path``, following one redirect (a run's page sends work about a record to the record's page)."""
+    code, page = call(base, "GET", path, token)
+    if code in (302, 303):
+        req = urllib.request.Request(base + path, method="GET",
+                                     headers={"Authorization": f"Bearer {token}"} if token else {})
+        try:
+            opener.open(req)
+        except urllib.error.HTTPError as exc:
+            where = exc.headers.get("Location", "")
+            return call(base, "GET", where.split("#", 1)[0], token)
+    return code, page
+
+
 def token(hub, mid, by=None):
     """A credential: a person's is their own; an agent's or service's comes from its sponsor."""
     if by is None:
@@ -141,8 +155,8 @@ def test_front_desk_does_not_see_the_draft_note(hub, server):
         assert draft not in call(server, "GET", path, jo)[1]
         assert draft in call(server, "GET", path, amara)[1]
     assert "Sore throat" not in call(server, "GET", f"/api/runs/{run['id']}", jo)[1]  # the transcript input
-    page = call(server, "GET", f"/runs/{run['id']}", jo)[1]
-    assert draft not in page and "needs access to" in page
+    page = follow(server, f"/runs/{run['id']}", jo)[1]  # on the visit's page, where the work is worked on
+    assert draft not in page and "a step you may not see" in page
     code, _ = call(server, "GET", f"/api/items/{item_for(hub, run, 'edit')}/context", jo)
     assert code == 403
 
@@ -154,9 +168,9 @@ def test_reading_a_run_is_in_the_patients_access_report(hub, server):
     run = visit_run(hub)
     assert run["record"]
     before = [r for r in hub.access_report(M(hub, "rana"), run["record"]) if r["who"] == "dr-liam"]
-    assert call(server, "GET", f"/runs/{run['id']}", token(hub, "dr-liam", by="dr-liam"))[0] == 200
+    assert follow(server, f"/runs/{run['id']}", token(hub, "dr-liam", by="dr-liam"))[0] == 200  # the visit's page
     seen = [r for r in hub.access_report(M(hub, "rana"), run["record"]) if r["who"] == "dr-liam"]
-    assert len(seen) == len(before) + 1 and seen[-1]["action"] == "viewed" and seen[-1]["how"] == f"run {run['id']}"
+    assert len(seen) == len(before) + 1 and seen[-1]["action"] == "viewed"
     call(server, "GET", f"/api/runs/{run['id']}", token(hub, "noor", by="noor"))
     assert any(r["who"] == "noor" and r["how"].startswith("run ")
                for r in hub.access_report(M(hub, "rana"), run["record"]))
@@ -1592,7 +1606,8 @@ def test_the_front_desk_red_flag_goes_to_a_nurse_not_the_calendar(hub, server):
     status, page = call(server, "POST", "/schedule/new", token(hub, "jo"), form={
         "with": "dr-amara", "at": f"{DAY}T11:00", "subject": _ellen(hub), "req_kind": "new-concern",
         "req_reason": "chest pain and short of breath", "req_urgency": "routine"})
-    assert status == 200 and "Not booked yet" in page and "Nurse" in page and "/runs/" in page
+    assert status == 200 and "Not booked yet" in page and "Nurse" in page and '#work">Open the ' in page
+    assert 'href="/runs/' not in page  # the request is worked on its record's page
     # the desk is still on the phone: the screen's advice is in front of them, first, not only sent to the portal
     tell = page.index("Tell the caller now:")
     assert tell < page.index("<b>Not booked yet.</b>") and "call 911" in page[tell:tell + 300] and 'role="alert"' in page
@@ -2115,19 +2130,22 @@ def test_the_definition_editor_says_whether_the_hub_accepts_the_text_without_ask
 
 def _panel(page):
     """The side panel of a record page (status, moves, open work), or of a patient's chart."""
-    m = re.search(r'<section class="wp-status".*?</aside>|<section class="wp-work".*?</aside>', page, re.S)
+    m = re.search(r'<p class="wp-lifecycle".*?</aside>|<section class="wp-status".*?</aside>|'
+                  r'<section class="wp-work".*?</aside>', page, re.S)
     return m.group(0) if m else ""
 
 
 def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
-    """A visit shows the run walking it on its own page, and the patient's chart lists the same run;
-    the status and moves are in words, and the workflow opens as a drawing with where it is now."""
+    """A visit's page leads with the work walking it: its state, the step it is at and who holds it, beside the
+    title; the patient's chart lists the same work, linked to the visit's page. The status and moves are in words,
+    and the workflow opens as a drawing with where it is now."""
     run = visit_run(hub)
     visit = next(r for r in run["refs"] if r.startswith("Encounter/"))
     page = call(server, "GET", f"/records/{visit}", token(hub, "dr-amara"))[1]
     panel = _panel(page)
-    assert "Open work" in panel and f'href="/runs/{run["id"]}"' in panel and "Draft the note" in panel
-    assert "In progress" in panel and "Move to" not in page  # words, not codes
+    status = page.split('class="rec-status"', 1)[1].split("</div>", 1)[0]
+    assert "In progress" in status and "Draft the note" in status and "Move to" not in page  # words, not codes
+    assert 'id="work"' in page and 'href="/runs/' not in page and "Open work" not in panel  # its work is above
     # being documented: its workflow waits on no pause now, so the page offers none (only its workflow moves it)
     assert ">Patient stepped out<" not in panel
     assert "View workflow" in panel and f'/records/{visit}/workflow" data-modal' in panel
@@ -2136,7 +2154,7 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     assert re.search(r'class="lc-node [a-z]+ current"><title>In progress', modal)
     # the chart of the patient lists the same run beside it
     chart = call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", token(hub, "dr-amara"))[1]
-    assert f'href="/runs/{run["id"]}"' in _panel(chart) and "On this patient" in chart
+    assert f'href="/records/{visit}#work"' in _panel(chart) and "On this patient" in chart
 
 
 def test_a_record_page_reads_in_words(hub, server):
@@ -2158,7 +2176,7 @@ def test_only_a_member_who_may_move_a_record_sees_its_moves(hub, server):
         if status != 200:
             continue
         may = hub.may_write(M(hub, mid), "Encounter")
-        assert ("Move it to" in _panel(page)) is may, mid
+        assert ('class="rw-moves"' in page) is may, mid
         assert "View workflow" in _panel(page), mid  # the drawing is for everyone who reads the record
         seen.add(may)
     assert True in seen
@@ -2176,7 +2194,7 @@ def test_the_front_desk_sees_no_step_of_a_branch_it_may_not_read(hub, server):
     tok = token(hub, "jo")
     listed = next(r for r in json.loads(call(server, "GET", "/api/runs", tok)[1])["runs"] if r["id"] == run["id"])
     seen = [json.dumps(listed), call(server, "GET", f"/api/runs/{run['id']}", tok)[1],
-            call(server, "GET", f"/runs/{run['id']}", tok)[1],
+            follow(server, f"/runs/{run['id']}", tok)[1],
             _panel(call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", tok)[1])]
     assert all(seen)
     for i, text in enumerate(seen):
@@ -2187,7 +2205,7 @@ def test_the_front_desk_sees_no_step_of_a_branch_it_may_not_read(hub, server):
             if s.when:
                 assert s.when not in html.unescape(text), s.id
     # a physician sees them
-    page = call(server, "GET", f"/runs/{run['id']}", token(hub, "dr-amara"))[1]
+    page = follow(server, f"/records/{run['record']}?tab=history", token(hub, "dr-amara"))[1]
     assert any(s.title in html.unescape(page) for s in hidden)
 
 
@@ -2647,9 +2665,9 @@ def test_reason_boxes_are_labelled_and_cancelling_work_is_asked_for(hub, server)
     page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))[1]
     give = page.split(f'action="/items/{iid}/release"', 1)[1].split("</form>", 1)[0]
     assert "<label>Why you give it back" in give and "placeholder" not in give
-    page = call(server, "GET", f"/runs/{run['id']}", token(hub, "jo"))[1]
+    page = follow(server, f"/runs/{run['id']}", token(hub, "jo"))[1]  # on the record's page
     cancel = page.split('class="cancel-work"', 1)[1].split("</details>", 1)[0]
-    assert "Cancel this work…</summary>" in cancel and "<label>Why it is cancelled" in cancel
+    assert "Cancel “Appointment request”…</summary>" in cancel and "<label>Why it is cancelled" in cancel
     assert 'placeholder="reason to cancel"' not in page
 
 

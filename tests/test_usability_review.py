@@ -156,9 +156,9 @@ def test_run_and_track_pages_speak_plainly(worked, server):  # noqa: F811
     hub = worked
     rana, amara = token(hub, "rana"), token(hub, "dr-amara")
     run = next(r for r in hub.engine.runs(limit=50) if r["workflow_id"] == "lab-result-review")
-    _, page = call(server, "GET", f"/runs/{run['id']}", amara)
+    _, page = call(server, "GET", f"/records/{run['record']}?tab=history", amara)  # its steps, in its history
     seen = _text(page)
-    assert "input." not in seen and "==" not in seen and "flag is critical" in seen
+    assert "input." not in seen and "==" not in seen and "'Review the result" in seen
     _, page = call(server, "GET", "/track", rana)
     assert 'class="plain ev-lines"' in page and "<summary class=\"meta\">Details</summary>" in page
     lines = " ".join(re.findall(r'<ul class="plain ev-lines">(.*?)</ul>', page))

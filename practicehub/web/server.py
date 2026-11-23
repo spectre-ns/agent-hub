@@ -63,6 +63,7 @@ from .mcp_pages import McpPages
 from .passes import PassPages
 from .office_pages import OfficePages
 from .live_pages import LivePages
+from .record_work import RecordWork
 from .records_pages import Download, RecordPages, a_an
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
@@ -97,7 +98,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages,
+class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, DefinitionPages, OfficePages, LivePages, McpPages,
           AnalyticsPages, BpmnPages, HolderWords, PassPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
@@ -413,7 +414,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         wf = viewer.workflow_of_run(run["id"])
         steps = viewer.run_steps(wf, run) if wf else run["steps"]  # a step they may not see: not even which ran
         return {**{k: run[k] for k in ("id", "workflow_id", "version", "record", "status", "started_by",
-                                       "created_at", "updated_at")}, "steps": steps, "title": self.hub.run_title(me, run)}
+                                       "created_at", "updated_at")}, "steps": steps, "title": self.hub.run_title(me, run),
+                "href": self.run_href(run)}  # where it is worked on: its record's page, else its own
 
     def _note_run_view(self, me, run) -> None:
         """A run's page shows its record's name, the run's input and its steps' results: what a member sees there
@@ -587,7 +589,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
 
     # ================================================================================================ pages
     def layout(self, req, title: str, body: str, *, crumbs=(), actions: str = "", subnav: str = "",
-               heading: bool = True, above: str = "") -> str:
+               heading: bool = True, above: str = "", status: str = "") -> str:
+        """A page. ``status``: what sits beside its title (a record's state, who holds it, when it is due)."""
         me = req.get("me")
         p = self.hub.practice
         name = p.get("name", "Practice Hub")
@@ -602,7 +605,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             crumb = ('<div class="crumbs">' + '<span class="sep">/</span>'.join(
                 f'<a href="{e(h)}">{e(t)}</a>' if h else e(t) for h, t in crumbs) + "</div>")
         page = (f'{crumb}{above}<div class="pagehead"><h1{"" if heading else " class=visually-hidden"}>{e(title)}</h1>'
-                f'{f"<div class=actions>{actions}</div>" if actions else ""}</div>{body}')
+                f'{status}{f"<div class=actions>{actions}</div>" if actions else ""}</div>{body}')
         mark = f'<span class="mark">{e(self._code())}</span>'
         if not me:
             return (head + f'<header class="top"><span class="logo">{mark}{e(name)}</span></header>'
@@ -1076,7 +1079,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                     if it["persons_only"] and it["kind"] != "notice" else "")
             rows.append(f'<tr><td style="white-space:nowrap">{self._ki(it["kind"])} <span class="key">{self._key(it["id"])}'
                         f'</span></td><td><a href="/items/{it["id"]}">{e(it["title"])}</a>{self._urgency(it)}{flag}{note}{reason}</td>'
-                        f'<td><a href="/runs/{it["run_id"]}">{e(it.get("run_title", ""))}</a></td>'
+                        f'<td><a href="{e(self.run_href(it["run_id"]))}">{e(it.get("run_title", ""))}</a></td>'
                         f'<td>{e(self._role_words(it["role"]))}</td><td>{self.holder_html(it) if it["kind"] != "notice" else ""}</td>'
                         f'<td>{self._item_loz(it)}</td><td class="muted" style="white-space:nowrap">'
                         f'{self._at(it["created_at"])}</td></tr>')
@@ -1544,7 +1547,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 now = ["a step you may not see"]
             wf = wf or wfs.get(r["workflow_id"])
             # Work is done on its record's page (as in Jira): a row opens the record, not the run's steps
-            href = self.record_href(r["record"]) if r.get("record") else f'/runs/{r["id"]}'
+            href = self.run_href(r)
             rows.append(f'<tr><td><a href="{e(href)}">{e(self.hub.run_title(req["me"], r))}</a></td>'
                         f'<td>{e(wf.title if wf else r["workflow_id"])} <span class="muted">v{r["version"]}</span></td>'
                         f'<td>{e(", ".join(now))}</td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'
@@ -1749,7 +1752,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         tell = self.tell_the_caller(run["id"], me=req["me"])
         booked = self.booked_confirmation(run["id"])
         if not tell and not booked:
-            raise Redirect(f"/runs/{run['id']}")
+            raise Redirect(self.run_href(run))
         # what the checks say to tell the caller is the page itself, not a link on a run page that may show nothing
         waiting = self.hub.db.items.find({"run_id": run["id"], "status": {"$in": ["open", "claimed"]}})
         roles = sorted({it.get("role") or "" for it in waiting} - {""})
@@ -1757,7 +1760,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         sent = (f'<div class="flash warning" role="status"><p><b>Sent on to {e(names)}.</b> Nothing is booked '
                 f'yet.</p></div>' if names and not booked else "")
         body = (f'<div data-modal-body data-modal-stay>{booked}{tell}{sent}<div class="filters"><a class="btn primary" '
-                f'href="/runs/{e(run["id"])}">See the request</a></div></div>')
+                f'href="{e(self.run_href(run))}">{e(self._open_words(run))}</a></div></div>')
         raise Rendered(200, self.layout(req, f"{wf.title}: started", body,
                                         crumbs=[("/start", "Start"), (None, wf.title)]))
 
@@ -1772,7 +1775,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             step = wf.step(item["step_id"])
         except KeyError:
             step = None
-        crumbs = [("/board", "Board"), (f"/runs/{run['id']}", self.hub.run_title(req["me"], run)), ("", self._key(iid))]
+        crumbs = [("/board", "Board"), (self.run_href(run), self.hub.run_title(req["me"], run)), ("", self._key(iid))]
         dl = [("Status", self._item_loz(item) + self._urgency(item)), ("Held by", self.holder_html(item)),
               ("Role", e(self._role_words(item["role"]) or "—")),
               ("Type", f'{self._ki(item["kind"])} {e({"gate": "decision", "hold": "approval"}.get(item["kind"], item["kind"]))}')]
@@ -1804,7 +1807,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                    or f'<a href="{e(self.record_href(run["record"]))}">{e(run["record"])}</a>')
             dl.append((rt.label if rt else "Record", rec))
         dl += [("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}'),
-               ("Run", f'<a href="/runs/{e(run["id"])}">{e(self.hub.run_title(req["me"], run))}</a>'),
+               ("Work", f'<a href="{e(self.run_href(run))}">{e(self.hub.run_title(req["me"], run))}</a>'),
                ("Created", self._at(item["created_at"])), ("Updated", self._at(item["updated_at"]))]
         details = ('<aside class="details"><h3>Details</h3><dl>'
                    + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in dl) + "</dl></aside>")
@@ -1864,35 +1867,44 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             main.append(self._hold_form(me, item, run, kept))
         else:
             main.append(self._work_form(me, item, iid, step, kept))
-            ok, _ = eng.eligibility(me, item)
-            ok_free = eng.eligibility(me, {**item, "status": "open", "claimed_by": None, "assignee": None})[0]
-            if ok and item["status"] == "open" and item["assignee"] != me["id"]:
-                # only on a shared queue, where it tells the others it is taken; Done takes it anyway
-                actions = (f'<form method="post" action="/items/{iid}/claim" class="inline"><button class="secondary" '
-                           f'aria-describedby="claim-hint-{iid}">Assign to me</button> <span class="muted" '
-                           f'id="claim-hint-{iid}">Optional: tells the others you are on it. Done assigns it to you '
-                           f'anyway.</span></form>')
-            elif ok:
-                actions = (f'<form method="post" action="/items/{iid}/release" class="inline"><label>Why you give it '
-                           f'back <span class="muted">(optional)</span> <input name="note"></label> '
-                           f'<button class="secondary">Give it back</button></form>')
-            elif eng.may_reassign(me, item):
-                held = self.member_name(eng.holder(item))
-                people = "".join(f'<option value="{e(m["id"])}">{e(m["name"])}</option>'
-                                 for m in eng.reassign_options(item))
-                mine = '<option value="">Me</option>' if eng.may_take_over(me, item) and ok_free else ""
-                actions = (f'<form method="post" action="/items/{iid}/take-over" class="inline reassign" '
-                           f'id="take-over">'
-                           f'<label>Move from {e(held)} to <select name="to">{mine}{people}'
-                           f'<option value="queue">Anyone who can</option></select></label>'
-                           f'<label>Why <span class="muted">(they will see it)</span> <input name="note" required></label>'
-                           f'<button>{"Take over" if item["escalated"] else "Reassign"}</button></form>')
+            actions = self._item_actions(me, item)
         main.append(self._item_family(me, item))
         main.append(self._step_history(me, wf, item))
         events = [ev for ev in self.hub.track.list(run_id=run["id"], limit=500) if ev["subject"] == f"item:{iid}"]
         main.append(f'<div class="section"><h2>Activity</h2>{self._activity(list(reversed(events)), me)}</div>')
         body = f'<div class="issue"><div data-modal-body>{"".join(main)}</div>{details}</div>'
         return self.layout(req, item["title"], body, crumbs=crumbs, actions=actions)
+
+    def _item_actions(self, me, item, back: str = "") -> str:
+        """What a member may do with a person's step besides its form: assign it to themselves, give it back, or take
+        it over or reassign it. ``back``: where the forms return to (the record page the step is shown on)."""
+        eng, iid = self.hub.engine, item["id"]
+        hidden = f'<input type="hidden" name="_back" value="{e(back)}">' if back else ""
+        actions = ""
+        ok, _ = eng.eligibility(me, item)
+        ok_free = eng.eligibility(me, {**item, "status": "open", "claimed_by": None, "assignee": None})[0]
+        if ok and item["status"] == "open" and item["assignee"] != me["id"]:
+            # only on a shared queue, where it tells the others it is taken; Done takes it anyway
+            actions = (f'<form method="post" action="/items/{iid}/claim" class="inline">{hidden}<button class="secondary" '
+                       f'aria-describedby="claim-hint-{iid}">Assign to me</button> <span class="muted" '
+                       f'id="claim-hint-{iid}">Optional: tells the others you are on it. Done assigns it to you '
+                       f'anyway.</span></form>')
+        elif ok:
+            actions = (f'<form method="post" action="/items/{iid}/release" class="inline">{hidden}<label>Why you give it '
+                       f'back <span class="muted">(optional)</span> <input name="note"></label> '
+                       f'<button class="secondary">Give it back</button></form>')
+        elif eng.may_reassign(me, item):
+            held = self.member_name(eng.holder(item))
+            people = "".join(f'<option value="{e(m["id"])}">{e(m["name"])}</option>'
+                             for m in eng.reassign_options(item))
+            mine = '<option value="">Me</option>' if eng.may_take_over(me, item) and ok_free else ""
+            actions = (f'<form method="post" action="/items/{iid}/take-over" class="inline reassign" '
+                       f'id="take-over">{hidden}'
+                       f'<label>Move from {e(held)} to <select name="to">{mine}{people}'
+                       f'<option value="queue">Anyone who can</option></select></label>'
+                       f'<label>Why <span class="muted">(they will see it)</span> <input name="note" required></label>'
+                       f'<button>{"Take over" if item["escalated"] else "Reassign"}</button></form>')
+        return actions
 
     def _item_family(self, me, item) -> str:
         """The item a child closes back into, and the children an item waits on (each with its key and holder)."""
@@ -1937,9 +1949,13 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         return (f'<div class="section"><h2>Steps so far</h2><table><thead><tr><th>Step</th><th>Who</th>'
                 f'<th>Began</th><th>How it went</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
 
-    def _work_form(self, me, item, iid, step, kept: dict | None = None) -> str:
+    def _work_form(self, me, item, iid, step, kept: dict | None = None, *, back: str = "",
+                   on_record: bool = False) -> str:
+        """A person's step: what it reads and its form (a decision, or its answer). ``back``: the page its forms return
+        to; ``on_record``: shown on the record's own page, which is what the step reads, so that stays folded."""
         eng = self.hub.engine
         kept = kept or {}
+        hidden = f'<input type="hidden" name="_back" value="{e(back)}">' if back else ""
         ok, why = eng.eligibility(me, item)
         if not ok:
             return f'<div class="error">You cannot take this: {e(self.holder_refusal(me, item, why))}</div>'
@@ -1951,21 +1967,23 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         asked = {k: v for k, v in ctx["context"].items() if k == "input" or k.startswith("input.")}
         if asked:  # what the person wrote, in their own words, before anything about it
             parts.append(f'<div class="section"><h2>The request</h2><div class="card request">'
-                         f'{self._context(asked, wf)}</div></div>')
+                         f'{self._context(asked, wf, me)}</div></div>')
         rest = {k: v for k, v in ctx["context"].items() if k not in asked}
         if st.get("instructions"):
             parts.append(f'<div class="section"><h2>Description</h2><div class="card">{e(st["instructions"])}</div></div>')
-        if ctx.get("skill"):
+        if ctx.get("skill") and not on_record:
             parts.append(f'<details class="card"><summary>How an agent is told to do this ({e(ctx["skill"]["title"])})'
                          f'</summary><pre class="wrap">{e(ctx["skill"]["instructions"])}</pre></details>')
-        parts.append(f'<details class="section" open><summary><b>What this step reads</b></summary><div class="card">'
-                     f'{self._context(rest, wf)}</div></details>')
+        if rest:
+            parts.append(f'<details class="section"{"" if on_record else " open"}><summary><b>What this step reads'
+                         f'</b></summary><div class="card">{self._context(rest, wf, me)}</div></details>')
         if ctx.get("draft"):
             by = ctx["draft"].get("by")
             parts.append(f'<div class="section"><h2>Draft by {self.who(by)}</h2><div class="card">'
-                         f'{self._values(ctx["draft"])}</div></div>')
+                         f'{self._values(ctx["draft"], me)}</div></div>')
         if st["kind"] == "gate":
-            parts.append(self._signed_record_view(me, run, step))
+            if not on_record:  # on the record's page, the record is the page above
+                parts.append(self._signed_record_view(me, run, step))
             says = st.get("meanings") or {}
             varied = len(set(says.values())) > 1   # each outcome signs its own sentence: show it beside the choice
             radios = "".join(f'<label class="radio"><input type="radio" class="opt-input" name="outcome" value="{e(o)}" '
@@ -1975,7 +1993,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                              + '</label>' for o in st["outcomes"])
             sign = ('<p class="sign">Deciding is your electronic signature, with the sentence beside your choice, '
                     if varied else f'<p class="sign">Deciding is your electronic signature: <b>“{e(st["meaning"])}”</b>, ')
-            parts.append(f'<div class="section"><h2>Decide</h2><form method="post" action="/items/{iid}/decide" class="card">'
+            parts.append(f'<div class="section"><h2>Decide</h2><form method="post" action="/items/{iid}/decide" class="card">{hidden}'
                          f'<fieldset class="choices options decide"><legend>Your decision<span class="req" aria-hidden="true"> *</span></legend>{radios}</fieldset><label>Comment<textarea name="comment" rows="3">{e(str(kept.get("comment", "")))}</textarea></label>'
                          f'{sign}over exactly what is shown on this page. If it changes before you decide, you are asked '
                          f'to read it again.</p>{self._sign_prompt(me)}<input type="hidden" name="seen" '
@@ -1985,7 +2003,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             prefill.update(self._form_output(kept))  # what the person typed, sent back with an error: theirs
             fields = "".join(self._field(f, ctx["choices"].get(f["name"]), prefill.get(f["name"])) for f in ctx["fields"])
             parts.append(f'<div class="section"><h2>Your answer</h2><form method="post" action="/items/{iid}/complete" '
-                         f'class="card">{fields}<button>Done</button></form></div>')
+                         f'class="card">{hidden}{fields}<button>Done</button></form></div>')
         return "".join(parts)
 
     def _signed_badge(self, ev) -> str:
@@ -2180,8 +2198,13 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 f'<script type="application/json" id="{fid}">{self._flow_json(wf, run, links, viewer)}</script>')
 
     def page_run(self, req, rid):
+        """Work about a record is worked on the record's page: there it goes, to its work (303). Work about no
+        record (or a record of a type this member may not read) keeps this page: where it is and its steps."""
         me, hub = req["me"], self.hub
         run = hub.engine.run(rid)
+        ref = run.get("record")
+        if ref and "/" in ref and self._may_read(me, ref.split("/", 1)[0]):
+            raise Redirect(self.run_href(run))
         self._note_run_view(me, run)
         wf, _ = hub.workflow(run["workflow_id"], run["version"])
         viewer = Viewer(hub, me)
@@ -2236,9 +2259,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                        f'</form></details>')
         dl = [("Status", self._loz(self.RUN_STATUS, run["status"])),
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
-        if run.get("subject") and run["subject"] != run["record"] and run["subject"].startswith(self.subj["type"] + "/"):
+        if run.get("subject") and run["subject"] != run.get("record") and run["subject"].startswith(self.subj["type"] + "/"):
             dl.append((self.subj["label"], self._ref_html(me, run["subject"]) or e(self.subj["label"])))
-        elif run["record"] and run["record"].startswith(self.subj["type"] + "/"):
+        elif run.get("record") and run["record"].startswith(self.subj["type"] + "/"):
             dl.append((self.subj["label"], self._ref_html(me, run["record"]) or e(self.subj["label"])))
         dl += [("Started by", self.who(run["started_by"])), ("Created", self._at(run["created_at"])),
                ("Updated", self._at(run["updated_at"]))]
@@ -2713,7 +2736,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             return titles[head] + (f": {rest.replace('_', ' ')}" if rest else "")
         return key
 
-    def _context(self, data: dict, wf=None) -> str:
+    def _context(self, data: dict, wf=None, me: dict | None = None) -> str:
         out = []
         for key, val in data.items():
             label = self._context_label(key, wf)
@@ -2737,7 +2760,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             elif key.startswith("provider:") and isinstance(val, list):
                 out.append(f"<h3>{e(label)}</h3><p class='muted'>{len(val)} options, offered in the form below.</p>")
             else:
-                out.append(f"<h3>{e(label)}</h3>" + self._values(val))
+                out.append(f"<h3>{e(label)}</h3>" + self._values(val, me))
         return "".join(out) or "<p class='muted'>Nothing.</p>"
 
     def _fact_html(self, v) -> str:
@@ -2760,8 +2783,10 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
 
     def _values(self, v, me: dict | None = None) -> str:
         if isinstance(v, dict):
-            rows = "".join(f"<tr><th>{e(self.human(k))}</th><td>{self._values(x, me)}</td></tr>"
-                           for k, x in v.items() if k not in ("event",))
+            # who did it, named (not their id or their kind); a reference, linked by its title
+            rows = "".join(f"<tr><th>{e(self.human(k))}</th><td>"
+                           f"{self.who(x) if k == 'by' and isinstance(x, str) and self.hub.db.members.get(x) else self._values(x, me)}"
+                           f"</td></tr>" for k, x in v.items() if k not in ("event", "by_kind"))
             return f"<table class='kv'>{rows}</table>"
         if isinstance(v, list):
             return ("<ul>" + "".join(f"<li>{self._values(x, me)}</li>" for x in v) + "</ul>"
@@ -2928,17 +2953,19 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         me, eng = req["me"], self.hub.engine
         f = self.form(req)
         item = eng.item(iid)
+        back = self.safe_back(f.get("_back"))  # from the record's page (or the board): back to it
         if verb == "claim":
             try:
                 eng.claim(me, iid)
             except Denied as exc:  # the refusal names who holds it
                 raise Denied(self.holder_refusal(me, item, str(exc))) from None
-            raise Redirect(f"/items/{iid}")
+            raise Redirect(back or f"/items/{iid}")
         if verb == "release":
             eng.release(me, iid, f.get("note", ""))
-            raise Redirect("/")
+            raise Redirect(back or "/")
         if verb == "take-over":  # from an overdue notice, the work taken opens
-            raise Redirect(f"/items/{eng.take_over(me, iid, f.get('note', ''), to=f.get('to') or None)['id']}")
+            taken = eng.take_over(me, iid, f.get('note', ''), to=f.get('to') or None)
+            raise Redirect(back or f"/items/{taken['id']}")
         if verb == "ack":
             eng.acknowledge(me, iid)
             raise Redirect("/")
@@ -2951,10 +2978,11 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         except (Denied, Invalid) as exc:  # the page again, saying what went wrong, with what was typed kept
             if isinstance(exc, Denied):
                 exc = Denied(self.holder_refusal(me, eng.item(iid), str(exc)))
-            kept = {k: v for k, v in f.items() if k not in ("passphrase", "credential", "seen")}
+            kept = {k: v for k, v in f.items() if k not in ("passphrase", "credential", "seen", "_back")}
             code = 403 if isinstance(exc, Denied) else 422
-            raise Rendered(code, self.page_item(req, iid, kept=kept, error=exc)) from None
-        raise Redirect(self.safe_back(f.get("_back")) or f"/runs/{item['run_id']}")  # from the board: back to it
+            again = self._record_again(req, back, {"iid": iid, "kept": kept, "error": exc}) if back else None
+            raise Rendered(code, again or self.page_item(req, iid, kept=kept, error=exc)) from None
+        raise Redirect(back or self.run_href(item["run_id"]))  # where it was done: back to it
 
     # ------------------------------------------------------------------------------------------ subjects
     def subject_link(self, ref: str, text: str | None = None) -> str:
@@ -3048,7 +3076,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         parts.insert(1, f'<div class="file-tools" role="group" aria-label="This file">{tools}</div>')
         runs = self.hub.engine.runs(record=ref)
         parts.append(f"<h2 id='work'>Work about this {e(self.subj['label'].lower())}</h2>" + (
-            "<table>" + "".join(f'<tr><td><a href="/runs/{r["id"]}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{e(r["status"])}</td>'
+            "<table>" + "".join(f'<tr><td><a href="{e(self.run_href(r))}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'
                                 f'<td class="muted">{self._at(r["created_at"])}</td></tr>' for r in runs)
             + "</table>" if runs else "<p class='muted'>None.</p>"))
         starts = self.start_buttons(me, st, ref)
@@ -3071,12 +3099,49 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
 
     # ------------------------------------------------------------------------------------------ runs
     def post_retry(self, req, rid, sid):
-        self.hub.engine.retry(req["me"], rid, sid, self.form(req).get("reason", ""))
-        raise Redirect(f"/runs/{rid}")
+        f = self.form(req)
+        self._run_verb(req, rid, f, lambda: self.hub.engine.retry(req["me"], rid, sid, f.get("reason", "")))
 
     def post_cancel(self, req, rid):
-        self.hub.engine.cancel(req["me"], rid, self.form(req).get("reason", ""))
-        raise Redirect(f"/runs/{rid}")
+        """Cancel a piece of work, from its record's page (or its own, for work about no record); refused, the
+        record's page says why (``Engine.cancel_refusal``)."""
+        f = self.form(req)
+        run = self.hub.engine.run(rid)
+        why = self.hub.engine.cancel_refusal(req["me"], run) if run["status"] == "running" else None
+
+        def cancel():
+            if why:
+                raise Denied(f"you may not cancel it: {why}")
+            self.hub.engine.cancel(req["me"], rid, f.get("reason", ""))
+        self._run_verb(req, rid, f, cancel)
+
+    def _run_verb(self, req, rid, f, act):
+        """Do ``act`` to a run, then back to where it was asked (the record's page, at its work). Refused, from a
+        record's page: that page again, saying why at its work."""
+        back = self.safe_back(f.get("_back")) or self.run_href(rid)
+        try:
+            act()
+        except (Denied, Invalid) as exc:
+            again = self._record_again(req, back, {"error": exc})
+            if again is None:
+                raise
+            raise Rendered(403 if isinstance(exc, Denied) else 422, again) from None
+        raise Redirect(back)
+
+    def _record_again(self, req, back: str, work: dict) -> str | None:
+        """The record page ``back`` names, drawn again with ``work`` (a refusal, what was typed) at its work; None
+        for a page that is not a record's."""
+        path = back.split("#", 1)[0].split("?", 1)[0]
+        m = re.fullmatch(r"/records/([A-Za-z][\w]*)/([\w.-]+)", path)
+        if not m:
+            return None
+        return self.page_record({**req, "query": {}, "_work": work}, m.group(1), m.group(2))
+
+    def _open_words(self, run) -> str:
+        """The words of a link to where a piece of work is worked on: its record (Open the visit), else the work."""
+        ref = run.get("record")
+        rt = self.hub.record_type(ref.split("/", 1)[0]) if ref and "/" in ref else None
+        return f"Open the {rt.label.lower()}" if rt else "See the request"
 
     def _events(self, events, me) -> str:
         rows, who, memo = [], {}, {}
@@ -4115,7 +4180,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                     if r.get("note") and readable else "")
             body.append(f'<tr id="msg-{r["id"]}"><td class="muted">{self._at(r["at"])}</td>'
                         f'<td>{e(r["channel"])}</td><td>{e(r["recipient"])}</td><td>{words}</td>'
-                        f'<td>{"<a href=/runs/" + e(r["run_id"]) + ">run</a>" if r["run_id"] else ""}</td>'
+                        f'<td>{"<a href=" + e(self.run_href(r["run_id"])) + ">the work</a>" if r["run_id"] else ""}</td>'
                         f'<td>{self._message_status(r)}{note}{self._deliver_form(me, r)}</td></tr>')
         body = "".join(body)
         return self.layout(req, "Outbox", "<p class='muted'>Messages the practice has queued to send (portal, fax, "
