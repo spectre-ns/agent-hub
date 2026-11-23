@@ -164,6 +164,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         R("GET", r"/board", self.page_board)
         R("POST", r"/board/move", self.post_board_move)
         R("GET", r"/items/(?P<iid>[\w-]+)", self.page_item)
+        R("GET", r"/items/(?P<iid>[\w-]+)/decide", self.page_decide)
         R("POST", r"/items/(?P<iid>[\w-]+)/(?P<verb>claim|complete|decide|release|ack|take-over)", self.post_item)
         R("POST", r"/notices/ack", self.post_notices_ack)
         R("GET", rf"/{sp}", self.page_subjects)
@@ -1998,6 +1999,19 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                          f'{sign}over exactly what is shown on this page. If it changes before you decide, you are asked '
                          f'to read it again.</p>{self._sign_prompt(me)}<input type="hidden" name="seen" '
                          f'value="{e(eng.shown_digest(me, iid))}"><button class="primary">Sign and decide</button></form></div>')
+            if on_record:
+                # on the record's page the decision leads, as its moves do: a button for each outcome, each opening a
+                # dialog for that outcome alone (what it signs, what it sets going, a comment, the signature)
+                q = urllib.parse.quote(back, safe="") if back else ""
+                last = len(st["outcomes"]) - 1
+                btns = "".join(
+                    f'<a class="btn {"primary" if i == 0 else "danger-subtle" if i == last and self._ends(o) else "secondary"}" '
+                    f'href="/items/{e(iid)}/decide?outcome={e(urllib.parse.quote(o, safe=""))}'
+                    + (f'&amp;_back={e(q)}' if q else "") + f'" data-modal>{e(self.human(o))}…</a>'
+                    for i, o in enumerate(st["outcomes"]))
+                decide = (f'<div class="section rw-decide"><h2>Decide</h2>'
+                          f'<div class="rw-moves" role="group" aria-label="Your decision">{btns}</div>'
+                          f'<p class="muted">Each opens what that decision signs and what follows it.</p></div>')
             # on the record's page the decision leads (the record is above it, its request and notes follow); on the
             # step's own page it follows what it is about
             parts.insert(0 if on_record else len(parts), decide)
@@ -2008,6 +2022,54 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             parts.append(f'<div class="section"><h2>Your answer</h2><form method="post" action="/items/{iid}/complete" '
                          f'class="card">{hidden}{fields}<button>Done</button></form></div>')
         return "".join(parts)
+
+    @staticmethod
+    def _ends(outcome: str) -> bool:
+        """An outcome that turns the request down, shown as the quiet red button (decline, reject, cancel)."""
+        return any(w in outcome for w in ("decline", "reject", "refuse", "cancel", "deny"))
+
+    def page_decide(self, req, iid, *, kept: dict | None = None, error=None):
+        """One outcome of a decision, as its own dialog: what is decided about, the sentence this decision signs for
+        this member, what it sets going (``Engine.outcome_follows``), a comment, and the signature. Sent from the
+        record page's decision buttons (``data-modal``); posts to the item's decide as the full form does."""
+        me, eng = req["me"], self.hub.engine
+        item = eng.item(iid)
+        kept = kept or {}
+        outcome = kept.get("outcome") or req["query"].get("outcome", "")
+        back = self.safe_back(kept.get("_back") or req["query"].get("_back"))
+        run = eng.run(item["run_id"])
+        wf = self.hub.workflow(run["workflow_id"], run["version"])[0]
+        step = wf.step(item["step_id"])
+        if step.kind != "gate" or outcome not in step.outcomes:
+            raise Invalid(f"“{self.human(outcome)}” is not a decision of “{step.title}”")
+        ok, why = eng.eligibility(me, item)
+        if not ok:
+            raise Denied(self.holder_refusal(me, item, why))
+        if item.get("status") not in ("open", "claimed"):
+            raise Invalid("this decision has already been made")
+        label = self.human(outcome)
+        meaning = eng.meaning_for(me, run, step, outcome)
+        about = self.hub.run_title(me, run)
+        follows = eng.outcome_follows(run, step, outcome)  # steps of the workflow they are deciding in: theirs to see
+        then = ("".join(f"<li>{e(s.title)}</li>" for s in follows) if follows else "")
+        hidden = f'<input type="hidden" name="_back" value="{e(back)}">' if back else ""
+        cancel = back or self.run_href(run)
+        err = (f'<div class="flash error" role="alert"><p>That did not go through: {e(str(error))}</p>'
+               f'<p>Nothing was decided. What you typed is kept below.</p></div>' if error is not None else "")
+        body = (f'<div data-modal-body>{err}<p><b>{e(step.title)}</b> <span class="muted">·</span> {e(about)}</p>'
+                + (f'<div class="card"><p class="muted">What follows</p><ul class="plain then">{then}</ul></div>'
+                   if then else '<p class="muted">Nothing else follows from it in this workflow.</p>')
+                + f'<form method="post" action="/items/{e(iid)}/decide" class="card stack">{hidden}'
+                f'<input type="hidden" name="outcome" value="{e(outcome)}"><input type="hidden" name="_dialog" value="1">'
+                f'<label>Comment<textarea name="comment" rows="3">{e(str(kept.get("comment", "")))}</textarea>'
+                f'<small>Kept with your decision in the record\'s history.</small></label>'
+                f'<p class="sign">Deciding is your electronic signature: <b>“{e(meaning)}”</b>, over exactly what '
+                f'this step shows you. If it changes before you decide, you are asked to read it again.</p>'
+                f'{self._sign_prompt(me)}<input type="hidden" name="seen" value="{e(eng.shown_digest(me, iid))}">'
+                f'<div class="filters"><button class="primary">{e(label)}: sign and decide</button>'
+                f'<a class="btn secondary" href="{e(cancel)}" data-modal-close>Cancel</a></div></form></div>')
+        crumbs = [(cancel, about), (None, label)]
+        return self.layout(req, label, body, crumbs=crumbs)
 
     def _signed_badge(self, ev) -> str:
         """A person's signature, or an agent's attested decision, which is never a signature."""
@@ -2983,6 +3045,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                 exc = Denied(self.holder_refusal(me, eng.item(iid), str(exc)))
             kept = {k: v for k, v in f.items() if k not in ("passphrase", "credential", "seen", "_back")}
             code = 403 if isinstance(exc, Denied) else 422
+            if verb == "decide" and f.get("_dialog"):  # from an outcome's dialog: that dialog again, as typed
+                raise Rendered(code, self.page_decide(req, iid, kept={**kept, "_back": back}, error=exc)) from None
             again = self._record_again(req, back, {"iid": iid, "kept": kept, "error": exc}) if back else None
             raise Rendered(code, again or self.page_item(req, iid, kept=kept, error=exc)) from None
         raise Redirect(back or self.run_href(item["run_id"]))  # where it was done: back to it

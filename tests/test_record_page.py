@@ -217,3 +217,37 @@ def test_a_long_parts_section_shows_the_latest_fifty_and_lists_every_one(hub, se
     assert f'href="/records/Observation?linked={q}">Show all ' in section
     code, all_ = call(server, "GET", f"/records/Observation?linked={q}", tok)
     assert code == 200 and all_.count('<tr><td><a href="') >= 51
+
+
+def test_a_decision_on_the_record_is_a_button_per_outcome_each_opening_its_own_dialog(hub, server):
+    """On the record's page each outcome of a decision is a button, like a move. Each opens a dialog for that outcome
+    alone: the sentence it signs, what it sets going (booking a visit books one; filing it normal tells the patient),
+    a comment and the signature. Deciding from it moves the work on and comes back to the record."""
+    from tests.test_clinic_records import LAB, _pat
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    ref = hub.engine.run(run["id"])["record"]
+    tok = token(hub, "dr-amara")
+    page = call(server, "GET", f"/records/{ref}", tok)[1]
+    step = page.split('class="rw-step"', 1)[1]
+    assert 'name="outcome"' not in step  # no radios on the record: a button each
+    iid = item_for(hub, run, "review-flagged")
+    for o in ("no-action-needed", "call-patient", "book-visit"):
+        assert f'href="/items/{iid}/decide?outcome={o}' in step
+    code, book = call(server, "GET", f"/items/{iid}/decide?outcome=book-visit", tok)
+    assert code == 200 and "data-modal-body" in book and "Book a visit" in book and "Tell the patient" not in book
+    assert "I have reviewed this result" in book and 'name="outcome" value="book-visit"' in book
+    code, fine = call(server, "GET", f"/items/{iid}/decide?outcome=no-action-needed", tok)
+    assert "Tell the patient their result was reviewed" in fine and "Book a visit" not in fine
+    assert call(server, "GET", f"/items/{iid}/decide?outcome=launch", tok)[0] == 422
+    seen = re.search(r'name="seen" value="([0-9a-f]+)"', book).group(1)
+    form = {"outcome": "book-visit", "comment": "talk it over", "seen": seen, "_dialog": "1",
+            "_back": f"/records/{ref}#work"}
+    code, again = call(server, "POST", f"/items/{iid}/decide", tok, form=form)  # signing asks for the passphrase
+    assert code == 403 and "data-modal-body" in again and ">talk it over</textarea>" in again
+    assert 'name="outcome" value="book-visit"' in again
+    words = passphrase(hub, "dr-amara")
+    code, _ = call(server, "POST", f"/items/{iid}/decide", tok, form={**form, "passphrase": words})
+    assert code in (200, 303) and hub.engine.item(iid)["status"] == "done"

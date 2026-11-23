@@ -1571,6 +1571,30 @@ class Engine:
                 self.hub.track.append({"id": "engine", "kind": "automation"}, "run.stuck", r["id"], cause=cause,
                                       data={"error": str(exc)})
 
+    def outcome_follows(self, run: dict, step, outcome: str) -> list:
+        """What deciding ``step`` with ``outcome`` sets going: the steps whose condition reads a decision and would
+        hold were it made (each step that copies the decision, ``{{<step>.outcome}}``, given it too). What a decision
+        dialog says follows it; the run itself is not touched."""
+        wf = self.hub.workflow(run["workflow_id"], run["version"])[0]
+        tag = "{{" + step.id + ".outcome"
+        given = {step.id: {"outcome": outcome}}
+        for s in wf.steps:  # a step that gathers decisions ("reviewed": {{review.outcome}}{{review-flagged.outcome}})
+            if s.kind == "automation" and tag in json.dumps(s.params, default=str):
+                given[s.id] = {"outcome": outcome}
+        live = {**self._live_ctx(run), **given}
+        out = []
+        for s in wf.steps:
+            if s.id in given or not s.when or ".outcome" not in s.when:
+                continue
+            if not any(g in s.when for g in given):
+                continue
+            try:
+                if expr.holds(s.when, live):
+                    out.append(s)
+            except Exception:  # noqa: BLE001 - a condition over what is not there yet: it does not follow (yet)
+                continue
+        return out
+
     def _live_ctx(self, run) -> dict:
         """The run's context plus ``record``: its record as it is now. Read fresh each time and never stored, so a
         step sees what earlier steps (and people) wrote."""
