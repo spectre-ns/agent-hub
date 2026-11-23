@@ -7,22 +7,42 @@ facts always give the same answer, and the answer is in the track.
 """
 
 code = '''
+from datetime import datetime
+
+
+def _wall(value):
+    return datetime.fromisoformat(str(value)[:19])
+
+
 def run(input):
-    hours = input["notice_hours"]
+    hours = input.get("notice_hours")
+    if hours is None and input.get("starts") and input.get("cancelled_at"):
+        hours = max(0, (_wall(input["starts"]) - _wall(input["cancelled_at"])).total_seconds() / 3600)
+    hours = hours or 0
     missed = input.get("missed_this_year") or 0
     if hours >= 24:
-        return {"charge": False, "amount": 0, "reason": "cancelled with at least 24 hours' notice"}
+        return {"charge": False, "amount": 0, "late": False, "reason": "cancelled with at least 24 hours' notice"}
     if missed == 0:
-        return {"charge": False, "amount": 0, "reason": "first missed appointment this year: a reminder, no fee"}
-    return {"charge": True, "amount": input["fee"],
+        return {"charge": False, "amount": 0, "late": True,
+                "reason": "first missed appointment this year: a reminder, no fee"}
+    return {"charge": True, "amount": input["fee"], "late": True,
             "reason": f"less than 24 hours' notice and {missed} earlier missed appointment(s) this year"}
 '''
 
 [[input]]
 name = "notice_hours"
 type = "number"
-required = true
-help = "how many hours before the appointment the patient cancelled (0 if they did not)"
+help = "how many hours before the appointment the patient cancelled (0 if they did not); or give starts and cancelled_at"
+
+[[input]]
+name = "starts"
+type = "string"
+help = "when the appointment was booked for (the practice's time), to work out the notice"
+
+[[input]]
+name = "cancelled_at"
+type = "string"
+help = "when it was cancelled (the practice's time)"
 
 [[input]]
 name = "missed_this_year"
@@ -45,6 +65,11 @@ required = true
 name = "amount"
 type = "number"
 required = true
+
+[[output]]
+name = "late"
+type = "boolean"
+help = "less than 24 hours' notice (a no-show is late)"
 
 [[output]]
 name = "reason"

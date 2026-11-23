@@ -1168,10 +1168,14 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
     def _late_work_of(self, me, notice) -> list[dict]:
         """The late work an escalation notice is about (open, at the notice's step of its run), that this member
         may see; none for any other notice."""
-        if notice["kind"] != "notice" or not notice.get("step_id"):
+        if notice["kind"] != "notice" or not (notice.get("step_id") or notice.get("escalates")):
             return []
         eng = self.hub.engine
         run = eng.run(notice["run_id"])
+        if notice.get("escalates"):  # the notice names the late work
+            w = self.hub.db.items.get(notice["escalates"])
+            late = [eng.item(notice["escalates"])] if w and w["status"] in ("open", "claimed") else []
+            return [w for w in late if self.may_see_item(me, w, run)]
         late = [eng.item(r["_id"]) for r in self.hub.db.items.find(
             {"run_id": notice["run_id"], "step_id": notice["step_id"], "kind": {"$in": ["task", "gate"]},
              "status": {"$in": ["open", "claimed"]}, "escalated": {"$gt": 0}}, fields=["_id"])]
@@ -1181,12 +1185,16 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         """What the work is about besides its record: the records its start named (a result, a referral), each
         named the way this member may see it."""
         vals = (run.get("ctx") or {}).get("input") or {}
-        refs = [self._ref_html(me, v) for v in vals.values() if isinstance(v, str) and v != run.get("record")]
+        subject = run.get("subject") or run.get("record")
+        named = ([run["record"]] if run.get("record") and run["record"] != subject else []) + [
+            v for v in vals.values() if isinstance(v, str) and v not in (subject, run.get("record"))]
+        refs = [self._ref_html(me, v) for v in named]
         return " · ".join(r for r in refs if r)
 
-    def _urgent_band(self, me, groups: list[dict], *, here: str = "/") -> str:
-        """The Urgent band: a row per record, with what it is about, how late, who holds it, and the way in."""
-        if not groups:
+    def _urgent_band(self, me, groups: list[dict], *, here: str = "/", records=()) -> str:
+        """The Urgent band: a row per record, with what it is about, how late, who holds it, and the way in; then
+        records left waiting with no work on them (``records``: type, record, state words)."""
+        if not groups and not records:
             return ""
         eng = self.hub.engine
         rows = []
@@ -1204,7 +1212,7 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                             f'<a href="/items/{e(w["id"])}">{e(w.get("step_title") or w["title"])}</a>'
                             f'{self._urgency(w)} <span class="muted">·</span> {self.holder_html(w, avatar=False)}'
                             f'<span class="u-go">{go}</span></div>')
-            count = len(g["notices"])
+            count = sum(int(n.get("repeats") or 1) for n in g["notices"])  # one notice counts its repeats
             told = (f' <span class="badge overdue" title="Escalation notices sent to you about this">Escalated '
                     f'{count}×</span>' if count else "")
             ack = ""
@@ -1212,11 +1220,20 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
                 ids = "".join(f'<input type="hidden" name="id" value="{e(n["id"])}">' for n in g["notices"])
                 ack = (f'<form method="post" action="/notices/ack" class="inline">{ids}<input type="hidden" '
                        f'name="_back" value="{e(here)}"><button class="subtle">Dismiss '
-                       f'{"notice" if count == 1 else f"the {count} notices"}</button></form>')
+                       f'{"notice" if len(g["notices"]) == 1 else "the notices"}</button></form>')
             rows.append(f'<li class="u-row"><div class="u-head"><b>{e(g["title"])}</b>{told}'
                         f'{f" <span class=u-value>{value}</span>" if value else ""}{ack}</div>{"".join(asks)}</li>')
+        busy = {g["run"].get("record") for g in groups} | {v for g in groups for v in ((g["run"].get("ctx") or {}).get("input") or {}).values() if isinstance(v, str)}
+        for rt, r, state in records:
+            ref = f"{rt.id}/{r['id']}"
+            if ref in busy:
+                continue
+            rows.append(f'<li class="u-row"><div class="u-head"><b>{e(rt.label)}</b> <span class="badge overdue">'
+                        f'{e(state)}</span> <span class="u-value"><a href="{e(self.record_href(ref))}">'
+                        f'{e(self.hub.title(r))}</a></span><span class="u-go"><a class="btn primary" '
+                        f'href="{e(self.record_href(ref))}">Open</a></span></div></li>')
         return (f'<section class="urgent-band" aria-labelledby="urgent-h"><h2 id="urgent-h">Urgent '
-                f'<span class="badge urgent">{len(groups)}</span></h2><ul class="plain">{"".join(rows)}</ul></section>')
+                f'<span class="badge urgent">{len(rows)}</span></h2><ul class="plain">{"".join(rows)}</ul></section>')
 
     def post_notices_ack(self, req):
         """Dismiss several notices at once (an Urgent row's escalations): each one this member may acknowledge."""
@@ -1285,7 +1302,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         done_rows = self.hub.db.items.find({**flt, "status": "done", "kind": {"$in": ["task", "gate"]}},
                                            sort=[("updated_at", -1)], limit=12, fields=["id"])
         # a run's item between people's steps (an automation running, a wait waiting): seen, in no one's to-do
-        done_rows += self.hub.db.items.find({**flt, "status": "waiting"}, sort=[("updated_at", -1)], limit=24,
+        done_rows += self.hub.db.items.find({**flt, "status": "waiting", "resting": {"$ne": True}},
+                                            sort=[("updated_at", -1)], limit=24,
                                             fields=["id"])
         runs: dict = {}
 
@@ -1808,11 +1826,16 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
             main.append(f'<div class="section"><h2>Result</h2><div class="card">{shown}</div></div>')
         elif item["kind"] == "notice":
             actions = (f'<form method="post" action="/items/{iid}/ack" class="inline"><button>Acknowledge</button></form>')
-            for w in self._late_work_of(me, item):  # an escalation: the way to the late work itself
-                go = ("Take it over" if eng.may_take_over(me, w) else "Open the work")
-                actions = (f'<a class="btn {"danger" if go == "Take it over" else "primary"}" '
-                           f'href="/items/{e(w["id"])}{"#take-over" if go == "Take it over" else ""}">{go} '
-                           f'({e(self._key(w["id"]))})</a> ' + actions)
+            if eng.escalated_item(me, item):  # overdue work this member may do: taking it is the first thing to do
+                actions = (f'<form method="post" action="/items/{iid}/take-over" class="inline"><button>Take it over'
+                           f'</button></form> <form method="post" action="/items/{iid}/ack" class="inline">'
+                           f'<button class="secondary">Acknowledge</button></form>')
+            else:
+                for w in self._late_work_of(me, item):  # an escalation: the way to the late work itself
+                    go = ("Take it over" if eng.may_take_over(me, w) else "Open the work")
+                    actions = (f'<a class="btn {"danger" if go == "Take it over" else "primary"}" '
+                               f'href="/items/{e(w["id"])}{"#take-over" if go == "Take it over" else ""}">{go} '
+                               f'({e(self._key(w["id"]))})</a> ' + actions)
             about = (item.get("output") or {}).get("about") or ""
             if about.startswith("outbox:"):
                 main.append(self._message_card(me, about.split(":", 1)[1]))
@@ -2890,9 +2913,8 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         if verb == "release":
             eng.release(me, iid, f.get("note", ""))
             raise Redirect("/")
-        if verb == "take-over":
-            eng.take_over(me, iid, f.get("note", ""), to=f.get("to") or None)
-            raise Redirect(f"/items/{iid}")
+        if verb == "take-over":  # from an overdue notice, the work taken opens
+            raise Redirect(f"/items/{eng.take_over(me, iid, f.get('note', ''), to=f.get('to') or None)['id']}")
         if verb == "ack":
             eng.acknowledge(me, iid)
             raise Redirect("/")
@@ -3012,7 +3034,9 @@ class App(CalendarPages, WorkPanel, RecordPages, DashboardPages, DefinitionPages
         # beside the chart, like any record's: the work under way about them (finished work is in the list below)
         panel = self.work_panel(me, ref)
         # urgent work about them goes directly under the banner, at every width: never below the fold of the chart
-        band = self._urgent_band(me, self._record_urgent(me, ref, runs), here=f"/{self.subj['path']}/{pid}")
+        about = self.hub.engine.runs(mentions=ref, status="running", limit=200)  # its results' reviews too
+        band = self._urgent_band(me, self._record_urgent(me, ref, about), here=f"/{self.subj['path']}/{pid}",
+                                 records=self.urgent_records(me, ref))
         body = parts[0] + band + "".join(parts[1:])
         if panel:
             body = (parts[0] + band + f'<div class="issue side-after"><div>{"".join(parts[1:])}</div>'

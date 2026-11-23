@@ -1,6 +1,10 @@
 # A call, meeting, email, letter or visit with a contact or an organisation. Part of the one it was with, so it is
 # added from, and shows on, that record's page. Business data only: the summary is of the business conversation,
 # never health information about anyone.
+#
+# Its status is its follow-up, walked by the crm-follow-up workflow: making one starts it (it notes who logged it), it
+# waits for the follow-up date, and the follow-up is one pass; followed up, the next run waits for the next date. The
+# daily crm-follow-up-due sweep only marks a date that has come (follow_up_asked), which that wait watches.
 id = "Interaction"
 label = "Interaction"
 plural = "Interactions"
@@ -10,6 +14,7 @@ date = "at"
 order = 30
 title = "{kind}: {summary}"
 summary = "A call, meeting, email, letter or visit: who, when, what was said, and when to follow up."
+workflow = { id = "crm-follow-up", when = "record.status == 'logged' or record.status == 'follow-up'" }
 
 [[field]]
 name = "with"
@@ -70,3 +75,27 @@ label = "Followed up for"
 type = "date"
 by = "workflow"
 advanced = true
+
+[[field]]
+name = "status"
+label = "Follow-up"
+type = "choice"
+choices = ["logged", "follow-up"]
+advanced = true
+
+[lifecycle]
+field = "status"
+initial = "logged"
+abandoned = { "follow-up" = "logged" }   # a follow-up cancelled: it waits for its next date
+labels = { "logged" = "Logged", "follow-up" = "Being followed up" }
+
+[[lifecycle.transition]]
+from = ["logged"]
+to = "follow-up"           # its follow-up date came (its workflow), or a person follows it up now
+label = "Follow up now"
+
+[[lifecycle.transition]]
+from = ["follow-up"]
+to = "logged"
+by = "workflow"            # followed up (or not needed)
+label = "Followed up"

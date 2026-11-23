@@ -5,6 +5,9 @@ is asked to get express consent, note a new dealing that renews it, or let it la
 commercial messages to them."""
 record = "Person"
 
+# A scheduled companion: a contact has no lifecycle (Person is no workflow's record to walk), so this sweep starts on
+# its schedule, writes only consent fields and moves no state.
+
 [trigger]
 schedule = "daily 07:00"
 for_each = "Person"

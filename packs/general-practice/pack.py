@@ -349,12 +349,42 @@ def guard_no_signature(values, ctxview):
             for k, v in values.items() if isinstance(v, str) and SIGNING.search(v)]
 
 
+def _same_drug_renewals(recs, asked, own, today):
+    """Other renewal work on the same drug for this patient: a renewal request still open (a draft proposal), or an
+    order issued today. Two requests a while apart (the pharmacy faxes, the patient asks on the portal an hour later)
+    are both walked; the physician must know of the other before renewing again."""
+    word = str(asked or "").strip().split()[0].lower() if str(asked or "").strip() else ""
+    out = []
+    for r in recs:
+        ref = f"MedicationRequest/{r.get('id')}"
+        if r.get("resourceType") != "MedicationRequest" or ref == own or not word or word not in _med_text(r).lower():
+            continue
+        if r.get("status") == "draft" and r.get("intent") == "proposal":
+            out.append((ref, "open"))
+        elif r.get("status") == "active" and str(r.get("authoredOn") or "")[:10] == today:
+            out.append((ref, "issued today"))
+    return out
+
+
+def _same_drug_concerns(found):
+    return [f"Another renewal request for this medication is open: {ref}" if how == "open"
+            else f"This medication was already prescribed today: {ref}" for ref, how in found]
+
+
 def guard_renewal_prep(values, ctxview):
     """The order a renewal replaces must be this patient's active prescription, copied as written: the workflow marks
-    it completed, so an answer may never point it at another record."""
+    it completed, so an answer may never point it at another record. Other renewal work on the same drug (a request
+    still open, an order issued today) must be named in the concerns, so the physician sees it before deciding."""
     recs = (ctxview.get("context") or {}).get("record:clinical") or []
     meds = {f"MedicationRequest/{r.get('id')}": r for r in recs if r.get("resourceType") == "MedicationRequest"}
     ref = str(values.get("current_order") or "")
+    run = ctxview.get("run") or {}
+    said = " ".join(str(c) for c in (values.get("concerns") or []))
+    unsaid = [o for o, _ in _same_drug_renewals(recs, (ctxview.get("context") or {}).get("input.medication"),
+                                                run.get("record"), run.get("today") or date.today().isoformat())
+              if o not in said]
+    if unsaid:
+        return [f"concerns must name the other renewal work on this medication: {', '.join(unsaid)}"]
     if not values.get("found_in_chart"):
         return [f"current_order is {ref}, but found_in_chart is not true"] if ref else []
     if ref not in meds:
@@ -369,6 +399,10 @@ def guard_renewal_prep(values, ctxview):
         if have is not None and values.get(key) is not None and values[key] != have:
             problems.append(f"{key} is {values[key]}, but {ref} says {have}; copy the order as written")
     return problems
+
+
+# what a physician signs to issue a prescription written by hand (MedicationRequest.toml [[signature]])
+RX_SIGNED = "I prescribe this medication as written"
 
 
 GUARDS = {"visit-coding": guard_visit_coding, "lab-triage": guard_lab_triage, "renewal-prep": guard_renewal_prep,
@@ -396,7 +430,8 @@ def standin_intake_review(ctx):
     p = _patient(ctx)
     if not p:
         return {"answer": {}, "escalate": True, "reason": "there is no registration to review"}
-    form = next(iter(_recs(ctx, "intake", "QuestionnaireResponse")), None)
+    forms = _recs(ctx, "intake", "QuestionnaireResponse")
+    form = next((f for f in forms if f.get("item")), None)  # the one with answers (a registration may have none)
     a = _answers(form) if form else {}
     missing = []
     if not any(i.get("system", "").endswith("health-card") for i in p.get("identifier", []) or []):
@@ -466,7 +501,7 @@ SOAP = {"patient": "subjective", "exam": "objective", "assessment": "assessment"
 
 def standin_visit_note_draft(ctx):
     """Sorts a labelled transcript ("Patient: ...", "Exam: ...", "Plan: ...") into a SOAP note."""
-    # the visit's transcript: given when the visit ended (end.transcript), or with a visit filed after the fact
+    # the visit's transcript: given when the visit ended (end.transcript), a visit filed after the fact too
     transcript = str(next((v for k, v in ctx["context"].items() if k.endswith(".transcript") and v), ""))
     out = {"subjective": [], "objective": [], "assessment": [], "plan": [], "follow_up": []}
     for line in transcript.splitlines():
@@ -513,7 +548,9 @@ def standin_renewal_prep(ctx):
     visits = sorted((r.get("period", {}).get("start") or r.get("meta", {}).get("lastUpdated", ""))[:10]
                     for r in _recs(ctx, "visits", "Encounter"))
     last_visit = visits[-1] if visits else None
-    concerns = []
+    run = ctx.get("run") or {}
+    concerns = _same_drug_concerns(_same_drug_renewals(_recs(ctx, "clinical"), asked, run.get("record"),
+                                                       run.get("today") or date.today().isoformat()))
     for al in _recs(ctx, "clinical", "AllergyIntolerance"):
         if word and word in _text(al.get("code")).lower():
             concerns.append(f"Allergy recorded: {summarize(al)}")
@@ -677,7 +714,7 @@ def demo(hub):
         "onsetDateTime": ago(400), "recordedDate": ago(400), "recorder": {"reference": "Practitioner/dr-liam"}})
     rx = hub.create_record(liam, "MedicationRequest", {**_order(nref, "Sertraline 50 mg daily", "1 tablet by mouth daily",
                                                                 30, "tablet", 2, 30, ago(60)), "status": "draft"})
-    hub.update_record(liam, f"MedicationRequest/{rx['id']}", {"status": "active"})
+    hub.sign_record(liam, f"MedicationRequest/{rx['id']}", RX_SIGNED)
     hub.create_record(rana, "Consent", {
         "patient": nref, "status": "active", "received": ago(30),
         "request": "Only Dr. Fraser should see my mental-health care. Not the front desk, not other staff.",
@@ -697,8 +734,8 @@ def demo(hub):
     for order in (_order(subj, "Ramipril 5 mg daily", "1 capsule by mouth once daily", 90, "capsule", 3, 90, ago(170)),
                   _order(subj, "Atorvastatin 20 mg daily", "1 tablet by mouth once daily at bedtime", 90, "tablet", 3,
                          90, ago(170))):
-        rx = hub.create_record(amara, "MedicationRequest", {**order, "status": "draft"})  # written, then issued
-        hub.update_record(amara, f"MedicationRequest/{rx['id']}", {"status": "active"})
+        rx = hub.create_record(amara, "MedicationRequest", {**order, "status": "draft"})  # written, then signed
+        hub.sign_record(amara, f"MedicationRequest/{rx['id']}", RX_SIGNED)  # issued by its prescriber's signature
     hub.create_record(amara, "AllergyIntolerance", {
         "patient": subj, "clinicalStatus": _cc("active", ALLERGY_STATUS),
         "verificationStatus": _cc("confirmed", "http://terminology.hl7.org/CodeSystem/allergyintolerance-verification"),
@@ -713,8 +750,9 @@ def demo(hub):
     hub.create_record(amara, "Immunization", {
         "status": "completed", "patient": subj, "vaccineCode": {"text": "Influenza vaccine (seasonal)"},
         "occurrenceDateTime": ago(40), "primarySource": True, "performer": [{"actor": {"reference": "Practitioner/dr-amara"}}]})
-    hub.create_record(imported, "Observation", {
-        "status": "final", "category": [{"text": "laboratory"}], "subject": subj, "code": {"text": "HbA1c"},
+    hub.create_record(imported, "Observation", {  # from the old chart: reviewed there long ago
+        "status": "final", "review": "closed", "category": [{"text": "laboratory"}], "subject": subj,
+        "code": {"text": "HbA1c"},
         "effectiveDateTime": ago(200), "valueQuantity": {"value": 5.9, "unit": "%"},
         "referenceRange": [{"low": {"value": 4.0, "unit": "%"}, "high": {"value": 6.0, "unit": "%"}, "text": "4.0-6.0 %"}],
         "interpretation": [{**_cc("N", INTERPRETATION), "text": "normal"}]})
@@ -743,14 +781,14 @@ def demo(hub):
     omar = hub.create_record(portal, "Patient", _patient_rec("Omar", "Haddad", "1990-07-02", "male",
                                                              card="9876 543 210", phone="902-555-0199",
                                                              street="301 Robie Street", postal="B3L 3B9"))
-    hub.create_record(portal, "QuestionnaireResponse", {
+    hub.create_record(portal, "QuestionnaireResponse", {  # his registration: filing it starts the intake
         "status": "completed", "subject": {"reference": f"Patient/{omar['id']}"}, "authored": today.isoformat(),
+        "questionnaire": "registration", "registration": "received",
         "item": [{"linkId": "medications", "answer": [{"valueString": "none"}]},
                  {"linkId": "allergies", "answer": [{"valueString": "none"}]},
                  {"linkId": "current-physician", "answer": [{"valueString": "none"}]},
                  {"linkId": "urgent-concern", "answer": [{"valueString": "no"}]},
                  {"linkId": "privacy-consent", "answer": [{"valueBoolean": True}]}]})
-    hub.engine.emit(portal, "patient.registered", record=f"Patient/{omar['id']}")
 
     # A visit just ended with Dr. Okafor.
     priya = hub.create_record(jo, "Patient", _patient_rec(

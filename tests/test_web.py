@@ -495,8 +495,11 @@ def test_views_show_in_the_sidebar_and_work_starts_about_any_record(hub, server)
     assert code == 200 and f'name="_record" value="CAPA/{capa["id"]}"' in page and 'class="about"' in page  # fixed
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": "Patient/x"})
     assert code == 422  # a CAPA workflow is about a CAPA
+    code, page = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
+    assert code == 422 and "already under way" in page  # its own workflow walks it: never a second run
+    hub.update_record(hub.member(qm["id"]), f"CAPA/{capa['id']}", {"status": "cancelled", "cancel_reason": "Test"})
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
-    assert code == 303
+    assert code == 303  # nothing of it open: work starts about it
 
 
 def test_the_privacy_officer_reports_who_accessed_a_file(hub, server):
@@ -1413,7 +1416,7 @@ def test_work_about_a_record_starts_from_a_button_whose_form_opens_in_the_dialog
     pat = hub.records.search("Patient")[0]
     ref = f"Patient/{pat['id']}"
     me = hub.member("dr-amara")
-    wfs = [w["workflow"] for w in hub.workflows() if w["workflow"].record == "Patient"
+    wfs = [w["workflow"] for w in hub.workflows() if "Patient" in hub.engine.start_on(w["workflow"])
            and hub.can(me, "starter", f"workflow:{w['workflow'].id}")]
     assert wfs, "the pack has work about a patient"
     page = call(server, "GET", f"/patients/{pat['id']}", amara)[1]
@@ -1737,7 +1740,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """Version 2 of the clinic pack merged Appointment into Visit (tests/test_rules.py upgrades a version 1)."""
-    assert hub.pack.version == "3.1" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "4.0" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do
@@ -2090,7 +2093,7 @@ def test_a_long_link_group_offers_every_one_on_a_list_of_its_own(hub, server):
     p = hub.records.search("Patient")[0]
     ref = f"Patient/{p['id']}"
     have = [r for r in hub.records.search("Observation") if r.get("subject", {}).get("reference") == ref]
-    tmpl = {k: v for k, v in hub.records.search("Observation")[0].items() if k not in ("id", "meta")}
+    tmpl = {k: v for k, v in hub.records.search("Observation")[0].items() if k not in ("id", "meta", "review")}
     for i in range(51 - len(have)):
         hub.create_record(amara, "Observation", {**tmpl, "status": "registered", "subject": {"reference": ref}})
     tok = token(hub, "dr-amara")
@@ -2173,7 +2176,7 @@ def test_the_front_desk_sees_no_step_of_a_branch_it_may_not_read(hub, server):
     listed = next(r for r in json.loads(call(server, "GET", "/api/runs", tok)[1])["runs"] if r["id"] == run["id"])
     seen = [json.dumps(listed), call(server, "GET", f"/api/runs/{run['id']}", tok)[1],
             call(server, "GET", f"/runs/{run['id']}", tok)[1],
-            _panel(call(server, "GET", f"/patients/{run['record'].split('/')[1]}", tok)[1])]
+            _panel(call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", tok)[1])]
     assert all(seen)
     for i, text in enumerate(seen):
         for s in hidden:
@@ -2570,13 +2573,14 @@ def test_urgent_work_comes_first_one_row_per_record_with_a_counter(hub, server):
     step = hub.engine.item(call_)["step_id"]
     mine = [n for n in hub.engine.inbox(M(hub, "dr-amara"))
             if n["kind"] == "notice" and n["run_id"] == run["id"] and n.get("step_id") == step]
-    assert len(mine) >= 2  # several escalation notices went to her
+    told = sum(int(n.get("repeats") or 1) for n in mine)
+    assert told >= 2  # she was told more than once
     hub.db.items.set(call_, {"due_at": "2020-01-01T00:00:00Z"})  # past its time, on the wall clock too
     status, page = call(server, "GET", "/", token(hub, "dr-amara"))
     assert status == 200
     band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
     assert page.index('class="urgent-band"') < page.index("In progress with you")
-    assert band.count('class="u-row"') == 1 and f"Escalated {len(mine)}×" in band
+    assert band.count('class="u-row"') == 1 and f"Escalated {told}×" in band
     assert "Potassium" in band and "Overdue" in band and f'href="/items/{call_}' in band
     assert "Waiting for</span> Nurse" in band  # handed back: nobody holds it now
     notices = page.split("<h2>Notices", 1)[1]
@@ -2586,7 +2590,7 @@ def test_urgent_work_comes_first_one_row_per_record_with_a_counter(hub, server):
     lane = board.split('class="lane urgent"', 1)[1]
     assert lane.index(call_) < lane.index('class="lane"') if 'class="lane"' in lane else call_ in lane
     item = call(server, "GET", f"/items/{mine[0]['id']}", token(hub, "dr-amara"))[1]
-    assert f'href="/items/{call_}' in item and ("Take it over" in item or "Open the work" in item)
+    assert "Take it over" in item or (f'href="/items/{call_}' in item and "Open the work" in item)
     # dismissing the row acknowledges every escalation on it
     status, _ = call(server, "POST", "/notices/ack", token(hub, "dr-amara"),
                      form=[("id", n["id"]) for n in mine] + [("_back", "/")])
@@ -2606,6 +2610,30 @@ def test_a_chart_shows_urgent_work_under_its_banner_at_every_width(hub, server):
     from practicehub.web.assets import CSS
     rule = CSS.split(".urgent-band", 1)[1].split("}", 1)[0]
     assert ".urgent-band" in CSS and not re.search(r"[{;]order:", rule)
+
+
+def test_a_result_the_patient_was_not_told_of_is_urgent_on_the_chart(hub, server):
+    """A result its review left "Patient not told" (a visit booked instead) has no work on it, yet it is listed under
+    Urgent on the chart, with a way to it, until a physician signs that the patient was told."""
+    from practicehub.agents.runner import run_all_local
+    ref = _ellen(hub)
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=ref, inputs={
+        "test": "Sodium", "value": "131", "unit": "mmol/L", "range": "135-145", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), "book-visit", "")
+    run_all_local(hub, log=quiet)
+    obs = hub.engine.run(run["id"])["record"]
+    assert hub.records.read(*obs.split("/", 1))["review"] == "not-told"
+    pid = ref.split("/", 1)[1]
+    page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
+    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
+    assert "Patient not told" in band and obs.split("/", 1)[1] in band
+    assert page.index('class="urgent-band"') < page.index('class="issue')
+    hub.sign_record(M(hub, "dr-amara"), obs, "Patient told", "Told at the visit")
+    page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
+    assert "Patient not told" not in page.split('class="urgent-band"', 1)[-1].split("</section>", 1)[0] \
+        or 'class="urgent-band"' not in page
 
 
 def test_reason_boxes_are_labelled_and_cancelling_work_is_asked_for(hub, server):

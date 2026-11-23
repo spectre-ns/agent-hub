@@ -1,7 +1,15 @@
 id = "lab-result-review"
 title = "Lab result review"
-record = "Patient"
+record = "Observation"
 summary = """
+One result, from received to closed: the result is this workflow's record, and its review is where the work is:
+waiting for review (received), reviewed by a physician (reviewed), the patient told (told), closed. A result is closed
+only when the patient was told: a review that ends without that (the patient not reached, a visit booked, the review
+cancelled) leaves it "Patient not told" until a physician signs it closed. A result the lab
+files starts its review; a result the lab sends for a patient (the lab.result event) is filed as one, or, when it names
+the result it already filed, walks that one; a result already reviewed that the lab sends again (corrected) is
+reviewed again, from waiting for review. The lab's own status stays the lab's.
+
 A result arrives from the lab. Code checks the value against its range and the practice's critical limits, whatever
 the lab's flag says; a result the lab or the check calls critical pages the physicians at once and goes straight to an urgent physician review, without waiting for the sort. Other
 results are sorted first.
@@ -13,6 +21,19 @@ are written back to the result. Agents sort; they never sign off a result.
 [trigger]
 starters = ["lab-interface", "nurse", "physician"]
 event = "lab.result"
+
+# Sent for the patient without the result filed yet, the run files it: a lab result on the chart, waiting for review.
+# Sent naming the result the lab filed (input.observation), the run walks that one instead.
+[new_record]
+status = "preliminary"
+category_text = "laboratory"
+test = "{{input.test}}"
+value = "{{input.value}}"
+unit = "{{input.unit}}"
+range_text = "{{input.range}}"
+flag_text = "{{input.flag}}"
+note_text = "As sent by the lab: {{input.value}} {{input.unit}} ({{input.flag}})"
+review = "received"
 
 [[input]]
 name = "test"
@@ -43,7 +64,16 @@ name = "observation"
 label = "Result record"
 type = "reference"
 target = ["Observation"]
-help = "The result the lab filed for this patient (another patient's is refused)"
+help = "The result the lab filed for this patient, if it filed one (another patient's is refused); else one is filed"
+
+# The lab sending a correction of a result already reviewed (input.observation names it): it is reviewed again,
+# from waiting for review, whatever the last review decided.
+[[steps]]
+id = "reopen"
+title = "Review the corrected result again"
+kind = "automation"
+when = "record.review != 'received'"
+state = "received"
 
 [[steps]]
 id = "check"
@@ -67,7 +97,7 @@ action = "message.send"
 channel = "page"
 to = "role:physician"
 subject = "CRITICAL result"
-body = "Critical {{input.test}} {{input.value}} {{input.unit}} for {{run.record}} ({{check.reason}}). Review now."
+body = "Critical {{input.test}} {{input.value}} {{input.unit}} for {{run.subject}} ({{check.reason}}). Review now."
 
 # The page waits for the connector; each physician on duty is also told on the board at once. The notice names no
 # test, value or patient (a notice's title shows where the record is withheld); it shows the page and its status.
@@ -162,11 +192,9 @@ comment = "{{review.comment}}{{review-flagged.comment}}{{review-critical.comment
 id = "file-result"
 title = "File the review on the result"
 kind = "automation"
-after = ["reviewed"]
-when = "input.observation != null and input.observation != ''"
+after = ["reviewed", "reopen"]
 action = "record.update"
-[steps.params]
-ref = "{{input.observation}}"
+state = "reviewed"
 [steps.params.set]
 status = "final"
 extension = [
@@ -179,12 +207,13 @@ extension = [
 id = "tell-normal"
 title = "Tell the patient it is normal"
 kind = "automation"
-after = ["reviewed"]
+after = ["file-result"]
 when = "reviewed.outcome == 'file-normal' and input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal'"
 action = "message.send"
+state = "told"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your {{input.test}} result"
 body = "Your physician has reviewed your {{input.test}} result and it is within the normal range. No action is needed."
 
@@ -192,12 +221,13 @@ body = "Your physician has reviewed your {{input.test}} result and it is within 
 id = "tell-reviewed"
 title = "Tell the patient their result was reviewed"
 kind = "automation"
-after = ["reviewed"]
+after = ["file-result"]
 when = "reviewed.outcome == 'no-action-needed'"
 action = "message.send"
+state = "told"
 [steps.params]
 channel = "patient-portal"
-to = "{{run.record}}"
+to = "{{run.subject}}"
 subject = "Your {{input.test}} result"
 body = "Your physician has reviewed your {{input.test}} result. No action is needed right now; you can talk about it at your next visit, or call us if you have questions."
 
@@ -208,7 +238,7 @@ kind = "task"
 role = "nurse"
 due = "1d"
 escalate_to = "physician"
-after = ["reviewed"]
+after = ["file-result"]
 when = "reviewed.outcome == 'call-patient' and not (input.flag == 'critical' or check.band == 'critical')"
 persons_only = true
 context = ["record:demographics", "record:clinical", "input", "reviewed"]
@@ -229,7 +259,7 @@ role = "nurse"
 priority = "urgent"
 due = "1h"
 escalate_to = "physician"
-after = ["reviewed"]
+after = ["reviewed"]   # a critical call is never held up by filing the result
 when = "reviewed.outcome == 'call-patient' and (input.flag == 'critical' or check.band == 'critical')"
 persons_only = true
 context = ["record:demographics", "record:clinical", "input", "reviewed"]
@@ -270,11 +300,12 @@ required = true
 id = "book"
 title = "Book a visit"
 kind = "automation"
-after = ["reviewed"]
+after = ["file-result"]
 when = "reviewed.outcome == 'book-visit' and not (input.flag == 'critical' or check.band == 'critical')"
 action = "workflow.start"
 [steps.params]
 workflow = "appointment-request"
+record = "{{run.subject}}"
 [steps.params.input]
 reason = "Follow-up on {{input.test}} result"
 urgency = "soon"
@@ -288,6 +319,33 @@ when = "reviewed.outcome == 'book-visit' and (input.flag == 'critical' or check.
 action = "workflow.start"
 [steps.params]
 workflow = "appointment-request"
+record = "{{run.subject}}"
 [steps.params.input]
 reason = "Follow-up on {{input.test}} result"
 urgency = "urgent"
+
+[[steps]]
+id = "told-by-phone"
+title = "The patient was told by phone"
+kind = "automation"
+after = ["call", "call-critical", "not-reached", "file-result"]   # told once the review is filed
+when = "call.reached == true or call-critical.reached == true or not-reached.action == 'reached-the-patient'"
+state = "told"
+
+# Every path ends here. The patient told, the result is closed; otherwise (not reached and no one has told them since,
+# a visit booked to talk it over) it is "Patient not told", until a physician signs it closed.
+[[steps]]
+id = "not-told"
+title = "The patient has not been told of the result"
+kind = "automation"
+after = ["tell-normal", "tell-reviewed", "told-by-phone", "not-reached", "book", "book-critical"]
+when = "record.review == 'reviewed'"
+state = "not-told"
+
+[[steps]]
+id = "close"
+title = "Close the result"
+kind = "automation"
+after = ["tell-normal", "tell-reviewed", "told-by-phone", "not-reached", "book", "book-critical", "not-told"]
+when = "record.review == 'told'"
+state = "closed"

@@ -89,7 +89,7 @@ name = "body"
 label = "Text"
 path = "section.0.text"
 type = "text"
-help = "the note; a visit note's sections are written by the visit-documentation workflow"
+help = "the note; a visit note's sections are written by the visit's own workflow (appointment-request)"
 
 [[screen]]
 id = "note"

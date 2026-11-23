@@ -21,7 +21,7 @@ FORMS = {
     "Encounter": ("noor", {"subject": "{patient}", "participant.0.individual": "Practitioner/dr-amara",
                            "type.0.text": "minor", "class.code": "AMB", "plannedStartDate": WHEN,
                            "reasonCode.0.text": "Sore throat"}),
-    "Observation": ("dr-amara", {"subject": "{patient}", "code.text": "HbA1c", "effectiveDateTime": WHEN,
+    "Observation": ("dr-amara", {"subject": "{patient}", "status": "final", "code.text": "HbA1c", "effectiveDateTime": WHEN,
                                  "valueQuantity.value": "6.6", "valueQuantity.unit": "%",
                                  "referenceRange.0.text": "4.0-6.0 %"}),
     "MedicationRequest": ("dr-amara", {"subject": "{patient}", "medicationCodeableConcept.text": "Ramipril 5 mg",
@@ -52,7 +52,7 @@ LANDS = {
 }
 
 # where a new one starts (the types without a lifecycle say their status on the form, or keep none)
-STARTS = {"Encounter": "planned", "Observation": "registered",
+STARTS = {"Encounter": "planned", "Observation": "final",
           "MedicationRequest": "draft", "Composition": "preliminary", "ServiceRequest": "draft",
           "Immunization": "completed"}
 
@@ -157,9 +157,10 @@ def test_a_reference_inside_a_list_is_a_picker(clinic, rtype, name):
 def test_a_person_starts_a_record_where_its_lifecycle_starts(clinic):
     hub, base, patient, visit = clinic
     from practicehub.hub import Invalid
-    with pytest.raises(Invalid, match="starts as 'registered'"):
+    with pytest.raises(Invalid, match="starts as 'received'"):
         hub.create_record(hub.member("dr-amara"), "Observation",
-                          {"status": "amended", "subject": {"reference": patient}, "code": {"text": "HbA1c"}})
+                          {"status": "final", "review": "told", "subject": {"reference": patient},
+                           "code": {"text": "HbA1c"}})
 
 
 def test_a_nurse_checks_a_patient_in(clinic):

@@ -38,7 +38,8 @@ KINDS_KEYS = {"label", "description", "mode", "workflow", "roles", "minutes", "h
               "inputs", "questions", "advice", "alarm", "booked", "booking_kind", "cancel_to",
               "cancel_before_hours", "max_slots", "done", "screen", "max_upcoming"}
 TOP_KEYS = {"member", "title", "welcome", "privacy", "contact_line", "wording", "identity", "code", "register",
-            "intake_workflow", "session_minutes", "kinds", "public_origin", "per_minute"}
+            "intake_workflow", "session_minutes", "kinds", "public_origin", "per_minute", "over_limit"}
+OVER_LIMIT_KEYS = {"workflow", "input"}
 QUESTION_KEYS = {"input", "label", "help", "choices"}
 FREE_TEXT = ("string", "text")    # an input a person fills in their own words: screened
 MODES = ("book", "request")
@@ -57,6 +58,9 @@ PER_MINUTE = 60            # sign-ins and registrations begun, from everyone, in
 MAX_UPCOMING = 2           # a person's open bookings (or requests) of one kind, unless the kind's max_upcoming says
 SUBMIT_HOURS = 24          # how long a form's answer is kept, so a second tap or a refresh lands on the same page
 
+IDENTITY_KEYS = {"born", "born_label", "identifier_label", "inputmode", "digits", "identifier_help", "born_help"}
+REGISTER_FIELD_KEYS = {"field", "label", "help", "required"}
+
 WORDING = {  # what the pages say, unless [portal.wording] says otherwise
     "booking": "Booking",
     "sent": "If what you gave matches our records, we have sent a code to the contact details we have for you. "
@@ -73,9 +77,18 @@ WORDING = {  # what the pages say, unless [portal.wording] says otherwise
     "working": "We are still taking your request. This page updates in a moment.",
     "too_many": "You already have as many of these booked or asked for as can be done online. Call the practice to "
                 "book more.",
+    "safety": "If this is an emergency, call 911 or go to the nearest emergency department now.",
+    "at_limit": "You already have {open} of these open, the most that can be made online. You can still write to us "
+                "here: a person at the practice reads it.",
+    "over_limit": "You already have as many of these open as can be made online, so nothing new was booked. A person "
+                  "at the practice has what you wrote and will contact you.",
     "busy": "Many people are using this just now. Try again in a minute.",
     "failed": "We could not book that time. The practice has been told and will contact you.",
     "closed": "Online booking is closed for now. Call the practice.",
+    "visit_next": "Come to the practice a few minutes before your time.",
+    "request_next": "Someone at the practice contacts you to arrange a time.",
+    "no_cancel_soon": "Less than {hours} hours away: call the practice to cancel or change it.",
+    "no_cancel": "This cannot be cancelled online: call the practice to cancel or change it.",
 }
 
 
@@ -186,8 +199,11 @@ def check_config(pack) -> list[str]:
     if not born or born not in sfields:
         problems.append(f"identity.born: the field of {subject or 'the subject type'} that holds the date of birth, "
                         f"not {born!r}")
-    for key in set(ident) - {"born", "born_label", "identifier_label", "inputmode"}:
-        problems.append(f"identity.{key}: not a setting (born, born_label, identifier_label, inputmode)")
+    for key in set(ident) - IDENTITY_KEYS:
+        problems.append(f"identity.{key}: not a setting ({', '.join(sorted(IDENTITY_KEYS))})")
+    if "digits" in ident and (not isinstance(ident["digits"], int) or isinstance(ident["digits"], bool)
+                              or not 1 <= ident["digits"] <= 30):
+        problems.append("identity.digits: how many digits the identifier has (1 to 30), checked on the sign-in form")
     if ident.get("inputmode") not in (None, "text", "numeric"):
         problems.append("identity.inputmode: text or numeric (the keyboard a phone shows for the identifier)")
     base = sdoc.get("base") or {}
@@ -230,7 +246,15 @@ def check_config(pack) -> list[str]:
         if not isinstance(reg, dict) or not isinstance(reg.get("fields"), list) or not reg.get("fields"):
             problems.append("register.fields: the fields of the subject type a new person gives")
         else:
-            problems += [f"register.fields: {subject} has no field {f!r}" for f in reg["fields"] if f not in sfields]
+            for f in reg["fields"]:
+                if isinstance(f, dict):
+                    problems += [f"register.fields: {x} is not a setting of a field "
+                                 f"({', '.join(sorted(REGISTER_FIELD_KEYS))})" for x in sorted(set(f) - REGISTER_FIELD_KEYS)]
+                    if "required" in f and not isinstance(f["required"], bool):
+                        problems.append(f"register.fields: required is true or false, not {f['required']!r}")
+                    f = f.get("field")
+                if f not in sfields:
+                    problems.append(f"register.fields: {subject} has no field {f!r}")
         pend = reg.get("pending") if isinstance(reg, dict) else None
         if not isinstance(pend, dict) or not pend:
             problems.append("register.pending: the field values a new registration gets so that it cannot sign in or "
@@ -242,6 +266,18 @@ def check_config(pack) -> list[str]:
         if reg is None:
             problems.append("register: say the fields a new person gives ([portal.register] fields), or leave out "
                             "intake_workflow")
+
+    ol = cfg.get("over_limit")
+    if ol is not None:
+        if not isinstance(ol, dict):
+            problems.append("over_limit: a table ([portal.over_limit]): the workflow that takes what a person wrote "
+                            "when they may book no more online, and its input for it")
+        else:
+            problems += [f"over_limit.{x}: not a setting (settings: {', '.join(sorted(OVER_LIMIT_KEYS))})"
+                         for x in sorted(set(ol) - OVER_LIMIT_KEYS)]
+            wf = wf_problem("over_limit.workflow", ol.get("workflow"), subject)
+            if wf is not None:
+                problems += over_limit_problems(wf, ol.get("input"))
 
     kinds = cfg.get("kinds")
     if not isinstance(kinds, dict) or not kinds:
@@ -351,6 +387,24 @@ def check_config(pack) -> list[str]:
             except (TypeError, ValueError):
                 problems.append(f"{w}.cancel_before_hours: a number of hours")
     return problems
+
+
+def over_limit_problems(wf, name) -> list[str]:
+    """``[portal.over_limit]`` against its workflow: it takes what the person wrote in an input in their own words,
+    which one of its steps screens, and it needs nothing else."""
+    import json
+    names = {i["name"]: i for i in wf.inputs}
+    if name not in names or (names[name].get("type") or "string") not in FREE_TEXT:
+        return [f"over_limit.input: the input of {wf.id} that takes what the person wrote, in their own words, not "
+                f"{name!r}"]
+    out = []
+    if not any(s.block and f"input.{name}" in json.dumps(s.params or {}, default=str) for s in wf.steps):
+        out.append(f"over_limit.workflow: no step of {wf.id} screens input.{name} for red flags")
+    missing = [n for n, i in names.items() if i.get("required") and i.get("default") is None and n != name]
+    if missing:
+        out.append(f"over_limit.workflow: {wf.id} needs {', '.join(missing)} as well: the portal gives it only "
+                   f"what the person wrote")
+    return out
 
 
 def kind_problems(w: str, k: dict, wf, qs: list[str]) -> list[str]:
@@ -508,12 +562,18 @@ class Portal:
         wids = [("intake_workflow", self.cfg.get("intake_workflow"))] if self.cfg.get("intake_workflow") else []
         for kid, k in self.kinds().items():
             wids.append((f"kinds.{kid}.workflow", k.get("workflow")))
+        if self.cfg.get("over_limit"):
+            wids.append(("over_limit.workflow", self.cfg["over_limit"].get("workflow")))
         for where, wid in wids:
             try:
                 wf, _ = self.hub.workflow(wid)
             except HubError as exc:
                 return f"{where}: {wid} is not an active workflow of this hub ({exc})"
-            if where.endswith(".workflow"):
+            if where == "over_limit.workflow":
+                problems = over_limit_problems(wf, self.cfg["over_limit"].get("input"))
+                if problems:
+                    return "; ".join(problems)
+            elif where.startswith("kinds."):
                 k = self.kinds()[where.split(".")[1]]
                 qs = [q if isinstance(q, str) else q["input"] for q in k.get("questions") or []]
                 problems = kind_problems(where.rsplit(".", 1)[0], k, wf, qs)
@@ -545,9 +605,24 @@ class Portal:
         return out
 
     def register_fields(self) -> list[dict]:
+        """The fields a new person gives: the subject type's, in the portal's words where ``[portal.register]``
+        words them (``{field, label, help, required}``; ``required`` may only add to what the type requires)."""
         rt = self._rt()
         reg = self.cfg.get("register") or {}
-        return [rt.field(n) for n in reg.get("fields") or [] if rt.field(n)]
+        out = []
+        for entry in reg.get("fields") or []:
+            words = entry if isinstance(entry, dict) else {"field": entry}
+            f = rt.field(words.get("field"))
+            if not f:
+                continue
+            f = dict(f)
+            for key in ("label", "help"):
+                if words.get(key):
+                    f[key] = str(words[key])
+            if words.get("required"):
+                f["required"] = True
+            out.append(f)
+        return out
 
     def public(self) -> dict:
         """What the portal's pages show, and nothing more: words, kinds and the questions they ask, the fields a new
@@ -568,7 +643,7 @@ class Portal:
         fields = []
         for f in self.register_fields():
             fields.append({"name": f["name"], "label": f.get("label") or f["name"], "type": f["type"],
-                           "required": bool(f.get("required")),
+                           "required": bool(f.get("required")), "help": f.get("help") or "",
                            "role": "born" if born and f["name"] == born["name"] else
                                    "identifier" if f["name"] == id_name else
                                    "contact" if f["name"] == contact_name else ""})
@@ -580,7 +655,9 @@ class Portal:
                 "identity": {"born_label": ident.get("born_label") or (born or {}).get("label") or "Date of birth",
                              "identifier_label": ident.get("identifier_label") or (id_f or {}).get("label")
                              or "Identifier",
-                             "identifier_inputmode": ident.get("inputmode") or "text"},
+                             "identifier_inputmode": ident.get("inputmode") or "text",
+                             "digits": ident.get("digits"), "identifier_help": ident.get("identifier_help") or "",
+                             "born_help": ident.get("born_help") or ""},
                 "register": bool(self.cfg.get("intake_workflow") and self.cfg.get("register")),
                 "register_fields": fields, "kinds": kinds, "dev": self.dev}
 
@@ -847,49 +924,77 @@ class Portal:
                     out.append(m)
         return out
 
-    def free_slots(self, kid: str, *, limit: int | None = None) -> list[dict]:
+    def free_slots(self, kid: str, *, day: str | None = None, limit: int | None = None) -> list[dict]:
         """The times free for this kind: its length, with the members of its roles, between the practice's hours,
-        from now to its horizon. Each is ``{value, label, day, time, with}``; ``value`` is ``YYYY-MM-DDTHH:MM|member``,
-        as the core's ``booking.book`` takes it."""
-        from .engine import bookings
+        from now to its horizon, or on ``day`` (``YYYY-MM-DD``) alone. Each is ``{value, label, day, date, time,
+        with}``; ``value`` is ``YYYY-MM-DDTHH:MM|member``, as the core's ``booking.book`` takes it. ``max_slots`` caps
+        what one day offers (a page lists one day at a time: ``free_days`` lists the days)."""
         k = self.kind(kid)
         if self.slot_mode(k) == "none":
             return []
+        now = self.hub.engine.now().replace(second=0, microsecond=0)
+        last = now.date() + timedelta(days=int(k.get("horizon_days", 14)))
+        if day is not None:
+            try:
+                first = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+            except ValueError:
+                return []
+            if not now.date() <= first <= last:
+                return []
+            last = first
+        else:
+            first = now.date()
+        per_day = limit or int(k.get("max_slots", 60))
+        out = []
+        for d, slots in self._free(k, first, last, now):
+            out += slots[:per_day]
+        return out
+
+    def free_days(self, kid: str) -> list[dict]:
+        """The working days in the kind's horizon that have a free time, first to last: ``{date, label, count}``."""
+        k = self.kind(kid)
+        if self.slot_mode(k) == "none":
+            return []
+        now = self.hub.engine.now().replace(second=0, microsecond=0)
+        last = now.date() + timedelta(days=int(k.get("horizon_days", 14)))
+        return [{"date": d.isoformat(), "label": slots[0]["day"], "count": len(slots)}
+                for d, slots in self._free(k, now.date(), last, now) if slots]
+
+    def _free(self, k: dict, first, last, now: datetime):
+        """Each working day from ``first`` to ``last``, with its free times (every member of the kind's roles)."""
+        from .engine import bookings
         cal = (self.hub.pack.calendar or {}) if self.hub.pack else {}
         hours = cal.get("hours") or {}
         step = int(k.get("minutes") or cal.get("slot_minutes", 15))
         size = int(cal.get("slot_minutes", 15))
-        now = self.hub.engine.now().replace(second=0, microsecond=0)
-        last = now.date() + timedelta(days=int(k.get("horizon_days", 14)))
         busy: dict[str, list[tuple[datetime, datetime]]] = {}
-        for b in bookings(self.hub, since=now.date().isoformat(), until=(last + timedelta(days=1)).isoformat()):
+        for b in bookings(self.hub, since=first.isoformat(), until=(last + timedelta(days=1)).isoformat()):
             span = self.hub.booking_span(b, size)
             if span:
                 for who in b["with"]:
                     busy.setdefault(who, []).append(span)
-        cap = limit or int(k.get("max_slots", 60))
         people = self._holders(k)
-        out = []
-        day = now.date()
-        while day <= last and len(out) < cap:
+        day = first
+        while day <= last:
             key = day.strftime("%a").lower()[:3]
             if key in hours:
+                out = []
                 opens, closes = (datetime.combine(day, datetime.strptime(x, "%H:%M").time()) for x in hours[key])
                 t = opens
-                while t + timedelta(minutes=step) <= closes and len(out) < cap:
+                while t + timedelta(minutes=step) <= closes:
                     end = t + timedelta(minutes=step)
                     if t > now:
                         for m in people:
                             if not any(s < end and t < e for s, e in busy.get(m["id"], [])):
                                 out.append({"value": f"{t:%Y-%m-%dT%H:%M}|{m['id']}", "day": day_words(t),
-                                            "time": clock(t), "with": m["name"],
+                                            "date": day.isoformat(), "time": clock(t), "with": m["name"],
                                             "label": f"{when_words(t)} with {m['name']}"})
                     t = end
+                yield day, out
             day += timedelta(days=1)
-        return out[:cap]
 
     def slot_free(self, kid: str, value: str) -> bool:
-        return any(s["value"] == value for s in self.free_slots(kid, limit=10000))
+        return any(s["value"] == value for s in self.free_slots(kid, day=str(value)[:10], limit=10000))
 
     # --- booking: always through the kind's workflow
     def _runs(self, person: str, k: dict) -> list[dict]:
@@ -933,11 +1038,14 @@ class Portal:
         (``_book``). What the person is told comes back: ``{run, kind, mode, advice, alarm, when, with, failed,
         requested}``. The same request sent again a moment later (the workflow's ``one_open_per``) is not a second
         one: its answer is the first one's."""
-        from .hub import Denied, Duplicate, Invalid
+        from .hub import Duplicate, Invalid
         k = self.kind(kid)
         mode = self.slot_mode(k)
         slot = (slot or "").strip() or None
-        if mode == "required" and not slot:
+        full = self.open_count(person, k) >= self.limit(k)
+        if full:
+            slot = None  # nothing more is booked online: what they wrote is still read (over_limit)
+        if mode == "required" and not slot and not full:
             raise Invalid("choose a time", ["Choose one of the times shown."])
         qs = self.questions(k)
         problems = [f"{q['label']}: choose one" for q in qs
@@ -950,10 +1058,10 @@ class Portal:
         if problems:
             raise Invalid("the form has problems", problems)
         if slot and (mode == "none" or not self.slot_free(kid, slot)):
-            raise Clash(self.free_slots(kid))
+            raise Clash(self.free_slots(kid, day=slot[:10]) if slot else [])
+        if full:
+            return self.over_limit(k, person, answers)
         try:
-            if self.open_count(person, k) >= int(k.get("max_upcoming", MAX_UPCOMING)):
-                raise Denied(self.say("too_many"))
             run = self._book(k, person, slot, answers)
         except Duplicate as dup:  # the same thing sent again a moment ago: the page the first one got
             if (dup.run or {}).get("subject") not in (person, None) and (dup.run or {}).get("record") != person:
@@ -962,21 +1070,103 @@ class Portal:
             slot = ((dup.run.get("ctx") or {}).get("input") or {}).get(k.get("slot_input", "slot")) or slot
         return self.outcome(k, run["id"], slot)
 
+    def limit(self, k: dict) -> int:
+        return int(k.get("max_upcoming", MAX_UPCOMING))
+
+    def limits(self, person: str) -> dict[str, dict]:
+        """Per kind, how many the person has open and the most they may (``max_upcoming``): told up front, on their
+        page and on the form, before they write anything."""
+        return {kid: {"open": self.open_count(person, k), "max": self.limit(k)} for kid, k in self.kinds().items()}
+
+    def screen(self, k: dict, inputs: dict) -> dict | None:
+        """The kind's screen (the block its workflow's ``screen`` step runs), run here on what the person wrote, with
+        no workflow started: what it found, or None when it cannot run (read as loud, never as quiet)."""
+        from .workflows import render
+        sid = k.get("screen")
+        try:
+            wf, _ = self.hub.workflow(k["workflow"])
+            step = next((s for s in wf.steps if s.id == sid), None)
+            if step is None or not step.block:
+                return None
+            params = render(step.params or {}, {"input": inputs})
+            out, _ = self.hub.engine._run_block({"id": "portal", "ctx": {"run": {}}}, step, params)
+            return out
+        except Exception:  # noqa: BLE001 - a screen that cannot run is a loud answer, never an error page
+            return None
+
+    def _words(self, k: dict, ctx: dict) -> tuple[str | None, bool, list[str]]:
+        """The kind's ``advice`` and ``alarm`` read on a run's context (or the screen's alone), and the names of what
+        the screen found (its ``flags`` and the signs it was unsure of), for the page to name in plain words."""
+        advice, alarm = None, False
+        if k.get("advice"):
+            got = expr.lookup(ctx, str(k["advice"]))
+            advice = str(got).strip() if got not in (None, "") else None
+        if k.get("alarm"):
+            try:
+                alarm = bool(expr.holds(str(k["alarm"]), ctx))
+            except expr.ExprError:
+                alarm = True  # a check that cannot be read says the advice loudly, never quietly
+        found: list[str] = []
+        got = ctx.get(str(k.get("screen") or "")) if k.get("screen") else None
+        if isinstance(got, dict):
+            for key in ("flags", "mentioned"):
+                found += [str(x) for x in got.get(key) or [] if str(x) not in found]
+        return advice, alarm, found
+
+    def over_limit(self, k: dict, person: str, answers: dict) -> dict:
+        """A person at the kind's limit who sends the form anyway: nothing is booked, but what they wrote is screened
+        first, here. Anything not plainly routine goes to the practice through ``[portal] over_limit`` (its workflow
+        screens it again and puts it in front of a person), and the page says the screen's advice, loudly when it
+        found something. Plainly routine, or no such workflow: refused, with what to do in an emergency."""
+        from .hub import Denied
+        inputs = {**(k.get("inputs") or {}), **{n: v for n, v in answers.items() if v not in (None, "")}}
+        found = self.screen(k, inputs)
+        ctx = {"input": inputs, str(k.get("screen") or "screen"): found}
+        advice, alarm, flags = self._words(k, ctx)
+        text = " ".join(str(answers.get(q["name"]) or "") for q in self.questions(k)
+                        if q["type"] in FREE_TEXT and not q["choices"]).strip()
+        ol = self.cfg.get("over_limit") or {}
+        routine = bool(found and found.get("routine")) and not alarm
+        if routine or not text or not ol.get("workflow"):
+            raise Denied(self.say("too_many"))  # the refusal page says what to do in an emergency (safety)
+        run = self.hub.engine.start(self.member, ol["workflow"], record=person, inputs={ol["input"]: text})
+        return {"run": run["id"], "kind": k["label"], "mode": k["mode"], "advice": advice, "alarm": alarm,
+                "found": flags, "when": None, "with": None, "failed": False, "requested": True, "over_limit": True,
+                "closed": self.closed_words()}
+
+    def opens(self, now: datetime | None = None) -> datetime | None:
+        """When the practice next opens (its calendar's ``hours``), its wall time; None while it is open now (or when
+        it keeps no hours)."""
+        hours = ((self.hub.pack.calendar or {}) if self.hub.pack else {}).get("hours") or {}
+        if not hours:
+            return None
+        now = now or self.hub.engine.now()
+        for d in range(0, 15):
+            day = now.date() + timedelta(days=d)
+            span = hours.get(day.strftime("%a").lower()[:3])
+            if not span:
+                continue
+            opens, closes = (datetime.combine(day, datetime.strptime(x, "%H:%M").time()) for x in span)
+            if d == 0 and opens <= now < closes:
+                return None
+            if opens > now:
+                return opens
+        return None
+
+    def closed_words(self) -> str | None:
+        """When the practice next opens, in words ('Monday, November 23 at 9:00 a.m.'), while it is closed now."""
+        t = self.opens()
+        return when_words(t) if t else None
+
     def outcome(self, k: dict, run_id: str, slot: str | None) -> dict:
         """What the person is told of the run their form started: the screen's words, whether they are loud, and
         whether it is booked (when, with whom), asked for (a person reads it first) or could not be done."""
         run = self.hub.engine.run(run_id) or {}
         ctx = run.get("ctx") or {}
-        out = {"run": run_id, "kind": k["label"], "mode": k["mode"], "advice": None, "alarm": False, "when": None,
-               "with": None, "failed": False, "requested": False}
-        if k.get("advice"):
-            got = expr.lookup(ctx, str(k["advice"]))
-            out["advice"] = str(got).strip() if got not in (None, "") else None
-        if k.get("alarm"):
-            try:
-                out["alarm"] = bool(expr.holds(str(k["alarm"]), ctx))
-            except expr.ExprError:
-                out["alarm"] = True  # a check that cannot be read says the advice loudly, never quietly
+        advice, alarm, found = self._words(k, ctx)
+        out = {"run": run_id, "kind": k["label"], "mode": k["mode"], "advice": advice, "alarm": alarm,
+               "found": found, "when": None, "with": None, "failed": False, "requested": False,
+               "closed": self.closed_words()}
         booked = str(k.get("booked") or "")
         done = (ctx.get(booked) or {}) if booked else {}
         state = ((run.get("steps") or {}).get(booked) or {}).get("state") if booked else None
@@ -1032,26 +1222,37 @@ class Portal:
                     names.append(self.hub.member(who)["name"])
                 except Exception:  # noqa: BLE001 - someone since removed: no name
                     pass
-            ok = bool(k and k.get("cancel_to")
-                      and start - now >= timedelta(hours=float(k.get("cancel_before_hours", 0)))
-                      and self._may_move(rt, ref, b["record"], k["cancel_to"]))
+            hours = float((k or {}).get("cancel_before_hours", 0))
+            soon = start - now < timedelta(hours=hours)
+            ok = bool(k and k.get("cancel_to") and not soon and self._may_move(rt, ref, b["record"], k["cancel_to"]))
+            why = None if ok else self.say("no_cancel_soon", hours=f"{hours:g}") if k and k.get("cancel_to") and soon \
+                else self.say("no_cancel")
             out.append({"ref": ref, "start": start.isoformat(timespec="minutes"),
                         "when": when_words(start), "with": names,
                         "kind": (k or {}).get("label") or self.say("booking"), "state": state, "can_cancel": ok,
-                        "kind_id": (k or {}).get("id")})
+                        "why_not": why, "next": self.say("visit_next"), "kind_id": (k or {}).get("id")})
         return sorted(out, key=lambda x: x["start"])
+
+    def _local_day(self, stamp) -> str:
+        """A stored instant (UTC, ``...Z``) as the practice's day in words: a request sent at 9 p.m. is that day's,
+        not tomorrow's."""
+        from . import clock
+        raw = str(stamp or "")
+        try:
+            t = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw[:10]
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return day_words(clock.local(t, self.hub.engine.zone()).date())
 
     def open_requests(self, person: str) -> list[dict]:
         """The person's requests still open that the portal sent: what (the kind's words) and since when."""
         out = []
         for k in self.kinds().values():
             for r in self._requests(person, k):
-                since = str(r.get("created_at") or "")[:10]
-                try:
-                    since = day_words(date.fromisoformat(since))
-                except ValueError:
-                    pass
-                out.append({"what": k["label"], "since": since})
+                out.append({"what": k["label"], "since": self._local_day(r.get("created_at")),
+                            "next": self.say("request_next")})
         return out
 
     def _may_move(self, rt, ref: str, rec: dict, to: str) -> bool:

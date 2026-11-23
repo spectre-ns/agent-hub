@@ -11,7 +11,17 @@
 # practice installed before keeps its own until a policy owner changes them); the red-flag screen catches more ways
 # of saying an emergency; a desk booking from a calendar slot is booked at once only when the reason is plainly
 # routine, anything else goes to a nurse first, and to a nurse too if the screen itself fails.
-version = "3.1"
+# 4.0: each clinic workflow walks a record of its own, and that record's state is where the work is, instead of
+# walking the patient: a renewal is a prescription request (MedicationRequest), a lab review its result
+# (Observation), a patient's question its message (Communication), a referral its ServiceRequest, a registration its
+# QuestionnaireResponse and a privacy request its Consent; the patient is the record's subject and the chart still
+# lists them. Runs open on version 3.1 move onto records of their own on their own (relink), keeping their steps.
+# missed-appointment and visit-documentation are retired: a late cancel or no-show is a step of the visit's own run,
+# and a visit filed after the fact is a visit created in progress. A prescription is issued only by its workflow or
+# by a physician's signature "I prescribe this medication as written", never by setting its status; a renewal for a
+# drug not on the chart is written in full, signed as written, faxed and told to the patient; a second renewal for
+# the same drug is flagged to the physician. A visit note's "Refer to" list makes referrals of their own.
+version = "4.0"
 
 [practice]
 requires_core = "1.0"
@@ -249,10 +259,21 @@ intake_workflow = "new-patient-intake"
 [portal.wording]
 booking = "Visit"
 requested = "We have your request. A member of our team reads it and contacts you, usually within one working day."
+visit_next = "Come to the practice 10 minutes before your time, with your health card."
+request_next = "A member of our team contacts you to arrange a time, usually within one working day."
+safety = "If this is an emergency, call 911 or go to the nearest emergency department now. For health advice at any hour, call 811."
+
+# A person who already has as many open as a kind allows (max_upcoming) may still write: nothing more is booked, but
+# what they wrote is screened at once and, unless it is plainly paperwork, goes to a nurse as a patient question.
+[portal.over_limit]
+workflow = "patient-question"
+input = "question"
 
 [portal.identity]
 born = "birthDate"            # with the health card ([base] identifier) and a code sent to the phone ([base] contact)
 inputmode = "numeric"         # a health card number: the phone shows digits
+digits = 10                   # checked on the sign-in form, before anything is asked of the hub
+identifier_help = "10 digits, as on your Nova Scotia health card. Spaces are fine."
 
 [portal.code]
 channel = "sms"               # no SMS provider is connected yet: the code waits on the outbox (see docs/portal.md)
@@ -260,7 +281,7 @@ minutes = 10
 length = 6
 
 [portal.register]
-fields = ["given", "family", "birthDate", "health_card", "phone"]
+fields = [{ field = "given", label = "First name" }, { field = "family", label = "Last name" }, "birthDate", { field = "health_card", help = "10 digits, as on your Nova Scotia health card." }, { field = "phone", label = "Mobile phone", required = true, help = "We text your sign-in code to this number." }]
 pending = { active = false }  # a request to join: no sign-in, no booking, until the intake accepts the patient
 
 # A new concern goes in as a request: the appointment request screens the reason for red flags (and says at once

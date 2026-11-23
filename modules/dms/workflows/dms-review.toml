@@ -1,16 +1,28 @@
 id = "dms-review"
-title = "Review a controlled document"
-summary = "A document sent for review is approved by a document controller, who signs, or returned to its author."
+title = "Control a document"
+summary = """One revision of a controlled document, from draft to in force: its author writes it and sends it for review,
+a document controller who did not write it approves it (and signs) or returns it, and it is in force until it is
+revised again or made obsolete. The document's status is where this work is."""
 record = "Document"
 
-[trigger]
-event = "record.transitioned:Document"
-when = "record.status == 'in-review'"
+# The Document type names this workflow: making a document starts it, and the document's status is its position.
+# A revision is one run: returned or revised, the run ends and the next one walks the next revision (the hub starts
+# it, since a workflow has no loops), and who wrote a revision never approves it. Nothing else starts it.
+
+[[steps]]
+id = "revise"
+title = "Write the revision and send it for review"
+kind = "wait"
+until = "record.status != 'draft'"   # sent for review (or made obsolete)
+instructions = """Write or revise the document, then send it for review on its page. Whoever writes this revision
+cannot approve it."""
 
 [[steps]]
 id = "approve"
 title = "Approve the document for use"
 kind = "gate"
+after = ["revise"]
+when = "record.status == 'in-review'"
 role = "document-controller"
 signer = "person"
 not_by = ["record.editors"]   # an author never approves their own document
@@ -30,10 +42,10 @@ kind = "automation"
 after = ["approve"]
 when = "approve.outcome == 'approve'"
 action = "record.update"
+state = "approved"
 [steps.params]
 ref = "{{run.record}}"
 [steps.params.set]
-status = "approved"
 effective = "{{run.today}}"
 
 [[steps]]
@@ -42,8 +54,14 @@ title = "Return it to the author"
 kind = "automation"
 after = ["approve"]
 when = "approve.outcome == 'return'"
-action = "record.update"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-status = "draft"
+state = "draft"   # the next revision is the next run's
+
+[[steps]]
+id = "in-force"
+title = "In force until revised or made obsolete"
+kind = "wait"
+after = ["revise", "publish"]
+when = "record.status == 'approved'"
+until = "record.status != 'approved'"   # revised, sent back for review (a CAPA), or made obsolete
+instructions = """The approved revision is in force: staff read it and sign that they understood it. Revising it
+starts the next revision; the one in force stays in use until that is approved."""

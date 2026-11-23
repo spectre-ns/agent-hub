@@ -64,8 +64,8 @@ def test_abnormal_result_cannot_be_filed_as_normal(worked):
     bodies = [r["body"] for r in worked.db.outbox.find({"channel": "patient-portal"}, sort="id")]
     result_msgs = [b for b in bodies if "result" in b]
     assert result_msgs and not any("normal" in b.lower() for b in result_msgs)
-    ob = read(worked, worked.engine.run(run["id"])["ctx"]["input"]["observation"])
-    assert ob["status"] == "final"
+    ob = read(worked, worked.engine.run(run["id"])["record"])  # the result itself is the review's record
+    assert ob["status"] == "final" and ob["review"] == "closed"
     assert any(e.get("valueReference") == {"reference": "Practitioner/dr-amara"} for e in ob["extension"])
 
 

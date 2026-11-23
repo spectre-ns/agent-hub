@@ -96,16 +96,31 @@ def test_cancelling_the_request_cancels_the_visit(hub):
     assert _status(hub, ref) == "cancelled" and hub.engine.run(run["id"])["status"] == "cancelled"
 
 
-def test_a_request_closed_without_a_visit_cancels_it(hub):
-    """The urgent branch: the nurse calls, advises and books nothing; the request is closed, the visit cancelled."""
+def test_a_request_handled_on_the_phone_is_completed_not_cancelled(hub):
+    """The urgent branch: the nurse calls, advises and books nothing; the contact took place, so the request is
+    completed (handled on the phone), not cancelled."""
     jo, noor = M(hub, "jo"), M(hub, "noor")
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"),
                            inputs={"reason": "my knee hurts when I run", "urgency": "urgent"})
     ref = hub.engine.run(run["id"])["record"]
     hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"reached": True, "advice": "ice and rest"})
     run = hub.engine.run(run["id"])
-    assert run["steps"]["not-booked"]["state"] == "done" and _status(hub, ref) == "cancelled"
-    assert run["status"] == "completed"
+    assert run["steps"]["handled-by-phone"]["state"] == "done" and _status(hub, ref) == "finished"
+    assert run["steps"]["not-booked"]["state"] == "skipped" and run["status"] == "completed"
+
+
+@pytest.mark.parametrize("action,want", [("reached-the-patient", "finished"), ("no-further-action", "cancelled")])
+def test_a_physicians_call_that_reaches_the_patient_completes_the_request(hub, action, want):
+    """Nobody reached by the nurse, the physician decides: reaching the patient themselves completes the request
+    (it was handled on the phone); no further action cancels it."""
+    jo, noor = M(hub, "jo"), M(hub, "noor")
+    run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"),
+                           inputs={"reason": "my knee hurts when I run", "urgency": "urgent"})
+    ref = hub.engine.run(run["id"])["record"]
+    hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"reached": False, "advice": "no answer"})
+    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"action": action, "notes": "called"})
+    run = hub.engine.run(run["id"])
+    assert _status(hub, ref) == want and run["status"] == "completed"
 
 
 def test_the_nurse_books_an_urgent_request_on_the_same_visit(hub):
@@ -413,6 +428,38 @@ defaults = { status = "planned" }   # as the step was written then: a booked vis
 """
 
 
+def test_a_run_from_before_is_moved_onto_its_own_record_only_once_its_type_is_ready_and_failures_back_off(
+        hub, monkeypatch):
+    """Rule: relinking waits for the record type: a run about the subject moves onto a record of its own only once
+    the type in force names the workflow and its active version is about that type (``Hub.record_workflow``), and a
+    record made in its first state has somewhere to go when the old run ends or is cancelled. A move that fails is
+    tried again later and later, noted on the track only when the error changes, and the escalation role is told
+    once; a run that can never move is noted once and not looked at again."""
+    jo, rana = M(hub, "jo"), M(hub, "rana")
+    pat = _pat(hub, "MacLeod")
+    old = hub.propose_workflow(jo, OLD_SHAPE, "the shape before")
+    hub.approve_workflow(rana, "appointment-request", old["version"])
+    rid = hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee"})["id"]
+    cur = hub.propose_workflow(jo, hub.pack.workflow_sources["appointment-request"], "its own visit")
+    hub.approve_workflow(rana, "appointment-request", cur["version"])
+    real = hub.record_workflow
+    monkeypatch.setattr(hub, "record_workflow", lambda rt: None)  # the type in force does not name it yet
+    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}
+    assert hub.engine.run(rid)["record"] == pat
+    monkeypatch.setattr(hub, "record_workflow", real)
+
+    def down(*a, **k):
+        raise RuntimeError("the database went away")
+    monkeypatch.setattr(hub.engine, "_make_record", down)
+    for n in range(1, hub.engine.RELINK_ALERT_AFTER + 2):
+        hub.db.runs.set(rid, {"relink_next_at": None})  # each time its next try is due
+        assert hub.engine.relink_runs()["failed"] == [rid]
+    assert len(hub.db.events.find({"action": "run.relink_failed", "subject": rid})) == 1  # the same error, once
+    told = hub.db.items.find({"run_id": rid, "kind": "notice", "title": {"$regex": "could not be moved"}})
+    assert len(told) >= 1 and len({t["created_at"] for t in told}) == 1  # told once, at the third try
+    assert hub.engine.run(rid)["relink_attempts"] == hub.engine.RELINK_ALERT_AFTER + 1
+
+
 def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_visit(hub, monkeypatch):
     """Today's runs about the patient move onto a visit of their own: once, each in its own transaction, keeping
     their version, item, key and steps so far; a failure is noted and tried again; the run then books that visit
@@ -441,14 +488,16 @@ def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_vis
     assert hub.engine.run(rid)["record"] == pat
     assert hub.db.events.find({"action": "run.relink_failed", "subject": rid})
     monkeypatch.setattr(hub.engine, "_make_record", real)
-    hub.engine.tick()  # every tick tries again
+    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}  # held back a while, not every tick
+    hub.db.runs.set(rid, {"relink_next_at": "2000-01-01T00:00:00Z"})  # its time to try again has come
+    hub.engine.tick()
     after = hub.engine.run(rid)
     ref = after["record"]
     assert ref.startswith("Encounter/") and after["subject"] == pat and _status(hub, ref) == "requested"
     assert after["version"] == before["version"] and after["item"] == before["item"]
     assert after["steps"] == before["steps"] and after["ctx"]["run"]["record"] == pat  # its pinned steps say so
     assert len(hub.records.search("Encounter", limit=None)) == visits + 1
-    assert hub.engine.relink_runs() == {"moved": [], "failed": []}  # once only
+    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}  # once only
     # its older step books that visit, not another one; when it ends, the visit's own workflow takes it on
     hub.engine.complete(noor, propose, {"slot": "2027-03-09T15:00|dr-amara"})
     assert _status(hub, ref) == "planned" and len(hub.records.search("Encounter", limit=None)) == visits + 1
@@ -457,3 +506,84 @@ def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_vis
     assert walk["version"] == cur["version"] and walk["steps"]["checked-in"]["state"] == "waiting"
     hub.update_record(jo, ref, {"status": "arrived"})
     assert hub.engine.run(walk["id"])["steps"]["checked-in"]["state"] == "done"
+
+
+def _to_the_note(hub, amara, **more):
+    """A visit seen and ended, its draft note edited, waiting for the physician's signature."""
+    run, ref = _to_the_visit(hub, amara)
+    hub.engine.complete(amara, item_for(hub, run, "end"), {"transcript": TRANSCRIPT, "visit_type": "minor",
+                                                           "minutes": 10})
+    run_all_local(hub, log=quiet)
+    item = item_for(hub, run, "edit")
+    draft = hub.engine.context(amara, item)["draft"]
+    fields = {k: draft.get(k) or "x" for k in ("subjective", "assessment", "plan")}
+    hub.engine.complete(amara, item, {**fields, "diagnosis_codes": ["V68"], **more})
+    return run, ref
+
+
+def test_a_discarded_note_completes_the_visit_without_a_note_and_tells_the_physician(hub):
+    """Discarding the draft never leaves the visit in progress: the visit took place, so it is completed (a workflow
+    has no going back a step); no note is filed, nothing is billed, and the physician is told to write the note."""
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_note(hub, amara)
+    hub.engine.decide(amara, item_for(hub, run, "sign"), "discard", "wrong patient's transcript")
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    assert _status(hub, ref) == "finished" and run["status"] == "completed"
+    assert run["steps"]["file-note"]["state"] == "skipped" and run["steps"]["code"]["state"] == "skipped"
+    assert not [c for c in hub.records.search("Composition", limit=None)
+                if (c.get("encounter") or {}).get("reference") == ref]
+    told = hub.db.items.find({"run_id": run["id"], "kind": "notice", "assignee": "dr-amara"})
+    assert any("has no note" in n["title"] for n in told)
+
+
+def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_referral_workflow(hub):
+    """Each referral the signed note asks for is a sub-record of the visit: a referral about the same patient,
+    linked to the visit, with the referral workflow's own run (caused by the visit's run on the track). The visit
+    does not wait for them; the visit's page lists them with their state and who holds them, each links back."""
+    amara = M(hub, "dr-amara")
+    run, ref = _to_the_note(hub, amara, referrals="Cardiology\nDermatology")
+    hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    pat = run["subject"]
+    kids = hub.engine.children_of(ref)
+    assert [k["ref"].split("/")[0] for k in kids] == ["ServiceRequest", "ServiceRequest"]
+    for kid in kids:
+        sr = hub.records.read(*kid["ref"].split("/", 1))
+        assert sr["subject"]["reference"] == pat and sr["encounter"]["reference"] == ref
+        assert sr["status"] == "draft" and sr["reasonCode"][0]["text"]
+        child = kid["run"]
+        assert child["workflow_id"] == "referral" and child["record"] == kid["ref"] and child["subject"] == pat
+        assert child["ctx"]["run"]["parent"] == run["id"]
+        made = hub.db.events.find_one({"action": "record.child", "data.child": kid["ref"]})
+        assert made["subject"] == ref and made["run_id"] == run["id"]
+        root = hub.db.events.find_one({"seq": child["root_event"]})
+        assert root["cause"] == made["seq"]  # the child's run is caused by the parent's step on the track
+        assert hub.engine.parent_record(kid["ref"]) == ref
+    assert {hub.records.read(*k["ref"].split("/", 1))["code"]["text"] for k in kids} == {"Cardiology", "Dermatology"}
+    assert run["status"] == "completed" or run["steps"]["refer"]["state"] == "done"
+    from practicehub.web.server import App
+    app = App(hub, dev=False)
+    page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
+    assert "Made from this" in page and kids[0]["ref"] in page and "Being written" in page
+    back = app.page_record({"me": amara, "query": {}, "path": "/records/" + kids[0]["ref"]},
+                           *kids[0]["ref"].split("/", 1))
+    assert "Made for" in back and ref.split("/", 1)[1] in back
+    chart = app.page_record({"me": amara, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
+    assert all(k["ref"] in chart for k in kids)
+
+
+def test_a_visit_marked_entered_in_error_stops_its_run_on_the_track(hub):
+    """Entered in error is open to whoever may write the visit, from any state, outside the workflow: its open run
+    stops with it (its work cancelled), and the track says who stopped it and why."""
+    jo = M(hub, "jo")
+    run, ref = _to_the_visit(hub, M(hub, "dr-amara"))
+    hub.update_record(jo, ref, {"status": "entered-in-error"})
+    after = hub.engine.run(run["id"])
+    assert after["status"] == "cancelled" and _status(hub, ref) == "entered-in-error"
+    assert not [i for i in _items(hub, after) if i["status"] in ("open", "claimed", "held", "waiting")]
+    (stop,) = hub.db.events.find({"action": "run.stopped", "run_id": run["id"]})
+    assert stop["actor"] == "jo" and "entered in error" in stop["data"]["reason"]
+    moved = hub.db.events.find_one({"seq": stop["cause"]})
+    assert moved["action"] == "record.transitioned" and moved["data"]["to"] == "entered-in-error"
