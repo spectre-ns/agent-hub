@@ -734,8 +734,6 @@ def test_a_stock_item_reorder_cycle_is_one_run_and_a_delivery_restocks_it_throug
     assert not runs(hub, "inventory-reorder", ref, "running")  # no longer kept: no one's work
 
 
-@pytest.mark.xfail(strict=True, reason="core: _owner_follows_move checks the type's when on the record as the person "
-                   "wrote it (submitted), not as the run it just advanced left it (posted), and starts the workflow again")
 def test_a_stock_move_posted_at_once_is_walked_by_one_run(stock):
     hub = stock
     rana = M(hub, "rana")
