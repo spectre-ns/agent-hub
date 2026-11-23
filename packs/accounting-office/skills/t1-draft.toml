@@ -1,0 +1,49 @@
+id = "t1-draft"
+title = "Draft a T1 return"
+instructions = """
+Draft the return from this year's slips: total income (line 15000), taxable income after RRSP contributions (line
+26000), the tax deducted at source, and the refund (negative: a balance owing). Then say, plainly, what changed from
+last year: each new kind of income, each slip from last year that did not come, a large change in the refund. Every
+reason the comparison (compare) gave for being over the risk line must be in flags. An answer that leaves one out is
+refused. Your draft is reviewed by a manager and filed by a partner: never call it final, filed or signed.
+"""
+
+[[output]]
+name = "total_income"
+label = "Total income"
+type = "number"
+required = true
+
+[[output]]
+name = "taxable_income"
+label = "Taxable income"
+type = "number"
+required = true
+
+[[output]]
+name = "tax_deducted"
+label = "Tax deducted"
+type = "number"
+required = true
+
+[[output]]
+name = "net_refund"
+label = "Refund (negative: owing)"
+type = "number"
+required = true
+
+[[output]]
+name = "flags"
+label = "What changed and why it was flagged"
+type = "text"
+
+[[output]]
+name = "draft_summary"
+label = "Summary for the reviewer"
+type = "text"
+required = true
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

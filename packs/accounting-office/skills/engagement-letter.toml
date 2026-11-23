@@ -1,0 +1,30 @@
+id = "engagement-letter"
+title = "Write an engagement letter"
+instructions = """
+Write the engagement letter for this engagement from the firm's standard terms: what the firm will do (the service
+and year), what the client must provide and by when, the fee (as on the engagement, plus HST), that the client is
+responsible for the accuracy of what they give, and that the firm files only once the client authorises it. Keep last
+year's scope unless the engagement says otherwise. Then a short email asking the client to sign it on the portal.
+Never quote a SIN or a business number.
+"""
+
+[[output]]
+name = "letter"
+label = "Engagement letter"
+type = "text"
+required = true
+
+[[output]]
+name = "subject"
+type = "string"
+required = true
+
+[[output]]
+name = "body"
+type = "text"
+required = true
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

@@ -1,0 +1,123 @@
+id = "engagement"
+title = "Engagement"
+record = "Engagement"
+summary = """
+One service for one client for one year. The documents agent writes the engagement letter from the firm's terms and
+last year's engagement and sends it; the client signs it on the portal (or the office records a signature on paper).
+Once signed the hub opens the work (for a T1, the year's T1 return, which its own workflow walks). When the work is
+done the engagement closes, and when the next season comes the hub proposes next year's.
+
+Each service opens its own work: pack.py's ENGAGEMENT_STARTERS, one entry per service.
+"""
+
+[trigger]
+starters = ["partner", "manager", "admin"]
+
+[[steps]]
+id = "letter"
+title = "Write the engagement letter"
+kind = "task"
+role = "document-clerk"
+skill = "engagement-letter"
+risk = "low"
+due = "2d"
+people_role = "admin"
+context = ["record:engagement", "record:profile"]
+
+[[steps]]
+id = "send-letter"
+title = "Send the letter to the client"
+kind = "automation"
+after = ["letter"]
+action = "engagement.send"
+[steps.params]
+letter = "{{letter.letter}}"
+subject = "{{letter.subject}}"
+body = "{{letter.body}}"
+drafted_by = "{{letter.by}}"
+
+[[steps]]
+id = "await-signature"
+title = "Wait for the client to sign"
+kind = "wait"
+after = ["send-letter"]
+until = "record.client_signed_on != null or record.status in ['signed', 'declined']"
+timeout = "14d"
+
+[[steps]]
+id = "record-signature"
+title = "Record the client's signature"
+kind = "automation"
+after = ["await-signature"]
+when = "record.status == 'proposed' and record.client_signed_on != null"
+state = "signed"
+
+[[steps]]
+id = "chase-signature"
+title = "Get the engagement letter signed"
+kind = "task"
+role = "admin"
+persons_only = true
+after = ["await-signature"]
+when = "await-signature.timed_out == true and record.status == 'proposed' and record.client_signed_on == null"
+state = "signed"
+moves = ["declined"]
+due = "5d"
+escalate_to = "partner"
+context = ["record:engagement", "letter"]
+instructions = """The client has not signed the engagement letter. Call them, and record their signature on the
+engagement's page (or that they declined)."""
+[[steps.fields]]
+name = "client_signed_on"
+label = "Signed on"
+type = "date"
+[[steps.fields]]
+name = "client_signed_how"
+label = "How"
+type = "choice"
+choices = ["paper", "email", "portal"]
+
+[[steps]]
+id = "activate"
+title = "Open the work"
+kind = "automation"
+after = ["record-signature", "chase-signature"]
+when = "record.status == 'signed'"
+action = "engagement.activate"
+state = "active"
+
+[[steps]]
+id = "await-close"
+title = "Wait for the work to be done"
+kind = "wait"
+after = ["activate"]
+until = "record.completed_on != null or record.status == 'closed'"
+
+[[steps]]
+id = "close"
+title = "Close the engagement"
+kind = "automation"
+after = ["await-close"]
+when = "record.status == 'active'"
+state = "closed"
+
+[[steps]]
+id = "renewal-date"
+title = "Work out when to propose next year's"
+kind = "automation"
+after = ["await-close", "close"]
+action = "engagement.renewal_date"
+
+[[steps]]
+id = "await-season"
+title = "Wait for next season"
+kind = "wait"
+after = ["renewal-date"]
+at = "{{renewal-date.on}}"
+
+[[steps]]
+id = "renew"
+title = "Propose next year's engagement"
+kind = "automation"
+after = ["await-season"]
+action = "engagement.renew"

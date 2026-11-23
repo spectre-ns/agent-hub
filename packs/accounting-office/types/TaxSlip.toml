@@ -1,0 +1,121 @@
+# A slip or document a client gives the firm: a T4, a T5, an RRSP receipt, a notice of assessment. It is part of the
+# client. It arrives (portal, email, upload) as received, with its file and what could be read of it (`text`); the
+# documents agent reads it (the slip-intake workflow), and the client's return for that year counts it.
+id = "TaxSlip"
+label = "Slip or document"
+plural = "Slips and documents"
+data_class = "documents"
+strict = true
+title = "{slip_type}[ {year}][ · {issuer}]"
+date = "received_on"
+part_of = "client"
+order = 20
+summary = "A tax slip, receipt or notice from the CRA, and what was read from it."
+workflow = { id = "slip-intake", when = "record.status == 'received'", again = "record.status == 'received'" }
+
+[[field]]
+name = "client"
+label = "Client"
+type = "reference"
+target = ["Client"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "status"
+label = "Status"
+type = "choice"
+choices = ["received", "extracted", "rejected"]
+required = true
+
+[[field]]
+name = "slip_type"
+label = "Slip"
+type = "choice"
+choices = ["T4", "T4A", "T4A-P", "T4A-OAS", "T4E", "T5", "T3", "T5008", "T2202", "RRSP", "donation", "medical", "childcare", "business-income", "NOA", "other"]
+labels = { T4A-P = "T4A(P) CPP", T4A-OAS = "T4A(OAS)", T4E = "T4E EI", RRSP = "RRSP receipt", donation = "Donation receipt", medical = "Medical receipts", childcare = "Childcare receipts", business-income = "Business income statement", NOA = "Notice of assessment", other = "Other document" }
+
+[[field]]
+name = "year"
+label = "Tax year"
+type = "number"
+min = 2000
+max = 2100
+
+[[field]]
+name = "issuer"
+label = "Issued by"
+type = "string"
+
+[[field]]
+name = "amount"
+label = "Amount"
+type = "number"
+help = "The slip's main box: employment income (T4 box 14), interest (T5 box 13), the contribution or donation; on a notice of assessment, the refund (negative: owing)"
+
+[[field]]
+name = "tax_deducted"
+label = "Tax deducted"
+type = "number"
+min = 0
+
+[[field]]
+name = "boxes"
+label = "Other boxes"
+type = "text"
+advanced = true
+help = "Every other box read from it, one a line, as `box: amount` (16: 1250.00); on a notice of assessment, the assessed figures (26000: taxable income, date: the notice's date)"
+
+[[field]]
+name = "source"
+label = "How it came"
+type = "choice"
+choices = ["portal", "email", "upload", "mail", "cra-autofill"]
+labels = { cra-autofill = "CRA Auto-fill" }
+
+[[field]]
+name = "received_on"
+label = "Received"
+type = "date"
+
+[[field]]
+name = "file"
+label = "File"
+type = "attachment"
+
+[[field]]
+name = "text"
+label = "Text of the document"
+type = "text"
+help = "What could be read from the file: what the documents agent reads it from"
+
+[[field]]
+name = "note"
+label = "Note"
+type = "text"
+
+[lifecycle]
+field = "status"
+initial = "received"
+labels = { received = "Received", extracted = "Read", rejected = "Rejected" }
+tones = { received = "waiting", extracted = "done", rejected = "ended" }
+abandoned = { received = "rejected" }
+
+[[lifecycle.transition]]
+from = ["received"]
+to = "extracted"
+label = "Record what it says"
+asks = ["slip_type", "year", "issuer", "amount", "tax_deducted", "boxes"]
+requires = ["slip_type", "year"]
+
+[[lifecycle.transition]]
+from = ["received", "extracted"]
+to = "rejected"
+label = "Reject (duplicate, wrong client or year)"
+asks = ["note"]
+requires = ["note"]
+
+[[lifecycle.transition]]
+from = ["extracted"]
+to = "received"
+label = "Read it again"

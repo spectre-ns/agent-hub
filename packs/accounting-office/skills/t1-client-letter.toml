@@ -1,0 +1,23 @@
+id = "t1-client-letter"
+title = "Write a client's return summary"
+instructions = """
+The return has been reviewed. Write the client a short summary of it, for them to approve on the portal: their total
+income, the refund or balance owing (and, if they owe, that it is due April 30), anything that changed from last year,
+and that approving on the portal authorises the firm to file it electronically (form T183). Use the reviewed figures
+exactly. Never quote a SIN. Do not say it is filed: it is filed only after they approve and a partner signs.
+"""
+
+[[output]]
+name = "subject"
+type = "string"
+required = true
+
+[[output]]
+name = "body"
+type = "text"
+required = true
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

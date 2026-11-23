@@ -1185,6 +1185,19 @@ class Engine:
                     moved = schema.put(moved, f["path"], got[n])
             hub.update_record(actor, ref, moved, cause=cause, run_id=run["id"])
 
+    def _signed_move(self, run: dict, step) -> tuple[str, str, str] | None:
+        """(record label, state label, meaning) when the move a step with ``state`` makes from where its record is
+        now is a signed transition: only a person moving the record signs it, never the workflow finishing the step."""
+        ref = run.get("record") or ""
+        if not step.state or "/" not in ref:
+            return None
+        rt = self.hub.record_type(ref.split("/", 1)[0])
+        rec = self.hub.records.read(*ref.split("/", 1)) if rt is not None and rt.lifecycle else None
+        if rec is None:
+            return None
+        t = rt.transition(schema.first(rec, rt.lifecycle["path"]), step.state)
+        return (rt.label, rt.state_label(step.state).lower(), t["sign"]) if t and t.get("sign") else None
+
     def _moves_due(self, run: dict, wf, cause) -> bool:
         """Move the record for each step with a ``state`` that people or a wait finished (an automation moves it as it
         runs). A move the record's lifecycle refuses is told to the practice's escalation role."""
@@ -2506,7 +2519,9 @@ class Engine:
         """Where an item goes when it is handed from agents to people: (role, assignee). Never to a role no person
         holds, where it would wait for good."""
         run, wf, step = self.step_of(item)
-        starter = self.hub.member(run["started_by"]) if run.get("started_by") else None
+        # a run a record's type started (``type:<id>``) or a schedule started has no member as its starter
+        starter = self.hub.member(run["started_by"]) if run.get("started_by") and \
+            self.hub.db.members.get(run["started_by"]) else None
         starter = starter if starter and starter["kind"] == "person" and starter["status"] == "active" else None
         first = getattr(step, "people_role", None) or item["role"]
         if item["assignee"]:
@@ -2714,6 +2729,10 @@ class Engine:
                 raise Invalid("this item is a decision or a notice, not a task")
             self._require_eligible(member, item)
             run, wf, step = self.step_of(item)
+            signed = self._signed_move(run, step)
+            if signed:  # the workflow cannot sign for a person: Done here would leave the record where it is
+                raise Invalid(f"{step.title} moves the {signed[0]} to {signed[1]}, which is signed {signed[2]!r}: "
+                              f"make that move on the record's page, with your signature")
             ctxview = self.context(member, item_id)
             fields = self.fields_for(step, run)
             try:

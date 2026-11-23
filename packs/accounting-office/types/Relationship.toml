@@ -1,0 +1,53 @@
+# Who a client is to another client: the owner or a shareholder of a company, a director, a spouse, a dependant.
+# It is part of the client it is about (`client`) and names the other (`other`).
+id = "Relationship"
+label = "Relationship"
+plural = "Relationships"
+data_class = "profile"
+strict = true
+title = "{kind} of {other}"
+part_of = "client"
+active = "record.ended == null"
+order = 5
+summary = "How two clients are related: an owner or shareholder of a company, a spouse, a dependant."
+
+[[field]]
+name = "client"
+label = "Client"
+type = "reference"
+target = ["Client"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "kind"
+label = "Relationship"
+type = "choice"
+choices = ["owner", "shareholder", "director", "spouse", "common-law-partner", "dependant", "signing-officer"]
+labels = { owner = "Owner", shareholder = "Shareholder", director = "Director", spouse = "Spouse", common-law-partner = "Common-law partner", dependant = "Dependant", signing-officer = "Signing officer" }
+required = true
+
+[[field]]
+name = "other"
+label = "Of"
+type = "reference"
+target = ["Client"]
+rel = "related"
+required = true
+
+[[field]]
+name = "percent"
+label = "Shares held (%)"
+type = "number"
+min = 0
+max = 100
+
+[[field]]
+name = "since"
+label = "Since"
+type = "date"
+
+[[field]]
+name = "ended"
+label = "Ended"
+type = "date"

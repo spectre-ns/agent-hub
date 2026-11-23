@@ -1,0 +1,349 @@
+id = "t1-return"
+title = "Personal tax return (T1)"
+record = "T1Return"
+summary = """
+One client's T1 for one year, from asking for the slips to the notice of assessment. The return is this workflow's
+record and its status is where the work is.
+
+The documents agent sends the organizer (what came last year, what to send this year) and chases what is still
+missing. Slips that arrive (on the portal, by email, uploaded) are read by the documents agent, and the return counts
+them. Once they are in, the hub compares this year with last year; the tax agent drafts the return. A draft over the
+risk line (a large change in the refund, a new kind of income, a slip from last year missing) is held for its sponsor
+before it goes on. A manager or partner reviews it and signs; the agent writes the client a summary; the client
+authorises filing (T183) on the portal, or on paper. A partner files, by signing, and only then does the hub transmit
+the return. The client is invoiced. When the notice of assessment comes, the hub compares it with the return, and a
+difference goes to a manager.
+
+No agent signs, files or approves: the review and filing are a person's signed moves on the return's page.
+"""
+
+[trigger]
+starters = ["partner", "manager", "senior", "staff", "admin"]
+
+[deadline]
+within = "26w"
+escalate_to = "partner"
+
+# --------------------------------------------------------------------------------------------- gathering the slips
+[[steps]]
+id = "organizer"
+title = "Send the organizer"
+kind = "task"
+role = "document-clerk"
+skill = "t1-organizer"
+risk = "low"
+due = "2d"
+escalate_to = "admin"
+people_role = "admin"
+context = ["record:tax", "record:documents", "record:profile"]
+
+[[steps]]
+id = "send-organizer"
+title = "Send the organizer to the client"
+kind = "automation"
+after = ["organizer"]
+action = "t1.organizer_sent"
+[steps.params]
+expected = "{{organizer.expected_slips}}"
+missing = "{{organizer.missing_slips}}"
+subject = "{{organizer.subject}}"
+body = "{{organizer.body}}"
+drafted_by = "{{organizer.by}}"
+
+[[steps]]
+id = "wait-slips"
+title = "Wait for the slips"
+kind = "wait"
+after = ["send-organizer"]
+until = "record.slips_complete == true"
+timeout = "21d"
+
+[[steps]]
+id = "chase"
+title = "Chase the missing slips"
+kind = "task"
+role = "document-clerk"
+skill = "slip-chase"
+risk = "low"
+after = ["wait-slips"]
+when = "wait-slips.timed_out == true and record.slips_complete != true"
+due = "2d"
+people_role = "admin"
+context = ["record:tax", "record:documents", "record:profile"]
+
+[[steps]]
+id = "send-chase"
+title = "Send the reminder"
+kind = "automation"
+after = ["chase"]
+action = "client.message"
+[steps.params]
+channel = "email"
+subject = "{{chase.subject}}"
+body = "{{chase.body}}"
+drafted_by = "{{chase.by}}"
+
+[[steps]]
+id = "wait-slips-again"
+title = "Wait for the slips (after the reminder)"
+kind = "wait"
+after = ["send-chase"]
+until = "record.slips_complete == true"
+timeout = "14d"
+
+[[steps]]
+id = "follow-up"
+title = "Call the client about the missing slips"
+kind = "task"
+role = "staff"
+persons_only = true
+after = ["wait-slips-again"]
+when = "wait-slips-again.timed_out == true and record.slips_complete != true"
+due = "3d"
+escalate_to = "manager"
+context = ["record:tax", "record:documents", "chase"]
+instructions = """The client was sent the organizer and a reminder and some slips are still missing. Call them.
+Prepare without them if they will not come (a slip the client says does not exist this year), or withdraw the
+return if there is nothing to file."""
+[[steps.fields]]
+name = "decision"
+label = "What now"
+type = "choice"
+choices = ["prepare", "withdraw"]
+labels = { prepare = "Prepare with what we have", withdraw = "Withdraw the return" }
+required = true
+[[steps.fields]]
+name = "notes"
+label = "What the client said"
+type = "text"
+required = true
+
+[[steps]]
+id = "withdraw"
+title = "Withdraw the return"
+kind = "automation"
+after = ["follow-up"]
+when = "follow-up.decision == 'withdraw'"
+action = "record.update"
+state = "withdrawn"
+[steps.params.set]
+note = "Withdrawn after the slips did not come: {{follow-up.notes}}"
+
+# ------------------------------------------------------------------------------------------------------ preparing
+[[steps]]
+id = "start-preparing"
+title = "Start preparing"
+kind = "automation"
+after = ["wait-slips", "wait-slips-again", "follow-up"]
+when = "follow-up.decision != 'withdraw'"
+state = "preparing"
+
+# The risk line: deterministic, in pack.py (t1.compare), never the agent's judgement.
+[[steps]]
+id = "compare"
+title = "Compare with last year"
+kind = "automation"
+after = ["start-preparing"]
+action = "t1.compare"
+
+[[steps]]
+id = "draft"
+title = "Draft the return"
+kind = "task"
+role = "tax-preparer"
+skill = "t1-draft"
+risk = "medium"
+after = ["compare"]
+when = "compare.over_line != true"
+state = "in-review"
+due = "5d"
+people_role = "senior"
+context = ["record:tax", "record:documents", "record:profile", "compare"]
+
+[[steps]]
+id = "draft-flagged"
+title = "Draft the return (over the risk line)"
+kind = "task"
+role = "tax-preparer"
+skill = "t1-draft"
+risk = "high"
+after = ["compare"]
+when = "compare.over_line == true"
+state = "in-review"
+due = "5d"
+people_role = "senior"
+context = ["record:tax", "record:documents", "record:profile", "compare"]
+
+# ------------------------------------------------------------------------------------------------------ the review
+[[steps]]
+id = "review"
+title = "Review the return"
+kind = "task"
+role = "manager"
+persons_only = true
+after = ["draft", "draft-flagged"]
+state = "client-approval"
+due = "5d"
+escalate_to = "partner"
+context = ["record:tax", "record:documents", "compare"]
+instructions = """Check the draft against the slips and last year. Correct the figures if they are wrong, note what
+you changed, and sign the review on the return's page. A return that is not ready stays here."""
+[[steps.fields]]
+name = "review_notes"
+label = "Reviewer's notes"
+type = "text"
+
+[[steps]]
+id = "client-letter"
+title = "Write the client's summary"
+kind = "task"
+role = "tax-preparer"
+skill = "t1-client-letter"
+risk = "medium"
+after = ["review"]
+due = "1d"
+people_role = "staff"
+context = ["record:tax", "record:profile"]
+
+[[steps]]
+id = "send-letter"
+title = "Send the summary for approval"
+kind = "automation"
+after = ["client-letter"]
+action = "client.message"
+[steps.params]
+channel = "portal"
+subject = "{{client-letter.subject}}"
+body = "{{client-letter.body}}"
+drafted_by = "{{client-letter.by}}"
+
+[[steps]]
+id = "await-t183"
+title = "Wait for the client to authorise filing (T183)"
+kind = "wait"
+after = ["send-letter"]
+until = "record.t183_signed_on != null or record.status == 'client-signed'"
+timeout = "14d"
+
+[[steps]]
+id = "t183-recorded"
+title = "Record the client's authorisation"
+kind = "automation"
+after = ["await-t183"]
+when = "record.status == 'client-approval' and record.t183_signed_on != null"
+state = "client-signed"
+
+[[steps]]
+id = "t183-chase"
+title = "Get the client's authorisation (T183)"
+kind = "task"
+role = "admin"
+persons_only = true
+after = ["await-t183"]
+when = "await-t183.timed_out == true and record.status == 'client-approval' and record.t183_signed_on == null"
+state = "client-signed"
+due = "5d"
+escalate_to = "manager"
+context = ["record:tax", "client-letter"]
+instructions = """The client has not authorised filing on the portal. Call them; record the signed T183 when you have
+it (on paper or by email) on the return's page."""
+[[steps.fields]]
+name = "t183_signed_on"
+label = "Signed on"
+type = "date"
+[[steps.fields]]
+name = "t183_how"
+label = "How"
+type = "choice"
+choices = ["paper", "email", "portal"]
+
+# ------------------------------------------------------------------------------------------------------ filing
+[[steps]]
+id = "file"
+title = "File the return"
+kind = "task"
+role = "partner"
+persons_only = true
+after = ["t183-recorded", "t183-chase"]
+when = "record.status == 'client-signed'"
+state = "filing"
+due = "3d"
+context = ["record:tax", "compare"]
+instructions = """The return is reviewed and the client has authorised it. Sign on the return's page to file it: the
+hub transmits it to the CRA as you sign."""
+[[steps.fields]]
+name = "filing_note"
+label = "Note"
+type = "text"
+
+[[steps]]
+id = "transmit"
+title = "Transmit to the CRA (EFILE)"
+kind = "automation"
+after = ["file"]
+action = "efile.transmit"
+state = "filed"
+
+[[steps]]
+id = "invoice"
+title = "Invoice the client"
+kind = "automation"
+after = ["transmit"]
+action = "t1.invoice"
+
+# ------------------------------------------------------------------------------------------------------ assessment
+[[steps]]
+id = "await-noa"
+title = "Wait for the notice of assessment"
+kind = "wait"
+after = ["transmit"]
+until = "record.noa_received == true"
+
+[[steps]]
+id = "assess"
+title = "Record the assessment"
+kind = "automation"
+after = ["await-noa"]
+state = "assessed"
+
+[[steps]]
+id = "compare-noa"
+title = "Compare the assessment with the return"
+kind = "automation"
+after = ["assess"]
+action = "t1.compare_noa"
+
+[[steps]]
+id = "noa-difference"
+title = "Look into the difference on the assessment"
+kind = "task"
+role = "manager"
+persons_only = true
+after = ["compare-noa"]
+when = "compare-noa.differs == true"
+due = "5d"
+escalate_to = "partner"
+context = ["record:tax", "record:documents", "compare-noa"]
+instructions = """The CRA assessed this return differently from what was filed. Find out why (a slip that came late,
+a CRA adjustment) and say what was done: accepted, a reply to the CRA, an adjustment request (T1-ADJ)."""
+[[steps.fields]]
+name = "notes"
+label = "What differs and what was done"
+type = "text"
+required = true
+
+[[steps]]
+id = "record-difference"
+title = "Write what was done on the return"
+kind = "automation"
+after = ["noa-difference"]
+action = "record.update"
+[steps.params.set]
+assessment_notes = "{{noa-difference.notes}}"
+
+[[steps]]
+id = "close-engagement"
+title = "Close the year's engagement"
+kind = "automation"
+after = ["compare-noa", "record-difference", "invoice"]
+action = "engagement.close"

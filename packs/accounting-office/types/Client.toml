@@ -1,0 +1,132 @@
+# A client of the firm: a person or a business. It extends the core's Subject, so the core's pages, pickers and any
+# module (crm, dms) see it. Who owns a company, and who is married to whom, are Relationships.
+id = "Client"
+label = "Client"
+plural = "Clients"
+data_class = "profile"
+extends = "Subject"
+strict = true
+title = "{name}[ · {client_number}]"
+short_title = "{name}"
+active = "record.active != false"
+order = 0
+summary = "A person or a business the firm works for."
+
+[base]
+identifier = "client_number"
+contact = "email"
+responsible = "partner_in_charge"
+
+[[field]]
+name = "kind"
+label = "Person or business"
+type = "choice"
+choices = ["person", "business"]
+labels = { person = "Person", business = "Business" }
+required = true
+fact = true
+
+[[field]]
+name = "name"                 # the Subject's name: a person's full name, or a business's legal name
+label = "Name"
+type = "string"
+required = true
+match = true
+
+[[field]]
+name = "client_number"
+label = "Client number"
+type = "string"
+fact = true
+help = "TW- and four digits: on every letter, and how a client signs in to the portal"
+
+[[field]]
+name = "email"
+label = "Email"
+type = "string"
+fact = true
+
+[[field]]
+name = "phone"
+label = "Phone"
+type = "string"
+fact = true
+
+[[field]]
+name = "address"
+label = "Mailing address"
+type = "text"
+
+[[field]]
+name = "birth_date"
+label = "Date of birth"
+type = "date"
+match = true
+help = "A person's; how they sign in to the portal"
+
+[[field]]
+name = "marital_status"
+label = "Marital status (as of December 31)"
+type = "choice"
+choices = ["single", "married", "common-law", "separated", "divorced", "widowed"]
+
+[[field]]
+name = "self_employed"
+label = "Self-employed (files by June 15)"
+type = "boolean"
+fact = true
+help = "A person with business or professional income, or their spouse: the T1 is due June 15, the balance April 30"
+
+[[field]]
+name = "sin"
+label = "Social insurance number"
+type = "string"
+data_class = "payroll"       # only those who read payroll and identity numbers see it
+help = "A person's; never written in a message"
+
+[[field]]
+name = "business_type"
+label = "Business type"
+type = "choice"
+choices = ["ccpc", "corporation", "partnership", "sole-proprietor", "non-profit"]
+labels = { ccpc = "Canadian-controlled private corporation", sole-proprietor = "Sole proprietor", non-profit = "Not-for-profit" }
+
+[[field]]
+name = "bn"
+label = "Business number"
+type = "string"
+data_class = "payroll"
+help = "A business's nine-digit CRA business number"
+
+[[field]]
+name = "fiscal_year_end"
+label = "Fiscal year end (MM-DD)"
+type = "string"
+fact = true
+help = "A business's, as month and day: 12-31"
+
+[[field]]
+name = "services"
+label = "Services"
+type = "choice"
+list = true
+choices = ["t1", "bookkeeping", "t2", "gst-hst", "payroll"]
+labels = { t1 = "Personal tax (T1)", bookkeeping = "Monthly bookkeeping", t2 = "Corporate year-end (T2)", gst-hst = "GST/HST returns", payroll = "Payroll" }
+fact = true
+
+[[field]]
+name = "partner_in_charge"
+label = "Partner in charge"
+type = "member"
+fact = true
+
+[[field]]
+name = "active"
+label = "Active client"
+type = "boolean"
+help = "false once the client has left the firm"
+
+[[field]]
+name = "notes"
+label = "Notes"
+type = "text"

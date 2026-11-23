@@ -1,0 +1,29 @@
+id = "slip-chase"
+title = "Remind a client of the slips still missing"
+instructions = """
+The client was sent the organizer and some slips are still missing (the return's missing_slips). Write a short,
+friendly reminder naming each missing slip and who issues it, saying how to send it (reply to this email, or the
+portal) and the filing deadline. If a slip may simply not exist this year (a job that ended), ask them to say so.
+Never quote a SIN or a business number. Do not give tax advice.
+"""
+
+[[output]]
+name = "missing_slips"
+label = "Still missing"
+type = "list"
+required = true
+
+[[output]]
+name = "subject"
+type = "string"
+required = true
+
+[[output]]
+name = "body"
+type = "text"
+required = true
+
+[[output]]
+name = "summary"
+type = "text"
+required = true

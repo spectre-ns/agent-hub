@@ -1,0 +1,116 @@
+# A bill to a client for an engagement's work. It is part of its client. The work's workflow raises it when the work
+# is done (a T1 once it is filed); the office marks it paid.
+id = "Invoice"
+label = "Invoice"
+plural = "Invoices"
+data_class = "engagement"
+strict = true
+title = "Invoice {number}[ · {client_name}]"
+date = "issued_on"
+part_of = "client"
+order = 40
+summary = "What the client owes for an engagement."
+
+[[field]]
+name = "client"
+label = "Client"
+type = "reference"
+target = ["Client"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "client_name"
+label = "Client name"
+type = "string"
+
+[[field]]
+name = "number"
+label = "Invoice number"
+type = "string"
+required = true
+
+[[field]]
+name = "engagement"
+label = "Engagement"
+type = "reference"
+target = ["Engagement"]
+rel = "engagement"
+
+[[field]]
+name = "about"
+label = "For"
+type = "reference"
+target = ["*"]
+rel = "about"
+
+[[field]]
+name = "description"
+label = "Description"
+type = "string"
+required = true
+
+[[field]]
+name = "amount"
+label = "Fee"
+type = "number"
+required = true
+min = 0
+
+[[field]]
+name = "hst"
+label = "HST"
+type = "number"
+min = 0
+
+[[field]]
+name = "total"
+label = "Total"
+type = "number"
+min = 0
+
+[[field]]
+name = "issued_on"
+label = "Issued"
+type = "date"
+
+[[field]]
+name = "due_on"
+label = "Due"
+type = "date"
+
+[[field]]
+name = "paid_on"
+label = "Paid on"
+type = "date"
+
+[[field]]
+name = "status"
+label = "Status"
+type = "choice"
+choices = ["draft", "sent", "paid", "void"]
+required = true
+
+[lifecycle]
+field = "status"
+initial = "draft"
+starts = ["sent"]
+labels = { draft = "Draft", sent = "Sent", paid = "Paid", void = "Void" }
+tones = { draft = "active", sent = "waiting", paid = "done", void = "ended" }
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "sent"
+label = "Send"
+
+[[lifecycle.transition]]
+from = ["sent"]
+to = "paid"
+label = "Record payment"
+asks = ["paid_on"]
+requires = ["paid_on"]
+
+[[lifecycle.transition]]
+from = ["draft", "sent"]
+to = "void"
+label = "Void"
