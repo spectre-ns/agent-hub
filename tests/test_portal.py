@@ -818,3 +818,65 @@ def test_the_portal_core_names_nothing_of_a_pack():
               ROOT / "practicehub" / "web" / "portal_api.py"):
         found = words.findall(f.read_text())
         assert not found, f"{f.name} names {sorted(set(found))}"
+
+
+
+
+# ------------------------------------------------------------------------------------------- the registration
+def _register(hub, given="Bea", card="7777 888 999"):
+    got = Portal(hub, dev=True).register({"given": given, "family": "Moss", "birthDate": "2001-07-08",
+                                          "health_card": card, "phone": "902-555-0199"}, client="10.0.2.1")
+    return got if "workflow_id" in got else hub.engine.run(got["run"])
+
+
+def _moves(hub, ref):
+    return [e["data"]["to"] for e in hub.db.events.find({"subject": ref, "action": "record.transitioned"}, sort="seq")]
+
+
+def test_a_registration_is_a_record_of_its_own_walked_until_the_person_is_taken_in(hub):
+    """The intake walks the registration (an intake form about the person), never the person's own record: checked,
+    then accepted; the person is its subject and is made active only by the acceptance. One run, one item."""
+    run = _register(hub)
+    ref, pat = run["record"], run["subject"]
+    assert ref.startswith("QuestionnaireResponse/") and pat.startswith("Patient/")
+    form = hub.records.read(*ref.split("/", 1))
+    assert form["registration"] == "received" and form["questionnaire"] == "registration"
+    assert form["subject"]["reference"] == pat
+    with pytest.raises((Denied, Invalid)):  # its intake moves it, nobody by hand
+        hub.update_record(M(hub, "jo"), ref, {**form, "registration": "accepted"})
+    _intake_accepts(hub, run)
+    assert hub.records.read(*ref.split("/", 1))["registration"] == "accepted"
+    assert hub.records.read(*pat.split("/", 1))["active"] is True
+    assert _moves(hub, ref) == ["checked", "accepted"]
+    assert len([i for i in hub.db.items.find({"run_id": run["id"]}) if i.get("parent_id") is None]) == 1
+    booked = hub.db.runs.find_one({"workflow_id": "appointment-request", "subject": pat})
+    assert booked and booked["record"].startswith("Encounter/"), "the first visit is booked for the person"
+
+
+@pytest.mark.parametrize("outcome,state", [("decline", "declined"), ("waitlist", "waitlisted")])
+def test_a_registration_not_accepted_says_so_and_the_person_stays_unable_to_sign_in(hub, outcome, state):
+    run = _register(hub)
+    hub.engine.complete(M(hub, "intake-agent"), item_for(hub, run, "review"), {
+        "complete": True, "missing": "", "urgency": "routine", "summary": "complete", "flags": []})
+    hub.engine.decide(M(hub, "jo"), item_for(hub, hub.engine.run(run["id"]), "accept"), outcome, "roster full")
+    assert hub.records.read(*run["record"].split("/", 1))["registration"] == state
+    assert hub.records.read(*run["subject"].split("/", 1))["active"] is False
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    assert Portal(hub, dev=True).begin_sign_in("2001-07-08", "7777 888 999", client="10.0.2.7")["dev_code"] is None
+
+
+def test_an_older_intake_about_the_person_is_moved_onto_a_registration_of_its_own(hub):
+    """A run started before the intake walked a registration (its record the person) is moved onto one made for it,
+    keeping its item, steps and version; done again, nothing changes. Accepted, it still takes the person in."""
+    run = _register(hub, given="Cy", card="1212 343 565")
+    pat, made = run["subject"], run["record"]
+    hub.db.runs.set(run["id"], {"record": pat, "subject": None})  # as an older run was: about the person
+    hub.db.runs.set(run["id"], {"ctx": {**run["ctx"], "run": {**run["ctx"]["run"], "record": pat, "subject": None}}})
+    item = run.get("item")
+    got = hub.engine.relink_runs()
+    assert run["id"] in got["moved"] and run["id"] not in hub.engine.relink_runs()["moved"]
+    moved = hub.engine.run(run["id"])
+    assert moved["record"].startswith("QuestionnaireResponse/") and moved["record"] != made and moved["subject"] == pat
+    assert moved.get("item") == item and moved["ctx"]["run"]["record"] == pat
+    _intake_accepts(hub, moved)
+    assert hub.records.read(*pat.split("/", 1))["active"] is True

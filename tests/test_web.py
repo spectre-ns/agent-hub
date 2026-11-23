@@ -1413,7 +1413,7 @@ def test_work_about_a_record_starts_from_a_button_whose_form_opens_in_the_dialog
     pat = hub.records.search("Patient")[0]
     ref = f"Patient/{pat['id']}"
     me = hub.member("dr-amara")
-    wfs = [w["workflow"] for w in hub.workflows() if w["workflow"].record == "Patient"
+    wfs = [w["workflow"] for w in hub.workflows() if "Patient" in hub.engine.start_on(w["workflow"])
            and hub.can(me, "starter", f"workflow:{w['workflow'].id}")]
     assert wfs, "the pack has work about a patient"
     page = call(server, "GET", f"/patients/{pat['id']}", amara)[1]
@@ -2090,7 +2090,7 @@ def test_a_long_link_group_offers_every_one_on_a_list_of_its_own(hub, server):
     p = hub.records.search("Patient")[0]
     ref = f"Patient/{p['id']}"
     have = [r for r in hub.records.search("Observation") if r.get("subject", {}).get("reference") == ref]
-    tmpl = {k: v for k, v in hub.records.search("Observation")[0].items() if k not in ("id", "meta")}
+    tmpl = {k: v for k, v in hub.records.search("Observation")[0].items() if k not in ("id", "meta", "review")}
     for i in range(51 - len(have)):
         hub.create_record(amara, "Observation", {**tmpl, "status": "registered", "subject": {"reference": ref}})
     tok = token(hub, "dr-amara")
@@ -2173,7 +2173,7 @@ def test_the_front_desk_sees_no_step_of_a_branch_it_may_not_read(hub, server):
     listed = next(r for r in json.loads(call(server, "GET", "/api/runs", tok)[1])["runs"] if r["id"] == run["id"])
     seen = [json.dumps(listed), call(server, "GET", f"/api/runs/{run['id']}", tok)[1],
             call(server, "GET", f"/runs/{run['id']}", tok)[1],
-            _panel(call(server, "GET", f"/patients/{run['record'].split('/')[1]}", tok)[1])]
+            _panel(call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", tok)[1])]
     assert all(seen)
     for i, text in enumerate(seen):
         for s in hidden:
