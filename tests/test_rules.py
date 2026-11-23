@@ -5259,3 +5259,44 @@ def test_move_record_writes_what_the_move_asks_with_the_state_and_only_who_may_m
     with pytest.raises(Denied, match="needs writing visits records"):
         hub.move_record(M(hub, "sam"), ref, "cancelled")
 
+
+def test_the_move_a_step_makes_is_the_step_and_doing_the_step_makes_the_move(hub):
+    """Rule: a person's step declares the move it makes with ``state``. While it is open, moving the record to that
+    state (``move_record``, or the record's own edit) does the step, by whoever moved it, with the step's fields
+    taken from the transition's ``asks`` by name; finishing the step on its item makes the same move, through the
+    same transition, writing the step's answers into the fields the move asks for. A step that moves nothing (no
+    ``state``) is done on its item as ever; ``moves`` lists the moves that leave its step open."""
+    _jobs(hub)
+    amara, liam, noor = M(hub, "dr-amara"), M(hub, "dr-liam"), M(hub, "noor")
+    ref, run = _job(hub)
+    with pytest.raises(Denied, match="'Do the work' is for the physician role"):
+        hub.move_record(noor, ref, "doing")
+    hub.engine.claim(liam, run["item"])
+    with pytest.raises(Denied, match="Dr Liam|Liam"):  # the holder is named
+        hub.move_record(amara, ref, "doing")
+    hub.move_record(liam, ref, "doing")
+    with pytest.raises(Denied, match="Liam"):
+        hub.move_record(amara, ref, "done", {"outcome": "Done"})
+    hub.move_record(amara, ref, "cancelled")  # a correction stays anyone's who may write the record
+    ref, run = _job(hub)
+    hub.move_record(amara, ref, "doing")  # a move the step lets people make: the step stays open
+    assert hub.engine.run(run["id"])["steps"]["work"]["state"] == "active"
+    with pytest.raises(Invalid, match="fill in Outcome"):
+        hub.move_record(amara, ref, "done")
+    hub.move_record(amara, ref, "done", {"outcome": "New seal fitted", "hours": 3})
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["work"]["state"] == "done" and run["steps"]["work"]["by"] == "dr-amara"
+    assert run["ctx"]["work"]["outcome"] == "New seal fitted" and run["ctx"]["work"]["hours"] == 3
+    assert run["steps"]["file"]["state"] == "active"  # the run went on from it
+    assert hub.records.read(*ref.split("/"))["status"] == "done"
+    # the other way: the step done on its item moves the record, with its answers
+    ref2, run2 = _job(hub, "Service the fridge")
+    hub.move_record(amara, ref2, "doing")
+    hub.engine.complete(amara, run2["item"], {"outcome": "Coils cleaned", "hours": 1})
+    rec = hub.records.read(*ref2.split("/"))
+    assert (rec["status"], rec["outcome"], rec["hours"]) == ("done", "Coils cleaned", 1)
+    # a step that moves nothing is done on its item; the record stays where it is
+    i = item_for(hub, hub.engine.run(run2["id"]), "file")
+    hub.engine.complete(amara, i, {"filed": True})
+    assert hub.records.read(*ref2.split("/"))["status"] == "done"
+    assert hub.engine.run(run2["id"])["status"] == "completed"

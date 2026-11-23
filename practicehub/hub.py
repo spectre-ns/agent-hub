@@ -3290,7 +3290,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             return None
         if not walked:
             return self._unwalked_move_refusal(rt, ref, after, run) if run else None
-        if self.state_move_waited_on(rt, ref, after, t["to"]):
+        how = self.state_move_waited_on(rt, ref, after, t["to"])
+        if how == "step" and run:  # the move a person's step makes is that person's: no other run makes it
+            return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
+        if how:
             return None
         if run:
             return f"a {label}'s {rt.lifecycle.get('field')} is moved by its own workflow, not by another"
@@ -3314,7 +3317,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
 
     def state_move_waited_on(self, rt, ref: str, after: dict, new: str) -> str | None:
         """Whether the open run of the type's workflow about ``ref`` is waiting on the record moving to ``new``: how
-        ("until", a wait that then goes on; "moves", a state the open step lets people move it to), or None."""
+        ("until", a wait that then goes on; "moves", a state the open step lets people move it to; "step", the state
+        the open person's step makes with its ``state``, so the move does that step), or None."""
         from . import expr
         owner = (rt.workflow or {}).get("id")
         field = (rt.lifecycle or {}).get("field")
@@ -3336,6 +3340,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
                         pass
                 if new in s.moves:
                     return "moves"
+                if st == "active" and self.step_makes_move(s, new) and not s.for_each:
+                    return "step"
         return None
 
     def record_workflow(self, rt) -> str | None:
@@ -3377,7 +3383,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         closing = not any(t["to"] in x["from"] for x in rt.lifecycle["transition"] if "*" not in x["from"])
         runs = [r["id"] for r in self.db.runs.find({"workflow_id": owner, "record": ref, "status": "running"},
                                                    fields=["id"])]
-        if runs and how != "until" and ("*" in t["from"] or closing):
+        if how == "step" and self._step_by_move(rt, ref, rec, member, t, cause):
+            runs = []  # the move was the step: its run has gone on from it
+        if runs and how not in ("until", "step") and ("*" in t["from"] or closing):
             why = f"moved to {rt.state_label(t['to']).lower()}" + (" (a correction)" if "*" in t["from"] else "")
             for r in runs:
                 self.engine.stop(member, r, why, cause)

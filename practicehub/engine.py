@@ -928,9 +928,18 @@ class Engine:
         rec = hub.records.read(*ref.split("/", 1))
         if rec is None:
             raise ValueError(f"state: there is no {ref}")
-        if schema.first(rec, rt.lifecycle["path"]) != step.state:
-            hub.update_record(actor, ref, schema.put(rec, rt.lifecycle["path"], step.state), cause=cause,
-                              run_id=run["id"])
+        now = schema.first(rec, rt.lifecycle["path"])
+        if now != step.state:
+            moved = schema.put(rec, rt.lifecycle["path"], step.state)
+            t = rt.transition(now, step.state)
+            # a person's step with a state is that move: what its form answered goes in as the fields the move asks
+            got = run["ctx"].get(step.id) if step.kind == "task" and isinstance(run["ctx"].get(step.id), dict) else {}
+            names = {f["name"] for f in self.fields_for(step, run)} if got else set()
+            for n in (t or {}).get("fields", []):
+                f = rt.field(n)
+                if f and n in names and got.get(n) not in (None, ""):
+                    moved = schema.put(moved, f["path"], got[n])
+            hub.update_record(actor, ref, moved, cause=cause, run_id=run["id"])
 
     def _moves_due(self, run: dict, wf, cause) -> bool:
         """Move the record for each step with a ``state`` that people or a wait finished (an automation moves it as it
