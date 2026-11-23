@@ -1,8 +1,8 @@
 # A result: a lab value, a vital sign. A lab result is walked by its review (review: received, reviewed, patient told,
 # closed, or patient not told); the physician's review is written back (status final, reviewed-by extensions).
 id = "Observation"
-label = "Result"
-plural = "Results"
+label = "Lab result"
+plural = "Lab results"
 data_class = "clinical"
 standard = "fhir-r4"
 strict = true
@@ -10,6 +10,9 @@ date = "effectiveDateTime"
 flag = "interpretation.0.text"
 active = "not record.status in ['cancelled', 'entered-in-error']"
 order = 40
+# A lab result is part of its patient: reached through their chart (Patient > Lab results > Lab result), listed
+# there, never moved to another patient. Review work and the inbox still find it.
+part_of = "subject"
 summary = "A result: a lab value or a vital sign, and the physician's review of it."
 # A result filed (by the lab, an import, a person) is walked by its review: received, reviewed by a physician, the
 # patient told, closed; corrected by the lab, it is reviewed again. A review that ends without the patient told (not reached, a visit booked, the review

@@ -4292,7 +4292,7 @@ def test_what_a_directive_withholds_is_a_stub_that_says_so_for_everyone_it_does_
     stub = hub.read_record(noor, obs)
     assert "valueQuantity" not in stub and "code" not in stub
     assert stub["meta"]["withheld"]["note"] == "Information withheld at the patient's request"
-    assert hub.title(hub.records.read(*obs.split("/"))) == "Result, restricted at the patient's request"
+    assert hub.title(hub.records.read(*obs.split("/"))) == "Lab result, restricted at the patient's request"
     assert "valueQuantity" not in hub.read_record(liam, obs)
     assert hub.read_record(amara, obs)["valueQuantity"]["value"] == 5.9  # she is named: she still sees it
     chart = hub.chart(noor, ref)

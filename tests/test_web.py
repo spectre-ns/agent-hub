@@ -1755,7 +1755,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """Version 2 of the clinic pack merged Appointment into Visit (tests/test_rules.py upgrades a version 1)."""
-    assert hub.pack.version == "4.1" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "4.2" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do
@@ -2108,17 +2108,18 @@ def test_a_long_link_group_offers_every_one_on_a_list_of_its_own(hub, server):
     amara = M(hub, "dr-amara")
     p = hub.records.search("Patient")[0]
     ref = f"Patient/{p['id']}"
-    have = [r for r in hub.records.search("Observation") if r.get("subject", {}).get("reference") == ref]
-    tmpl = {k: v for k, v in hub.records.search("Observation")[0].items() if k not in ("id", "meta", "review")}
+    # a kind linked to the patient, not a part of it (a part is listed in full in its own section): reports
+    have = [r for r in hub.records.search("DiagnosticReport", limit=None) if r.get("subject", {}).get("reference") == ref]
     for i in range(51 - len(have)):
-        hub.create_record(amara, "Observation", {**tmpl, "status": "registered", "subject": {"reference": ref}})
+        hub.create_record(amara, "DiagnosticReport", {"status": "final", "code": {"text": f"Panel {i}"},
+                                                      "subject": {"reference": ref}})
     tok = token(hub, "dr-amara")
     page = call(server, "GET", f"/{hub.pack.subject['path']}/{p['id']}", tok)[1]
     q = urllib.parse.quote(ref, safe="")
-    assert f'href="/records/Observation?linked={q}">Show all ' in page
-    code, all_ = call(server, "GET", f"/records/Observation?linked={q}", tok)
+    assert f'href="/records/DiagnosticReport?linked={q}">Show all ' in page
+    code, all_ = call(server, "GET", f"/records/DiagnosticReport?linked={q}", tok)
     assert code == 200 and all_.count('<tr><td><a href="') >= 51
-    assert call(server, "GET", "/records/Observation?linked=Patient/nope", tok)[0] == 404
+    assert call(server, "GET", "/records/DiagnosticReport?linked=Patient/nope", tok)[0] == 404
 
 
 def test_the_definition_editor_says_whether_the_hub_accepts_the_text_without_asking_again(hub, server):

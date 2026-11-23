@@ -1134,7 +1134,11 @@ class RecordPages:
             out.append(f'<section class="chart-section{"" if recs else " empty-part"}" id="part-{e(t)}" '
                        f'aria-labelledby="part-{e(t)}-h"><header>'
                        f'<h2 id="part-{e(t)}-h">{e(rt.plural)} <span class="count-badge">{len(recs)}</span></h2>'
-                       f'{none}{add}</header>{self._part_rows(rt, recs) if recs else ""}</section>')
+                       f'{none}{add}</header>{self._part_rows(rt, recs[:50]) if recs else ""}'
+                       # a patient's lab results run to hundreds: the 50 most recent, and every one on a list of its own
+                       + (f'<p class="muted body">The 50 most recent of {len(recs)}. <a href="/records/{e(t)}?linked='
+                          f'{e(urllib.parse.quote(ref, safe=""))}">Show all {len(recs)}</a></p>' if len(recs) > 50 else "")
+                       + '</section>')
             rail.append((f"part-{t}", rt.plural, len(recs)))
         groups: dict[str, dict] = {}
         for x in hub.linked(me, ref):

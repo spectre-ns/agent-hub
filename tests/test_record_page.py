@@ -172,12 +172,24 @@ def test_visits_are_listed_in_time_order_with_a_today_filter(hub, server):
     assert all(d == day.isoformat() for d in shown)
 
 
-def test_a_patients_results_and_prescriptions_are_sections_of_their_chart(hub, server):
+def test_a_patients_lab_results_and_prescriptions_are_sections_of_their_chart(hub, server):
     pid = _ellen(hub).split("/")[1]
     page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
-    assert '<h2 id="link-Observation-h">Results' in page and '<h2 id="link-MedicationRequest-h">Prescriptions' in page
+    # lab results are a part of the patient (Patient > Lab results > Lab result); prescriptions are linked
+    assert page.count('id="part-Observation"') == 1 and 'id="link-Observation"' not in page
+    assert '<h2 id="link-MedicationRequest-h">Prescriptions' in page
     own = page.split('class="subnav owner-rail"', 1)[1].split("</nav>", 1)[0].split('<div class="sec">Linked here', 1)[0]
-    assert 'href="#link-Observation"' in own and 'href="#link-MedicationRequest"' in own
+    assert 'href="#part-Observation"' in own and 'href="#link-MedicationRequest"' in own
+
+
+def test_a_lab_result_is_under_its_patient_in_its_crumbs(hub, server):
+    pid = _ellen(hub).split("/")[1]
+    lab = next(o for o in hub.records.search("Observation", limit=None)
+               if (o.get("subject") or {}).get("reference") == f"Patient/{pid}")
+    page = call(server, "GET", f"/records/Observation/{lab['id']}", token(hub, "dr-amara"))[1]
+    crumbs = page.split('class="crumbs"', 1)[1].split("</div>", 1)[0]
+    ptitle = hub.short_title(hub.records.read("Patient", pid))
+    assert crumbs.index(ptitle) < crumbs.index("Lab results") < crumbs.index(hub.short_title(lab)), crumbs
 
 
 def test_on_the_record_a_decision_leads_its_step_before_the_request_it_is_about(worked, server):
@@ -188,3 +200,20 @@ def test_on_the_record_a_decision_leads_its_step_before_the_request_it_is_about(
     step = page.split('class="rw-step"', 1)[1]
     assert "<h2>Decide</h2>" in step and "<h2>The request</h2>" in step
     assert step.index("<h2>Decide</h2>") < step.index("<h2>The request</h2>") < step.index("What this step reads")
+
+
+def test_a_long_parts_section_shows_the_latest_fifty_and_lists_every_one(hub, server):
+    pid = _ellen(hub).split("/")[1]
+    ref = f"Patient/{pid}"
+    amara = M(hub, "dr-amara")
+    have = [o for o in hub.records.search("Observation", limit=None) if (o.get("subject") or {}).get("reference") == ref]
+    tmpl = {k: v for k, v in have[0].items() if k not in ("id", "meta", "review")}
+    for _ in range(51 - len(have)):
+        hub.create_record(amara, "Observation", {**tmpl, "status": "final", "subject": {"reference": ref}})
+    tok = token(hub, "dr-amara")
+    page = call(server, "GET", f"/patients/{pid}", tok)[1]
+    q = urllib.parse.quote(ref, safe="")
+    section = page.split('id="part-Observation"', 1)[1].split("</section>", 1)[0]
+    assert f'href="/records/Observation?linked={q}">Show all ' in section
+    code, all_ = call(server, "GET", f"/records/Observation?linked={q}", tok)
+    assert code == 200 and all_.count('<tr><td><a href="') >= 51
