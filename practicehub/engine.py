@@ -446,17 +446,6 @@ def _plain(doc: dict | None) -> dict | None:
     return {k: v for k, v in doc.items() if k != "_id"} if doc is not None else None
 
 
-def _mentions(value, ref: str) -> bool:
-    """Whether ``ref`` is anywhere in this value, as a string or a key (what searching its JSON for it found)."""
-    if isinstance(value, str):
-        return value == ref
-    if isinstance(value, dict):
-        return any(k == ref or _mentions(v, ref) for k, v in value.items())
-    if isinstance(value, (list, tuple)):
-        return any(_mentions(v, ref) for v in value)
-    return False
-
-
 _REF = re.compile(r"[A-Z][A-Za-z0-9_]*/[A-Za-z0-9_.-]+")
 
 
@@ -523,6 +512,31 @@ def _item_doc(hub, **fields) -> dict:
     return doc
 
 
+def _run_doc(**fields) -> dict:
+    """A new run with every field it has: what is not given takes its default."""
+    doc = {"id": None, "workflow_id": None, "version": None, "title": "", "record": None, "subject": None,
+           "status": "running", "ctx": {}, "steps": {}, "started_by": None, "root_event": None, "item": None,
+           "waits_on": None, "resting": False, "picks": None, "at": None, "deadline_at": None,
+           "deadline_missed_at": None, "created_at": utcnow(), "updated_at": utcnow()}
+    doc.update(fields)
+    doc["_id"] = doc["id"]
+    doc["refs"] = run_refs(doc)
+    return doc
+
+
+def home_run(hub, wid: str, *, title: str, started_by: str, cause, record: str | None = None,
+             ctx: dict | None = None) -> str:
+    """The run one of the hub's own notices hangs on (an event no workflow took, an emergency access, something
+    about a member's account, a change waiting for approval, a mention): of the hub's own workflow ``wid``
+    (version 0), ended as it is made, its steps passed over. Returns its id."""
+    wf, _ = hub.workflow(wid, 0)
+    run_id = _new_id("run")
+    hub.db.runs.insert(_run_doc(id=run_id, workflow_id=wid, version=0, title=title, record=record,
+                                status="completed", ctx=ctx or {}, steps={s.id: {"state": "skipped"} for s in wf.steps},
+                                started_by=started_by, root_event=cause))
+    return run_id
+
+
 class Engine:
     def __init__(self, hub):
         self.hub = hub
@@ -579,18 +593,9 @@ class Engine:
         if status:
             flt["status"] = status
         order = [("created_at", -1)]
-        if not mentions:
-            return [_plain(r) for r in self.hub.db.runs.find(flt, sort=order, limit=limit)]
-        # about it, or carrying it anywhere in the run's data (runs keep the records they carry in ``refs``; one
-        # saved before it did is searched)
-        out = []
-        flt = {**flt, "$or": [{"record": mentions}, {"refs": mentions}, {"refs": {"$exists": False}}]}
-        for r in self.hub.db.runs.find(flt, sort=order):
-            if r.get("record") == mentions or mentions in (r.get("refs") or ()) or _mentions(r.get("ctx"), mentions):
-                out.append(_plain(r))
-                if len(out) >= limit:
-                    break
-        return out
+        if mentions:  # about it, or carrying it anywhere in its data: a run keeps the records it carries in ``refs``
+            flt["refs"] = mentions
+        return [_plain(r) for r in self.hub.db.runs.find(flt, sort=order, limit=limit)]
 
     def _save(self, run: dict) -> None:
         # the people chosen, in the transition being made, for this run's work: kept on the run until that work
@@ -738,11 +743,9 @@ class Engine:
                 lc = lc_type.lifecycle if lc_type else None
                 ctx["run"]["start_state"] = schema.first(hub.records.read(*record.split("/", 1)), lc["path"]) \
                     if lc else None
-            hub.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": wid, "version": row["version"],
-                                "title": title, "record": record, "subject": subject, "status": "running", "ctx": ctx,
-                                "steps": {s.id: {"state": "pending"} for s in wf.steps}, "started_by": actor["id"],
-                                "refs": run_refs({"ctx": ctx, "record": record}),
-                                "root_event": None, "created_at": utcnow(), "updated_at": utcnow()})
+            hub.db.runs.insert(_run_doc(id=run_id, workflow_id=wid, version=row["version"], title=title,
+                                        record=record, subject=subject, ctx=ctx, started_by=actor["id"],
+                                        steps={s.id: {"state": "pending"} for s in wf.steps}))
             seq = hub.track.append(actor, "run.started", record or "", run_id=run_id, cause=cause,
                                    data={"workflow": wid, "version": row["version"], "title": title, "input": values,
                                          "parent": parent, **({"origin": origin} if origin else {})})
@@ -1635,11 +1638,11 @@ class Engine:
 
     def recheck_waits(self, cause: int | None, ref: str | None = None) -> None:
         """Something changed: let every run that is waiting see whether what it waits for now holds. ``ref``: the
-        record that changed; only the runs whose waits can see it are rechecked (``waits_on``: that record, or "*"),
-        and runs saved before it was kept; the tick rechecks every waiting run (time, and changes made outside)."""
+        record that changed; only the runs whose waits can see it are rechecked (``waits_on``: that record, or "*");
+        the tick rechecks every waiting run (time, and changes made outside)."""
         q = {"status": "running", **_WAITING}
         if ref:
-            q["$or"] = [{"waits_on": {"$in": [ref, "*"]}}, {"waits_on": {"$exists": False}}]
+            q["waits_on"] = {"$in": [ref, "*"]}
         rows = self.hub.db.runs.find(q, fields=["id"])
         for r in rows:
             if r["id"] in self._advancing:
@@ -3369,13 +3372,9 @@ class Engine:
         hub = self.hub
         with hub.db:
             seq = hub.track.append(actor, "event.unhandled", record or "", cause=cause, data={"type": event_type})
-            run_id = _new_id("run")
+            run_id = home_run(hub, UNHANDLED_WORKFLOW, title=f"An event no workflow took: {event_type}",
+                              started_by=actor["id"], cause=cause, record=record, ctx={"event": {"type": event_type}})
             run = {"id": run_id}
-            hub.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": UNHANDLED_WORKFLOW, "version": 0,
-                                "title": f"An event no workflow took: {event_type}", "record": record,
-                                "status": "completed", "ctx": {"event": {"type": event_type}},
-                                "steps": {"look": {"state": "skipped"}}, "started_by": actor["id"],
-                                "root_event": cause, "created_at": utcnow(), "updated_at": utcnow()})
             self.alert(run, None, f"Urgent: {actor.get('name') or actor['id']} sent the event \u201c{event_type}\u201d "
                                   f"and no workflow took it. Check the sender, or the workflow meant to listen for it.",
                        role=hub.practice.get("escalation_role"), cause=seq, priority="urgent")

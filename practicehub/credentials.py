@@ -329,13 +329,10 @@ class CredentialsMixin:
     def _account_notice(self, actor: dict, target: dict, cause: int, title: str, summary: str, data: dict,
                         what: str, run_title: str = "About your account", ctx: dict | None = None) -> str:
         """An urgent notice, on the member's own work, about their account (a setup code issued, a lockout)."""
-        from .engine import _item_doc, _new_id
-        run_id, item_id = _new_id("run"), _new_id("item")
-        self.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": ACCOUNT_WORKFLOW, "version": 0,
-                             "title": run_title, "record": None, "status": "completed",
-                             "ctx": ctx or {"account": cause}, "steps": {"look": {"state": "skipped"}},
-                             "started_by": actor["id"], "root_event": cause, "created_at": utcnow(),
-                             "updated_at": utcnow()})
+        from .engine import _item_doc, _new_id, home_run
+        item_id = _new_id("item")
+        run_id = home_run(self, ACCOUNT_WORKFLOW, title=run_title, started_by=actor["id"], cause=cause,
+                          ctx=ctx or {"account": cause})
         self.db.items.insert(_item_doc(
             self, id=item_id, run_id=run_id, step_id="look", kind="notice", role=None, assignee=target["id"],
             persons_only=1, status="open", cause=cause, priority="urgent", title=title,

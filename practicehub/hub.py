@@ -1651,16 +1651,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     def _tell_approvers(self, actor: dict, cause: int, exclude: set, title: str, summary: str, href: str) -> list[str]:
         """A notice, on their work, to each active policy owner who may approve what is waiting: never the one who
         asked (``actor``) nor anyone in ``exclude`` (the member it is for, others who asked, reviewers)."""
-        from .engine import _item_doc, _new_id
+        from .engine import _item_doc, _new_id, home_run
         who = [m for m in self.members("person") if m["status"] == "active" and m["id"] != actor.get("id")
                and m["id"] not in exclude and self.is_policy_owner(m)]
         if not who:
             return []
-        run_id = _new_id("run")
-        self.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": APPROVAL_WORKFLOW, "version": 0,
-                             "title": title, "record": None, "status": "completed", "ctx": {"waiting": cause},
-                             "steps": {"look": {"state": "skipped"}}, "started_by": actor["id"], "root_event": cause,
-                             "created_at": utcnow(), "updated_at": utcnow()})
+        run_id = home_run(self, APPROVAL_WORKFLOW, title=title, started_by=actor["id"], cause=cause,
+                          ctx={"waiting": cause})
         items = []
         for m in who:
             item_id = _new_id("item")

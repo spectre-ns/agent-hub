@@ -6846,3 +6846,34 @@ def test_a_started_record_of_a_type_the_member_may_not_read_is_never_named_or_li
     assert theirs["ref"].startswith("Encounter/") and theirs["readable"] is False
     (mine,) = started(M(hub, "dr-amara"))
     assert mine["ref"] == theirs["ref"] and mine["readable"] is True
+
+
+def test_every_run_is_written_with_every_field_a_run_has(worked):
+    """A run is one shape, whoever makes it: a workflow started, and the five runs the hub's own notices hang on
+    (an event no workflow took, an emergency access, a member's account, a change waiting for approval, a
+    mention). So a query never has to ask whether a field is there."""
+    from practicehub.credentials import ACCOUNT_WORKFLOW
+    from practicehub.engine import UNHANDLED_WORKFLOW, _run_doc
+    from practicehub.hub import APPROVAL_WORKFLOW
+    from practicehub.mentions import MENTION_WORKFLOW, mentions_of
+    from practicehub.restrictions import OVERRIDE_WORKFLOW
+    hub, rana = worked, M(worked, "rana")
+    hub.engine.emit(rana, "lab.result_lost_in_the_post", data={"note": "x"})
+    ref, obs = _ellen_and_her_result(hub)
+    _lockbox(hub, ref, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-liam"}])
+    hub.break_glass(M(hub, "noor"), obs, "Collapsed in the waiting room; need her results now")
+    hub.add_member(rana, {"id": "temp", "name": "Tess Temp", "roles": []})
+    hub.issue_setup_code(rana, "temp")
+    hub.propose_agent_profile(rana, "intake-agent", {"max_risk": "high"})
+    mentions_of(hub).mention(rana, ref, "@dr-liam please look", anchor="note")
+    runs = hub.db.runs.find({})
+    homes = {UNHANDLED_WORKFLOW, OVERRIDE_WORKFLOW, ACCOUNT_WORKFLOW, APPROVAL_WORKFLOW, MENTION_WORKFLOW}
+    assert homes <= {r["workflow_id"] for r in runs} and any(r["workflow_id"] not in homes for r in runs)
+    every = set(_run_doc())
+    for r in runs:
+        assert every <= set(r), f"{r['workflow_id']}: a run without {sorted(every - set(r))}"
+        if r["workflow_id"] in homes:  # of the hub's own workflow, ended as made, each step passed over
+            assert r["version"] == 0 and r["status"] == "completed"
+            assert set(r["steps"]) == {s.id for s in hub.workflow(r["workflow_id"], 0)[0].steps}
+    # and a run is found by a record it carries without reading every run: the mention's, by the file it is on
+    assert MENTION_WORKFLOW in {r["workflow_id"] for r in hub.engine.runs(mentions=ref, limit=1000)}

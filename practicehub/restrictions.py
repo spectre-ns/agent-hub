@@ -382,8 +382,7 @@ class Restrictions:
         ds = [d for d in self.of_subject(subject or "") if not self._allowed(member, d)]
         if not ds:
             raise Invalid("nothing in this file is withheld from you: there is nothing to open with emergency access")
-        from .engine import _item_doc, _new_id
-        from .store import utcnow
+        from .engine import _item_doc, _new_id, home_run
         # a short title (a name, never a card number): it travels in notice titles and lists
         title = hub.short_title(hub.records.read(*subject.split("/", 1)) or {}) or "a file"
         what = hub.short_title(rec) or "a record"
@@ -399,12 +398,8 @@ class Restrictions:
             seq = hub.track.append(member, "record.viewed", ref,
                                    data={"how": "override", "reason": reason, "subject": subject,
                                          "restrictions": [d["ref"] for d in ds]})
-            run_id = _new_id("run")
-            hub.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": OVERRIDE_WORKFLOW, "version": 0,
-                                "title": f"Emergency access: {title}", "record": subject, "status": "completed",
-                                "ctx": {"override": seq}, "steps": {"review": {"state": "skipped"}},
-                                "started_by": member["id"], "root_event": seq, "created_at": utcnow(),
-                                "updated_at": utcnow()})
+            run_id = home_run(hub, OVERRIDE_WORKFLOW, title=f"Emergency access: {title}", started_by=member["id"],
+                              cause=seq, record=subject, ctx={"override": seq})
             owners = self._reviewers(member, ds, rtype)
             blind = [] if owners else self._blind_reviewers(member)
             if not owners:

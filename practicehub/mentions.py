@@ -135,7 +135,7 @@ the file in ``field`` it is about, when it is about a file rather than the field
 
     def _send(self, author, ref, m, *, text, anchor, quote, field, file="", cause) -> dict:
         hub = self.hub
-        from .engine import _item_doc, _new_id
+        from .engine import _item_doc, _new_id, home_run
         mid = "mn-" + secrets.token_hex(6)
         rtype, rid = ref.split("/", 1)
         rec = hub.records.read(rtype, rid)
@@ -144,12 +144,8 @@ the file in ``field`` it is about, when it is about a file rather than the field
             seq = hub.track.append(author, "mention.created", ref, cause=cause,
                                    data={"mention": mid, "who": m["id"], "kind": m["kind"], "anchor": anchor,
                                          "field": field, **({"file": file} if file else {})})
-            run_id = _new_id("run")
-            self.db.runs.insert({"_id": run_id, "id": run_id, "workflow_id": MENTION_WORKFLOW, "version": 0,
-                                 "title": f"You were mentioned: {title}", "record": ref, "status": "completed",
-                                 "ctx": {"mention": mid}, "steps": {"look": {"state": "skipped"}},
-                                 "started_by": author["id"], "root_event": seq, "created_at": utcnow(),
-                                 "updated_at": utcnow()})
+            run_id = home_run(hub, MENTION_WORKFLOW, title=f"You were mentioned: {title}", started_by=author["id"],
+                              cause=seq, record=ref, ctx={"mention": mid})
             item_id = _new_id("item")
             what = "asked you" if m["kind"] == "agent" else "mentioned you"
             self.db.items.insert(_item_doc(
