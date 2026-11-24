@@ -60,18 +60,12 @@ help = "on a registration form only: where the practice's intake of the person i
 
 # The registration: its states and the moves between them are the new-patient intake's (written as states and edges),
 # not listed here. A registration whose intake is cancelled is withdrawn (the person stays inactive: never taken in
-# silently); one an older intake (that walked the person's own record) finished is closed, and the person's record
-# says how it ended.
+# silently).
 [lifecycle]
 field = "registration"
 initial = "received"
 labels = { received = "Waiting to be checked", checked = "Checked", accepted = "Accepted", waitlisted = "Waitlisted", declined = "Declined", withdrawn = "Withdrawn", closed = "Closed" }
 abandoned = { received = "withdrawn", checked = "withdrawn" }
-ended = { received = "closed", checked = "closed" }
-[[lifecycle.transition]]
-from = ["received", "checked"]
-to = "withdrawn"
-by = "workflow"
 [[lifecycle.transition]]
 from = ["received", "checked"]
 to = "closed"

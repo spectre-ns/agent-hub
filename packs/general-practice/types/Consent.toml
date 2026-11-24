@@ -109,8 +109,7 @@ fields = ["patient", "status", "received", "request", "withhold_classes", "withh
 
 # The privacy-request workflow (written as states and edges) reviews a request and puts it in force or refuses it: its
 # moves are the workflow's, not listed here. The privacy officer lifts one in force (and may put a lifted one back). A
-# request whose work is cancelled is withdrawn, never silently refused or put in force. A run of an older version
-# (which put a directive of its own in force) that ends leaves its request withdrawn. Reviewed is where a run of an
+# request whose work is cancelled is withdrawn, never silently refused or put in force. Reviewed is where a run of an
 # earlier pack version passes (its review moved the request there before putting it in force or refusing it): the
 # moves through it stay for those runs.
 [lifecycle]
@@ -119,7 +118,6 @@ initial = "requested"
 starts = ["active"]   # the privacy officer records one the patient signed on paper straight in force
 labels = { requested = "Requested", reviewed = "Reviewed", active = "In force", refused = "Refused", withdrawn = "Withdrawn" }
 abandoned = { requested = "withdrawn", reviewed = "withdrawn" }
-ended = { requested = "withdrawn", reviewed = "withdrawn" }
 [[lifecycle.transition]]
 from = ["requested"]
 to = "reviewed"
@@ -135,10 +133,6 @@ from = ["reviewed"]
 to = "refused"
 by = "workflow"
 label = "Refused"
-[[lifecycle.transition]]
-from = ["requested", "reviewed"]
-to = "withdrawn"
-by = "workflow"
 [[lifecycle.transition]]
 from = ["active"]
 to = "withdrawn"

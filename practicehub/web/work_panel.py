@@ -434,7 +434,8 @@ class WorkPanel:
         for t in lc["transition"]:
             frm = "any state" if "*" in t["from"] else ", ".join(rt.state_label(f) for f in t["from"])
             here = (st in t["from"] or "*" in t["from"]) and t["by"] != "workflow"
-            who = "only a workflow" if t["by"] == "workflow" else "anyone who may change it"
+            who = "only when its work is cancelled" if t.get("abandon") else \
+                "only a workflow" if t["by"] == "workflow" else "anyone who may change it"
             rows.append(f'<tr{" class=here" if here and t["to"] != st else ""}><td>{e(frm)}</td>'
                         f'<td>{e(rt.state_label(t["to"]))}</td><td>{e(t["label"])}</td><td>{e(who)}</td></tr>')
         return ('<details class="lc-moves"><summary>Every move, in words</summary><div class="tablewrap"><table>'

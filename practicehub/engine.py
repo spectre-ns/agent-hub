@@ -1305,7 +1305,6 @@ class Engine:
             self._save(run)
             seq = hub.track.append(self.automation_actor(run), "run.completed", run["record"] or "", run_id=run_id,
                                    cause=cause)
-            self._ended(run, seq)
             self._abandon(run, seq, stranded_only=True)
             self._late_finish(run, cause)
             self._re_enter(run, seq)
@@ -1753,29 +1752,12 @@ class Engine:
                                         data={"step": step_id, "error": st.get("error"), "reason": reason})
         self.advance(run_id, seq)
 
-    def _ended(self, run: dict, cause: int) -> None:
-        """A run of its record's own workflow ended with the record still in a state the lifecycle's ``ended`` names
-        (an older version that did the work without moving it): the record goes where that says, by the workflow."""
-        ref = run.get("record") or ""
-        if "/" not in ref:
-            return
-        hub = self.hub
-        rt = hub.record_type(ref.split("/", 1)[0])
-        lc = rt.lifecycle if rt else None
-        if not lc or not lc.get("ended") or (rt.workflow or {}).get("id") != run["workflow_id"]:
-            return
-        if any(r["id"] != run["id"] for r in self.runs(record=ref, status="running")):
-            return
-        rec = hub.records.read(*ref.split("/", 1))
-        to = lc["ended"].get(schema.first(rec, lc["path"])) if rec else None
-        if to:
-            hub.update_record(self.automation_actor(run), ref, schema.put(rec, lc["path"], to), cause=cause,
-                              run_id=run["id"])
-
     def _abandon(self, run: dict, cause: int, *, stranded_only: bool = False) -> None:
-        """A run about a record was cancelled: move the record where its lifecycle says abandoned work goes, unless
-        other work on it is still open. ``stranded_only``: the run finished, on a way that never moved its record on
-        (a request a nurse dealt with by phone): only a state that workflows alone leave is closed so."""
+        """A run about a record was cancelled: move the record where its lifecycle says abandoned work goes
+        (``abandoned``, a move of its own that needs no transition written for it; a state named as its own target
+        stays where it is), unless other work on it is still open. ``stranded_only``: the run finished, on a way that
+        never moved its record on (a request a nurse dealt with by phone): only a state that workflows alone leave is
+        closed so."""
         ref = run.get("record") or ""
         if "/" not in ref:
             return
@@ -1797,7 +1779,7 @@ class Engine:
         if to and stranded_only:
             exits = [t for t in lc["transition"] if st in t["from"]]
             to = to if exits and all(t["by"] == "workflow" for t in exits) else None
-        if to:
+        if to and to != st:
             hub.update_record(actor, ref, schema.put(rec, lc["path"], to), cause=cause, run_id=run["id"])
 
     # ------------------------------------------------------------------ blocks

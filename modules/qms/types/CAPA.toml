@@ -110,18 +110,6 @@ requires = ["root_cause", "plan"]
 label = "Plan agreed"
 
 [[lifecycle.transition]]
-from = ["further-action", "actions"]
-to = "investigating"
-by = "workflow"            # its run was cancelled: the plan is reopened (a quality manager may start it again, or cancel it)
-label = "Back to investigating"
-
-[[lifecycle.transition]]
-from = ["verification"]
-to = "further-action"
-by = "workflow"            # its verification was cancelled (the not-effective edge makes this move too)
-label = "Back to further action"
-
-[[lifecycle.transition]]
 from = ["verification"]
 to = "actions"
 by = "workflow"            # a pass walked by the workflow's first version, before further action was a state of its own

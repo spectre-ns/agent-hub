@@ -1669,7 +1669,8 @@ class RecordPages:
 
         moves = [t for t in lc.get("transition", []) if (st in t["from"] or "*" in t["from"]) and t["to"] != st] \
             if lc else []
-        auto = [t for t in moves if t["by"] == "workflow"]
+        # where its workflow moves it from here: not where it goes only if that work is cancelled (``abandoned``)
+        auto = [t for t in moves if t["by"] == "workflow" and not t.get("abandon")]
         status, work = self.record_work(req, ref, rt, rec, st, url, editing=editing)
         moves_html = ""
         sigs = hub.signatures(me, ref)

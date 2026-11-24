@@ -306,12 +306,6 @@ labels = { requested = "Requested", reading = "Being read", callback = "To call 
 abandoned = { requested = "cancelled", reading = "cancelled", callback = "cancelled", "not-reached" = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
 # How each state reads at a glance: a visit no-showed or cancelled has ended, one with no note needs the physician.
 tones = { requested = "waiting", reading = "waiting", callback = "attention", "not-reached" = "attention", drafting = "active", editing = "active", signing = "active", planned = "waiting", arrived = "active", triaged = "active", "in-progress" = "active", onleave = "active", finished = "done", undocumented = "attention", cancelled = "ended", noshow = "ended", "entered-in-error" = "ended" }
-# A request whose work is cancelled before it is booked is cancelled too (lifecycle.abandoned): not an edge of the
-# workflow, so the move is kept here.
-[[lifecycle.transition]]
-from = ["requested", "reading", "callback", "not-reached"]
-to = "cancelled"
-by = "workflow"
 # Checking in opens two hours before the visit is booked for, and a no-show only once its time has come: the desk who
 # opens tomorrow's visit by mistake cannot mark it missed (which messages the patient and frees the slot).
 [[lifecycle.transition]]

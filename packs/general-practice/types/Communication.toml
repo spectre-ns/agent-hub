@@ -104,7 +104,6 @@ initial = "received"
 starts = ["closed"]
 labels = { received = "Waiting to be read", to-call = "To call now", not-reached = "Could not reach", drafting = "Reply being drafted", to-check = "Reply to check", with-nurse = "With a nurse", triaged = "Triaged", answered = "Answered", closed = "Closed" }
 abandoned = { to-call = "closed", not-reached = "closed", drafting = "closed", to-check = "closed", with-nurse = "closed", triaged = "closed", answered = "closed" }
-ended = { received = "closed", triaged = "closed", answered = "closed" }
 # the moves a run of pack 4.5 or before still makes: screened (triaged), then answered
 [[lifecycle.transition]]
 from = ["received"]
@@ -116,12 +115,6 @@ from = ["triaged"]
 to = "answered"
 by = "workflow"
 label = "Answered"
-# where its work cancelled leaves it (and where an older run that ended left it): closed, by the workflow
-[[lifecycle.transition]]
-from = ["to-call", "not-reached", "drafting", "to-check", "with-nurse", "triaged", "answered"]
-to = "closed"
-by = "workflow"
-label = "Closed"
 [[lifecycle.transition]]
 from = ["received"]
 to = "closed"

@@ -105,13 +105,7 @@ to = "in-review"
 label = "Submit for signing"
 
 # Putting it in force and sending it back are the inventory-policy workflow's edges; only the moves people make by
-# hand, where cancelled work leaves it, and its retiring (by the next policy's run) are listed here.
-
-[[lifecycle.transition]]
-from = ["in-review"]
-to = "draft"
-by = "workflow"            # only when its signing is cancelled part way
-label = "Back to its author"
+# hand and its retiring (by the next policy's run) are listed here. Where cancelled work leaves it is abandoned, above.
 
 [[lifecycle.transition]]
 from = ["in-review"]

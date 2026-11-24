@@ -107,13 +107,8 @@ to = "in-review"
 label = "Send for review"
 
 # The moves its workflow makes (approve, return, send back for review, make obsolete, keep) are the dms-review
-# workflow's edges; only the moves people make by hand, and where cancelled work leaves it, are listed here.
-
-[[lifecycle.transition]]
-from = ["in-review", "retiring"]
-to = "draft"
-by = "workflow"         # only when its review or its retiring is cancelled part way
-label = "Hand back as a draft"
+# workflow's edges; only the moves people make by hand are listed here. Where cancelled work leaves it is abandoned,
+# above.
 
 [[lifecycle.transition]]
 from = ["approved"]

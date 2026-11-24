@@ -156,10 +156,8 @@ fields = ["subject", "medication", "directions", "quantity", "quantity_unit", "r
 [lifecycle]
 field = "status"
 initial = "draft"
-# Its renewal cancelled, the request is closed; a renewal run of an older version that ended without moving it (it
-# wrote a separate order, or declined) closes it too.
+# Its renewal cancelled, the request is closed.
 abandoned = { draft = "cancelled" }
-ended = { draft = "cancelled" }
 # Issued only by the renewal workflow (its prescriber signed for it) or by a physician signing the order: never moved
 # to active by hand, by a nurse or a service that writes clinical records.
 [[lifecycle.transition]]

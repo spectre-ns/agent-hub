@@ -158,14 +158,8 @@ from = ["draft"]
 to = "submitted"
 label = "Submit for posting"
 
-# Posting it and sending it back are the inventory-post workflow's edges; only the moves people make by hand, and
-# where cancelled work leaves it, are listed here.
-[[lifecycle.transition]]
-from = ["submitted"]
-to = "draft"
-by = "workflow"            # only when its sign-off is cancelled part way
-label = "Back to its author"
-
+# Posting it and sending it back are the inventory-post workflow's edges; only the moves people make by hand are
+# listed here. Where cancelled work leaves it is abandoned, above.
 [[lifecycle.transition]]
 from = ["rejected"]
 to = "draft"

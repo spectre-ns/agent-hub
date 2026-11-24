@@ -128,13 +128,7 @@ to = "in-review"
 label = "Submit for approval"
 
 # The moves its workflow makes (in use at once, approve, send back) are the inventory-part workflow's edges; only the
-# moves people make by hand, and where cancelled work leaves it, are listed here.
-
-[[lifecycle.transition]]
-from = ["in-review"]
-to = "draft"
-by = "workflow"            # only when its approval is cancelled part way
-label = "Back to its author"
+# moves people make by hand are listed here. Where cancelled work leaves it is abandoned, above.
 
 [[lifecycle.transition]]
 from = ["in-review"]

@@ -90,9 +90,5 @@ labels = { planned = "To code", coded = "To submit", "on-hold" = "Held", billabl
 abandoned = { planned = "aborted", coded = "aborted" }   # its work cancelled: the charge is too
 tones = { planned = "waiting", coded = "waiting", "on-hold" = "attention", billable = "done", "not-billable" = "ended", aborted = "ended", billed = "done", "entered-in-error" = "ended" }
 [[lifecycle.transition]]
-from = ["planned", "coded"]
-to = "aborted"
-by = "workflow"   # its claim's work cancelled (lifecycle.abandoned)
-[[lifecycle.transition]]
 from = ["*"]
 to = "entered-in-error"

@@ -239,12 +239,6 @@ requires = ["t183_signed_on"]
 confirm = "The return is transmitted to the CRA as soon as you sign."
 
 [[lifecycle.transition]]
-from = ["filing"]
-to = "client-signed"
-by = "workflow"
-label = "Not transmitted: back to the partner"
-
-[[lifecycle.transition]]
 from = ["filed"]
 to = "assessed"
 label = "Record the notice of assessment"

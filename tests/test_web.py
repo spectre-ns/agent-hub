@@ -2191,6 +2191,24 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     assert f'href="{addr(hub, visit)}#work"' in _panel(chart) and "On this patient" in chart
 
 
+def test_where_cancelled_work_leaves_a_record_is_not_told_as_a_step_of_its_workflow(hub, server):
+    """A record's page says where its workflow moves it from here. Where it goes only if that work is cancelled (its
+    type's ``abandoned``, a move no transition is written for) is not one of those; the table of its moves says when
+    that one is made."""
+    from practicehub import schema
+    rt = hub.record_type("QuestionnaireResponse")
+    assert rt.transition("received", "withdrawn")["abandon"]  # a registration whose intake is cancelled
+    reg = next(r for r in hub.records.search("QuestionnaireResponse", limit=None)
+               if schema.first(r, rt.lifecycle["path"]) == "received")
+    amara = token(hub, "dr-amara")
+    page = call(server, "GET", addr(hub, f"QuestionnaireResponse/{reg['id']}"), amara)[1]
+    told = re.search(r"Its workflow moves it to ([^<]*)\.", page).group(1)
+    assert rt.state_label("checked") in told and rt.state_label("withdrawn") not in told
+    modal = call(server, "GET", f"/records/QuestionnaireResponse/{reg['id']}/workflow", amara)[1]
+    assert (f'<td>{rt.state_label("received")}</td><td>{rt.state_label("withdrawn")}</td>'
+            f'<td>{rt.state_label("withdrawn")}</td><td>only when its work is cancelled</td>') in modal
+
+
 def test_a_record_page_reads_in_words(hub, server):
     run = visit_run(hub)
     visit = next(r for r in run["refs"] if r.startswith("Encounter/"))

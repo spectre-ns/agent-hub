@@ -201,7 +201,6 @@ fields = ["subject", "status", "test", "category_text", "effectiveDateTime", "va
 [lifecycle]
 field = "review"
 initial = "received"
-ended = { reviewed = "closed", told = "closed" }
 [[lifecycle.transition]]
 from = ["reviewed", "told"]
 to = "closed"

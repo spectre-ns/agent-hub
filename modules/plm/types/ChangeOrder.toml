@@ -107,18 +107,12 @@ label = "Send for review"
 requires = ["reason"]
 
 # Approving, rejecting, releasing and returning it are the plm-change workflow's edges; only the moves people make by
-# hand, and where cancelled work leaves it, are listed here.
+# hand are listed here. Where cancelled work leaves it is abandoned, above.
 
 [[lifecycle.transition]]
 from = ["rejected"]
 to = "draft"
 label = "Revise"
-
-[[lifecycle.transition]]
-from = ["review", "approved", "releasing"]
-to = "draft"
-by = "workflow"            # only when its review, its documents' revision or its release is cancelled part way
-label = "Back to its author"
 
 [[lifecycle.transition]]
 from = ["draft", "rejected"]   # not while the board has it: its review ends it

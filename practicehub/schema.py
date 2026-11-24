@@ -237,8 +237,8 @@ KEYS = {
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
               "roles", "required_unless"},
-    "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "abandoned", "ended", "in_use",
-                  "labels", "tones"},
+    "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "abandoned", "in_use", "labels",
+                  "tones"},
     "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "link": {"rel", "label", "to", "many", "help", "back"},
@@ -413,7 +413,8 @@ def move_row(frm, to, *, by, label, asks=(), requires=(), **more) -> dict:
     """One move of a lifecycle, as everything that reads a type's transitions takes it: a ``[[lifecycle.transition]]``
     as parsed, and a move the type's workflow makes (``catalog._with_workflow_moves``). ``asks``: the fields its
     screen asks for; ``requires``: those that must be set once it has moved. ``more``: its ``screen``, ``comment``,
-    ``sign``, ``opens`` and ``confirm``, and what marks a workflow's move (``edge``, ``entry``)."""
+    ``sign``, ``opens`` and ``confirm``, and what marks a move no transition was written for: a workflow's
+    (``edge``, ``entry``), or where ``abandoned`` sends a record whose work is cancelled (``abandon``)."""
     return {"from": list(frm), "to": to, "by": by, "label": label, "screen": None, "asks": list(asks),
             "requires": list(requires), "comment": False, "sign": None, **more}
 
@@ -585,7 +586,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             if st not in states:
                 problems.append(f"lifecycle.locked: {st!r} is not one of its states")
         # Where a record goes when the work that was moving it is cancelled: a state that only workflows leave
-        # would otherwise strand the record for good.
+        # would otherwise strand the record for good. It is a move of its own, which the engine makes
+        # (``Engine._abandon``): no transition is written for it. A state named as its own target stays where it is.
         abandoned = lc.get("abandoned") or {}
         if not isinstance(abandoned, dict):
             problems.append("lifecycle.abandoned: a table of state = the state it goes to")
@@ -594,34 +596,30 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         for st, to in abandoned.items():
             if st not in states or to not in states:
                 problems.append(f"lifecycle.abandoned: {st!r} = {to!r}: both must be its states")
-            elif not any(st in t["from"] or "*" in t["from"] for t in trans if t["to"] == to):
-                problems.append(f"lifecycle.abandoned: there is no move from {st!r} to {to!r}")
-        # Where a record goes when its workflow's run ends with it still in a state the run was to move it out of:
-        # a run of an older version that did the work without naming states (a question answered before the
-        # question had a lifecycle). A current version moves its record itself, so for it this never applies.
-        ended = lc.get("ended") or {}
-        if not isinstance(ended, dict):
-            problems.append("lifecycle.ended: a table of state = the state it goes to")
-            ended = {}
-        ended = dict(ended)
-        for st, to in ended.items():
-            if st not in states or to not in states:
-                problems.append(f"lifecycle.ended: {st!r} = {to!r}: both must be its states")
-            elif not any(st in t["from"] or "*" in t["from"] for t in trans if t["to"] == to):
-                problems.append(f"lifecycle.ended: there is no move from {st!r} to {to!r}")
         for st in states:
             exits = [t for t in trans if (st in t["from"] or "*" in t["from"]) and t["to"] != st]
             if exits and all(t["by"] == "workflow" for t in exits) and st not in abandoned:
                 problems.append(f"lifecycle.abandoned: only workflows move a record out of {st!r}; say where it goes "
                                 f"if that work is cancelled (abandoned = {{ {st!r} = ... }})".replace("'", '"'))
+        for t in trans:  # a move by the workflow that says nothing but what abandoned says already
+            if t["by"] == "workflow" and not (t["asks"] or t["requires"] or t["sign"] or t["screen"]) \
+                    and t["from"] and all(f in states and abandoned.get(f) == t["to"] for f in t["from"]):
+                frm = [repr(f) for f in t["from"]]
+                problems.append(f"lifecycle.transition to {t['to']!r}: abandoned already moves a record there from "
+                                f"{' and '.join([', '.join(frm[:-1]), frm[-1]] if frm[:-1] else frm)} when its work "
+                                f"is cancelled; leave it out")
+        for st, to in abandoned.items():  # the move itself, for each pair no transition of the type's makes
+            if st != to and st in states and to in states \
+                    and not any(x["to"] == to and (st in x["from"] or "*" in x["from"]) for x in trans):
+                trans.append(move_row([st], to, by="workflow", label=labels[to], abandon=True))
         in_use = lc.get("in_use")  # the state people work from; while revised, the last such version stays shown
         if in_use is not None and in_use not in states:
             problems.append(f"lifecycle.in_use: {in_use!r} is not one of its states")
         revising = revising_states(states, trans, in_use)
         tones = _lifecycle_tones(lc.get("tones"), states, problems)
         lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial, "tones": tones,
-              "starts": list(starts), "transition": trans, "locked": locked, "abandoned": abandoned, "ended": ended, "in_use": in_use, "revising": revising,
-              "labels": labels}
+              "starts": list(starts), "transition": trans, "locked": locked, "abandoned": abandoned, "in_use": in_use,
+              "revising": revising, "labels": labels}
     for key in ("date", "flag"):
         p = doc.get(key)
         if p and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.([A-Za-z0-9_]+))*", str(p)):

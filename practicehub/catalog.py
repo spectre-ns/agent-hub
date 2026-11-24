@@ -114,7 +114,8 @@ class CatalogMixin:
         """A type whose workflow is written as states and edges (``practicehub/states.py``) moves as that workflow
         says: its active version's edges are the type's moves by the workflow (each from the state it leaves to
         every state it can land in; the entry from any state), and its states' labels and tones are the type's.
-        The type says which values its state field takes, and the moves people make by hand; the workflow, the rest."""
+        The type says which values its state field takes, the moves people make by hand and where a record goes
+        when its work is cancelled (``abandoned``); the workflow, the rest."""
         wrow = self.db.workflow_versions.find_one({"workflow_id": rt.workflow["id"], "status": "active"},
                                                   fields=["_id", "version", "source"])
         if not wrow:
@@ -142,17 +143,31 @@ class CatalogMixin:
                 labels[st["id"]] = st["label"]
             if st.get("tone"):
                 tones[st["id"]] = st["tone"]
-        moves = list(lc.get("transition") or [])
-        for e in [*wf.shape["edges"], wf.shape["start"]]:  # an edge's own move first: the entry covers the rest
+        # The type's own moves come first, so one it writes stands; then each edge's; then where ``abandoned`` sends
+        # a record whose work is cancelled, for a pair no edge makes (an edge that makes the same move says it in
+        # its own words); then the entry, which covers the rest.
+        written = list(lc.get("transition") or [])
+        moves = [t for t in written if not t.get("abandon")]
+
+        def uncovered(frm, to):
+            return [f for f in frm if f in states and f != to
+                    and not any(t["to"] == to and f in t["from"] for t in moves)]
+
+        def edge_moves(e):
             for to in e.get("lands") or []:
-                frm = [e["from"]] if e["from"] else [s for s in states if s != to]
                 if to not in states:  # a stop only the run keeps (the record's field has no value for it)
                     continue
-                frm = [f for f in frm if f in states and f != to
-                       and not any(t["to"] == to and f in t["from"] for t in moves)]
+                frm = uncovered([e["from"]] if e["from"] else [s for s in states if s != to], to)
                 if frm:
                     moves.append(schema.move_row(frm, to, by="workflow", label=e["label"], edge=e["id"],
                                                  **({"entry": True} if not e["from"] else {})))
+        for e in wf.shape["edges"]:
+            edge_moves(e)
+        for t in written:
+            frm = uncovered(t["from"], t["to"]) if t.get("abandon") else []
+            if frm:  # named by its target's words, as its workflow has them
+                moves.append({**t, "from": frm, "label": labels.get(t["to"]) or t["label"]})
+        edge_moves(wf.shape["start"])
         lc.update(transition=moves, labels=labels, tones=tones,
                   # a workflow starting on the record again (its entry) is no way back into use
                   revising=schema.revising_states(states, [t for t in moves if not t.get("entry")], lc.get("in_use")))

@@ -79,13 +79,7 @@ to = "archived"
 label = "Archive"
 
 # A flagged page is put back or archived only by its check, a wiki owner's signed decision: those moves are the
-# wiki-check workflow's edges. A check cancelled part way leaves the page as it was:
-
-[[lifecycle.transition]]
-from = ["needs-check"]
-to = "published"
-by = "workflow"         # only when its check is cancelled part way
-label = "Put back as it was"
+# wiki-check workflow's edges. A check cancelled part way leaves the page as it was (abandoned, above).
 
 [[lifecycle.transition]]
 from = ["archived"]

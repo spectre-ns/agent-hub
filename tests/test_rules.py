@@ -3862,10 +3862,6 @@ from = ["submitted"]
 to = "rejected"
 by = "workflow"
 [[lifecycle.transition]]
-from = ["submitted"]
-to = "draft"
-by = "workflow"
-[[lifecycle.transition]]
 from = ["rejected"]
 to = "draft"
 """
@@ -4464,29 +4460,183 @@ def test_a_record_type_stored_before_a_stricter_check_is_set_aside_not_a_failure
     assert listed["Condition"]["definition"] is None and "initial" in listed["Condition"]["problem"]
 
 
-# --------------------------------------------------------------- lifecycle.ended: where an old run's record goes
+# --------------------------------------------------- lifecycle.abandoned: where cancelled work leaves its record
+# A test fixture: an errand walked by its own workflow, whose type writes no move at all. Cancelled while asked it is
+# dropped (a state no edge reaches); cancelled while being done it stays where it is; cancelled while being checked
+# it counts as done, the move its workflow's own edge makes.
+ERRAND = """id = "Errand"
+data_class = "visits"
+{top}
+[[field]]
+name = "title"
+required = true
+[[field]]
+name = "status"
+type = "choice"
+choices = ["asked", "doing", "checking", "done", "dropped"]
+[lifecycle]
+field = "status"
+initial = "asked"
+[lifecycle.abandoned]
+asked = "dropped"
+doing = "doing"
+checking = "done"
+"""
+ERRAND_FLOW = """id = "errand-flow"
+title = "Run the errand"
+record = "Errand"
+[trigger]
+starters = ["physician"]
+[start]
+to = "asked"
+[[state]]
+id = "asked"
+[[state.work]]
+id = "go"
+title = "Set off"
+kind = "task"
+role = "physician"
+[[state.work.fields]]
+name = "note"
+type = "text"
+[[edge]]
+id = "set-off"
+from = "asked"
+to = "doing"
+[[state]]
+id = "doing"
+[[state.work]]
+id = "do"
+title = "Do it"
+kind = "task"
+role = "physician"
+[[state.work.fields]]
+name = "note"
+type = "text"
+[[edge]]
+id = "did"
+from = "doing"
+to = "checking"
+[[state]]
+id = "checking"
+[[state.work]]
+id = "check"
+title = "Check it"
+kind = "task"
+role = "physician"
+[[state.work.fields]]
+name = "note"
+type = "text"
+[[edge]]
+id = "checked"
+label = "Checked: it is done"
+from = "checking"
+to = "done"
+[[state]]
+id = "done"
+"""
+# A type alone, for what a lifecycle may say: {life} goes under [lifecycle], {rows} after its one move by hand.
+WIDGET = ('id = "Widget"\ndata_class = "clinical"\n[[field]]\nname = "status"\ntype = "choice"\n'
+          'choices = ["a", "b", "c"]\n[[field]]\nname = "note"\n[[signature]]\nmeaning = "Checked"\n'
+          '[lifecycle]\nfield = "status"\ninitial = "a"\n{life}'
+          '[[lifecycle.transition]]\nfrom = ["a"]\nto = "b"\n{rows}')
 
-_ENDED_TYPE = ('id = "Widget"\ndata_class = "clinical"\n[[field]]\nname = "status"\ntype = "choice"\n'
-               'choices = ["a", "b", "c"]\n[lifecycle]\nfield = "status"\ninitial = "a"\n'
-               'abandoned = { b = "a" }\n'
-               '[[lifecycle.transition]]\nfrom = ["a"]\nto = "b"\n'
-               '[[lifecycle.transition]]\nfrom = ["b"]\nto = "c"\nby = "workflow"\n'
-               '[[lifecycle.transition]]\nfrom = ["b"]\nto = "a"\nby = "workflow"\n')
+
+def test_a_lifecycle_has_no_ended():
+    """Rule: a run moves its record itself, so a lifecycle does not say where a run that "ended" without moving it
+    leaves its record: ``lifecycle.ended`` is a key a lifecycle does not have, refused like any other."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    life = 'abandoned = { b = "a" }\n'
+    assert "ended" not in schema.parse(WIDGET.format(life=life, rows="")).lifecycle
+    with pytest.raises(DefinitionError) as exc:
+        schema.parse(WIDGET.format(life=life + 'ended = { b = "a" }\n', rows=""))
+    assert exc.value.problems == ['lifecycle: unknown key "ended"']
 
 
-def test_a_lifecycle_ended_names_only_its_own_states_and_moves_it_has(hub):
-    """``lifecycle.ended`` says where a record goes when an older version's run ends without moving it: each entry
-    is state = state, both the type's, with a move between them. Anything else is refused when proposed."""
-    rana = M(hub, "rana")
-    for ended, why in (('"c"', "a table"), ('{ b = "gone" }', "both must be its states"),
-                       ('{ nowhere = "a" }', "both must be its states"), ('{ a = "c" }', "no move from 'a' to 'c'")):
-        src = _ENDED_TYPE.replace('abandoned = { b = "a" }\n', f'abandoned = {{ b = "a" }}\nended = {ended}\n')
-        with pytest.raises(Invalid) as e:
-            hub.propose("type", rana, src)
-        assert any(p.startswith("lifecycle.ended") and why in p for p in e.value.problems), (ended, e.value.problems)
-    src = _ENDED_TYPE.replace('abandoned = { b = "a" }\n', 'abandoned = { b = "a" }\nended = { b = "c" }\n')
-    p = hub.propose("type", rana, src)  # a real move from a state it is in: accepted
-    assert p["version"]
+def test_abandoned_is_a_move_of_its_own_that_no_transition_is_written_for(hub):
+    """Rule: ``lifecycle.abandoned`` (state = the state it goes to) is itself the move a record makes when the work
+    about it is cancelled: the type writes no transition for it. A state named as its own target stays where it is.
+    The move is the workflow's (``by = "workflow"``): a person cannot make it by hand, and no page or tool offers it.
+    Where the type's workflow has an edge that makes the same move, that edge's move stands, in its own words."""
+    from practicehub import mcp, schema
+    alone = schema.parse(ERRAND.format(top="")).lifecycle["transition"]
+    assert [(t["from"], t["to"], t["by"], t["label"], t.get("abandon")) for t in alone] == [
+        (["asked"], "dropped", "workflow", "Dropped", True), (["checking"], "done", "workflow", "Done", True)]
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    for top in ("", 'workflow = { id = "errand-flow", when = "record.status == \'asked\'" }'):
+        p = hub.propose("type", rana, ERRAND.format(top=top), "errands")
+        hub.approve(amara, "type", "Errand", p["version"])
+        if not top:
+            w = hub.propose_workflow(rana, ERRAND_FLOW, "errands")
+            hub.approve_workflow(amara, "errand-flow", w["version"])
+    rt = hub.record_type("Errand")
+    assert rt.transition("asked", "dropped")["abandon"] and rt.transition("asked", "dropped")["by"] == "workflow"
+    checked = rt.transition("checking", "done")  # its workflow's edge makes this move: the edge's own row
+    assert checked["edge"] == "checked" and checked["label"] == "Checked: it is done" and not checked.get("abandon")
+    assert rt.transition("doing", "doing") is None and not any(t["to"] == "doing" and t.get("abandon")
+                                                               for t in rt.lifecycle["transition"])
+
+    def errand(title):
+        ref = f"Errand/{hub.create_record(amara, 'Errand', {'title': title})['id']}"
+        return ref, _own_run(hub, ref, "errand-flow")
+
+    # cancelled while asked: dropped, by its run, with no transition written for that move
+    ref, run = errand("Fetch the gauze")
+    hub.engine.cancel(amara, run["id"], "not needed")
+    assert hub.records.read(*ref.split("/"))["status"] == "dropped"
+    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "dropped"})
+    assert moved["run_id"] == run["id"] and moved["data"]["from"] == "asked"
+    # cancelled while being done: it stays where it is
+    ref, run = errand("Post the parcel")
+    hub.engine.complete(amara, run["item"], {"note": "on my way"})
+    assert hub.records.read(*ref.split("/"))["status"] == "doing"
+    version = hub.record_version(ref)
+    hub.engine.cancel(amara, run["id"], "the post office is shut")
+    assert hub.records.read(*ref.split("/"))["status"] == "doing" and hub.record_version(ref) == version
+    assert hub.engine.run(run["id"])["status"] == "cancelled"
+    # a person does not make the move by hand, by an edit or by a move, and is offered it nowhere
+    ref, run = errand("Collect the keys")
+    with pytest.raises(Denied, match="only a workflow moves"):
+        hub.update_record(amara, ref, {"status": "dropped"})
+    with pytest.raises(Denied, match="only its workflow moves"):
+        hub.move_record(amara, ref, "dropped")
+    screen = hub.transition_screen(amara, ref)
+    assert "dropped" not in [m["to"] for m in screen["may"]]
+    assert "only its workflow moves" in {m["to"]: m["why"] for m in screen["may_not"]}["dropped"]
+    assert not [t for t in mcp.moves_for(rt, amara) if t["to"] == "dropped"]
+    assert hub.records.read(*ref.split("/"))["status"] == "asked"
+
+
+def test_a_move_by_the_workflow_that_only_repeats_abandoned_is_refused():
+    """Rule: where a record goes when its work is cancelled is said once, by ``abandoned``. A transition
+    ``by = "workflow"`` with no ``asks``, ``requires`` or ``sign`` whose every from and to is a pair ``abandoned``
+    names says nothing more, and is refused. One that carries ``asks``, ``requires`` or ``sign``, one that also makes
+    another move, and a move people make by hand are the type's to write: such a row stands and no move is added
+    for that pair. ``abandoned`` names states of the type, and needs no transition between them."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    life = 'abandoned = { b = "a" }\n'
+    back = '[[lifecycle.transition]]\nfrom = ["b"]\nto = "a"\n'
+    for rows in (back + 'by = "workflow"\n', back + 'by = "workflow"\nlabel = "Hand it back"\n'):
+        with pytest.raises(DefinitionError) as exc:
+            schema.parse(WIDGET.format(life=life, rows=rows))
+        assert exc.value.problems == ["lifecycle.transition to 'a': abandoned already moves a record there from 'b' "
+                                      "when its work is cancelled; leave it out"]
+    for life_, rows in ((life, back + 'by = "workflow"\nasks = ["note"]\n'),
+                        (life, back + 'by = "workflow"\nrequires = ["note"]\n'),
+                        (life, back + 'by = "workflow"\nsign = "Checked"\n'),
+                        ('abandoned = { b = "a", c = "c" }\n', back.replace('["b"]', '["b", "c"]') + 'by = "workflow"\n'),
+                        (life, back)):
+        rt = schema.parse(WIDGET.format(life=life_, rows=rows))
+        assert not any(t.get("abandon") for t in rt.lifecycle["transition"])
+        assert rt.transition("b", "a")["label"] == "A" and len(rt.lifecycle["transition"]) == 2
+    # no transition need lead where abandoned says; both are states of the type
+    rt = schema.parse(WIDGET.format(life='abandoned = { b = "c" }\n', rows=""))
+    assert rt.transition("b", "c")["abandon"]
+    for bad in ('{ b = "gone" }', '{ nowhere = "a" }'):
+        with pytest.raises(DefinitionError, match="both must be its states"):
+            schema.parse(WIDGET.format(life=f"abandoned = {bad}\n", rows=""))
 
 
 # ------------------------------------------------------------------------------------------- the calendar
@@ -5974,7 +6124,7 @@ def test_a_record_type_names_its_workflow_and_a_step_names_the_state_it_puts_the
     def job(top="", fields="", life=True):
         return ('id = "Job"\ndata_class = "x"\n' + top + '[[field]]\nname = "status"\ntype = "choice"\n'
                 'choices = ["asked", "done"]\n' + fields
-                + ('[lifecycle]\ninitial = "asked"\nabandoned = { asked = "done" }\n'
+                + ('[lifecycle]\ninitial = "asked"\nabandoned = { asked = "asked" }\n'
                    '[[lifecycle.transition]]\nfrom = ["asked"]\nto = "done"\nby = "workflow"\n' if life else ""))
     for bad, says in ((job('workflow = "job-flow"\n', life=False), "has a lifecycle"),
                       (job('workflow = { id = "job-flow", when = "record.status ==" }\n'), "workflow.when"),
