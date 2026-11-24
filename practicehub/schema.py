@@ -57,18 +57,28 @@ answer that becomes a record, an engine calling the API.
                                   #   still says who sees the record exists, lists it and creates it.
 
     [lifecycle]                   # optional: the states a record moves through
-    field = "status"
+    field = "status"              # the field that holds the state; its choices are the states
     initial = "preliminary"
-    [[lifecycle.transition]]
-    from = ["preliminary"]
-    to = "final"
-    by = "workflow"               # "anyone" who may write the class (default), or only a "workflow" step
-    # label = "Finalise"          # the move's words (default: the state it goes to, in words)
+    # abandoned = { amended = "final" }   # where a record goes when the work moving it is cancelled: a move of its
+                                  #   own, with no transition written for it; a state named as its own target stays
+    [[lifecycle.transition]]      # a move people make by hand
+    from = ["final"]
+    to = "amended"
+    # label = "Amend"             # the move's words (default: the state it goes to, in words)
     # asks = ["conclusion"]       # fields the move's screen asks for, written in the same move
     # requires = ["conclusion"]   # fields that must be set once it has moved (whoever moves it, a workflow too);
                                   #   the type's own field rules check what they hold
     # sign = "Approved"           # the mover signs it with this meaning (a person: an agent never signs)
+    # by = "workflow"             # not by hand: see below
     # [lifecycle.labels]          # a state's words, where its code is not words: onleave = "On leave"
+
+A type that names its own workflow (``workflow``) lists the values its state field takes and the moves people make
+by hand. The moves that workflow makes are its edges (``practicehub/states.py``), not written here: read with its
+workflow in force, the type has them as moves by the workflow (``CatalogMixin._with_workflow_moves``), and the
+workflow's states carry their own words and tone. What the two may not both say is checked by
+``catalog.lifecycle_fit``. A transition ``by = "workflow"`` is still the type's to write for a move no edge of its
+own workflow makes (one made from outside its own run: another workflow's, or a signature's ``moves_to``), for a move
+from a value its workflow has no state for, and for a move it attaches ``asks``, ``requires`` or ``sign`` to.
 
 A path may use ``*`` for every item of a list (``participant.*.actor``).
 
@@ -250,6 +260,9 @@ KEYS = {
                 "request_inputs"},
 }
 FIELD_BOOLS = ("required", "list", "show", "advanced", "fact", "match", "live")
+# A key that is another table's word for what this one calls something else, and is nowhere near it in spelling: a
+# screen lists its ``fields``; a move ``asks`` for them.
+OTHER_WORD = {"transition": {"fields": "asks"}}
 
 
 def _unknown(where: str, table: dict, kind: str) -> list[str]:
@@ -257,7 +270,8 @@ def _unknown(where: str, table: dict, kind: str) -> list[str]:
     out = []
     for k in table:
         if k not in KEYS[kind]:
-            near = difflib.get_close_matches(str(k), sorted(KEYS[kind]), n=1)
+            near = [w for w in [OTHER_WORD.get(kind, {}).get(k)] if w] \
+                or difflib.get_close_matches(str(k), sorted(KEYS[kind]), n=1)
             out.append(f'{where}: unknown key "{k}"' + (f' (did you mean "{near[0]}"?)' if near else ""))
     return out
 

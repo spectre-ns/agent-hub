@@ -43,8 +43,10 @@ edges' steps read it, never the conditions, so an edge that changes what they re
 routes the record; on a person's state it says whether the edge is offered. A record type with no state field of its
 own may still be walked: the run keeps where it is (``run["at"]``). A state with no work and no edge out is where the record ends. A state may name
 several pieces of work, each with its own ``when`` (a critical result's review is urgent): the one that holds is
-done. The record's type still says which values its state field takes; the moves the workflow makes are the
-workflow's, not listed on the type.
+done. The record's type says which values its state field takes (every state here is one of them, where the type
+has a state field), the moves people make by hand, and where a record goes when its work is cancelled
+(``abandoned``). The moves the workflow makes are its edges, and its states' words and tones are said here: the type
+repeats neither (``catalog.lifecycle_fit``).
 
 A lifecycle may loop (a document returned to its author, revised after it was approved). States are listed in the
 order a pass goes through them: an edge back to a state listed at or before the one it leaves, from which the record

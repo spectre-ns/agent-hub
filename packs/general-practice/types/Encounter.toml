@@ -304,7 +304,7 @@ field = "status"
 initial = "planned"
 labels = { onleave = "Patient stepped out" }
 abandoned = { requested = "cancelled", reading = "cancelled", callback = "cancelled", "not-reached" = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
-# How each state reads at a glance: a visit no-showed or cancelled has ended, one with no note needs the physician.
+# How the two states its workflow does not have read at a glance (the workflow gives the others their tone).
 tones = { triaged = "active", onleave = "active" }
 # Checking in opens two hours before the visit is booked for, and a no-show only once its time has come: the desk who
 # opens tomorrow's visit by mistake cannot mark it missed (which messages the patient and frees the slot).

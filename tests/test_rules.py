@@ -6734,7 +6734,7 @@ def test_a_transition_asks_requires_and_signs_and_a_move_missing_a_required_fiel
 def test_a_move_says_asks_and_requires_and_the_older_names_are_refused(hub):
     """Rule: a lifecycle transition says what its screen asks for as ``asks`` and what must be set once it has moved
     as ``requires``, and has no other names for them: ``fields`` and ``require``, the older ones, are keys a
-    transition does not have, refused like any other and with the nearest key named where one is near. Every move a
+    transition does not have, refused like any other and with the key that is meant named. Every move a
     reader of a type meets, one the type writes or one its workflow's edge makes, is made by ``schema.move_row``
     and so carries the same keys."""
     from practicehub import schema
@@ -6743,7 +6743,7 @@ def test_a_move_says_asks_and_requires_and_the_older_names_are_refused(hub):
     for old, says in ((job.replace('requires = ["outcome"]', 'require = ["outcome"]'),
                        'lifecycle.transition to \'done\': unknown key "require" (did you mean "requires"?)'),
                       (job.replace('asks = ["outcome", "hours"]', 'fields = ["outcome", "hours"]'),
-                       'lifecycle.transition to \'done\': unknown key "fields"')):
+                       'lifecycle.transition to \'done\': unknown key "fields" (did you mean "asks"?)')):
         with pytest.raises(DefinitionError) as exc:
             schema.parse(old)
         assert exc.value.problems == [says]

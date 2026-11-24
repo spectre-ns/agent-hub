@@ -11,6 +11,7 @@ import difflib
 import json
 import re
 import tomllib
+import urllib.parse
 from html import escape as e
 
 from .. import schema
@@ -23,8 +24,11 @@ HELP = {
              'datetime, choice, member, reference...), <code>required</code>, <code>choices</code>.</li>'
              '<li><code>[lifecycle]</code>: <code>field</code>, <code>initial</code>, <code>locked</code> (states in which '
              'people change nothing but the state), <code>abandoned</code> (where a record goes if the work moving it '
-             'is cancelled) and <code>[[lifecycle.transition]]</code> with <code>from</code>, <code>to</code>, '
-             '<code>label</code> and <code>by = "workflow"</code> for moves only a workflow makes.</li>'
+             'is cancelled: a move of its own, with no transition written for it) and '
+             '<code>[[lifecycle.transition]]</code> with <code>from</code>, <code>to</code>, <code>label</code>, '
+             '<code>asks</code> and <code>requires</code> for the moves people make by hand. The moves a type\'s own '
+             'workflow makes are that workflow\'s edges, not listed here; <code>by = "workflow"</code> is for a move no '
+             'edge of it makes (another workflow\'s, a signature\'s).</li>'
              '<li><code>[[signature]]</code>: a <code>meaning</code> people sign with, the <code>roles</code> and '
              '<code>states</code> it is allowed in, and <code>moves_to</code> to move the record when signed.</li>'),
     "view": ('<li><code>id</code>, <code>title</code>, <code>summary</code>, <code>nav</code> (in the sidebar) and '
@@ -870,6 +874,12 @@ def render_builder(doc: dict, *, did, types, classes, module_fields, problems, n
                     + chips("b-lc-locked", "lc.locked", "Locked in", st_opts, lc.get("locked") or [],
                             help_="States in which people change nothing but the state.")
                     + more("lc.more", lc, LC_FORM) + '</fieldset>')
+        own = doc.get("workflow")
+        own = str((own.get("id") if isinstance(own, dict) else own) or "")
+        if own:  # its own workflow's edges are its moves too: said where they are changed, not listed here
+            form.append(f'<p class="muted" id="b-lc-own">The moves its workflow makes are that workflow\'s edges, changed '
+                        f'at <a href="/workflows/{e(urllib.parse.quote(own))}">/workflows/{e(own)}</a>. The moves '
+                        f'listed here are the ones people make by hand.</p>')
         form.append(f'<h3 class="fb-h3" id="b-lc-trans">Moves</h3><input type="hidden" name="tr.n" value="{len(moves)}">')
         for i, t in enumerate(moves):
             p, a = f"tr.{i}.", f"b-tr{i}"
@@ -883,7 +893,7 @@ def render_builder(doc: dict, *, did, types, classes, module_fields, problems, n
                 + '<div class="fb-grid">'
                 + select(f"{a}-to", p + "to", "To", st_opts, str(t.get("to") or ""), blank="Choose…")
                 + select(f"{a}-by", p + "by", "Who moves it",
-                         [("anyone", "Anyone who may write it"), ("workflow", "Only a workflow step")],
+                         [("anyone", "Anyone who may write it"), ("workflow", "Not by hand (a workflow or a signature)")],
                          str(t.get("by") or "anyone"))
                 + text(f"{a}-label", p + "label", "Button label", t.get("label", "")) + '</div>'
                 + chips(f"{a}-requires", p + "requires", "Fields it requires", pick_opts, t.get("requires") or [],

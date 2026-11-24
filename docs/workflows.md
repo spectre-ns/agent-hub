@@ -110,6 +110,8 @@ body = "Your renewal was cancelled: {{cancel.reason}}"
   `cancel.reason` and `cancel.by` (the canceller's name). They run inside the cancel. If one fails, the cancel is
   refused ("it cannot be cancelled now: 'Tell the patient' did not go through (...)") and nothing of it is kept, so
   nobody is left untold.
+- The run's record goes where its type's `abandoned` says for the state it is in (back to a draft, closed, or it
+  stays where it is), unless other work on it is still open. See "What the type says, and what its workflow says".
 
 ## States and edges
 
@@ -237,20 +239,66 @@ tone = "done"
 
 A workflow is about a record (`record = "<Type>"`). The states form moves that record:
 
-- **A type with a lifecycle**: each state id is a value of its state field. The type keeps the values the field
-  takes (with their labels) and the moves people make **by hand** (corrections, putting a job on hold). The
-  workflow's edges become the type's moves "by workflow" (`practicehub/catalog.py`, `_with_workflow_moves`), each
-  from the state it leaves to every state it can land in, so nobody makes those moves by hand while the workflow
-  walks the record. The workflow's state labels and tones are the type's.
+- **A type with a lifecycle**: each state id is a value of its state field. The type lists the values the field
+  takes, the moves people make **by hand** (corrections, putting a job on hold) and where a record goes when its
+  work is cancelled (`abandoned`). The workflow's edges become the type's moves "by workflow"
+  (`practicehub/catalog.py`, `_with_workflow_moves`), each from the state it leaves to every state it can land in,
+  so nobody makes those moves by hand while the workflow walks the record. The workflow's state labels and tones
+  are the type's. See "What the type says, and what its workflow says" below.
 - **Where the state field is a fixed standard vocabulary** (a FHIR status) that cannot say every stop, the type
   gets a separate stage field as its lifecycle field (Observation's `review`, Task's `stage`), and edge automations
   set the standard status with `record.update`.
 - **A type with no lifecycle** (no `[lifecycle]`, a patient, say) may still be walked: the run keeps where the
   record is (`run["at"]`) instead of moving it. So does a state the record's field has no value for (a stop only the
-  run knows, such as a final sign-off that moves nothing): the field stays where it was.
+  run knows, such as a final sign-off that moves nothing): the field stays where it was. Prefer a value: then the
+  record itself says where it is. Every pack and module the hub ships lists each of its workflows' states on the
+  type.
 - **A workflow about no record cannot be written as states and edges**: the moves along its edges need a record
   ("state moves the run's record; the workflow is about none"). A scheduled workflow names its records with
   `trigger.for_each` (one run per record).
+
+### What the type says, and what its workflow says
+
+A record type that names its own workflow (`workflow = "<id>"` in the type) and that workflow each say their part
+once. The hub checks the pair (`catalog.lifecycle_fit`) when either is proposed or approved, against the other as
+it is in force, and when a pack or module installs both.
+
+| The type says | The workflow says |
+|---|---|
+| the values its state field takes (`choices`), every state of the workflow among them | its states, each with its `label` and `tone` |
+| the moves people make by hand (`[[lifecycle.transition]]`), and what each asks, requires or signs | the moves it makes: its edges |
+| where a record goes when its work is cancelled (`abandoned`) | |
+| words and a tone for a value the workflow has no state for (`lifecycle.labels`, `tones`) | |
+
+```toml
+[lifecycle]                              # in the record type
+field = "status"
+initial = "draft"
+abandoned = { in-review = "draft", sent = "sent" }   # cancelled in review: back to a draft; once sent: it stays
+[[lifecycle.transition]]                 # a move by hand
+from = ["approved"]
+to = "draft"
+label = "Revise"
+```
+
+- **`abandoned`** (state = the state it goes to) is itself the move a record makes when the run about it is
+  cancelled: no transition is written for it, and a `by = "workflow"` row that only repeats it is refused. A state
+  named as its own target stays where it is. A state that only the workflow moves a record out of, counting the
+  type's moves and the workflow's edges together, must be listed, so a cancelled run never strands a record where
+  nobody can move it.
+- **A state is named once.** The field that holds the state takes no `labels`, and the type gives no label or tone
+  to a state its workflow has.
+- **A move is written once.** The type does not repeat a move one of its workflow's edges makes. A transition
+  `by = "workflow"` is still the type's to write for a move no edge of its own workflow makes (another workflow's
+  run retiring the policy it replaces, a signature's `moves_to`), for a move from a value the workflow has no state
+  for, and where the type attaches `asks`, `requires` or `sign` to the move: an edge that makes the same move then
+  goes through that transition.
+
+**The order to change them in.** Add to the type first, then to the workflow: a new state's value goes on the
+field (without it the run alone keeps that stop), and a state that only the workflow will leave gets its `abandoned`
+entry, before the workflow version that uses them is approved. Remove from the workflow first, then from the type:
+a value goes once no state of the workflow in force is it. A label, a tone or a `by = "workflow"` row that the
+workflow is about to say itself comes off the type first.
 
 ### How it runs
 

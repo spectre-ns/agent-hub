@@ -455,6 +455,9 @@ def test_the_type_builder_round_trips_through_toml(hub, server):
     rana = _modules(hub, server)
     code, page = call(server, "GET", "/define/types/Document/edit", rana)
     assert code == 200 and 'id="type-builder"' in page and "Edit as TOML" in page
+    # its workflow's edges are its moves too: said, with where they are changed, above the moves people make by hand
+    assert page.index('href="/workflows/dms-review"') < page.index('id="b-lc-trans"')
+    assert "Not by hand (a workflow or a signature)" in page
     form = _BuilderForm(page).pairs
     assert ("t.id", "Document") in form and any(k.endswith(".name") for k, _ in form)
     assert any(re.fullmatch(r"tr\.\d+\.requires", k) and v == "obsolete_reason" for k, v in form)  # what a move requires
