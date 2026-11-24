@@ -811,10 +811,12 @@ class Engine:
 
     def _re_enter(self, run: dict, cause) -> None:
         """A lifecycle that loops (a document revised after it was approved, a change order sent back, a CAPA found
-        not effective) is walked one pass per run, since a workflow has no loops: a run of the current version that
-        ends with its record moved since it started and back where its type's workflow starts hands the record on to
-        a new run of it, which walks the next pass. A run that never moved its record ends for good (it cannot start
-        itself over and over). The new run's ``run.previous`` is this one, so who did what before still counts."""
+        not effective) is walked one pass per run, since a workflow has no loops: a run that ends with its record
+        moved since it started and back where its type's workflow starts hands the record on to a new run of it,
+        of the version in force now, which walks the next pass. A run that never moved its record ends for good,
+        whatever its version (it cannot start itself over and over): its record is picked up when it is next
+        written (``Hub._pick_up``). The new run's ``run.previous`` is this one, so who did what before still
+        counts."""
         hub = self.hub
         ref = str(run.get("record") or "")
         if "/" not in ref:
@@ -822,9 +824,9 @@ class Engine:
         try:
             rt = hub.record_type(ref.split("/", 1)[0])
             rec = hub.records.read(*ref.split("/", 1))
-            if rt is None or rec is None or self._walked_again(run, rt, rec) != "re-enter" \
+            if rt is None or rec is None or not self._walked_again(run, rt, rec) \
                     or hub.db.runs.find_one({"workflow_id": run["workflow_id"], "record": ref, "status": "running"}):
-                return  # an older version hands on (``_hand_on``); work still open walks it
+                return  # work still open walks it
             with hub.db:
                 self.start({"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"},
                            run["workflow_id"], record=ref, inputs=dict((run.get("ctx") or {}).get("input") or {}),
@@ -833,20 +835,15 @@ class Engine:
             hub.track.append(self.automation_actor(run), "trigger.failed", ref, run_id=run["id"], cause=cause,
                              data={"workflow": run["workflow_id"], "error": f"walking the next pass: {exc}"})
 
-    def _walked_again(self, run: dict, rt, rec: dict) -> str | None:
-        """Whether the record a run of its type's own workflow ended on is walked on by another run of it: "hand-on"
-        (the run was an older version: ``_hand_on``), "re-enter" (it moved during the run and is back where its
-        workflow starts: ``_re_enter``), or None (it is left where it is)."""
+    def _walked_again(self, run: dict, rt, rec: dict) -> bool:
+        """Whether the record a run of its type's own workflow ended on is walked on by another run of it
+        (``_re_enter``): it moved during the run and is back where its workflow starts."""
         hub = self.hub
         wid = run["workflow_id"]
         if schema.starts_workflow(rt, rec) != wid or hub.record_workflow(rt) != wid:
-            return None
-        if hub.workflow(wid)[1]["version"] != run["version"]:
-            return "hand-on"
-        if hub.db.events.find_one({"action": "record.transitioned", "subject": run.get("record"),
-                                   "seq": {"$gt": run.get("root_event") or 0}}, fields=["seq"]):
-            return "re-enter"
-        return None
+            return False
+        return bool(hub.db.events.find_one({"action": "record.transitioned", "subject": run.get("record"),
+                                            "seq": {"$gt": run.get("root_event") or 0}}, fields=["seq"]))
 
     def stop(self, actor: dict, run_id: str, why: str, cause: int | None) -> None:
         """Stop a record's own run because its record was moved out of its hands (entered in error, cancelled): its
@@ -904,33 +901,6 @@ class Engine:
             hub.track.append(actor, "step.done" if how == "moved" else "step.withdrawn", f"step:{s.id}",
                              run_id=run_id, cause=cause, data={"step": s.id, "moved_to": new_state,
                                                                **({"when": s.when} if how == "withdrawn" else {})})
-
-    def _hand_on(self, run: dict, cause) -> None:
-        """A run of an older version of a type's own workflow that ends with its record still where that workflow
-        starts (a version that stopped once the booking was made) hands the record on to the current version, which
-        walks it from there. A run of the current version never does (it ends its record closed)."""
-        hub = self.hub
-        ref = str(run.get("record") or "")
-        if "/" not in ref:
-            return
-        try:
-            rt = hub.record_type(ref.split("/", 1)[0])
-            rec = hub.records.read(*ref.split("/", 1))
-            if rt is None or rec is None or schema.starts_workflow(rt, rec) != run["workflow_id"]:
-                return
-            wf, row = hub.workflow(run["workflow_id"])
-            if row["version"] == run["version"] or \
-                    hub.db.runs.find_one({"workflow_id": wf.id, "record": ref, "status": "running"}, fields=["id"]):
-                return
-            if hub.record_workflow(rt) != wf.id:
-                return
-            with hub.db:
-                self.start({"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"},
-                           wf.id, record=ref, inputs=dict((run.get("ctx") or {}).get("input") or {}), cause=cause,
-                           via_automation=True, on_create=True, previous=run["id"])
-        except Exception as exc:  # noqa: BLE001 - the run that ended stays ended; the hand-on is noted
-            hub.track.append(self.automation_actor(run), "trigger.failed", ref, run_id=run["id"], cause=cause,
-                             data={"workflow": run["workflow_id"], "error": f"handing the record on: {exc}"})
 
     def _make_record(self, wf, row, run_id: str, subject_field: dict, subject: str, ctx: dict, cause) -> str:
         """The record a run started on its subject makes: the workflow's ``[new_record]`` fields (placeholders over
@@ -1338,7 +1308,6 @@ class Engine:
             self._ended(run, seq)
             self._abandon(run, seq, stranded_only=True)
             self._late_finish(run, cause)
-            self._hand_on(run, seq)
             self._re_enter(run, seq)
         if run["status"] == "running":
             self._place(run_id, cause)

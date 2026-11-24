@@ -7076,3 +7076,93 @@ def test_every_run_is_written_with_every_field_a_run_has(worked):
             assert set(r["steps"]) == {s.id for s in hub.workflow(r["workflow_id"], 0)[0].steps}
     # and a run is found by a record it carries without reading every run: the mention's, by the file it is on
     assert MENTION_WORKFLOW in {r["workflow_id"] for r in hub.engine.runs(mentions=ref, limit=1000)}
+
+
+MEMO = """id = "Memo"
+data_class = "visits"
+{top}
+[[field]]
+name = "title"
+required = true
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "closed"]
+[lifecycle]
+field = "status"
+initial = "open"
+[[lifecycle.transition]]
+from = ["open"]
+to = "closed"
+label = "Close"
+"""
+# Reading a memo moves nothing its field can say: both stops are the run's own, so the memo stays open throughout.
+MEMO_READ = """id = "memo-read"
+title = "{title}"
+record = "Memo"
+[trigger]
+starters = ["physician"]
+[start]
+to = "unread"
+[[state]]
+id = "unread"
+[[state.work]]
+id = "read"
+title = "Read the memo"
+kind = "task"
+role = "physician"
+[[state.work.fields]]
+name = "read"
+type = "boolean"
+[[edge]]
+id = "was-read"
+from = "unread"
+to = "read"
+[[state]]
+id = "read"
+"""
+
+
+def test_a_run_that_never_moved_its_record_starts_nothing_when_it_ends_whatever_its_version(hub):
+    """Rule: one rule says what follows a run of a type's own workflow. A run that moved its record and ends where
+    the workflow starts is followed by a run of the version in force (the next pass). A run that never moved its
+    record ends for good, also when a newer version was approved meanwhile: it does not start that version as it
+    ends. The record is picked up, once, by a version that never walked it, the next time it is written."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    p = hub.propose("type", rana, MEMO.format(top=""), "memos")
+    hub.approve(amara, "type", "Memo", p["version"])
+    w = hub.propose_workflow(rana, MEMO_READ.format(title="Read a memo"), "memos")
+    hub.approve_workflow(amara, "memo-read", w["version"])
+    p = hub.propose("type", rana, MEMO.format(top='workflow = { id = "memo-read", when = "record.status == \'open\'" }'),
+                    "walked")
+    hub.approve(amara, "type", "Memo", p["version"])
+
+    def memo(title):
+        ref = f"Memo/{hub.create_record(amara, 'Memo', {'title': title})['id']}"
+        return ref, _own_run(hub, ref, "memo-read")
+
+    def read(run):
+        hub.engine.complete(amara, item_for(hub, run, "read"), {"read": True})
+        return hub.engine.run(run["id"])
+
+    # the version in force: its run ends, the memo still open, and nothing starts on it again, now or when written
+    same, run = memo("Fire drill on Friday")
+    done = read(run)
+    assert done["status"] == "completed" and done["at"] == "read" and hub.records.read(*same.split("/"))["status"] == "open"
+    assert not hub.engine.runs(record=same, status="running")
+    hub.update_record(amara, same, {"title": "Fire drill on Friday at ten"})
+    assert [r["id"] for r in hub.engine.runs(record=same)] == [run["id"]]
+    # a newer version approved while a run is under way: that run keeps its version, and ending starts nothing
+    other, old = memo("New fridge for vaccines")
+    w2 = hub.propose_workflow(rana, MEMO_READ.format(title="Read a memo, and say so"), "a clearer title")
+    hub.approve_workflow(amara, "memo-read", w2["version"])
+    assert hub.engine.run(old["id"])["version"] == w["version"] != w2["version"]
+    ended = read(old)
+    assert ended["status"] == "completed" and ended["version"] == w["version"]
+    assert not hub.engine.runs(record=other, status="running")
+    # written next, it is picked up by the version in force, which never walked it: once
+    hub.update_record(amara, other, {"title": "New fridge for the vaccines"})
+    (picked,) = hub.engine.runs(record=other, status="running")
+    assert picked["version"] == w2["version"] and picked["ctx"]["run"]["previous"] == old["id"]
+    hub.update_record(amara, other, {"title": "A new fridge for the vaccines"})
+    assert len(hub.engine.runs(record=other, status="running")) == 1
