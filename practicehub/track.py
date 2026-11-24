@@ -60,25 +60,6 @@ class Track:
     def seal(self, digest: str) -> str:
         return hmac.new(self.secret.encode(), f"event:{digest}".encode(), hashlib.sha256).hexdigest()
 
-    def seal_unsealed(self) -> int:
-        """Seal events recorded before events were sealed, once, and only if the chain verifies as it is. Never run
-        on start: anyone who can write the database could rebuild a chain without seals and have it blessed. It is
-        an explicit step (``practicehub track seal-legacy``) taken by whoever holds the secret."""
-        rows = self.db.events.find({"mac": None}, sort="seq", fields=["seq", "hash"])
-        if not rows:
-            return 0
-        # Once anything is sealed, an unsealed event is a forgery (or a row whose seal was stripped), never one to
-        # bless: only a track that was never sealed, and never anchored, is sealed here.
-        if self.db.events.exists({"mac": {"$ne": None}}) or self._anchors():
-            return 0
-        check = self.verify(require_seal=False)
-        if not check["ok"]:
-            return 0  # leave it for verify to report; sealing would bless a broken chain
-        with self.db:
-            for r in rows:
-                self.db.events.set(r["seq"], {"mac": self.seal(r["hash"])})
-        return len(rows)
-
     def sealed(self, row) -> bool:
         """True if this event row carries this hub's seal over its hash: it was written here, not into the file."""
         return bool(row["mac"]) and hmac.compare_digest(row["mac"], self.seal(row["hash"]))

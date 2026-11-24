@@ -107,9 +107,10 @@ def test_a_bad_token_is_401_and_a_bad_origin_403(hub, server):
     assert st == 403
     st, _, _ = rpc(server, "practice", tok, "ping", headers={"Origin": server})
     assert st == 200
-    # a page's cookie is not a credential here
+    # a page's cookie is not a credential here: not a signed-in session, and not a token put in one
     req = urllib.request.Request(f"{server}/mcp/practice", method="POST", data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
-                                 headers={"Content-Type": "application/json", "Cookie": f"ph_token={tok}"})
+                                 headers={"Content-Type": "application/json",
+                                          "Cookie": f"ph_session={hub.start_session(M(hub, 'jo'))}; ph_token={tok}"})
     with pytest.raises(urllib.error.HTTPError) as exc:
         urllib.request.urlopen(req)
     assert exc.value.code == 401

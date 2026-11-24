@@ -190,8 +190,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         self.restrictions = Restrictions(self)  # a subject's limits on who sees what of their file
         self._subjects()
         if self.pack and pack is None:
-            self._everyone_holds_everyone()
-            self._search_ready(self.db.records.distinct("type"))  # records written before their words were kept
+            self._search_ready(self.db.records.distinct("type"))  # a type's classes may have changed while it was down
         from .models import ModelGateway
         self.models = models or ModelGateway(self)
         from .engine import Engine
@@ -563,9 +562,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     # ------------------------------------------------------------------ modules
     def installed_modules(self) -> list[str]:
-        """Module ids in install order (an older practice stored directories: read those by their name)."""
-        return [Path(m).name if ("/" in str(m) or "\\" in str(m)) else str(m)
-                for m in self.db.get_setting("modules", []) or []]
+        """Module ids, in install order."""
+        return list(self.db.get_setting("modules", []) or [])
 
     def _module_code_sha(self, mid: str) -> str | None:
         """The pack.py a policy owner installed or upgraded to last, from the signed track."""
@@ -1474,14 +1472,6 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     def roles_of(self, mid: str) -> list[str]:
         return sorted(o.split(":", 1)[1] for (o, r, _) in self.authz.read(subject=member_ref(mid)) if
                       o.startswith("role:") and r == "assignee" and o != f"role:{EVERYONE}")
-
-    def _everyone_holds_everyone(self) -> None:
-        """Every person holds the ``everyone`` role (hubs from before it existed get it on start)."""
-        held = {s for (_, _, s) in self.authz.read(obj=f"role:{EVERYONE}", relation="assignee")}
-        missing = [(f"role:{EVERYONE}", "assignee", member_ref(r["id"])) for r in
-                   self.db.members.find({"kind": "person"}, fields=["id"]) if member_ref(r["id"]) not in held]
-        if missing:
-            self.authz.write(missing)
 
     def role(self, rid: str) -> dict:
         row = self.db.roles.get(rid)

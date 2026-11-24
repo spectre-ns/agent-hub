@@ -379,17 +379,6 @@ def cmd_member(args):
               f"practicehub member approve-roles {args.id} --as <another policy owner>")
 
 
-def cmd_seal_legacy(args):
-    """Seal a track written before events were sealed. Only someone holding the secret should run this, after
-    checking the chain against a head kept off this machine: it is never done on start."""
-    from .track import Track, hub_secret
-    sd = state_dir(args)
-    with database() as db:
-        track = Track(db, hub_secret(sd), _anchors_path(sd))
-        n = track.seal_unsealed()
-    print(f"sealed {n} event(s)" if n else "nothing sealed: the track is already sealed, anchored, or does not verify")
-
-
 def cmd_verify(args):
     hub = build_hub(args)
     v = hub.verify()
@@ -530,9 +519,6 @@ def cmd_restore(args):
     import time
     sd, src = state_dir(args), Path(args.src)
     if not (src / "backup.json").exists():
-        if (src / "hub.db").exists():
-            raise SystemExit(f"{src}/ is a backup of a hub that kept its data in SQLite (hub.db); the hub keeps it in "
-                             f"MongoDB now and cannot restore it")
         raise SystemExit(f"there is no backup in {src}/ (no backup.json)")
     manifest = json.loads((src / "backup.json").read_text())
     if manifest.get("format") != BACKUP_FORMAT:
@@ -990,8 +976,6 @@ def main(argv=None):
     p = sub.add_parser("verify", help="verify the track")
     p.set_defaults(fn=cmd_verify)
     tr = sub.add_parser("track", help="the track itself").add_subparsers(dest="sub", required=True)
-    p = tr.add_parser("seal-legacy", help="seal a track from before events were sealed (secret holder only)")
-    p.set_defaults(fn=cmd_seal_legacy)
     p = tr.add_parser("restored", help="after a restore: record that the events after the backup were lost, and "
                                        "anchor again (a policy owner, with the secret)")
     p.add_argument("--as", dest="as_member", required=True)

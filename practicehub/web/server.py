@@ -338,10 +338,6 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             m = self.hub.session_member(jar["ph_session"].value)
             if m:
                 return m
-        if "ph_token" in jar:  # a token in a cookie, from before passphrases: still honoured, never set any more
-            m = self.hub.authenticate(jar["ph_token"].value)
-            if m:
-                return m
         if self.dev and "ph_as" in jar:
             try:
                 m = self.hub.member(jar["ph_as"].value)

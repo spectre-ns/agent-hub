@@ -122,7 +122,7 @@ class LocalRecordStore:
 
     def reindex(self, rtype: str, stamp: str) -> int:
         """Rewrite the search words of ``rtype``'s records indexed under another stamp (their type's data classes
-        changed, or they were written before the words were kept). Returns how many were rewritten."""
+        changed). Returns how many were rewritten."""
         n = 0
         for row in self.db.records.find({"type": rtype, "ix": {"$ne": stamp}}, fields=["data"]):
             self.db.records.set(row["_id"], self._indexed(row["data"]))
