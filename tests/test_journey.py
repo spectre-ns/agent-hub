@@ -161,7 +161,9 @@ def test_a_move_by_hand_carries_what_the_workflow_ran_after_it(hub):
     assert missed["label"] == "Missed or cancelled" and missed["status"] == "done" and missed["by"] is None
     assert [s["title"] for s in missed["steps"]][:3] == ["Count the patient's missed appointments this year",
                                                          "Apply the missed-appointment policy", "Tell the patient"]
-    assert missed["not_taken"] == ["Entered in error", "Visit started"] and missed["not_needed"]["count"] == 4
+    # not needed here: the fee's steps (a first miss) and, for a visit no clinician asked for, the two that would
+    # send it back to whoever asked
+    assert missed["not_taken"] == ["Entered in error", "Visit started"] and missed["not_needed"]["count"] == 6
     (note,) = [ln for ln in j["stages"][2]["lines"] if ln["kind"] == "note"]
     assert note["what"] == "finished"
 
