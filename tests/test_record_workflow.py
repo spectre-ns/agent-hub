@@ -6,7 +6,7 @@ import re
 import pytest
 
 from practicehub import schema
-from tests.conftest import M, item_for, quiet, run_all_local, stored_workflow
+from tests.conftest import M, item_for, quiet, run_all_local
 
 
 TRANSCRIPT = "\n".join([
@@ -551,119 +551,6 @@ def test_the_record_page_says_who_holds_it_what_is_next_and_when_it_is_due_even_
     panel = app.work_panel(amara, vref, rt=hub.record_type("Encounter"), st="noshow")
     assert "Stopped" in panel and "being fixed by" in panel and "the portal is down" in panel
     assert "tell-missed" not in panel  # step titles, never step ids
-
-
-# A version stored before (about the patient, moving nothing, in the old step form), which runs from then still walk:
-# put in force as stored (``stored_workflow``), since a proposal in the old form is refused now.
-OLD_SHAPE = """id = "appointment-request"
-title = "Appointment request"
-record = "Patient"
-[trigger]
-starters = ["front-desk", "scheduler"]
-[[input]]
-name = "reason"
-type = "text"
-required = true
-[[steps]]
-id = "propose"
-title = "Propose a slot"
-kind = "task"
-role = "scheduler"
-[[steps.fields]]
-name = "slot"
-type = "string"
-required = true
-[[steps]]
-id = "book"
-title = "Book the visit"
-kind = "automation"
-after = ["propose"]
-action = "booking.book"
-[steps.params]
-slot = "{{propose.slot}}"
-subject = "{{run.record}}"
-reason = "{{input.reason}}"
-defaults = { status = "planned" }   # as the step was written then: a booked visit
-"""
-
-
-def test_a_run_from_before_is_moved_onto_its_own_record_only_once_its_type_is_ready_and_failures_back_off(
-        hub, monkeypatch):
-    """Rule: relinking waits for the record type: a run about the subject moves onto a record of its own only once
-    the type in force names the workflow and its active version is about that type (``Hub.record_workflow``), and a
-    record made in its first state has somewhere to go when the old run ends or is cancelled. A move that fails is
-    tried again later and later, noted on the track only when the error changes, and the escalation role is told
-    once; a run that can never move is noted once and not looked at again."""
-    jo, rana = M(hub, "jo"), M(hub, "rana")
-    pat = _pat(hub, "MacLeod")
-    stored_workflow(hub, OLD_SHAPE, "the shape before")
-    rid = hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee"})["id"]
-    cur = hub.propose_workflow(jo, hub.pack.workflow_sources["appointment-request"], "its own visit")
-    hub.approve_workflow(rana, "appointment-request", cur["version"])
-    real = hub.record_workflow
-    monkeypatch.setattr(hub, "record_workflow", lambda rt: None)  # the type in force does not name it yet
-    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}
-    assert hub.engine.run(rid)["record"] == pat
-    monkeypatch.setattr(hub, "record_workflow", real)
-
-    def down(*a, **k):
-        raise RuntimeError("the database went away")
-    monkeypatch.setattr(hub.engine, "_make_record", down)
-    for n in range(1, hub.engine.RELINK_ALERT_AFTER + 2):
-        hub.db.runs.set(rid, {"relink_next_at": None})  # each time its next try is due
-        assert hub.engine.relink_runs()["failed"] == [rid]
-    assert len(hub.db.events.find({"action": "run.relink_failed", "subject": rid})) == 1  # the same error, once
-    told = hub.db.items.find({"run_id": rid, "kind": "notice", "title": {"$regex": "could not be moved"}})
-    assert len(told) >= 1 and len({t["created_at"] for t in told}) == 1  # told once, at the third try
-    assert hub.engine.run(rid)["relink_attempts"] == hub.engine.RELINK_ALERT_AFTER + 1
-
-
-def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_visit(hub, monkeypatch):
-    """Today's runs about the patient move onto a visit of their own: once, each in its own transaction, keeping
-    their version, item, key and steps so far; a failure is noted and tried again; the run then books that visit
-    (not another one) and, when its older version ends, the visit's current workflow walks it from there."""
-    jo, rana = M(hub, "jo"), M(hub, "rana")
-    noor = jo  # the scheduler
-    pat = _pat(hub, "MacLeod")
-    stored_workflow(hub, OLD_SHAPE, "the shape before")
-    run = hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee"})
-    rid = run["id"]
-    propose = item_for(hub, run, "propose")
-    hub.engine.claim(noor, propose)
-    before = hub.engine.run(rid)
-    assert before["record"] == pat  # about the patient, as runs were before the visit had its own
-    cur = hub.propose_workflow(jo, hub.pack.workflow_sources["appointment-request"], "its own visit")
-    hub.approve_workflow(rana, "appointment-request", cur["version"])
-    visits = len(hub.records.search("Encounter", limit=None))
-    # a failure: noted, the run left as it was, and tried again next time
-    real = hub.engine._make_record
-
-    def down(*a, **k):
-        raise RuntimeError("the database went away")
-    monkeypatch.setattr(hub.engine, "_make_record", down)
-    assert hub.engine.relink_runs()["failed"] == [rid]
-    assert hub.engine.run(rid)["record"] == pat
-    assert hub.db.events.find({"action": "run.relink_failed", "subject": rid})
-    monkeypatch.setattr(hub.engine, "_make_record", real)
-    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}  # held back a while, not every tick
-    hub.db.runs.set(rid, {"relink_next_at": "2000-01-01T00:00:00Z"})  # its time to try again has come
-    hub.engine.tick()
-    after = hub.engine.run(rid)
-    ref = after["record"]
-    assert ref.startswith("Encounter/") and after["subject"] == pat and _status(hub, ref) == "requested"
-    assert after["version"] == before["version"] and after["item"] == before["item"]
-    assert after["steps"] == before["steps"] and after["ctx"]["run"]["record"] == pat  # its pinned steps say so
-    assert len(hub.records.search("Encounter", limit=None)) == visits + 1
-    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}  # once only
-    # its older step books that visit, not another one; when it ends, the visit's own workflow takes it on
-    hub.engine.complete(noor, propose, {"slot": "2027-03-09T15:00|dr-amara"})
-    assert _status(hub, ref) == "planned" and len(hub.records.search("Encounter", limit=None)) == visits + 1
-    assert hub.engine.run(rid)["status"] == "completed"
-    (walk,) = hub.engine.runs(record=ref, status="running")
-    assert walk["version"] == cur["version"] and walk["steps"]["checked-in"]["state"] == "waiting"
-    _at_the_visit(hub, ref)
-    hub.update_record(jo, ref, {"status": "arrived"})
-    assert hub.engine.run(walk["id"])["steps"]["checked-in"]["state"] == "done"
 
 
 def _to_the_note(hub, amara, **more):

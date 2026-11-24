@@ -336,13 +336,6 @@ def M(hub, mid):
     return hub.member(mid)
 
 
-def stored_workflow(hub, source: str, note: str) -> int:
-    """A workflow version approved and kept before the current rules (the old step form, say): put in force as it was
-    stored, not proposed (a proposal gets every rule of today), so runs pinned to it still walk as they did."""
-    wid = source.split('"')[1]
-    return hub._put_version(M(hub, "rana"), "workflow", wid, source, note, "", None, "workflow.approved")
-
-
 def run_of(hub, workflow_id):
     runs = [r for r in hub.engine.runs() if r["workflow_id"] == workflow_id]
     assert runs, f"no {workflow_id} run"

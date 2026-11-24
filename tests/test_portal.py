@@ -913,23 +913,6 @@ def test_a_registration_not_accepted_says_so_and_the_person_stays_unable_to_sign
     assert Portal(hub, dev=True).begin_sign_in("2001-07-08", "7777 888 999", client="10.0.2.7")["dev_code"] is None
 
 
-def test_an_older_intake_about_the_person_is_moved_onto_a_registration_of_its_own(hub):
-    """A run started before the intake walked a registration (its record the person) is moved onto one made for it,
-    keeping its item, steps and version; done again, nothing changes. Accepted, it still takes the person in."""
-    run = _register(hub, given="Cy", card="1212 343 565")
-    pat, made = run["subject"], run["record"]
-    hub.db.runs.set(run["id"], {"record": pat, "subject": None})  # as an older run was: about the person
-    hub.db.runs.set(run["id"], {"ctx": {**run["ctx"], "run": {**run["ctx"]["run"], "record": pat, "subject": None}}})
-    item = run.get("item")
-    got = hub.engine.relink_runs()
-    assert run["id"] in got["moved"] and run["id"] not in hub.engine.relink_runs()["moved"]
-    moved = hub.engine.run(run["id"])
-    assert moved["record"].startswith("QuestionnaireResponse/") and moved["record"] != made and moved["subject"] == pat
-    assert moved.get("item") == item and moved["ctx"]["run"]["record"] == pat
-    _intake_accepts(hub, moved)
-    assert hub.records.read(*pat.split("/", 1))["active"] is True
-
-
 def test_the_portal_knows_when_the_practice_is_closed(hub):
     """Round 7 blocker: an alarm page says when nobody is there to read it."""
     p = Portal(hub)

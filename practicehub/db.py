@@ -93,8 +93,7 @@ SHAPES = {
                                 "resolved_at resolved_by"),
     # work
     "runs": ("id", "id workflow_id version title record subject status ctx steps started_by root_event item refs "
-                   "waits_on resting picks at deadline_at deadline_missed_at created_at updated_at "
-                   "fold_failed relink_attempts relink_error relink_next_at relink_skipped"),
+                   "waits_on resting picks at deadline_at deadline_missed_at created_at updated_at fold_failed"),
     "items": ("id", "id n run_id step_id kind title role assignee persons_only status claimed_by output note cause "
                     "created_at updated_at due_at escalated priority escalate_next escalates repeats "
                     "step_title history parent_id children wave step_started_at waiting resting folded_into"),

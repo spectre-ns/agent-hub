@@ -6,7 +6,7 @@ privacy directive."""
 import pytest
 
 from practicehub.hub import Denied, Invalid
-from tests.conftest import M, item_for, quiet, run_all_local, run_of, stored_workflow
+from tests.conftest import M, item_for, quiet, run_all_local, run_of
 
 
 def _pat(hub, family="MacLeod"):
@@ -178,71 +178,6 @@ def test_a_new_renewal_request_made_by_hand_starts_its_workflow(hub):
     ref = f"MedicationRequest/{rx['id']}"
     (run,) = hub.engine.runs(record=ref, status="running")
     assert run["workflow_id"] == "prescription-renewal" and run["ctx"]["input"]["medication"] == "Metformin 500 mg"
-
-
-# A version stored before (about the patient, moving nothing, in the old step form), which runs from then still walk:
-# put in force as stored (``stored_workflow``), since a proposal in the old form is refused now.
-OLD_RENEWAL = """id = "prescription-renewal"
-title = "Prescription renewal"
-record = "Patient"
-[trigger]
-starters = ["front-desk", "nurse", "physician"]
-[[input]]
-name = "medication"
-type = "string"
-required = true
-[[steps]]
-id = "decide"
-title = "Decide on the renewal"
-kind = "gate"
-role = "physician"
-signer = "person"
-outcomes = ["renew", "decline"]
-meaning = "I authorize this renewal"
-[[steps]]
-id = "prescribe"
-title = "Write the prescription"
-kind = "automation"
-after = ["decide"]
-when = "decide.outcome == 'renew'"
-action = "record.create"
-[steps.params]
-type = "MedicationRequest"
-[steps.params.data]
-status = "active"
-intent = "order"
-subject = { reference = "{{run.record}}" }
-medicationCodeableConcept = { text = "{{input.medication}}" }
-"""
-
-
-def test_a_renewal_from_before_the_request_had_its_own_workflow_moves_onto_a_request_and_closes_it(hub):
-    """A run about the patient moves onto a request of its own (keeping its version, item and steps); its older
-    steps write the order as they did, and when it ends the request it walked is closed, not handed on again."""
-    jo, rana, amara = M(hub, "jo"), M(hub, "rana"), M(hub, "dr-amara")
-    pat = _pat(hub)
-    cur = hub.workflow("prescription-renewal")[1]["source"]
-    stored_workflow(hub, OLD_RENEWAL, "the shape before")
-    run = hub.engine.start(jo, "prescription-renewal", record=pat, inputs={"medication": "Atorvastatin 20 mg"})
-    before = hub.engine.run(run["id"])
-    assert before["record"] == pat
-    new = hub.propose_workflow(jo, cur, "its own request")
-    hub.approve_workflow(rana, "prescription-renewal", new["version"])
-    assert run["id"] in hub.engine.relink_runs()["moved"]
-    after = hub.engine.run(run["id"])
-    ref = after["record"]
-    assert ref.startswith("MedicationRequest/") and after["subject"] == pat and after["item"] == before["item"]
-    assert after["version"] == before["version"] and after["ctx"]["run"]["record"] == pat
-    assert _read(hub, ref)["status"] == "draft"
-    assert hub.engine.relink_runs() == {"moved": [], "failed": [], "skipped": []}
-    hub.engine.decide(amara, item_for(hub, after, "decide"), "renew", "")
-    run_all_local(hub, log=quiet)
-    assert hub.engine.run(run["id"])["status"] == "completed"
-    assert _read(hub, ref)["status"] == "cancelled"  # its older version wrote the order separately
-    assert not hub.engine.runs(record=ref, status="running")  # and nothing starts on it again
-    orders = [o for o in hub.records.search("MedicationRequest", limit=None)
-              if o["medicationCodeableConcept"].get("text") == "Atorvastatin 20 mg" and o["status"] == "active"]
-    assert len(orders) == 1
 
 
 # ------------------------------------------------------------------------------------------------ lab result review
