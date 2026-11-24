@@ -82,14 +82,6 @@ class PassPages:
     def _pass_number(self, run: dict) -> int:
         return len(self._pass_runs(run)) if run.get("record") else 1
 
-    def _run_title_pass(self, me, run: dict) -> str:
-        """A run's title, with its pass when its record has been walked more than once."""
-        title = self.hub.run_title(me, run)
-        if not run.get("record"):
-            return title
-        n = self._pass_number(run)
-        return f"{title}, pass {n}" if n > 1 or self._next_pass(run) else title
-
     def _pass_strip(self, me, run: dict) -> str:
         """Which pass this is, how the pass before ended (in words, with the decider's comment), and links to the
         passes before and after. Nothing for a run walked once."""

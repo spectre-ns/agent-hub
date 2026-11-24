@@ -705,7 +705,7 @@ def test_the_outbox_shows_a_clinical_answer_only_to_those_who_read_clinical_reco
                            inputs={"question": "My rash is spreading on my arm"})
     hub.engine.complete(M(hub, "noor"), item_for(hub, run, "clinician"), {"answer": "Use the cream twice daily."})
     row = hub.db.outbox.find_one({"body": "Use the cream twice daily."})
-    assert "clinical" in row["classes"].split(",")
+    assert "clinical" in row["classes"]
     front = app.page_outbox({"me": M(hub, "jo"), "query": {}, "path": "/outbox"})
     assert "Use the cream twice daily." not in front and "Not shown" in front
     nurse = app.page_outbox({"me": M(hub, "noor"), "query": {}, "path": "/outbox"})

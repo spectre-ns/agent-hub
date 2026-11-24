@@ -69,7 +69,7 @@ def act_message_send(engine, run, step, params, actor):
         hub.db.outbox.insert({"_id": oid, "id": oid, "at": utcnow(), "channel": params.get("channel", "message"),
                               "recipient": str(recipient), "subject": subject,
                               "body": body, "run_id": run["id"], "sent_by": actor["id"],
-                              "status": "queued", "classes": ",".join(sorted(classes)), "claimed_by": None,
+                              "status": "queued", "classes": sorted(classes), "claimed_by": None,
                               "claimed_at": None, "done_at": None, "done_by": None, "note": "", "escalated": 0,
                               "purpose": purpose})
         return oid

@@ -124,9 +124,8 @@ class OutboxMixin:
         return out
 
     def message_classes_of(self, row: dict) -> list[str]:
-        practice = (self.pack.practice if self.pack else {}) or {}
-        legacy = practice.get("free_text_class") or practice.get("message_class") or "messages"
-        return [c for c in (row.get("classes") or legacy).split(",") if c]  # from before classes were kept: guarded
+        """The data classes a message's words come from (``engine.message_classes``): never none."""
+        return list(row["classes"])
 
     def may_read_message(self, member: dict, row: dict) -> bool:
         return all(self.can(member, "reader", f"data_class:{c}") for c in self.message_classes_of(row))

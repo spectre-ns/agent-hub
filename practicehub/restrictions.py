@@ -101,10 +101,6 @@ class Restrictions:
         self._at = now
         return out
 
-    def is_restriction(self, rtype: str) -> bool:
-        self._load()
-        return rtype in self._types
-
     def of_subject(self, subject: str) -> list[dict]:
         return list(self._load().get(subject) or [])
 

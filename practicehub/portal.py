@@ -791,7 +791,7 @@ class Portal:
                               "recipient": ref, "subject": "Your sign-in code",
                               "body": f"Your code to sign in to {name} is {code}. It expires in "
                                       f"{self.code_minutes()} minutes. If you did not ask for it, ignore this.",
-                              "run_id": None, "sent_by": self.member["id"], "status": "queued", "classes": cls,
+                              "run_id": None, "sent_by": self.member["id"], "status": "queued", "classes": [cls],
                               "claimed_by": None, "claimed_at": None, "done_at": None, "done_by": None, "note": "",
                               "escalated": 0, "purpose": "sign-in"})
         return oid
@@ -1173,7 +1173,7 @@ class Portal:
         if done.get("when") and slot:
             t = datetime.strptime(slot.split("|", 1)[0], "%Y-%m-%dT%H:%M")
             out["when"], out["with"] = when_words(t), done.get("member_name")
-        elif run.get("status") == "failed" or state == "failed":
+        elif state == "failed":
             out["failed"] = True  # the workflow could not do it: its step failed, and the practice is told
         else:
             out["requested"] = True  # in as a request: a person reads it first (a flag, or not plainly routine)

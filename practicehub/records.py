@@ -117,7 +117,7 @@ class LocalRecordStore:
 
     def _indexed(self, rec: dict) -> dict:
         parts, stamp = self.parts_fn(rec)
-        return {"search": search_text(rec), "words": words_in(rec), "ix": stamp,
+        return {"words": words_in(rec), "ix": stamp,
                 "search_parts": [{"c": c, "w": words_in(view)} for c, view in parts] or None}
 
     def reindex(self, rtype: str, stamp: str) -> int:

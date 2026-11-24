@@ -222,7 +222,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     def _pack_in_force(self) -> dict | None:
         """The practice pack as it was installed or last upgraded, from the signed track: digest and pack.py."""
-        rows = self.track.trusted({"action": {"$in": ["practice.installed", "practice.upgraded", "practice.pinned"]}},
+        rows = self.track.trusted({"action": {"$in": ["practice.installed", "practice.upgraded"]}},
                                   sort=[("seq", DESC)], limit=1)
         return rows[0]["data"] if rows else None
 
@@ -711,13 +711,6 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             except (FileNotFoundError, ValueError):
                 return []
         return list(m.requires)
-
-    def _module_by_id(self, mid: str) -> packmod.Pack:
-        m = next((x for x in self.pack.modules if x.id == mid), None)
-        if m is None:
-            raise NotFound(f"the module {mid} is not installed" + (f" ({self.module_problems[mid]})"
-                                                                   if mid in self.module_problems else ""))
-        return m
 
     def wake_agents(self) -> None:
         """New work: an agent loop running in this process (``serve --agents``) picks it up now, not at its next
@@ -2578,7 +2571,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 or self.can(actor, "member_admin", "practice:main")):
             raise Denied(f"{actor['name']} may not see {target['name']}'s credentials")
         return [{"id": r["token_hash"][:12], "label": r["label"], "created_at": r["created_at"],
-                 "issued_by": r["issued_by"], "revoked": bool(r["revoked"]), "scope": r.get("scope", "api"),
+                 "issued_by": r["issued_by"], "revoked": bool(r["revoked"]), "scope": r["scope"],
                  "servers": r.get("servers", []), "client": r.get("client") or {}}
                 for r in self.db.tokens.find({"member": mid}, sort=[("created_at", DESC)])]
 
@@ -2607,7 +2600,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     def authenticate(self, token: str, scope: str = "api") -> dict | None:
         """The active member a token is for, if it is live and for this use (an MCP token opens only MCP)."""
         got = self.credential(token)
-        return got[0] if got and got[1].get("scope", "api") == scope else None
+        return got[0] if got and got[1]["scope"] == scope else None
 
     def credential(self, token: str) -> tuple[dict, dict] | None:
         """(member, the credential's row) for a live token of an active member."""
@@ -2615,7 +2608,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if not row:
             return None
         m = self.member(row["member"])
-        return (m, {**row, "scope": row.get("scope", "api")}) if m["status"] == "active" else None
+        return (m, row) if m["status"] == "active" else None
 
     # ------------------------------------------------------------------ records (permission-checked)
     def _type(self, rtype: str) -> schema.RecordType:

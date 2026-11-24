@@ -228,10 +228,6 @@ def diff(old: str, new: str) -> list:
     return normalize([p, ins, -(na - p - s), s])
 
 
-def is_noop(op) -> bool:
-    return all(isinstance(p, int) and p > 0 for p in normalize(op))
-
-
 def transform_index(op, index: int, *, before_insert: bool = False) -> int:
     """Where a position (a caret) is after the operation. An insert at the caret goes before it, unless
     ``before_insert`` (the caret stays in front of text inserted where it is)."""

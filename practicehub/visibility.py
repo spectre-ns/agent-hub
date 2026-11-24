@@ -102,14 +102,6 @@ def strip(rec: dict, fields: list[dict]) -> dict:
     return out
 
 
-def strip_classed(hub, rec: dict | None) -> dict | None:
-    """``rec`` without every field that has a data class of its own: what is safe to name it by, for anyone."""
-    if not rec:
-        return rec
-    rt = hub.record_type_for_reading(rec.get("resourceType") or "")
-    return strip(rec, rt.classed_fields) if rt is not None and rt.classed_fields else rec
-
-
 def redact(hub, member: dict | None, rec: dict | None) -> dict | None:
     """What the member may see of a record: without the fields whose data class they may not read, and without what
     a restriction of its subject withholds from them (``practicehub/restrictions.py``: a record it masks becomes a

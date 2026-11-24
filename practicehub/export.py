@@ -34,7 +34,6 @@ from .db import utcnow
 from .hub import Invalid, NotFound
 
 FHIR = "fhir-r4"
-FHIR_VERSION = "4.0.1"
 ODT = "application/vnd.oasis.opendocument.text"
 ODS = "application/vnd.oasis.opendocument.spreadsheet"
 

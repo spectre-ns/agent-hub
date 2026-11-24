@@ -1688,7 +1688,7 @@ def test_a_forged_event_is_never_sealed_or_trusted(tmp_path, monkeypatch):
     raw = _raw_db()  # the database, opened by someone without the hub
     last = raw.events.get(head["seq"])
     seq = head["seq"] + 1
-    forged = {**last, "_id": seq, "seq": seq, "action": "practice.pinned", "prev": head["hash"], "mac": None,
+    forged = {**last, "_id": seq, "seq": seq, "action": "practice.upgraded", "prev": head["hash"], "mac": None,
               "data": {"digest": "f" * 64, "pack_py_sha256": "e" * 64}}
     forged["hash"] = hashlib.sha256(b"anything").hexdigest()
     raw.events.insert(forged)
@@ -2590,8 +2590,8 @@ def test_a_name_is_found_with_or_without_its_accents(hub):
     for q in ("cote", "Côté", "helene", "HELENE cote"):
         assert pat["id"] in {r["id"] for r in hub.records.search("Patient", text=q)}, q
     row = hub.db.records.get(f"Patient/{pat['id']}")
-    assert row["data"]["name"][0]["given"] == ["Hélène"]  # kept as written; only the search text is folded
-    assert "helene" in row["search"] and "Hélène" not in row["search"]
+    assert row["data"]["name"][0]["given"] == ["Hélène"]  # kept as written; only the words it is found by are folded
+    assert "helene" in row["words"] and "Hélène" not in row["words"] and "search" not in row
 
 
 def test_a_record_is_found_by_what_it_says_now_not_what_it_said(hub):
@@ -2770,7 +2770,7 @@ def _critical_page(hub):
                            inputs={"test": "Potassium", "value": "7.2", "unit": "mmol/L", "range": "3.5-5.0",
                                    "flag": "critical"})  # the run files the result it reviews
     msg = hub.db.outbox.find_one({"run_id": run["id"], "channel": "page"}, sort="id")
-    assert msg and msg["status"] == "queued" and "clinical" in msg["classes"].split(",")
+    assert msg and msg["status"] == "queued" and "clinical" in msg["classes"]
     return run, msg
 
 

@@ -77,7 +77,7 @@ SHAPES = {
     "agent_profile_versions": ('"agent_id@version"', "agent_id version status profile source author note created_at "
                                                      "approved_by approved_at based_on reduction"),
     # records
-    "records": ('"Type/id"', "type id subject data version updated_at search words search_parts ix"),
+    "records": ('"Type/id"', "type id subject data version updated_at words search_parts ix"),
     "record_versions": ('"Type/id@version"', "type id version data refs actor run_id at comment authors"),
     "links": ('"from_ref|rel|to_ref"', "from_ref rel to_ref hand"),
     "titles": ('"Type/id"', "type key"),                 # the title folded, for types with formatted text

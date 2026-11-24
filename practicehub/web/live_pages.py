@@ -409,10 +409,6 @@ class LivePages:
         self._back(rtype, rid, cid, req)
 
     # ------------------------------------------------------------------ versions
-    def history_extra(self, v: dict) -> str:
-        """What a version row adds: its comment (\"Edited by Jo and Noor\", \"Restored version 3\")."""
-        return e(v.get("comment") or "")
-
     def page_compare(self, req, rtype, rid):
         """Two versions of a record side by side, as one text: what was taken out, and what was put in."""
         me, hub = req["me"], self.hub
