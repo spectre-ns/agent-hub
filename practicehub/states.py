@@ -77,6 +77,8 @@ ARRIVE = "{edge}--to"           # the step that moves the record along an edge (
 ROUTE = "{state}--route"        # the step that decides, once, which edge an automated state's record leaves by
 FAILED = "{step}--failed"       # the step that moves the record where an automation's on_fail says, if it fails
 START = "start"
+# what the workflow works out from its states and edges, and no author writes on work or on an automation
+WORKED_OUT = ("state", "route", "needs", "on_edge", "at_state", "outcome_when", "outcome_labels")
 
 
 class _Bad(Exception):
@@ -197,6 +199,23 @@ def extension_problems(base: dict, ext: dict) -> list[str]:
     return out
 
 
+def _automations(table: dict, where: str, problems: list[str]) -> list:
+    """``do`` of an edge (or of ``[start]``): a list of automations, whatever was written there."""
+    do = table.get("do") or []
+    do = [do] if isinstance(do, dict) else do
+    if not isinstance(do, list):
+        problems.append(f"{where}: do is a list of automations ([[{'start' if where == 'start' else 'edge'}.do]])")
+        return []
+    return list(do)
+
+
+def _plain_id(what: str, sid, problems: list[str]) -> None:
+    """Ids with a double dash are the ones the workflow makes for its own steps (``<edge>--to``): none is written."""
+    if "--" in str(sid or ""):
+        problems.append(f"{what}: an id has single dashes only (a double dash marks the steps the workflow makes "
+                        f"itself)")
+
+
 def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
     """The steps a states-and-edges workflow runs as, and its shape for its page:
     ``{"start": edge, "states": [state], "edges": [edge]}``, each edge with ``steps`` (its automations' ids) and
@@ -224,6 +243,7 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
     for sid in state_ids:
         if not sid:
             problems.append("state: give every state its id, the value its record's state field takes")
+        _plain_id(f"state {sid}", sid, problems)
     if len(known) != len(state_ids):
         problems.append("state: two states share an id")
     edges: list[dict] = []
@@ -246,11 +266,11 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
                             f"and do (its automations), not {', '.join(sorted(set(e) - {'id', 'label', 'from', 'to', 'when', 'do', 'help'}))}")
         edges.append({"id": eid, "label": str(e.get("label") or eid.replace("-", " ").capitalize()),
                       "from": frm, "to": to, "when": e.get("when") or None, "help": str(e.get("help") or ""),
-                      "do": list(e.get("do") or [])})
+                      "do": _automations(e, where, problems)})
     if start.get("to") is not None and start["to"] not in known:
         problems.append(f"start: to {start['to']!r} is not one of the workflow's states")
     entry = {"id": START, "label": str(start.get("label") or "Filed"), "from": None, "to": start.get("to"),
-             "when": None, "help": "", "do": list(start.get("do") or [])}
+             "when": None, "help": "", "do": _automations(start, "start", problems)}
     out_of: dict = {sid: [e for e in edges if e["from"] == sid] for sid in state_ids}
     names = {str(s.get("id", "")): str(s.get("label") or s.get("id", "")) for s in raw_states}
     loops = _loops(edges, state_ids)
@@ -291,7 +311,8 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
             if w.get("kind", "task") not in ("task", "gate", "automation", "wait"):
                 problems.append(f"{where}: the work on a state is a person's task, a signed decision, an "
                                 f"automation or a wait (kind = \"task\", \"gate\", \"automation\" or \"wait\")")
-            for k in ("outcomes", "after", "state", "route"):
+            _plain_id(where, w.get("id"), problems)
+            for k in ("outcomes", "after", *WORKED_OUT):
                 if k in w:
                     problems.append(f"{where}: {k} is the workflow's to work out from its states and edges")
             if automated:
@@ -350,7 +371,8 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
             where = f"edge {e['id']}: automation {a.get('id', j + 1)}"
             if a.get("kind", "automation") != "automation":
                 problems.append(f"{where}: an edge carries automations; a person's work goes on a state")
-            for k in ("state", "route"):
+            _plain_id(where, a.get("id"), problems)
+            for k in ("outcomes", *WORKED_OUT):
                 if k in a:
                     problems.append(f"{where}: {k} is the workflow's to work out from its states and edges")
             waits = a.pop("after", None) or []  # earlier automations of this edge it waits for, besides those it reads

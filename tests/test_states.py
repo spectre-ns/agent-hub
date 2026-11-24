@@ -330,3 +330,46 @@ def test_the_hubs_own_workflows_are_written_as_workflows_that_only_act(hub):
     assert wfmod.acts_only_source("x", 'A "quoted" title', "It's a summary", "look", "Look") == (
         'id = "x"\ntitle = "A \\"quoted\\" title"\nsummary = "It\'s a summary"\n\n[start]\nlabel = "Told"\n\n'
         '[[start.do]]\nid = "look"\ntitle = "Look"\naction = "context.set"\n')
+
+
+WORKED_OUT = {"state": '"done"', "route": '[["yes", "true"]]', "needs": '["decide"]', "on_edge": '"yes"',
+              "at_state": '"open"', "outcome_when": '{ yes = "true" }', "outcome_labels": '{ yes = "Yes" }',
+              "outcomes": '["yes", "no"]'}
+
+
+@pytest.mark.parametrize("key", sorted(WORKED_OUT))
+def test_what_the_workflow_works_out_is_never_written_on_work_or_on_an_automation(key):
+    """Which edge a step runs on, where it moves the record, what it waits for and which outcomes it offers come
+    from the states and edges. Written by hand on a state's work or an edge's automation, each is refused: a file
+    that said ``on_edge`` or ``at_state`` of its own would be read by the record's history as something else."""
+    said = f"{key} = {WORKED_OUT[key]}\n"
+    on_work = PICK.replace('id = "decide"\n', 'id = "decide"\n' + said, 1)
+    on_automation = PICK.replace('id = "tell"\n', 'id = "tell"\n' + said, 1)
+    assert on_work != PICK and on_automation != PICK
+    assert f"work decide: {key} is the workflow's to work out" in problems(on_work)
+    assert f"automation tell: {key} is the workflow's to work out" in problems(on_automation)
+
+
+def test_an_id_with_a_double_dash_is_the_workflows_own_to_make():
+    """``<edge>--to``, ``<state>--route`` and ``<step>--failed`` are the steps the workflow makes itself: no state,
+    work or automation is given an id with a double dash, as no edge is."""
+    for old, new, where in (('id = "open"\n[[state.work]]', 'id = "op--en"\n[[state.work]]', "state op--en"),
+                            ('id = "decide"', 'id = "de--cide"', "work de--cide"),
+                            ('id = "tell"', 'id = "tell--to"', "automation tell--to")):
+        assert old in PICK
+        assert f"{where}: an id has single dashes only" in problems(PICK.replace(old, new))
+
+
+def test_do_that_is_not_a_list_of_automations_is_a_problem_said_in_words():
+    """A file is read from anywhere (the editor, an import): whatever stands where an edge's automations go, the
+    answer is a problem in words, never an error of the hub's own."""
+    from practicehub.states import compile_states
+    for doc, where in (({"start": {"to": "a"}, "state": [{"id": "a"}], "edge": [{"id": "e", "from": "a", "to": "a",
+                                                                                 "do": 5}]}, "edge e"),
+                       ({"start": {"to": "a", "do": "x"}, "state": [{"id": "a"}]}, "start")):
+        found: list = []
+        compile_states(doc, found)
+        assert any(p.startswith(f"{where}: do is a list of automations") for p in found), found
+    one: list = []  # a single table where a list of them goes is that one automation
+    steps, _ = compile_states({"start": {"do": {"id": "n", "action": "context.set"}}}, one)
+    assert [s["id"] for s in steps] == ["n"] and not one

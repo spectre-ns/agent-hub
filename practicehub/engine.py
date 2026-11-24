@@ -29,6 +29,7 @@ from . import expr
 from . import schema
 from . import visibility
 from . import workflows as wfmod
+from .states import FAILED
 from .db import utcnow
 from .backends import backend_for
 from .fields import FieldError, coerce, json_schema
@@ -1172,7 +1173,7 @@ class Engine:
         """An edge's automation written with ``on_fail`` (states.py) failed: its record goes where that says and the
         run goes on from there. What waited on it to move the record along its edge is skipped; the failure stays
         recorded and told, and the step is not retried (the record went on without it)."""
-        fid = f"{step.id}--failed"
+        fid = FAILED.format(step=step.id)
         fb = next((s for s in wf.steps if s.id == fid and s.on_edge), None)
         if fb is None or run["steps"].get(fid, {}).get("state") != "pending":
             return
