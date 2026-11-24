@@ -90,30 +90,18 @@ type = "list"
 name = "handling"
 label = "Handling"
 type = "choice"
-choices = ["received", "to-call", "not-reached", "drafting", "to-check", "with-nurse", "triaged", "answered", "closed"]
+choices = ["received", "to-call", "not-reached", "drafting", "to-check", "with-nurse", "answered", "closed"]
 help = "where the practice's handling of a patient's message is"
 
 # The handling: its states and the moves between them are the patient-question workflow's (written as states and
 # edges), not listed here. A message no run walks (one entered as received by hand) stays waiting to be read until
-# someone closes it: a patient's message is never closed unread. Triaged is where a run of pack 4.5 or before left a
-# message: screened and with whoever answers it.
+# someone closes it: a patient's message is never closed unread.
 [lifecycle]
 field = "handling"
 initial = "received"
 starts = ["closed"]
 labels = { received = "Waiting to be read" }
-abandoned = { to-call = "closed", not-reached = "closed", drafting = "closed", to-check = "closed", with-nurse = "closed", triaged = "closed", answered = "closed" }
-# the moves a run of pack 4.5 or before still makes: screened (triaged), then answered
-[[lifecycle.transition]]
-from = ["received"]
-to = "triaged"
-by = "workflow"
-label = "Triaged"
-[[lifecycle.transition]]
-from = ["triaged"]
-to = "answered"
-by = "workflow"
-label = "Answered"
+abandoned = { to-call = "closed", not-reached = "closed", drafting = "closed", to-check = "closed", with-nurse = "closed", answered = "closed" }
 [[lifecycle.transition]]
 from = ["received"]
 to = "closed"

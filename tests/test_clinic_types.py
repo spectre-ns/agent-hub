@@ -171,7 +171,7 @@ def test_a_person_starts_a_record_where_its_lifecycle_starts(clinic):
     from practicehub.hub import Invalid
     with pytest.raises(Invalid, match="starts as 'received'"):
         hub.create_record(hub.member("dr-amara"), "Observation",
-                          {"status": "final", "review": "told", "subject": {"reference": patient},
+                          {"status": "final", "review": "closed", "subject": {"reference": patient},
                            "code": {"text": "HbA1c"}})
 
 

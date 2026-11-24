@@ -54,7 +54,7 @@ help = "[{linkId, answer: [{valueString | valueBoolean | ...}]}]"
 name = "registration"
 label = "Registration"
 type = "choice"
-choices = ["received", "checked", "accepted", "waitlisted", "declined", "withdrawn", "closed"]
+choices = ["received", "checked", "accepted", "waitlisted", "declined", "withdrawn"]
 help = "on a registration form only: where the practice's intake of the person is"
 
 # The registration: its states and the moves between them are the new-patient intake's (written as states and edges),
@@ -64,7 +64,3 @@ help = "on a registration form only: where the practice's intake of the person i
 field = "registration"
 initial = "received"
 abandoned = { received = "withdrawn", checked = "withdrawn" }
-[[lifecycle.transition]]
-from = ["received", "checked"]
-to = "closed"
-by = "workflow"

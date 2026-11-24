@@ -40,7 +40,7 @@ required = true
 [[field]]
 name = "status"
 type = "choice"
-choices = ["requested", "reviewed", "active", "refused", "withdrawn"]
+choices = ["requested", "active", "refused", "withdrawn"]
 required = true
 help = "requested: asked for, not yet in force; withdrawn: the patient lifted it; what it withheld is seen again as the roles allow"
 
@@ -108,29 +108,12 @@ fields = ["patient", "status", "received", "request", "withhold_classes", "withh
 
 # The privacy-request workflow (written as states and edges) reviews a request and puts it in force or refuses it: its
 # moves are the workflow's, not listed here. The privacy officer lifts one in force (and may put a lifted one back). A
-# request whose work is cancelled is withdrawn, never silently refused or put in force. Reviewed is where a run of an
-# earlier pack version passes (its review moved the request there before putting it in force or refusing it): the
-# moves through it stay for those runs.
+# request whose work is cancelled is withdrawn, never silently refused or put in force.
 [lifecycle]
 field = "status"
 initial = "requested"
 starts = ["active"]   # the privacy officer records one the patient signed on paper straight in force
-abandoned = { requested = "withdrawn", reviewed = "withdrawn" }
-[[lifecycle.transition]]
-from = ["requested"]
-to = "reviewed"
-by = "workflow"
-label = "Reviewed"
-[[lifecycle.transition]]
-from = ["reviewed"]
-to = "active"
-by = "workflow"
-label = "Put in force"
-[[lifecycle.transition]]
-from = ["reviewed"]
-to = "refused"
-by = "workflow"
-label = "Refused"
+abandoned = { requested = "withdrawn" }
 [[lifecycle.transition]]
 from = ["active"]
 to = "withdrawn"

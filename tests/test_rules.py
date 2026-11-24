@@ -7071,7 +7071,7 @@ def test_a_person_makes_a_record_only_in_its_initial_state_or_one_its_lifecycle_
     assert on_paper["status"] == "active"
     assert not hub.engine.runs(record=f"Consent/{on_paper['id']}")
     with pytest.raises(Invalid, match="starts as 'requested'"):
-        hub.create_record(rana, "Consent", dict(base, status="reviewed"))
+        hub.create_record(rana, "Consent", dict(base, status="refused"))
     assert hub._type("Consent").lifecycle["starts"] == ["active"]
 
 

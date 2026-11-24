@@ -183,7 +183,7 @@ help = "the physician's review: reviewed-by (valueReference), reviewed-on (value
 name = "review"
 label = "Review"
 type = "choice"
-choices = ["received", "checking", "sorting", "reviewed", "told", "closed", "not-told"]
+choices = ["received", "checking", "sorting", "closed"]
 help = "where the physician's review of the result is"
 
 [[screen]]
@@ -193,36 +193,17 @@ fields = ["subject", "status", "test", "category_text", "effectiveDateTime", "va
           "flag_text", "encounter", "note_text"]
 
 # The review: its states and the moves between them are the lab-result-review workflow's (written as states and
-# edges), not listed here: nobody moves a result its review is walking by hand. Here are only the hand moves left: a
-# closed result reviewed again, and the moves out of where reviews of earlier pack versions left a result.
-# Reviewed, Patient told and Patient not told are where a review of pack 4.5 or before left a result: a review now
-# closes the result once it has told the patient or started the call or visit that follows (a record of its own).
+# edges), not listed here: nobody moves a result its review is walking by hand. The one move by hand is a closed
+# result reviewed again. A review closes the result once it has told the patient or started the call or visit that
+# follows (a record of its own).
 [lifecycle]
 field = "review"
 initial = "received"
 # a review cancelled part way leaves the result where it is: it is still to be reviewed
 abandoned = { received = "received", checking = "checking", sorting = "sorting" }
-[[lifecycle.transition]]
-from = ["reviewed", "told"]
-to = "closed"
-label = "Close"
-# only a physician's signature closes a result the patient was not told of (see the signature below)
-[[lifecycle.transition]]
-from = ["not-told"]
-to = "closed"
-by = "workflow"
-label = "Closed: the patient was told"
 # a result the lab corrects is reviewed again: the lab sending its corrected result (lab.result naming it) starts a
 # new review, which moves it back to be sorted
 [[lifecycle.transition]]
-from = ["closed", "not-told"]
+from = ["closed"]
 to = "received"
 label = "Review again"
-
-# A result its review left with the patient not told (not reached, a visit booked, the review cancelled) stays open
-# until a physician signs that the patient was told: that signature closes it.
-[[signature]]
-meaning = "Patient told"
-roles = ["physician"]
-states = ["not-told"]
-moves_to = "closed"
