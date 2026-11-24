@@ -79,6 +79,20 @@ FAILED = "{step}--failed"       # the step that moves the record where an automa
 START = "start"
 # what the workflow works out from its states and edges, and no author writes on work or on an automation
 WORKED_OUT = ("state", "route", "needs", "on_edge", "at_state", "outcome_when", "outcome_labels")
+# what a workflow says, and where: a key that is none of these is a slip of the pen, refused rather than ignored
+KEYS = {
+    "workflow": {"id", "title", "summary", "record", "trigger", "input", "deadline", "new_record", "on_cancel",
+                 "cancel_by", "start", "state", "edge"},
+    "trigger": {"starters", "event", "when", "schedule", "for_each", "where", "one_open_per", "allow_duplicate",
+                "one_open_while", "one_open_within", "one_open_same"},
+    "start": {"to", "label", "do"},
+    "work": {"id", "title", "kind", "role", "when", "risk", "skill", "instructions", "context", "fields", "review_of",
+             "not_by", "signer", "meaning", "meanings", "meanings_if_did", "agent_criteria", "action", "params",
+             "persons_only", "block", "due", "escalate_to", "priority", "assign_to", "people_role", "for_each",
+             "where", "until", "for", "at", "timeout", "moves", "requires_links"},
+    "automation": {"id", "title", "kind", "when", "action", "block", "params", "for_each", "where", "context",
+                   "after", "to", "on_fail"},
+}
 
 
 class _Bad(Exception):
@@ -199,6 +213,18 @@ def extension_problems(base: dict, ext: dict) -> list[str]:
     return out
 
 
+def unknown(where: str, table, kind: str, also=()) -> list[str]:
+    """``where: unknown key "untill" (did you mean "until"?)`` for each key a table of this kind does not have
+    (``also``: keys refused in words of their own)."""
+    import difflib
+    out = []
+    for k in table if isinstance(table, dict) else ():
+        if k not in KEYS[kind] and k not in also:
+            near = difflib.get_close_matches(str(k), sorted(KEYS[kind]), n=1)
+            out.append(f'{where}: unknown key "{k}"' + (f' (did you mean "{near[0]}"?)' if near else ""))
+    return out
+
+
 def _automations(table: dict, where: str, problems: list[str]) -> list:
     """``do`` of an edge (or of ``[start]``): a list of automations, whatever was written there."""
     do = table.get("do") or []
@@ -232,6 +258,7 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
     raw_states, raw_edges = _additions(raw_states, raw_edges, problems)
     acts_only = isinstance(start, dict) and not start.get("to") and bool(start.get("do")) \
         and not raw_states and not raw_edges  # a workflow that only acts (a sweep): it ends once [start] has run
+    problems += unknown("start", start, "start")
     if not isinstance(start, dict) or not start.get("to") and not acts_only:
         problems.append("start: say which state a record enters in ([start] to = \"<state>\")")
         start = {"to": None}
@@ -312,6 +339,7 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
                 problems.append(f"{where}: the work on a state is a person's task, a signed decision, an "
                                 f"automation or a wait (kind = \"task\", \"gate\", \"automation\" or \"wait\")")
             _plain_id(where, w.get("id"), problems)
+            problems += unknown(where, w, "work", ("outcomes", "after", *WORKED_OUT))
             for k in ("outcomes", "after", *WORKED_OUT):
                 if k in w:
                     problems.append(f"{where}: {k} is the workflow's to work out from its states and edges")
@@ -372,6 +400,7 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
             if a.get("kind", "automation") != "automation":
                 problems.append(f"{where}: an edge carries automations; a person's work goes on a state")
             _plain_id(where, a.get("id"), problems)
+            problems += unknown(where, a, "automation", ("outcomes", *WORKED_OUT))
             for k in ("outcomes", *WORKED_OUT):
                 if k in a:
                     problems.append(f"{where}: {k} is the workflow's to work out from its states and edges")

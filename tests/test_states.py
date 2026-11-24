@@ -373,3 +373,30 @@ def test_do_that_is_not_a_list_of_automations_is_a_problem_said_in_words():
     one: list = []  # a single table where a list of them goes is that one automation
     steps, _ = compile_states({"start": {"do": {"id": "n", "action": "context.set"}}}, one)
     assert [s["id"] for s in steps] == ["n"] and not one
+
+
+def test_a_key_a_workflow_does_not_have_is_refused_not_ignored():
+    """A setting misspelt was dropped without a word, and the workflow ran without it (a wait with no ``until``, a
+    task with no ``due``). Each table of a workflow takes the keys it has; any other is named, with the nearest."""
+    for old, new, says in (
+            ('title = "W"\n', 'title = "W"\nsumary = "S"\n', 'workflow: unknown key "sumary" (did you mean "summary"?)'),
+            ('starters = ["physician"]\n', 'starters = ["physician"]\nscedule = "daily 07:00"\n',
+             'trigger: unknown key "scedule" (did you mean "schedule"?)'),
+            ('[start]\nto = "open"\n', '[start]\nto = "open"\nlable = "In"\n',
+             'start: unknown key "lable" (did you mean "label"?)'),
+            ('meaning = "I decided"\n', 'meaning = "I decided"\ndue_in = "2d"\n',
+             'state open: work decide: unknown key "due_in"'),
+            ('id = "tell"\n', 'id = "tell"\nparms = { role = "physician" }\n',
+             'edge yes: automation tell: unknown key "parms" (did you mean "params"?)')):
+        text = (HEAD + PICK).replace(old, new, 1)
+        assert text != HEAD + PICK
+        with pytest.raises(wfmod.DefinitionError) as bad:
+            wfmod.parse(text)
+        assert any(p.startswith(says) for p in bad.value.problems), bad.value.problems
+    # what the workflow works out is refused in its own words, once, not also as a key it does not know
+    said = " | ".join(p for p in problems(PICK.replace('id = "decide"\n', 'id = "decide"\non_edge = "yes"\n', 1))
+                      .split(" | ") if "on_edge" in p)
+    assert said == "state open: work decide: on_edge is the workflow's to work out from its states and edges"
+    with pytest.raises(wfmod.DefinitionError) as bad:  # a trigger that is no table is said so, not an error
+        wfmod.parse('id = "w"\ntitle = "W"\ntrigger = "daily"\n[start]\n[[start.do]]\nid = "n"\naction = "context.set"\n')
+    assert any(p.startswith("trigger: a table") for p in bad.value.problems)

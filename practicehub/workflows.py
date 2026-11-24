@@ -281,7 +281,13 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
         problems.append("id: give the workflow an id of lower-case letters, digits and dashes (not 'new')")
     if not doc.get("title"):
         problems.append("title: give the workflow a title")
+    from .states import unknown
+    problems += unknown("workflow", doc, "workflow", ("steps",))  # steps: refused below, in words of its own
     trig = doc.get("trigger", {}) or {}
+    if not isinstance(trig, dict):
+        problems.append("trigger: a table ([trigger]) saying who may start it, and on what event or schedule")
+        trig = {}
+    problems += unknown("trigger", trig, "trigger")
     for key in ("when", "where"):
         if trig.get(key):
             try:
