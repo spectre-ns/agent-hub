@@ -6,7 +6,8 @@ done there) and the **edges** between them (the ways on, and the automations tha
 tracker writes a workflow. Work is done by **roles**, never by named people. Whether a person or an agent does it
 depends on who holds the role and on the rules below.
 
-> The old step form (`[[steps]]` with `after`) is no longer accepted for authored workflows. Write states and edges.
+> A list of `[[steps]]` with `after` is not a way to write a workflow, and is refused wherever one is read. Write states
+> and edges.
 > The hub still compiles a workflow to steps internally (`practicehub/states.py`, `compile_states`), so runs, their
 > history, analytics and the BPMN export read as before.
 
@@ -308,8 +309,10 @@ moves the record (its id is `<edge>--to`, which no author writes). So placeholde
 ids (`{{decide.by}}`, `{{review.outcome}}`, `{{check.band}}`), and the run's history, analytics and BPMN export read
 as any workflow's. Keep ids stable: other workflows, blocks and tests refer to them.
 
-Workflows are written only this way. The older form, a list of `[[steps]]` with no states, is refused when a workflow
-is proposed or installed; versions approved in that form before keep running as they were.
+Workflows are written only this way, and every version is read by the same rules, whenever it was approved. A list of
+`[[steps]]` is refused wherever a workflow is read. A version in force that a newer rule refuses is not read: it is
+left out of the workflows and starts nothing, its page and its runs say why, and the clock goes on for everyone
+else's work. The way back is to approve a version that passes; proposing the refused text again is refused too.
 
 ### A module adding to another module's workflow
 
@@ -429,10 +432,6 @@ Some work is not asked about:
 
 Over the API, `assign` (`{"<workflow>/<work>": "<member>"}`) on `complete`, `decide` and `move_record` is checked
 the same way, but is optional.
-
-Runs that were open before this (an item per step) are folded when the hub opens: the earliest item keeps its key
-and gains every item's history; the one open step moves onto it, and steps open side by side become its children.
-The other items are marked as moved, and their links lead to the run's item. It runs once per run.
 
 ### Moving the record on its page
 
