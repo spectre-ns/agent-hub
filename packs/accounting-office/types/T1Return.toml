@@ -3,9 +3,14 @@
 # assessment.
 #
 # Two moves are signed by a person and never made by an agent or a workflow: the review ("I reviewed this return...",
-# a manager or partner) and filing ("I authorise filing...", a partner). Only after a partner's signature does the
-# hub transmit the return (an automation); the client's own authorisation (T183) comes in through the portal, or is
-# recorded from paper by the office.
+# a manager or partner) and filing ("I authorise filing...", a partner). The hub transmits nothing to the CRA: the
+# partner files the return from the firm's certified tax software, then records that here, signing with the CRA's
+# confirmation number and the date. The client's own authorisation (T183) comes in through the portal, or is recorded
+# from paper by the office.
+#
+# What was reviewed is what the client authorises and what is filed: once the review is signed the return is locked
+# (nobody edits its figures), and the only way to change it is to reopen it, which sends it back to be compared,
+# drafted, reviewed and authorised again.
 id = "T1Return"
 label = "T1 return"
 plural = "T1 returns"
@@ -18,7 +23,8 @@ flag = "attention"
 part_of = "client"
 order = 10
 summary = "A personal income tax return, from the slips to the notice of assessment."
-workflow = { id = "t1-return", when = "record.status == 'gathering'" }
+# A return reopened for changes (back at comparing) is walked again from there: the next pass, a run of its own.
+workflow = { id = "t1-return", when = "record.status in ['gathering', 'comparing']" }
 
 [[field]]
 name = "client"
@@ -150,11 +156,13 @@ labels = { portal = "Signed on the portal", paper = "Signed on paper", email = "
 name = "efile_confirmation"
 label = "EFILE confirmation number"
 type = "string"
+help = "The CRA's confirmation number, copied from the firm's tax software once the return was accepted: the hub transmits nothing and never makes one up"
 
 [[field]]
 name = "filed_on"
 label = "Filed on"
 type = "date"
+help = "The day the return was transmitted from the firm's tax software and accepted by the CRA"
 
 [[field]]
 name = "noa_date"
@@ -199,8 +207,11 @@ states = ["client-signed"]
 [lifecycle]
 field = "status"
 initial = "gathering"
-# Its work cancelled mid-transmission, it waits for a partner again; cancelled while an assessment that differs is being
-# looked at, it stays there.
+# What was reviewed is what the client authorises and what is filed: from the signed review on, people change nothing
+# on the return but its state (a move still writes what it asks for). "Reopen for changes" is the way back.
+locked = ["client-approval", "with-client", "t183-overdue", "client-signed", "filing", "filed", "assessment-differs", "assessed", "withdrawn"]
+# Its work cancelled while the filing it recorded is being checked, it waits for a partner again; cancelled while an
+# assessment that differs is being looked at, it stays there.
 abandoned = { filing = "client-signed", assessment-differs = "assessment-differs" }
 
 [[lifecycle.transition]]
@@ -230,13 +241,31 @@ label = "Record the client's authorisation (T183)"
 asks = ["t183_signed_on", "t183_how"]
 requires = ["t183_signed_on", "t183_how"]
 
+# The hub does not transmit: the partner files from the firm's tax software first, then records it here.
 [[lifecycle.transition]]
 from = ["client-signed"]
 to = "filing"
-label = "File with the CRA"
+label = "Record the filing"
 sign = "I authorise filing this return with the CRA"
-requires = ["t183_signed_on"]
-confirm = "The return is transmitted to the CRA as soon as you sign."
+asks = ["efile_confirmation", "filed_on"]
+requires = ["t183_signed_on", "efile_confirmation", "filed_on"]
+confirm = "The hub sends nothing to the CRA. Sign only once the return has been transmitted from the firm's tax software and accepted: you are recording the CRA's confirmation number and the date it was filed."
+
+# The way back once the review is signed: the return is compared and drafted again from the slips on file, and needs
+# the review signature and the client's authorisation (T183) again before it can be filed. Whoever holds the work
+# where it waits makes the move; a slip that comes late makes it too (the slip's own run).
+[[lifecycle.transition]]
+from = ["with-client", "t183-overdue", "client-signed"]
+to = "comparing"
+label = "Reopen for changes"
+comment = true
+
+# A slip that came after the draft, before a person could reopen it: only the slip's run makes this move.
+[[lifecycle.transition]]
+from = ["in-review", "client-approval"]
+to = "comparing"
+by = "workflow"
+label = "Back for a slip that came late"
 
 [[lifecycle.transition]]
 from = ["filed"]

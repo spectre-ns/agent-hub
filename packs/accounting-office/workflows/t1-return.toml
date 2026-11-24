@@ -10,9 +10,14 @@ missing. Slips that arrive (on the portal, by email, uploaded) are read by the d
 them. Once they are in, the hub compares this year with last year; the tax agent drafts the return. A draft over the
 risk line (a large change in the refund, a new kind of income, a slip from last year missing) is held for its sponsor
 before it goes on. A manager or partner reviews it and signs; the agent writes the client a summary; the client
-authorises filing (T183) on the portal, or on paper. A partner files, by signing, and only then does the hub transmit
-the return. The client is invoiced. When the notice of assessment comes, the hub compares it with the return, and a
-difference goes to a manager.
+authorises filing (T183) on the portal, or on paper. A partner files it from the firm's certified tax software and
+records that here, by signing, with the CRA's confirmation number and the date: the hub transmits nothing to the CRA.
+The client is invoiced once the filing is recorded. When the notice of assessment comes, the hub compares it with the
+return, and a difference goes to a manager.
+
+What was reviewed is what the client authorises and what is filed. Once the review is signed nobody edits the return;
+it is reopened for changes instead (by whoever holds its work, or by a slip that comes late), which sends it back to
+be compared, drafted, reviewed and authorised again. The client's earlier authorisation does not carry over.
 
 No agent signs, files or approves: the review and filing are a person's signed moves on the return's page.
 """
@@ -30,6 +35,15 @@ escalate_to = "partner"
 [start]
 to = "organizer"
 label = "Opened"
+
+# A return reopened for changes is back at comparing, and this is its next pass: it is compared and drafted again.
+# What the client authorised was the return as it was, so their authorisation (T183) is cleared.
+[[start.do]]
+id = "reopen"
+title = "Reopened: the client's authorisation no longer stands"
+action = "t1.reopen"
+when = "record.status == 'comparing'"
+to = "comparing"
 
 # --------------------------------------------------------------------------------------------- gathering the slips
 [[state]]
@@ -256,11 +270,14 @@ title = "Review the return"
 kind = "task"
 role = "manager"
 persons_only = true
+when = "record.status == 'in-review'"   # a slip that came late took it back to be drafted again: nothing to review
+moves = ["comparing"]
 due = "5d"
 escalate_to = "partner"
 context = ["record:tax", "record:documents", "compare"]
 instructions = """Check the draft against the slips and last year. Correct the figures if they are wrong, note what
-you changed, and sign the review on the return's page. A return that is not ready stays here."""
+you changed, and sign the review on the return's page. A return that is not ready stays here. Once you sign, the
+return is locked: what you reviewed is what the client authorises and what is filed."""
 [[state.work.fields]]
 name = "review_notes"
 label = "Reviewer's notes"
@@ -285,6 +302,8 @@ kind = "task"
 role = "tax-preparer"
 skill = "t1-client-letter"
 risk = "medium"
+when = "record.status == 'client-approval'"   # a slip that came late took it back: no summary of the old figures
+moves = ["comparing"]
 due = "1d"
 people_role = "staff"
 context = ["record:tax", "record:profile"]
@@ -314,8 +333,17 @@ tone = "waiting"
 id = "await-t183"
 title = "Wait for the client to authorise filing (T183)"
 kind = "wait"
-until = "record.t183_signed_on != null or record.status == 'client-signed'"
+until = "record.t183_signed_on != null or record.status in ['client-signed', 'comparing']"
 timeout = "14d"
+
+# Reopened for changes while the client had it (on the return's page, or by a slip that came late): this pass ends,
+# and the next one compares and drafts it again.
+[[edge]]
+id = "reopened-with-client"
+label = "Reopened for changes"
+from = "with-client"
+to = "comparing"
+when = "record.status == 'comparing'"
 
 [[edge]]
 id = "t183-recorded"
@@ -341,6 +369,8 @@ title = "Get the client's authorisation (T183)"
 kind = "task"
 role = "admin"
 persons_only = true
+when = "record.status == 't183-overdue'"   # reopened for changes: there is nothing to authorise yet
+moves = ["comparing"]
 due = "5d"
 escalate_to = "manager"
 context = ["record:tax", "client-letter"]
@@ -370,39 +400,51 @@ tone = "attention"
 
 [[state.work]]
 id = "file"
-title = "File the return"
+title = "File the return and record it"
 kind = "task"
 role = "partner"
 persons_only = true
+when = "record.status == 'client-signed'"   # reopened for changes: there is nothing to file yet
+moves = ["comparing"]
 due = "3d"
 context = ["record:tax", "compare"]
-instructions = """The return is reviewed and the client has authorised it. Sign on the return's page to file it: the
-hub transmits it to the CRA as you sign."""
+instructions = """The return is reviewed and the client has authorised it. The hub sends nothing to the CRA: file the
+return from the firm's tax software (EFILE), exactly as it was reviewed and authorised. Once the CRA has accepted it,
+record that on the return's page: the CRA's confirmation number and the date it was filed, with your signature. If
+anything must change first, reopen the return for changes instead: it is then reviewed and authorised again."""
 [[state.work.fields]]
-name = "filing_note"
-label = "Note"
-type = "text"
+name = "efile_confirmation"
+label = "EFILE confirmation number (from the tax software)"
+type = "string"
+required = true
+[[state.work.fields]]
+name = "filed_on"
+label = "Filed on"
+type = "date"
+required = true
 
 [[edge]]
 id = "signed-for-filing"
-label = "File with the CRA"
+label = "Record the filing"
 from = "client-signed"
 to = "filing"
 
+# The hub checks what was recorded (a partner's signature, the client's authorisation, the confirmation number and
+# the date); it transmits nothing.
 [[state]]
 id = "filing"
-label = "Filing"
+label = "Checking the filing record"
 tone = "active"
 
 [[state.work]]
-id = "transmit"
-title = "Transmit to the CRA (EFILE)"
+id = "filing-check"
+title = "Check the filing as it was recorded"
 kind = "automation"
-action = "efile.transmit"
+action = "t1.filing_recorded"
 
 [[edge]]
-id = "transmitted"
-label = "Accepted by the CRA"
+id = "filing-recorded"
+label = "Filed, as the partner recorded"
 from = "filing"
 to = "filed"
 

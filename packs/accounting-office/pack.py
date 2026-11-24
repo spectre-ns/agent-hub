@@ -10,8 +10,9 @@ Sectioned like pack.toml, one section per service, each with its own registries,
 
 A section adds to its own ``<SECTION>_ACTIONS``, ``_PROVIDERS``, ``_GUARDS``, ``_STANDINS``, ``_SUMMARIES`` (record
 type -> summary) and ``ENGAGEMENT_STARTERS`` (service -> what a signed engagement opens); nothing else needs to change
-in another section. Everything here is deterministic: the stand-ins answer for the agents in tests and demos, and the
-CRA is never called (``efile_stub``).
+in another section. Everything here is deterministic: the stand-ins answer for the agents in tests and demos. The hub
+never calls the CRA and has no EFILE connector: a partner files from the firm's certified tax software and records
+the CRA's confirmation number here (``t1.filing_recorded`` checks what was recorded, and sends nothing).
 
 This file is run as one module (the hub checks its digest): it imports nothing from beside it.
 """
@@ -400,6 +401,9 @@ def estimate(slips: list[dict]) -> dict:
 # The T1's states while its slips are gathered (organizer to the call about what is missing), and before it is drafted.
 T1_GATHERING = ("organizer", "gathering", "chasing", "reminded", "slips-missing")
 T1_BEFORE_DRAFT = (*T1_GATHERING, "comparing", "preparing")
+# ...drafted and not filed yet (in review, or reviewed and with the client or the partner): a slip that comes now
+# sends it back to be compared and drafted again.
+T1_DRAFTED = ("in-review", "client-approval", "with-client", "t183-overdue", "client-signed")
 T1_ASSESSED = ("assessment-differs", "assessed")
 
 
@@ -507,8 +511,12 @@ def act_t1_organizer_sent(engine, run, step, params, actor):
 
 def act_t1_slip_filed(engine, run, step, params, actor):
     """t1.slip_filed (a slip's run): the slip counts on the client's return for its year. A slip it was waiting for
-    is no longer missing (all in: slips_complete); a notice of assessment is recorded on the return it assesses; a
-    slip that comes after the return was drafted is flagged for a person."""
+    is no longer missing (all in: slips_complete); a notice of assessment is recorded on the return it assesses.
+
+    A slip that comes after the return was drafted, and before it is filed, reopens it: the return goes back to be
+    compared and drafted again with the slip in it, the client's authorisation (T183) is cleared, and it is reviewed
+    and authorised again before it can be filed. It is never left as a flag on a return someone could still file.
+    One that comes after the filing was recorded is flagged for a person (the return may need an adjustment)."""
     hub = engine.hub
     slip = _read(hub, run["record"])
     client, year = _ref(slip.get("client")), slip.get("year")
@@ -534,8 +542,34 @@ def act_t1_slip_filed(engine, run, step, params, actor):
              slips_complete=(not missing) if expected else income_in)
         return {"return": ref, "missing": missing, "summary": f"{slip_key(slip)} counted on {ref}; "
                 + (f"still missing: {', '.join(missing)}." if missing else "nothing expected is missing.")}
-    _set(hub, actor, ref, run, attention=f"A slip came after the return was drafted: {slip_key(slip)}")
-    return {"return": ref, "late": True, "summary": f"{slip_key(slip)} came after {ref} was drafted: flagged."}
+    if ret.get("status") in T1_DRAFTED:
+        why = f"a slip came after the return was drafted: {slip_key(slip)}"
+        note = "\n".join(b for b in (str(ret.get("note") or "").strip(),
+                                     f"Reopened {_today(engine).isoformat()}: {why}.") if b)
+        # the return's own workflow lets this move through (its open work's ``moves``, its wait's ``until``): this
+        # pass ends, and the next one compares and drafts it again (t1.reopen)
+        _set(hub, actor, ref, run, status="comparing", t183_signed_on=None, t183_how=None, note=note,
+             attention=f"Reopened: {why}")
+        return {"return": ref, "late": True, "reopened": True,
+                "summary": f"{slip_key(slip)} came after {ref} was drafted: reopened, to be drafted, reviewed and "
+                           f"authorised again."}
+    _set(hub, actor, ref, run, attention=f"A slip came after the return was filed: {slip_key(slip)}. It may need "
+                                         f"an adjustment (T1-ADJ).")
+    return {"return": ref, "late": True, "reopened": False,
+            "summary": f"{slip_key(slip)} came after {ref} was filed: flagged for a person."}
+
+
+def act_t1_reopen(engine, run, step, params, actor):
+    """t1.reopen: the return is back to be compared and drafted again (a person reopened it for changes, or a slip
+    came after it was drafted). What the client authorised was the return as it was: the T183 is cleared, so the
+    return is reviewed, and authorised by the client, again before it can be filed."""
+    hub, ref = engine.hub, run["record"]
+    ret = _read(hub, ref)
+    had = ret.get("t183_signed_on")
+    _set(hub, actor, ref, run, t183_signed_on=None, t183_how=None)
+    return {"reopened": True, "cleared_t183": bool(had),
+            "summary": "Reopened for changes: it is drafted, reviewed and authorised by the client again."
+                       + (f" The authorisation of {had} no longer stands." if had else "")}
 
 
 def act_t1_compare(engine, run, step, params, actor):
@@ -551,30 +585,38 @@ def act_t1_compare(engine, run, step, params, actor):
     return out
 
 
-def efile_stub(ret: dict) -> dict:
-    """The CRA's EFILE service, stubbed: no call leaves the hub. A real connector replaces this function and keeps its
-    contract (the return in; a confirmation number, or a refusal raised as an error)."""
-    if not ret.get("t183_signed_on"):
-        raise ValueError("EFILE: no T183 authorisation on the return")
-    digest = hashlib.sha256(f"{ret.get('id')}|{ret.get('year')}|{ret.get('net_refund')}".encode()).hexdigest()
-    return {"confirmation": "EF" + digest[:8].upper()}
-
-
-def act_efile_transmit(engine, run, step, params, actor):
-    """efile.transmit: send the return to the CRA, only after a partner signed its filing. The step runs as the
-    workflow; it refuses unless the last signature on the return is a person's, a partner's, saying it authorises
-    filing (the lifecycle already asks for that signature; this checks it was given)."""
+def act_t1_filing_recorded(engine, run, step, params, actor):
+    """t1.filing_recorded: check the filing a partner recorded. Nothing is sent to the CRA: the hub has no EFILE
+    connector, and the return was filed from the firm's certified tax software. The step runs as the workflow; it
+    refuses unless the last signature on the return is a person's, a partner's, saying it authorises filing, the
+    client's authorisation (T183) is on the return, and the CRA's confirmation number and the date filed were
+    recorded (the lifecycle already asks for all of these; this checks they were given). It writes neither: a
+    confirmation number is never made up here. Dates that do not agree are flagged for a person, since the filing
+    itself is done."""
     hub, ref = engine.hub, run["record"]
     ret = _read(hub, ref)
     signed = hub.db.events.find_one({"action": "record.signed", "subject": ref}, sort=[("seq", -1)])
     meaning = (((signed or {}).get("data") or {}).get("signed") or {}).get("meaning")
     signer = hub.member(signed["actor"]) if signed and hub.db.members.get(str(signed["actor"])) else {}
     if meaning != FILE_MEANING or signer.get("kind") != "person" or "partner" not in (signer.get("roles") or []):
-        raise ValueError("efile.transmit: the return is not signed for filing by a partner")
-    got = efile_stub(ret)
-    _set(hub, actor, ref, run, efile_confirmation=got["confirmation"], filed_on=_today(engine).isoformat())
-    return {"confirmation": got["confirmation"], "signed_by": signer.get("id"),
-            "summary": f"Transmitted; EFILE confirmation {got['confirmation']}."}
+        raise ValueError("t1.filing_recorded: the return is not signed for filing by a partner")
+    if not ret.get("t183_signed_on"):
+        raise ValueError("t1.filing_recorded: no T183 authorisation on the return")
+    confirmation, filed_on = str(ret.get("efile_confirmation") or "").strip(), str(ret.get("filed_on") or "")
+    if not confirmation or not filed_on:
+        raise ValueError("t1.filing_recorded: the EFILE confirmation number and the date filed are not recorded")
+    odd = []
+    if filed_on > _today(engine).isoformat():
+        odd.append(f"it is recorded as filed on {filed_on}, a day that has not come")
+    if filed_on < str(ret["t183_signed_on"]):
+        odd.append(f"it is recorded as filed on {filed_on}, before the client authorised it "
+                   f"({ret['t183_signed_on']})")
+    if odd:
+        _set(hub, actor, ref, run, attention=("Check the filing dates: " + "; ".join(odd))[:2000])
+    return {"confirmation": confirmation, "filed_on": filed_on, "signed_by": signer.get("id"),
+            "summary": f"Filed on {filed_on} from the firm's tax software, as {signer.get('name') or 'a partner'} "
+                       f"recorded: EFILE confirmation {confirmation}."
+                       + (" Check the dates: " + "; ".join(odd) + "." if odd else "")}
 
 
 def act_t1_invoice(engine, run, step, params, actor):
@@ -612,8 +654,8 @@ def prov_t1_last_year(engine, run, step, member):
 
 
 T1_ACTIONS = {"t1.organizer_sent": act_t1_organizer_sent, "t1.slip_filed": act_t1_slip_filed,
-              "t1.compare": act_t1_compare, "efile.transmit": act_efile_transmit, "t1.invoice": act_t1_invoice,
-              "t1.compare_noa": act_t1_compare_noa}
+              "t1.compare": act_t1_compare, "t1.reopen": act_t1_reopen, "t1.filing_recorded": act_t1_filing_recorded,
+              "t1.invoice": act_t1_invoice, "t1.compare_noa": act_t1_compare_noa}
 T1_PROVIDERS = {"t1-last-year": prov_t1_last_year}
 
 FINAL = re.compile(r"\b(filed|final|signed|approved by)\b", re.I)
@@ -1026,7 +1068,7 @@ def _prior_year(hub, name, year, slips):
         "status": "assessed", "self_employed": se, **_due_dates(hub.pack, year, se),
         **{k: est[k] for k in ("total_income", "taxable_income", "tax_deducted", "net_refund")},
         "t183_signed_on": f"{year + 1}-04-0{3 + len(name) % 5}", "t183_how": "portal",
-        "efile_confirmation": "EF" + hashlib.sha256(f"{name}{year}".encode()).hexdigest()[:8].upper(),
+        "efile_confirmation": _demo_confirmation(name, year),
         "filed_on": f"{year + 1}-04-1{len(name) % 9}", "noa_received": True, "noa_date": f"{year + 1}-05-2{len(name) % 9}",
         "assessed_refund": est["net_refund"], "assessed_taxable_income": est["taxable_income"],
         "assessment_notes": "Assessed as filed."})
@@ -1088,8 +1130,19 @@ def _client_approves(hub, name):
     _agents_work(hub)
 
 
+def _demo_confirmation(name: str, year) -> str:
+    """Demo data, marked as such: the number a partner would copy from the firm's tax software. The hub files
+    nothing and never makes a confirmation number of its own."""
+    return "DEMO-" + hashlib.sha256(f"{name}{year}".encode()).hexdigest()[:6].upper()
+
+
 def _file(hub, ref):
-    hub.move_record(hub.member("anne"), ref, "filing", {}, signature=FILE_MEANING)
+    """Anne (partner) records the filing she made from the tax software: its confirmation number (demo data) and the
+    date, signed."""
+    ret = _read(hub, ref) or {}
+    hub.move_record(hub.member("anne"), ref, "filing",
+                    {"efile_confirmation": _demo_confirmation(ret.get("client_name") or "", ret.get("year")),
+                     "filed_on": hub.engine.now().date().isoformat()}, signature=FILE_MEANING)
     _agents_work(hub)
 
 
@@ -1139,14 +1192,15 @@ def demo_t1(hub):
     _approve_holds(hub, mei)
     _review(hub, mei, "T4 agrees with Chen Design's payroll. No changes.")
 
-    # James: reviewed and approved by him on the portal: Anne (partner) signs to file it.
+    # James: reviewed and approved by him on the portal: Anne (partner) is to file it and record that here.
     james = _engage(hub, "James Okafor", year, prev["James Okafor"])
     _upload(hub, "James Okafor", year, DEMO_SLIPS["James Okafor"])
     _approve_holds(hub, james)
     _review(hub, james, "RRSP receipt matches the contribution room on last year's NOA.")
     _client_approves(hub, "James Okafor")
 
-    # Aisha: filed (EFILE confirmation, invoiced), waiting for the notice of assessment.
+    # Aisha: filed from the tax software and recorded here (a demo confirmation number), invoiced, waiting for the
+    # notice of assessment.
     aisha = _engage(hub, "Aisha Okafor", year, prev["Aisha Okafor"])
     _upload(hub, "Aisha Okafor", year, DEMO_SLIPS["Aisha Okafor"])
     _approve_holds(hub, aisha)

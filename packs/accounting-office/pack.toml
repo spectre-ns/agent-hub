@@ -5,7 +5,9 @@
 #
 # How work is split here: agents categorise, reconcile, chase missing slips and documents, and draft returns and
 # client messages. People review returns and anything over a risk line, and sign what is filed. An agent never signs
-# and never files: filing is a partner's signed move on the return's own page, and only then does the hub transmit.
+# and never files. Nor does the hub: it has no EFILE connector and sends nothing to the CRA. A partner files a return
+# from the firm's certified tax software, then records it on the return's own page, a signed move that asks for the
+# CRA's confirmation number and the date filed.
 #
 # The pack is built in sections, one per service, so each can be worked on apart: FOUNDATION (the firm, clients,
 # engagements, billing, messages), T1 (personal tax), BOOKS (bookkeeping), T2 (corporate tax), GST-PAYROLL. A section
@@ -17,7 +19,11 @@
 # 1.1: the engagement, T1 return, client signature and slip intake workflows are written as their records' states and
 # the edges between them (docs/workflows.md, "States and edges"), with the automations on the edges; the moves they
 # make are their edges, no longer listed on the Engagement and T1 return types. Runs open on 1.0 keep their version.
-version = "1.1"
+# 1.2: filing a T1 is recorded, not transmitted: the partner's signed move asks for the CRA's confirmation number and
+# the date filed (the hub never made a real transmission, and no longer writes a confirmation number of its own). A
+# return is locked once its review is signed; "Reopen for changes", or a slip that comes late, sends it back to be
+# compared, drafted, reviewed and authorised (T183) again.
+version = "1.2"
 
 [practice]
 requires_core = "1.0"
@@ -34,7 +40,8 @@ message_class = "correspondence"
 free_text_class = "correspondence"
 notes = """Agents here do the preparation: they sort and read slips, chase what is missing, compare with last year,
 draft returns and client messages, and flag what changed. People review every return and approve anything over the
-risk line. Only a partner files, by signing; no agent ever signs, files, or tells a client what they owe as final."""
+risk line. Only a partner files, from the firm's tax software, and records it here by signing: the hub sends nothing
+to the CRA. No agent ever signs, files, or tells a client what they owe as final."""
 agent_rules = [
   "You never sign, file, or tell a client a return is final: a person reviews and a partner files.",
   "You never give tax planning or legal advice: a question that needs a judgement is escalated to a person.",
