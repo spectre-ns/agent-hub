@@ -36,13 +36,6 @@ POLL_WAIT = 25             # how long a long poll is held
 MAX_TEXT = 400_000         # characters a live text may grow to
 MAX_OP_PARTS = 2000
 
-INDEXES = {
-    "live_sessions": ["ref"],
-    "live_ops": [{"fields": ["session", "seq"], "unique": True}, {"fields": ["session", "cid"], "unique": True}],
-    "live_comments": [("ref", "at")],
-}
-
-
 
 def names(people: list[str]) -> str:
     """"Jo", "Jo and Noor", "Jo, Noor and Sam"."""
@@ -72,7 +65,6 @@ class Live:
         self._conds: dict[str, threading.Condition] = {}
         self._locks: dict[str, threading.RLock] = {}
         self._guard = threading.Lock()
-        self.db.ensure_indexes(INDEXES)
 
     # ------------------------------------------------------------------ helpers
     def _cond(self, sid: str) -> threading.Condition:
