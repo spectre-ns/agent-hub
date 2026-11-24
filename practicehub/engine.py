@@ -1313,9 +1313,7 @@ class Engine:
                     seq = hub.track.append(self.automation_actor(run), "step.activated", f"step:{step.id}",
                                            run_id=run_id, cause=cause,
                                            data={"step": step.id, "kind": step.kind, "role": step.role})
-                    if not run.get("item"):  # a run with no item of its own (none before it): an item per step
-                        st.update(state="active", item=self._new_item(run, step, seq))
-                    elif step.for_each:  # once per person: a child item each
+                    if step.for_each:  # once per person: a child item each
                         people = self._people_of(run, step)
                         if not people:
                             run["ctx"][step.id] = {"each": [], "by": None}
@@ -1985,18 +1983,17 @@ class Engine:
                 "assignee": route.get("assignee"), "started_at": utcnow(), "taken_at": None, "done_at": None,
                 "by": None, "outcome": None, "due_at": route.get("due_at"), "escalated": 0, "item": item_id, **more}
 
-    def _new_item(self, run: dict, step, cause: int, *, parent: dict | None = None, person: str | None = None) -> str:
-        """A child item of the run's item (``parent``), or, for a run without one, an item for this step alone."""
+    def _new_item(self, run: dict, step, cause: int, *, parent: dict, person: str | None = None) -> str:
+        """A child item of the run's item (``parent``): a step people work beside another, or once per person."""
         item_id = _new_id("item")
         route = self._route(run, step, person)
         self.hub.db.items.insert(_item_doc(
             self.hub, id=item_id, run_id=run["id"], step_id=step.id, kind=step.kind,
-            title=run["title"] if parent else step.title, step_title=step.title, status="open", cause=cause,
-            parent_id=parent["id"] if parent else None, step_started_at=utcnow(),
+            title=run["title"], step_title=step.title, status="open", cause=cause,
+            parent_id=parent["id"], step_started_at=utcnow(),
             history=[self._entry(step, route, item_id)], **route))
-        if parent:
-            self.hub.db.items.update({"_id": parent["id"]}, {"$push": {"children": item_id, "wave": item_id},
-                                                             "$set": {"updated_at": utcnow()}})
+        self.hub.db.items.update({"_id": parent["id"]}, {"$push": {"children": item_id, "wave": item_id},
+                                                         "$set": {"updated_at": utcnow()}})
         if not route["assignee"] and route["role"] and not self.hub.active_holders(
                 route["role"], persons_only=bool(route["persons_only"])):
             self._nobody_holds(run, step, item_id, cause)
@@ -3048,8 +3045,8 @@ class Engine:
         hub = self.hub
         if signed is not None and member.get("kind") != "person":
             raise Denied("only a person signs: agents never sign")
-        # the run's own item waits for its next step; a child (or an item of a run without one) is done
-        walks = bool(run.get("item")) and item["id"] == run.get("item")
+        # the run's own item waits for its next step; a child is done
+        walks = item["id"] == run.get("item")
         hub.db.items.set(item["id"], {"status": "waiting" if walks else "done", "claimed_by": member["id"],
                                       "output": values, "updated_at": utcnow()})
         entry = self._hist_update(item["id"], step.id, done_at=utcnow(), by=member["id"],
@@ -3095,120 +3092,6 @@ class Engine:
         self.hub.db.items.set(item_id, {"status": "done", "claimed_by": member["id"], "updated_at": utcnow()})
         self.hub.track.append(member, "notice.acknowledged", f"item:{item_id}", run_id=item["run_id"], cause=item["cause"])
         return self.item(item_id)
-
-    # ------------------------------------------------------------------ upgrade: one item per run
-    def fold_run_items(self) -> list[str]:
-        """Runs still open from before one item walked its workflow (an item per step) get their one item: the
-        earliest item keeps its key and gets every item's step history; the one step open on its own moves onto
-        it, and steps open side by side become its child items (keeping their keys). Items folded in are marked
-        ``folded`` (``folded_into`` the kept one), so a link to one still finds the work. Safe to run again: a run
-        that has been looked at carries ``item`` (None when its workflow has no step for a person or a wait)."""
-        hub = self.hub
-        done = []
-        for r in hub.db.runs.find({"status": "running", "$or": [{"item": {"$exists": False}}, {"fold_failed": True}]},
-                                  sort=[("created_at", 1)]):
-            run = _plain(r)
-            try:
-                with hub.db:
-                    self._fold(run)
-                    if run.get("fold_failed"):
-                        hub.db.runs.update({"_id": run["id"]}, {"$unset": {"fold_failed": ""}})
-                done.append(run["id"])
-            except Exception as exc:  # noqa: BLE001 - one run that cannot be folded never stops the hub opening
-                hub.db.runs.set(run["id"], {"item": None, "fold_failed": True})  # tried again at the next start
-                hub.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "run.fold_failed",
-                                 run["id"], run_id=run["id"], data={"error": str(exc)})
-        return done
-
-    def _fold(self, run: dict) -> None:
-        hub = self.hub
-        rows = hub.db.items.find({"run_id": run["id"], "kind": {"$nin": ["notice", "hold"]},
-                                  "status": {"$ne": "folded"}}, sort="n")
-        try:
-            wf, _ = hub.workflow(run["workflow_id"], run["version"])
-        except Exception:  # noqa: BLE001
-            wf = None
-        if not rows:
-            pid = self._run_item(run["id"], wf, run["title"], run.get("root_event")) if wf else None
-            hub.db.runs.set(run["id"], {"item": pid})
-            if pid:
-                self._place(run["id"], run.get("root_event"))
-            return
-        keep = rows[0]
-        live = [x for x in rows if x["status"] in OPEN_WORK]
-
-        def entry(x) -> dict:
-            closed = x["status"] in ("done", "cancelled")
-            title = x.get("step_title") or x["title"]
-            kind = x["kind"]
-            try:
-                st = wf.step(x["step_id"]) if wf else None
-            except KeyError:
-                st = None
-            if st is not None:  # a step its version no longer has keeps the item's own title and kind
-                title, kind = st.title, st.kind
-            return {"step": x["step_id"], "title": title, "kind": kind, "role": x.get("role"),
-                    "assignee": x.get("assignee"), "started_at": x["created_at"], "taken_at": None,
-                    "done_at": x["updated_at"] if closed else None, "by": x.get("claimed_by") if closed else None,
-                    "outcome": ((x.get("output") or {}).get("outcome") or "done") if x["status"] == "done"
-                    else ("cancelled" if closed else None), "due_at": x.get("due_at"),
-                    "escalated": int(x.get("escalated") or 0), "item": x["_id"]}
-
-        for x in rows:  # when each was first taken, from the track
-            ev = hub.db.events.find_one({"subject": f"item:{x['_id']}", "action": "item.claimed"}, sort="seq",
-                                        fields=["at"])
-            x["_taken"] = ev["at"] if ev else None
-        history = []
-        for x in rows:
-            if x["status"] in OPEN_WORK and x is not keep and len(live) > 1:
-                continue  # stays a child item, with its own history
-            history.append({**entry(x), "taken_at": x["_taken"]})
-        carried = keep if keep["status"] in OPEN_WORK else (live[0] if len(live) == 1 else None)
-        children = [x for x in live if x is not carried]
-        fields = {"title": run["title"], "parent_id": None, "history": history,
-                  "children": [x["_id"] for x in children], "wave": [x["_id"] for x in children],
-                  "updated_at": utcnow()}
-        if carried is not None:
-            st = None
-            try:
-                st = wf.step(carried["step_id"]) if wf else None
-            except KeyError:
-                pass
-            for h in history:
-                if h["item"] == carried["_id"]:
-                    h["item"] = keep["_id"]
-            fields.update({k: carried.get(k) for k in ("step_id", "kind", "role", "assignee", "persons_only", "status",
-                                                       "claimed_by", "output", "note", "cause", "due_at", "escalated",
-                                                       "escalate_next", "priority")},
-                          step_title=st.title if st else carried["title"], step_started_at=carried["created_at"],
-                          waiting="")
-        else:
-            fields.update(status="waiting", kind="wait", step_id="", step_title="", claimed_by=None, role=None,
-                          assignee=None, due_at=None)
-        hub.db.items.set(keep["_id"], fields)
-        steps = run["steps"]
-        for x in rows:
-            if x is keep:
-                continue
-            if x in children:
-                hub.db.items.set(x["_id"], {"parent_id": keep["_id"], "step_title": x.get("step_title") or x["title"],
-                                            "title": run["title"], "step_started_at": x["created_at"],
-                                            "history": [{**entry(x), "taken_at": x["_taken"]}]})
-                continue
-            hub.db.items.set(x["_id"], {"status": "folded", "folded_into": keep["_id"], "updated_at": utcnow()})
-            hub.db.items.update({"kind": "hold", "output.holds": x["_id"]}, {"$set": {"output.holds": keep["_id"]}},
-                                many=True)
-            for sid, st in steps.items():
-                if st.get("item") == x["_id"]:
-                    st["item"] = keep["_id"]
-        hub.db.runs.set(run["id"], {"item": keep["_id"], "steps": steps})
-        hub.track.append({"id": "hub", "kind": "automation", "name": "Practice Hub"}, "run.items_folded",
-                         f"item:{keep['_id']}", run_id=run["id"],
-                         data={"kept": keep["_id"], "folded": [x["_id"] for x in rows if x is not keep
-                                                               and x not in children],
-                               "children": [x["_id"] for x in children]})
-        if carried is None and wf is not None:
-            self._show_waiting(self.run(run["id"]), wf, keep["_id"])
 
     # ------------------------------------------------------------------ inbound events
     def _starts_on(self, wf, event_type: str, ctx: dict) -> bool:

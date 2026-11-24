@@ -145,8 +145,7 @@ def one_item_per_run(db) -> None:
     work on it (parallel steps, a step once per person) is a child of it. Notices and sponsor holds are apart."""
     for run in db.runs.find({"item": {"$type": "string"}}, {"item": 1}):
         top = [r["_id"] for r in db.items.find({"run_id": run["_id"], "parent_id": None,
-                                                 "kind": {"$nin": ["notice", "hold"]},
-                                                 "status": {"$ne": "folded"}}, {"_id": 1})]
+                                                 "kind": {"$nin": ["notice", "hold"]}}, {"_id": 1})]
         assert top == [run["item"]], f"run {run['_id']}: top items {top}, not its one item {run['item']}"
         stray = db.items.count_documents({"run_id": run["_id"], "parent_id": {"$nin": [None, run["item"]]}})
         assert not stray, f"run {run['_id']}: {stray} child item(s) of another item"

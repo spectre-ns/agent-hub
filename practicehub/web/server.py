@@ -957,8 +957,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         return f'{self._code()}-{row["n"] if row else "?"}'
 
     ITEM_STATUS = {"open": ("To do", ""), "claimed": ("In progress", "prog"), "held": ("Waiting for sponsor", "wait"),
-                   "done": ("Done", "done"), "cancelled": ("Cancelled", ""), "waiting": ("Waiting", "wait"),
-                   "folded": ("Moved", "")}
+                   "done": ("Done", "done"), "cancelled": ("Cancelled", ""), "waiting": ("Waiting", "wait")}
     STEP_STATE = {"pending": ("To come", ""), "active": ("Now", "prog"), "done": ("Done", "done"),
                   "skipped": ("Not needed", ""), "failed": ("Stopped", "bad"), "waiting": ("Now", "wait"),
                   "if-needed": ("If needed", "")}
@@ -1810,8 +1809,6 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
     def page_item(self, req, iid, kept: dict | None = None, error: Exception | None = None):
         me, eng = req["me"], self.hub.engine
         item, run = self._item_for(me, iid)
-        if item["status"] == "folded" and item.get("folded_into"):
-            raise Redirect(f"/items/{item['folded_into']}")  # a step's own item from before: now the run's one item
         wf, _ = self.hub.workflow(run["workflow_id"], run["version"])
         try:
             step = wf.step(item["step_id"])

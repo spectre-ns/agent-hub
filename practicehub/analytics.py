@@ -145,8 +145,7 @@ def report(hub, member, *, days: int = DEFAULT_DAYS, now: datetime | None = None
             else:  # by item and step: one item walks a run's steps
                 key = (ev["subject"], (ev.get("data") or {}).get("step"))
                 handed_up[key] = handed_up.get(key, 0) + 1
-        items += db.items.find({"run_id": {"$in": ids}, "kind": {"$nin": list(NOT_WORK)},
-                                "status": {"$ne": "folded"}},
+        items += db.items.find({"run_id": {"$in": ids}, "kind": {"$nin": list(NOT_WORK)}},
                                fields=["run_id", "step_id", "status", "created_at", "updated_at", "due_at",
                                        "escalated", "history"])
     defs: dict = {}
@@ -186,26 +185,20 @@ def report(hub, member, *, days: int = DEFAULT_DAYS, now: datetime | None = None
     visits = []  # (item, step, began, first taken, done, due, escalations, open, handed up)
     for it in items:
         subj = f"item:{it['_id']}"
-        if it.get("history"):
-            # a step's time from the item's step history: each step a person did on this item (a child's step is
-            # counted once, on the child; an entry of an item folded in from before counts here)
-            for h in it["history"]:
-                if h.get("kind") not in ("task", "gate"):
-                    continue
-                if h.get("item") != it["_id"] and h.get("item") in known_items:
-                    continue
-                hsub = f"item:{h.get('item') or it['_id']}"
-                ended = h.get("done_at") if h.get("outcome") not in (None, "cancelled") else None
-                visits.append((it, h["step"], h.get("started_at"), h.get("taken_at") or claimed_at.get(hsub)
-                               if hsub != subj else h.get("taken_at"), ended, h.get("due_at"),
-                               int(h.get("escalated") or 0), not h.get("done_at") and it["status"] in OPEN_STATES,
-                               handed_up.get((subj, h["step"]), 0) + (handed_up.get((hsub, None), 0)
-                                                                       if hsub != subj else 0)))
-            continue
-        visits.append((it, it["step_id"], it["created_at"], claimed_at.get(subj),
-                       it["updated_at"] if it["status"] == "done" else None, it.get("due_at"),
-                       int(it.get("escalated") or 0), it["status"] in OPEN_STATES,
-                       sum(v for (sj, _), v in handed_up.items() if sj == subj)))
+        # a step's time from the item's step history: each step a person did on this item (a child's step is counted
+        # once, on the child)
+        for h in it["history"]:
+            if h.get("kind") not in ("task", "gate"):
+                continue
+            if h.get("item") != it["_id"] and h.get("item") in known_items:
+                continue
+            hsub = f"item:{h.get('item') or it['_id']}"
+            ended = h.get("done_at") if h.get("outcome") not in (None, "cancelled") else None
+            visits.append((it, h["step"], h.get("started_at"), h.get("taken_at") or claimed_at.get(hsub)
+                           if hsub != subj else h.get("taken_at"), ended, h.get("due_at"),
+                           int(h.get("escalated") or 0), not h.get("done_at") and it["status"] in OPEN_STATES,
+                           handed_up.get((subj, h["step"]), 0) + (handed_up.get((hsub, None), 0)
+                                                                   if hsub != subj else 0)))
     for it, sid, began, taken, ended, due_at, escalated, still_open, handed in visits:
         run = by_run.get(it["run_id"])
         if not run:

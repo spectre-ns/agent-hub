@@ -26,7 +26,7 @@ and ``ctx.input``. ``runs.status`` is running, completed or cancelled. ``runs.re
 ``runs.waits_on`` the record its waits can see ("*": any), ``runs.resting`` that nothing is to be done about it;
 ``runs.item`` its one work item (None: its workflow asks nothing of anyone); ``runs.at`` where its record is, for a
 workflow state the record's own field has no value for; ``runs.picks`` the people chosen for work not started yet.
-``items.status`` is open, claimed, held, waiting, done or cancelled (folded: see ``Engine.fold_run_items``);
+``items.status`` is open, claimed, held, waiting, done or cancelled;
 ``items.kind`` task, gate, wait, notice or hold. ``items.n`` is the item's number in order of creation, shown as
 its key. ``outbox.status`` is queued, sending, sent, delivered, failed, refused or withdrawn.
 ``records.words`` is every word of the record's values, folded (a search matches the start of one, by index);
@@ -93,10 +93,10 @@ SHAPES = {
                                 "resolved_at resolved_by"),
     # work
     "runs": ("id", "id workflow_id version title record subject status ctx steps started_by root_event item refs "
-                   "waits_on resting picks at deadline_at deadline_missed_at created_at updated_at fold_failed"),
+                   "waits_on resting picks at deadline_at deadline_missed_at created_at updated_at"),
     "items": ("id", "id n run_id step_id kind title role assignee persons_only status claimed_by output note cause "
                     "created_at updated_at due_at escalated priority escalate_next escalates repeats "
-                    "step_title history parent_id children wave step_started_at waiting resting folded_into"),
+                    "step_title history parent_id children wave step_started_at waiting resting"),
     "events": ("seq", "seq at actor actor_kind action subject run_id cause data prev hash signature mac"),
     "outbox": ("id", "id at channel recipient subject body run_id sent_by status classes purpose claimed_by "
                      "claimed_at done_at done_by note escalated"),

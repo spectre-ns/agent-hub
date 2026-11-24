@@ -1,13 +1,11 @@
 """One item walks each run's workflow: one key and one history from start to finish, reassigned to each step's
 role; steps side by side (and a step once per person) are child items that close back into it; between people's
-steps it says what it waits on and is in nobody's to-do; open runs from before are folded into one item."""
+steps it says what it waits on and is in nobody's to-do."""
 
 import pytest
 
 from conftest import M, item_for, one_item_per_run
-from practicehub.engine import _item_doc
 from practicehub.hub import Denied
-from practicehub.store import utcnow
 
 FIELD = '[[state.work.fields]]\nname = "done"\ntype = "boolean"\n'
 
@@ -136,76 +134,3 @@ def test_a_wait_shows_on_the_item_and_is_in_no_ones_list(hub):
     assert it["role"] is None and it["claimed_by"] is None
     with pytest.raises(Denied):
         hub.engine.claim(M(hub, "dr-liam"), iid)
-
-
-# ------------------------------------------------------------------------------------------------ the upgrade
-def _legacy(hub, wid):
-    """A run as the engine left it before: an item per step, the first done, the second open."""
-    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub))
-    hub.db.runs.update({"_id": run["id"]}, {"$unset": {"item": ""}})
-    hub.db.items.delete({"run_id": run["id"]})
-    now = utcnow()
-    first = _item_doc(hub, id="item-old1", run_id=run["id"], step_id="a", kind="task", title="Write it",
-                      status="done", claimed_by="dr-amara", role="physician", created_at=now, updated_at=now)
-    second = _item_doc(hub, id="item-old2", run_id=run["id"], step_id="b", kind="task", title="Check it",
-                       status="open", role="physician", created_at=now, updated_at=now)
-    for doc in (first, second):
-        doc.pop("history", None), doc.pop("parent_id", None), doc.pop("children", None)
-        hub.db.items.insert(doc)
-    steps = hub.engine.run(run["id"])["steps"]
-    steps["a"] = {"state": "done", "item": "item-old1", "by": "dr-amara"}
-    steps["b"] = {"state": "active", "item": "item-old2"}
-    hub.db.runs.set(run["id"], {"steps": steps, "ctx": {**hub.engine.run(run["id"])["ctx"],
-                                                         "a": {"done": True, "by": "dr-amara"}}})
-    return run
-
-
-def test_open_runs_from_before_fold_into_their_earliest_item_once(hub):
-    wid = _install(hub, "walk-old", _walk(_task("a", "Write it"), _task("b", "Check it", 'not_by = ["a"]\n')))
-    run = _legacy(hub, wid)
-    key = hub.db.items.get("item-old1")["n"]
-    assert hub.engine.fold_run_items() == [run["id"]]
-    kept = _item(hub, "item-old1")
-    assert kept["n"] == key and kept["status"] == "open" and kept["step_id"] == "b"   # the earliest key, now on b
-    assert [(h["step"], h["by"]) for h in kept["history"]] == [("a", "dr-amara"), ("b", None)]
-    assert hub.db.items.get("item-old2")["status"] == "folded"
-    assert hub.db.items.get("item-old2")["folded_into"] == "item-old1"
-    assert hub.engine.run(run["id"])["item"] == "item-old1"
-    assert hub.engine.run(run["id"])["steps"]["b"]["item"] == "item-old1"
-    assert not hub.engine.eligibility(M(hub, "dr-amara"), kept)[0]     # the history still keeps duties apart
-    assert hub.engine.fold_run_items() == []                             # again: nothing to do
-    assert _item(hub, "item-old1")["history"] == kept["history"]
-    one_item_per_run(hub.db.db)
-    hub.engine.complete(M(hub, "dr-liam"), "item-old1", {"done": True})
-    assert hub.engine.run(run["id"])["status"] == "completed"
-
-
-def test_the_hub_folds_open_runs_when_it_opens(hub, monkeypatch):
-    from practicehub.hub import Hub
-    wid = _install(hub, "walk-open", _walk(_task("a", "Write it"), _task("b", "Check it")))
-    run = _legacy(hub, wid)
-    import conftest
-    conftest._TEST["next"] = hub.db.name  # the same practice, opened again
-    again = Hub(None, pack="general-practice")
-    assert again.engine.run(run["id"])["item"] == "item-old1"
-    assert again.db.items.get("item-old2")["status"] == "folded"
-
-
-def test_a_run_at_a_step_its_version_no_longer_has_still_folds_and_a_failure_is_tried_again(hub, monkeypatch):
-    """Found on the demo hub: open runs sat at a step their workflow version does not define, and the fold stopped
-    on it. The item keeps its own title; a run whose fold did fail is folded at the next start."""
-    wid = _install(hub, "walk-gone", _walk(_task("a", "Write it"), _task("b", "Check it")))
-    run = _legacy(hub, wid)
-    hub.db.items.set("item-old2", {"step_id": "gone", "title": "A step since removed"})
-    real = hub.engine._fold
-    monkeypatch.setattr(hub.engine, "_fold", lambda r: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert hub.engine.fold_run_items() == []
-    assert hub.engine.run(run["id"])["item"] is None and hub.engine.run(run["id"])["fold_failed"]
-    monkeypatch.setattr(hub.engine, "_fold", real)
-    from practicehub.hub import Hub
-    import conftest
-    conftest._TEST["next"] = hub.db.name  # the same practice, opened again: it tries the failed fold again
-    again = Hub(None, pack="general-practice")
-    folded = again.engine.run(run["id"])
-    assert folded["item"] == "item-old1" and "fold_failed" not in folded
-    assert [h["title"] for h in _item(hub, "item-old1")["history"]][-1] == "A step since removed"

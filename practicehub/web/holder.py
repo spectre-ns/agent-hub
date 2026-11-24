@@ -18,7 +18,7 @@ def holder(item: dict) -> dict:
     ``how`` is "taken" when the member took it, "given" when it was given to them and nobody took it yet, and "done"
     for finished work (``member`` is then who finished it). With no member, the work waits for its ``role``."""
     role = item.get("role") or None
-    if item.get("status") in ("done", "cancelled", "folded"):
+    if item.get("status") in ("done", "cancelled"):
         who = item.get("done_by") or item.get("claimed_by")
         return {"member": who, "how": "done" if who else None, "role": role}
     if item.get("claimed_by"):
