@@ -756,8 +756,9 @@ def cmd_workflow_export_bpmn(args):
 
 
 def cmd_workflow_import_bpmn(args):
-    """A BPMN file as workflow TOML on stdout (what could not be mapped on stderr); with --propose, proposed as a
-    change for a policy owner who did not write it to approve. Nothing is installed directly."""
+    """A BPMN file exported from Practice Hub as workflow TOML on stdout (what its diagram holds that is not imported
+    on stderr); with --propose, proposed as a change for a policy owner who did not write it to approve. A diagram
+    from another tool is refused, with the tasks it holds listed by lane. Nothing is installed directly."""
     from . import bpmn
     path = Path(args.file)
     if path.stat().st_size > bpmn.MAX_BYTES:
@@ -766,7 +767,7 @@ def cmd_workflow_import_bpmn(args):
     try:
         out = bpmn.import_bpmn(path.read_bytes(), hub.pack if hub else None)
     except bpmn.BpmnError as exc:
-        raise SystemExit("error: " + "; ".join(exc.problems)) from None
+        raise SystemExit("error: " + "\n".join(exc.problems)) from None  # a refusal is several lines: one each
     for p in out.problems:
         print(f"note: {p}", file=sys.stderr)
     if not args.propose:
@@ -1054,7 +1055,8 @@ def main(argv=None):
     p.add_argument("id")
     p.add_argument("--out", help="write to this file instead of stdout")
     p.set_defaults(fn=cmd_workflow_export_bpmn)
-    p = wk.add_parser("import-bpmn", help="read a BPMN file as workflow TOML (stdout), or propose it with --propose")
+    p = wk.add_parser("import-bpmn", help="read a BPMN file exported from Practice Hub as workflow TOML (stdout), or "
+                      "propose it with --propose")
     p.add_argument("file")
     p.add_argument("--propose", action="store_true", help="propose it as a workflow change (never installs it)")
     p.add_argument("--as", dest="as_member", help="the member who proposes it")

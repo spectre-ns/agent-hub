@@ -272,15 +272,19 @@ age; and missed deadlines. It is counts and times only: no records, no names, no
 most 20,000 runs of the period and says so when there were more.
 
 - **BPMN 2.0.** **Download as BPMN** on a workflow's page (or `practicehub workflow export-bpmn <id>`) gives a file
-  Camunda Modeler, bpmn.io and other BPMN tools open: a lane per role, user tasks for tasks and decisions, service
-  tasks for automations, catch events for waits, conditions on the flows, gateways where branches split or join, due
-  times as timers, and a diagram. What BPMN has no place for (fields, params, blocks, outcomes, inputs) travels in a
-  `ph:` extension, so a file exported and read back gives the same workflow; what you change in the BPMN tool (names,
-  flows, conditions, lanes, timers) wins. **Import BPMN** on the Workflows page (or `practicehub workflow import-bpmn
-  <file>`, which prints the TOML, or proposes it with `--propose --as <member>`) opens the result in the editor and
-  lists, in words, what could not be brought across from another tool (sub-processes, message flows, compensation,
-  loops, scripts, signals...). An import is never installed: you review it and propose it, and a policy owner who did
-  not write it approves it. Files with a DOCTYPE or entities, or over 2 MB, are refused.
+  Camunda Modeler, bpmn.io and other BPMN tools open. It draws the workflow as the steps it runs as: a lane per role,
+  user tasks for tasks and decisions, service tasks for automations, catch events for waits, conditions on the flows,
+  gateways where branches split or join, due times as timers, and a diagram. The workflow itself (its states and
+  edges, and everything else it says) travels in a `ph:` extension, so a file exported and read back gives the same
+  workflow. **Import BPMN** on the Workflows page (or `practicehub workflow import-bpmn <file>`, which prints the
+  TOML, or proposes it with `--propose --as <member>`) reads such a file back and opens it in the editor. The title,
+  the summary and how the workflow starts (a timer start is its schedule, a message start its event) come back as
+  the BPMN tool left them. The steps do not: they come from the states and edges, so the import says when tasks were
+  added or removed in the diagram, and names what else was drawn there that a workflow has no place for
+  (sub-processes, message flows, more pools...). A diagram drawn in another tool carries no states and edges, so it
+  is refused rather than guessed at: the refusal lists its tasks by lane, to help you write the workflow by hand
+  ("States and edges" in `docs/workflows.md`). An import is never installed: you review it and propose it, and a
+  policy owner who did not write it approves it. Files with a DOCTYPE or entities, or over 2 MB, are refused.
 - **Blocks** in the sidebar lists the blocks and the engines under the hub; create or change one there.
 - `docs/workflows.md` is the reference.
 - `docs/packs.md` explains how to set up another kind of practice: its roles, data classes, subject (Patient, Client,

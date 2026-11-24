@@ -1,8 +1,10 @@
-"""BPMN 2.0 interchange: every shipped workflow survives export and import, a foreign file's unsupported parts are
-named rather than guessed at, hostile XML is refused, and an import only ever becomes a proposal."""
+"""BPMN 2.0 interchange: every shipped workflow survives export and import, a diagram changed in another tool brings
+back its title, summary and trigger and never its steps, a file from another tool is refused with what it holds,
+hostile XML is refused, and an import only ever becomes a proposal."""
 
 import dataclasses
 import glob
+import json
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -74,85 +76,215 @@ def test_schedules_and_durations_convert_both_ways():
     assert bpmn.duration_from_iso("P1M") is None  # a month is not a fixed length
 
 
-# Written as steps (a workflow written as states and edges takes its steps from them, so a diagram's changes to its
-# steps are not imported: bpmn.import_bpmn says so)
-STEPS_FORM = """id = "renewal"
+# An ordinary workflow: two states with a person's work, a decision between two edges, automations on the edges
+RENEWAL = """id = "renewal"
 title = "Renewal"
+summary = "A renewal is prepared, then a physician decides on it."
 record = "MedicationRequest"
+
 [trigger]
 starters = ["physician"]
-[[steps]]
+
+[start]
+to = "requested"
+
+[[state]]
+id = "requested"
+[[state.work]]
 id = "prepare"
 title = "Prepare the renewal"
-kind = "task"
 role = "clinical-assistant"
 due = "1d"
 skill = "renewal-prep"
-[[steps]]
+
+[[state]]
+id = "deciding"
+[[state.work]]
 id = "decide"
 title = "Decide on the renewal"
 kind = "gate"
 role = "physician"
-after = ["prepare"]
 signer = "person"
-outcomes = ["renew", "book-visit", "decline"]
 meaning = "I authorize this renewal"
-[[steps]]
-id = "not-on-chart"
-title = "Write a new prescription"
-kind = "task"
-role = "physician"
-after = ["decide"]
-when = "decide.outcome == 'renew'"
-[[steps.fields]]
-name = "notes"
-type = "text"
-[[steps]]
+
+[[state]]
+id = "renewed"
+
+[[state]]
+id = "declined"
+
+[[edge]]
+id = "prepared"
+from = "requested"
+to = "deciding"
+
+[[edge]]
+id = "renew"
+from = "deciding"
+to = "renewed"
+[[edge.do]]
 id = "prescribe"
 title = "Write the prescription"
-kind = "automation"
-after = ["not-on-chart"]
 action = "record.update"
-[steps.params.set]
+[edge.do.params.set]
 intent = "order"
-[[steps]]
+
+[[edge]]
+id = "decline"
+from = "deciding"
+to = "declined"
+[[edge.do]]
 id = "tell-declined"
 title = "Tell the patient"
-kind = "automation"
-after = ["decide"]
-when = "decide.outcome == 'decline'"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your renewal request"
 body = "Not renewed."
 """
 
+# A workflow that only acts: its [start] has automations, and it has no states and no edges
+SWEEP = """id = "renewals-due"
+title = "Renewals that have come due"
+record = "MedicationRequest"
 
-def test_what_the_diagram_says_wins_over_the_extension():
-    """A task renamed, a condition changed and a step moved to another lane in a BPMN tool come back changed; what
-    BPMN has no place for (params, outcomes) comes back from the extension."""
-    wf = wfmod.parse(STEPS_FORM, stored=True)  # a version kept from before the states form
-    root = ET.fromstring(bpmn.export_bpmn(wf))
-    proc = root.find(B + "process")
-    proc.find(f"{B}userTask[@id='prepare']").set("name", "Get the renewal ready")
+[trigger]
+schedule = "daily 07:00"
+for_each = "MedicationRequest"
+where = "record.status == 'active'"
+
+[start]
+label = "The renewal came due"
+[[start.do]]
+id = "remind"
+title = "Remind the patient"
+action = "message.send"
+[start.do.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+body = "Your prescription is due for renewal."
+"""
+
+# One state and no edge: the entry's automation runs, and the record ends where it entered
+NOTED = """id = "renewal-noted"
+title = "Note a renewal request"
+record = "MedicationRequest"
+
+[start]
+to = "noted"
+[[start.do]]
+id = "note"
+action = "record.update"
+[start.do.params.set]
+note = "A renewal was asked for"
+
+[[state]]
+id = "noted"
+"""
+WRITTEN = ("start", "state", "edge")  # where a workflow's states and edges are written
+
+
+def _exported(src) -> tuple[ET.Element, ET.Element]:
+    root = ET.fromstring(bpmn.export_bpmn(src))
+    return root, root.find(B + "process")
+
+
+@pytest.mark.parametrize("src", [RENEWAL, SWEEP, NOTED], ids=["states-and-edges", "only-acts", "one-state-no-edge"])
+def test_a_file_we_exported_read_back_unchanged_gives_the_same_workflow(src):
+    wf = wfmod.parse(src)
+    out = bpmn.import_bpmn(bpmn.export_bpmn(wf))
+    assert out.problems == []
+    assert same(wf, wfmod.parse(out.source))
+    assert tomllib.loads(out.source) == tomllib.loads(src)
+
+
+def test_a_diagram_changed_in_another_tool_brings_back_its_title_summary_and_trigger():
+    """What a BPMN tool may change: the process's name (the title), its documentation (the summary) and its start
+    events (a timer start is the schedule, a message start the event). The states and edges stay the extension's."""
+    was = tomllib.loads(RENEWAL)
+    root, proc = _exported(RENEWAL)
+    proc.set("name", "Renewal of a prescription")
+    proc.find(B + "documentation").text = "A physician decides on each renewal."
+    timer = ET.SubElement(ET.SubElement(proc, B + "startEvent", {"id": "nightly"}), B + "timerEventDefinition")
+    ET.SubElement(timer, B + "timeCycle").text = "R/2026-01-05T07:00:00/P1D"
+    ET.SubElement(root, B + "message", {"id": "asked", "name": "renewal.requested"})
+    ET.SubElement(ET.SubElement(proc, B + "startEvent", {"id": "on-asked"}), B + "messageEventDefinition",
+                  {"messageRef": "asked"})
+    out = bpmn.import_bpmn(ET.tostring(root))
+    doc = tomllib.loads(out.source)
+    assert out.problems == []
+    assert doc["title"] == "Renewal of a prescription" and doc["summary"] == "A physician decides on each renewal."
+    assert doc["trigger"] == {"starters": ["physician"], "schedule": "daily 07:00", "event": "renewal.requested"}
+    assert {k: doc[k] for k in WRITTEN} == {k: was[k] for k in WRITTEN}
+
+    root, proc = _exported(SWEEP)   # a schedule changed in the tool, then one a workflow cannot keep, then none
+    cycle = proc.find(f"{B}startEvent/{B}timerEventDefinition/{B}timeCycle")
+    cycle.text = "R/PT1H"
+    doc = tomllib.loads(bpmn.import_bpmn(ET.tostring(root)).source)
+    assert doc["trigger"] == {**tomllib.loads(SWEEP)["trigger"], "schedule": "hourly"}
+    cycle.text = "R/PT5M"
+    assert any("is not a schedule a workflow can keep" in p for p in bpmn.import_bpmn(ET.tostring(root)).problems)
+    proc.remove(proc.find(f"{B}startEvent[@id='Start_schedule']"))
+    assert "trigger" not in tomllib.loads(bpmn.import_bpmn(ET.tostring(root)).source)  # nor for_each, with no schedule
+
+
+def test_a_diagram_never_brings_back_its_steps():
+    """The steps come from the states and edges. A task renamed, moved to another lane, given another condition or
+    due time, or written in another place in the file changes nothing; tasks added or removed are reported, and the
+    states and edges are still the extension's."""
+    was = tomllib.loads(RENEWAL)
+    said = "steps added or removed in the diagram are not imported"
+    root, proc = _exported(RENEWAL)
+    prepare = proc.find(f"{B}userTask[@id='prepare']")
+    prepare.set("name", "Get the renewal ready")
     for f in proc.iter(B + "sequenceFlow"):
         if f.get("targetRef") == "tell-declined":
             f.find(B + "conditionExpression").text = "decide.outcome in ['decline']"
     lanes = {ln.get("name"): ln for ln in proc.iter(B + "lane")}
-    ref = next(r for r in lanes["Physician"] if r.text == "not-on-chart")
-    lanes["Physician"].remove(ref)
-    lanes["Clinical assistant"].append(ref)
-    due = proc.find(f"{B}boundaryEvent[@attachedToRef='prepare']")
-    due.find(f"{B}timerEventDefinition/{B}timeDuration").text = "PT8H"
+    ref = next(r for r in lanes["Clinical assistant"] if r.text == "prepare")
+    lanes["Clinical assistant"].remove(ref)
+    lanes["Physician"].append(ref)
+    proc.find(f"{B}boundaryEvent[@attachedToRef='prepare']/{B}timerEventDefinition/{B}timeDuration").text = "PT8H"
+    proc.remove(prepare)
+    proc.append(prepare)   # a tool may write the tasks in another order: none was added or removed
     out = bpmn.import_bpmn(ET.tostring(root))
-    wf2 = wfmod.parse(out.source, stored=True)
-    assert wf2.step("prepare").title == "Get the renewal ready" and wf2.step("prepare").due == "8h"
-    assert wf2.step("tell-declined").when == "decide.outcome in ['decline']"
-    assert wf2.step("not-on-chart").role == "clinical-assistant"
-    assert wf2.step("decide").outcomes == ["renew", "book-visit", "decline"]
-    assert wf2.step("prescribe").params == wf.step("prescribe").params
+    assert not any(said in p for p in out.problems)
+    assert tomllib.loads(out.source) == was
+    step = wfmod.parse(out.source).step("prepare")
+    assert (step.title, step.role, step.due) == ("Prepare the renewal", "clinical-assistant", "1d")
+    assert wfmod.parse(out.source).step("tell-declined").when == "decide.outcome == 'decline'"
+
+    ET.SubElement(proc, B + "userTask", {"id": "Activity_1", "name": "Call the patient"})  # drawn in the tool
+    out = bpmn.import_bpmn(ET.tostring(root))
+    assert any(said in p for p in out.problems)
+    assert tomllib.loads(out.source) == was
+
+    root, proc = _exported(RENEWAL)
+    proc.remove(proc.find(f"{B}serviceTask[@id='prescribe']"))
+    out = bpmn.import_bpmn(ET.tostring(root))
+    assert any(said in p for p in out.problems)
+    assert tomllib.loads(out.source) == was and wfmod.parse(out.source).step("prescribe").action == "record.update"
+
+
+def test_what_a_tool_added_that_a_workflow_has_no_place_for_is_named():
+    """A sub-process, a data object, a second pool, a message flow and a start on a signal drawn into a file we
+    exported are named in words and left out, never guessed at; the workflow comes back as it was."""
+    root, proc = _exported(RENEWAL)
+    appeal = ET.SubElement(proc, B + "subProcess", {"id": "sp", "name": "Appeal"})
+    ET.SubElement(appeal, B + "task", {"id": "inner", "name": "Inner"})
+    ET.SubElement(proc, B + "dataObjectReference", {"id": "chart", "name": "The chart"})
+    recall = ET.SubElement(proc, B + "startEvent", {"id": "recall", "name": "Recall"})
+    ET.SubElement(recall, B + "signalEventDefinition")
+    collab = root.find(B + "collaboration")
+    ET.SubElement(collab, B + "participant", {"id": "p2", "name": "Pharmacy"})
+    ET.SubElement(collab, B + "messageFlow", {"id": "mf1", "sourceRef": "prescribe", "targetRef": "p2"})
+    out = bpmn.import_bpmn(ET.tostring(root))
+    text = "\n".join(out.problems)
+    for words in ("'Appeal' is a sub-process", "'The chart' is a data object", "'Recall' starts on a signal",
+                  "several pools", "Message flows"):
+        assert words in text, words
+    assert tomllib.loads(out.source) == tomllib.loads(RENEWAL)
 
 
 FOREIGN = """<?xml version="1.0" encoding="UTF-8"?>
@@ -192,21 +324,64 @@ FOREIGN = """<?xml version="1.0" encoding="UTF-8"?>
 </bpmn:definitions>"""
 
 
-def test_a_foreign_file_maps_what_it_can_and_names_the_rest():
-    out = bpmn.import_bpmn(FOREIGN)
-    text = "\n".join(out.problems)
-    for words in ("Message flows", "sub-process", "compensation", "default path", "script", "another BPMN tool",
-                  "several pools"):
-        assert words in text, words
-    doc = tomllib.loads(out.source)  # always TOML the editor can open, even when it still needs work
-    steps = {s["id"]: s for s in doc["steps"]}
-    assert doc["title"] == "Claim handling"
-    assert steps["review-the-claim"]["role"] == "billing-clerk" and steps["review-the-claim"]["due"] == "3d"
-    assert steps["review-the-claim"]["instructions"] == "Check the codes."
-    assert steps["send-the-claim"] == {"id": "send-the-claim", "title": "Send the claim", "kind": "automation",
-                                       "after": ["review-the-claim"], "when": "review.ok == true"}
-    assert "inner" not in steps and "appeal" not in steps  # never guessed at
-    assert any(p.startswith("Still to fix:") for p in out.problems)  # what parse still wants, in its words
+def test_a_file_from_another_tool_is_refused_with_its_tasks_by_lane():
+    """A workflow is its record's states and the edges between them, which a diagram from another tool does not
+    carry, so its tasks and flows are not mapped to anything. The refusal says how a workflow is written and names
+    the tasks the file holds, by lane, for whoever writes it by hand."""
+    with pytest.raises(bpmn.BpmnError) as err:
+        bpmn.import_bpmn(FOREIGN)
+    said = err.value.problems
+    assert "written as its record's states and the edges between them" in said[0]
+    assert "a diagram drawn in another tool cannot be imported as it is" in said[0]
+    assert "The file holds 4 tasks" in said[1]
+    assert "Billing clerk: Review the claim" in said
+    assert "In no lane: Send the claim, Inner, Work out the fee" in said  # in the file's order, a sub-process's too
+    assert '"States and edges" in docs/workflows.md' in said[-1]
+    assert str(err.value) == "\n".join(said)
+    with pytest.raises(bpmn.BpmnError, match="no process"):  # a file with nothing to read is still told so first
+        bpmn.import_bpmn(f'<bpmn:definitions xmlns:bpmn="{bpmn.BPMN}"/>')
+
+
+def test_a_file_we_exported_that_lost_its_states_and_edges_is_refused_too():
+    """A tool that drops what it does not know, or a file whose extension holds no states and edges, leaves only a
+    diagram: it is refused like any other, never read back as steps."""
+    root, proc = _exported(RENEWAL)
+    ext = proc.find(f"{B}extensionElements/{{{bpmn.PH}}}workflow")
+    ext.text = json.dumps({k: v for k, v in json.loads(ext.text).items() if k not in WRITTEN})
+    with pytest.raises(bpmn.BpmnError, match="states and the edges between them") as err:
+        bpmn.import_bpmn(ET.tostring(root))
+    assert "Clinical assistant: Prepare the renewal" in err.value.problems
+    proc.remove(proc.find(B + "extensionElements"))
+    with pytest.raises(bpmn.BpmnError, match="states and the edges between them"):
+        bpmn.import_bpmn(ET.tostring(root))
+
+
+def _foreign(inside: str) -> str:
+    return f'<bpmn:definitions xmlns:bpmn="{bpmn.BPMN}"><bpmn:process id="p">{inside}</bpmn:process></bpmn:definitions>'
+
+
+def test_the_refusal_names_only_so_many_tasks_each_on_one_plain_line():
+    many = bpmn.LISTED + 440
+    with pytest.raises(bpmn.BpmnError) as err:
+        bpmn.import_bpmn(_foreign("".join(f'<bpmn:task id="t{i}" name="Task {i}"/>' for i in range(many))))
+    said = err.value.problems
+    assert f"The file holds {many} tasks" in said[1] and "And 440 more, not listed here." in said
+    assert sum(p.count("Task ") for p in said) == bpmn.LISTED
+    with pytest.raises(bpmn.BpmnError) as err:  # a name with line breaks, a direction override and no end
+        bpmn.import_bpmn(_foreign('<bpmn:task id="t" name="Call&#10;the  patient&#x202E; now"/>'
+                                  f'<bpmn:task id="u" name="{"very " * 100}long"/><bpmn:task id="v"/>'))
+    names = err.value.problems[2]
+    assert names.startswith("In no lane: Call the patient now, very very ") and names.endswith("..., v")
+    assert names.isprintable() and len(names) < 200
+
+
+def test_a_deeply_nested_file_from_another_tool_is_refused_like_any_other():
+    """Its tasks are found without recursion, so nesting as deep as the element cap allows cannot exhaust the stack."""
+    deep = 5000
+    inside = "<bpmn:subProcess>" * deep + '<bpmn:task name="At the bottom"/>' + "</bpmn:subProcess>" * deep
+    with pytest.raises(bpmn.BpmnError) as err:
+        bpmn.import_bpmn(_foreign(inside))
+    assert "In no lane: At the bottom" in err.value.problems
 
 
 BILLION_LAUGHS = """<?xml version="1.0"?>
@@ -271,6 +446,11 @@ def test_download_and_import_only_propose(hub):
     assert hub.workflow("referral")[1]["version"] == before
     with pytest.raises(Invalid):
         app.post_import_bpmn({**_upload(BILLION_LAUGHS.encode()), "me": rana})
+    req = {**_upload(FOREIGN.encode(), "claims.bpmn"), "me": rana}
+    with pytest.raises(Invalid) as err:  # a file from another tool: refused, and the page lists the tasks it holds
+        app.post_import_bpmn(req)
+    page = app.error_page(req, err.value, err.value.problems)
+    assert "The file could not be imported." in page and "<li>Billing clerk: Review the claim</li>" in page
 
 
 def test_the_command_line_prints_toml_or_proposes(hub, tmp_path, capsys, monkeypatch):
@@ -288,3 +468,8 @@ def test_the_command_line_prints_toml_or_proposes(hub, tmp_path, capsys, monkeyp
     assert "proposed referral" in capsys.readouterr().out
     assert hub.workflow("referral")[1]["version"] == before  # proposed, not in force
     assert [v for v in hub.versions("referral") if v["status"] == "proposed"]
+    g = tmp_path / "claims.bpmn"
+    g.write_text(FOREIGN)
+    with pytest.raises(SystemExit, match="error: A workflow here is written as its record's states and the edges"):
+        cli.main(["workflow", "import-bpmn", str(g)])  # a file from another tool: refused, nothing printed as TOML
+    assert capsys.readouterr().out == ""

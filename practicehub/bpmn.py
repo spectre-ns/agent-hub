@@ -1,6 +1,8 @@
-"""BPMN 2.0 interchange for workflows: export a workflow as BPMN XML, and read BPMN XML back into workflow TOML.
+"""BPMN 2.0 interchange for workflows: export a workflow as BPMN XML, and read a file we exported back into
+workflow TOML.
 
-Export draws the workflow for BPMN tools (Camunda Modeler, bpmn.io): a pool with one lane per role (and one for the
+A workflow is written as its record's states and the edges between them (``practicehub/states.py``). Export draws it
+for BPMN tools (Camunda Modeler, bpmn.io) as the steps it runs as: a pool with one lane per role (and one for the
 automatic steps), a start event per way it starts (by hand, on an event: a message start, on a schedule: a timer
 start), a ``userTask`` for each task and decision, a ``serviceTask`` for each automation, an ``intermediateCatchEvent``
 (conditional, or timer) for each wait, ``sequenceFlow`` for ``after`` with the step's ``when`` as its
@@ -8,14 +10,19 @@ start), a ``userTask`` for each task and decision, a ``serviceTask`` for each au
 decision, inclusive otherwise) and where a step waits for several, a non-interrupting timer on a task or decision with
 a ``due`` time, and diagram coordinates (BPMNDI) in a simple layered layout.
 
-Everything Practice Hub needs that BPMN has no place for (params, block names, fields, inputs, signer, meanings...) is
-kept in a namespaced ``extensionElements`` block, as JSON, on each step and on the process. Reading it back, what the
-diagram shows wins (a renamed task, a moved flow, a changed condition, a task moved to another lane), and the
-extension supplies the rest: a file we exported, read back unchanged, gives the same workflow.
+The workflow itself (its ``start``, ``state`` and ``edge`` tables and everything else it says) travels as JSON in a
+namespaced ``extensionElements`` block on the process. Each step's settings are on its element the same way, for
+whoever reads the diagram; the import reads only the step's id there, to tell which steps the diagram still shows.
 
-Import of foreign BPMN maps the supported subset and lists, in plain words, what it could not map (sub-processes,
-message flows, compensation, signals, loops...), rather than guessing. The TOML it gives is never installed: it goes
-to the editor or to ``Hub.propose_workflow`` like any edit, so a policy owner who did not write it approves it.
+Import reads a file we exported. The states and edges come back from the extension; the title, the summary and how
+the workflow starts (a timer start: its schedule; a message start: its event) come back from what the diagram shows,
+so those can be changed in a BPMN tool. A file exported and read back unchanged gives the same workflow. The steps
+are never read from the diagram, because they come from the states and edges: the import says so when tasks were
+added or removed there, and names, in plain words, what else was added that a workflow has no place for
+(sub-processes, message flows, more pools...). A file from another tool carries no states and edges, and is refused
+rather than guessed at: the refusal lists the tasks it holds, by lane, for whoever writes the workflow by hand. The
+TOML an import gives is never installed: it goes to the editor or to ``Hub.propose_workflow`` like any edit, so a
+policy owner who did not write it approves it.
 
 Untrusted XML is read defensively: a size cap, an element cap, and no DOCTYPE or entity declarations at all (so no
 entity expansion and no external entities). No code in the XML is ever run.
@@ -47,7 +54,8 @@ MAX_ELEMENTS = 20000
 
 
 class BpmnError(ValueError):
-    """The file cannot be read at all (not BPMN, too large, or unsafe XML)."""
+    """The file cannot be imported at all: it is not BPMN, too large or unsafe XML, or it is a diagram from another
+    tool, which carries no states and edges."""
 
     def __init__(self, problems: list[str]):
         super().__init__("\n".join(problems))
@@ -57,7 +65,7 @@ class BpmnError(ValueError):
 @dataclass
 class Imported:
     source: str                                       # workflow TOML, for the editor or propose_workflow
-    problems: list[str] = field(default_factory=list)  # what was not mapped, and what still needs fixing
+    problems: list[str] = field(default_factory=list)  # what the diagram holds that is not imported, and what to fix
 
 
 def q(ns: str, tag: str) -> str:
@@ -240,7 +248,7 @@ def dumps_toml(doc: dict) -> str:
 # ================================================================================================ export
 def _raw(workflow) -> tuple[dict, wfmod.Workflow]:
     source = workflow.source if isinstance(workflow, wfmod.Workflow) else str(workflow)
-    wf = workflow if isinstance(workflow, wfmod.Workflow) else wfmod.parse(source, stored=True)  # read, as kept
+    wf = workflow if isinstance(workflow, wfmod.Workflow) else wfmod.parse(source)
     return tomllib.loads(source), wf
 
 
@@ -266,12 +274,9 @@ def _expr(parent, tag: str, text: str):
 def export_bpmn(workflow) -> str:
     """A workflow (a parsed Workflow, or its TOML) as BPMN 2.0 XML with a diagram."""
     raw, wf = _raw(workflow)
-    if wfmod.is_states_form(raw):
-        # written as states and edges: drawn as the steps it runs as; the states and edges travel in the
-        # workflow's own extension, and come back from it on import
-        steps = [dict(s) for s in compile_states(raw, [])[0]]
-    else:
-        steps = [dict(s) for s in raw.get("steps", []) or []]
+    # drawn as the steps it runs as; the states and edges travel in the workflow's own extension, and come back
+    # from it on import
+    steps = [dict(s) for s in compile_states(raw, [])[0]]
     by_id = {s["id"]: s for s in steps}
     trig = dict(raw.get("trigger", {}) or {})
     wid = wf.id
@@ -287,7 +292,7 @@ def export_bpmn(workflow) -> str:
         ET.SubElement(defs, q(BPMN, "message"), {"id": msg_id, "name": str(trig["event"])})
     proc = ET.SubElement(defs, q(BPMN, "process"), {"id": pid, "name": wf.title, "isExecutable": "false"})
     _doc(proc, raw.get("summary"))
-    _ext(proc, "workflow", {k: v for k, v in raw.items() if k != "steps"})
+    _ext(proc, "workflow", raw)
 
     # ---- lanes: one per role, in order of appearance, then the automatic steps (and the start and end)
     def lane_of(s) -> str:
@@ -590,13 +595,11 @@ def parse_xml(data) -> ET.Element:
 
 
 # ================================================================================================ import
-TASKS = {"userTask": "task", "manualTask": "task", "task": "task", "serviceTask": "automation",
-         "scriptTask": "automation", "sendTask": "automation", "businessRuleTask": "automation",
-         "receiveTask": "wait", "intermediateCatchEvent": "wait"}
-COMPATIBLE = {"userTask": ("task", "gate"), "manualTask": ("task",), "task": ("task", "gate"),
-              "serviceTask": ("automation",), "scriptTask": ("automation",), "sendTask": ("automation",),
-              "businessRuleTask": ("automation",), "receiveTask": ("wait",), "intermediateCatchEvent": ("wait",)}
-GATEWAYS = {"exclusiveGateway", "inclusiveGateway", "parallelGateway"}
+TASKS = {"userTask", "manualTask", "task", "serviceTask", "scriptTask", "sendTask", "businessRuleTask", "receiveTask"}
+STEPS = TASKS | {"intermediateCatchEvent"}   # what a step is drawn as: a task, or a catch event for a wait
+DRAWN = STEPS | {"sequenceFlow", "startEvent", "endEvent", "boundaryEvent", "exclusiveGateway", "inclusiveGateway",
+                 "parallelGateway"}           # everything export draws a workflow with
+SUB_PROCESSES = {"subProcess", "transaction", "adHocSubProcess"}
 IGNORED = {"documentation", "extensionElements", "laneSet", "textAnnotation", "association", "group", "category",
            "incoming", "outgoing", "property", "ioSpecification"}
 UNSUPPORTED = {
@@ -612,16 +615,11 @@ EVENT_DEFS = {"messageEventDefinition": "a message", "timerEventDefinition": "a 
               "errorEventDefinition": "an error", "escalationEventDefinition": "an escalation",
               "compensateEventDefinition": "compensation", "cancelEventDefinition": "a cancellation",
               "linkEventDefinition": "a link", "terminateEventDefinition": "a terminate end"}
-KIND_WORDS = {"task": "a task", "gate": "a decision", "automation": "an automation", "wait": "a wait"}
-RESERVED = {"run", "input", "record", "each", "each_record", "new"}
+LISTED = 60   # the tasks named when a file from another tool is refused
 
 
 def _children(el, tag):
     return [c for c in el if _ns(c.tag) == BPMN and _local(c.tag) == tag]
-
-
-def _text(el) -> str | None:
-    return None if el is None else (el.text or "")
 
 
 def _one(el, tag):
@@ -646,31 +644,6 @@ def _ph(el, tag):
     return None
 
 
-def _foreign_ext(el) -> bool:
-    ee = _one(el, "extensionElements")
-    if ee is not None and any(_ns(c.tag) not in (PH, BPMN) for c in ee):
-        return True
-    return any(_ns(k) not in ("", PH, BPMN, XSI) for k in el.attrib)
-
-
-def _condition(el, tag, problems, where) -> str | None:
-    c = _one(el, tag)
-    if c is None:
-        return None
-    text = (c.text or "").strip()
-    m = re.fullmatch(r"[$#]\{(.*)\}", text, re.S)
-    if m:
-        text = m.group(1).strip()
-    if not text:
-        return None
-    try:
-        wfmod.expr.check(text)
-    except wfmod.expr.ExprError:
-        problems.append(f"{where}: the condition {text!r} is not written in Practice Hub's condition language "
-                        f"(for example decide.outcome == 'approve'); it is kept for you to rewrite")
-    return text
-
-
 def _keep(ext: dict, key: str, derived, to_bpmn=str):
     """What the diagram says wins; the extension's value is kept when the diagram still says the same."""
     have = ext.get(key)
@@ -682,17 +655,91 @@ def _keep(ext: dict, key: str, derived, to_bpmn=str):
         ext[key] = derived
 
 
+def _carried(proc) -> dict | None:
+    """The workflow a process carries in our extension, when it holds states and edges: only a file we exported
+    has one."""
+    ext = _ph(proc, "workflow")
+    return ext if ext and any(k in ext for k in ("start", "state", "edge")) else None
+
+
+def _plain(text, limit: int = 80) -> str:
+    """A name from the file, for a message: one line of printable characters, and not too long."""
+    s = " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
+    return s if len(s) <= limit else s[:limit - 3].rstrip() + "..."
+
+
+def _tasks_by_lane(root) -> dict[str, list[str]]:
+    """The names of the file's tasks under the name of the lane each is drawn in ("" for none), in the file's order.
+    A task inside a sub-process is in the sub-process's lane. The file is untrusted and may nest as deep as it
+    likes, so it is walked with a list, never by recursion."""
+    found: dict[str, list[str]] = {}
+    for proc in _children(root, "process"):
+        lane_of: dict[str, str] = {}
+        for ls in _children(proc, "laneSet"):
+            for lane in ls.iter(q(BPMN, "lane")):  # outer lanes first, so a task is in its innermost lane
+                for ref in _children(lane, "flowNodeRef"):
+                    lane_of[(ref.text or "").strip()] = _plain(lane.get("name") or "") or _plain(lane.get("id") or "")
+        todo = [(iter(proc), "")]
+        while todo:
+            inside, lane = todo[-1]
+            el = next(inside, None)
+            if el is None:
+                todo.pop()
+            elif _ns(el.tag) == BPMN:
+                here = lane_of.get(el.get("id"), lane)
+                if _local(el.tag) in TASKS:
+                    name = _plain(el.get("name") or "") or _plain(el.get("id") or "") or "a task with no name"
+                    found.setdefault(here, []).append(name)
+                elif _local(el.tag) in SUB_PROCESSES:
+                    todo.append((iter(el), here))
+    return found
+
+
+def _refusal(root) -> list[str]:
+    """Why a file that carries no states and edges is not imported, and the tasks it holds, by lane, for whoever
+    writes the workflow by hand."""
+    lanes = _tasks_by_lane(root)
+    total = sum(len(names) for names in lanes.values())
+    out = ["A workflow here is written as its record's states and the edges between them ([start], [[state]], "
+           "[[edge]]), and this file carries none: a diagram drawn in another tool cannot be imported as it is."]
+    if total:
+        out.append(f"The file holds {total} task{'s' if total != 1 else ''}, listed here by lane to help you write "
+                   f"the workflow by hand.")
+        named = 0
+        for lane in sorted(lanes, key=lambda name: not name):  # the lanes in the file's order, then the tasks in none
+            names = lanes[lane][:LISTED - named]
+            if names:
+                out.append(f"{lane or 'In no lane'}: {', '.join(names)}")
+                named += len(names)
+        if named < total:
+            out.append(f"And {total - named} more, not listed here.")
+    else:
+        out.append("The file holds no tasks.")
+    out.append("A lane is usually a role, and a task is the work on a state or an automation on an edge: see "
+               "\"States and edges\" in docs/workflows.md.")
+    return out
+
+
 def import_bpmn(data, catalog=None) -> Imported:
-    """BPMN XML as workflow TOML, and the problems: what could not be mapped, then what the workflow still needs
-    (the checks ``workflows.parse`` makes). Raises BpmnError when the file cannot be read at all."""
+    """A BPMN file we exported as workflow TOML, and the problems: what the diagram holds that is not imported, then
+    what the workflow still needs (the checks ``workflows.parse`` makes). The states and edges are the extension's;
+    the title, the summary and how the workflow starts are the diagram's. Raises BpmnError when the file cannot be
+    read at all, or is a diagram from another tool."""
     root = parse_xml(data)
     if root.tag != q(BPMN, "definitions"):
         raise BpmnError(["The file is not BPMN 2.0: it has no BPMN definitions."])
-    problems: list[str] = []
     procs = _children(root, "process")
     if not procs:
         raise BpmnError(["The file has no process to import."])
-    proc = max(procs, key=lambda p: len(list(p)))
+    proc = wdoc = None
+    for p in procs:
+        wdoc = _carried(p)
+        if wdoc is not None:
+            proc = p
+            break
+    if proc is None:
+        raise BpmnError(_refusal(root))
+    problems: list[str] = []
     if len(procs) > 1:
         problems.append(f"The file has {len(procs)} processes; only {proc.get('name') or proc.get('id')!r} is "
                         f"imported (a workflow is one process).")
@@ -714,238 +761,23 @@ def import_bpmn(data, catalog=None) -> Imported:
                 problems.append(f"{_local(c.tag)} in the collaboration is not supported; left out.")
     messages = {m.get("id"): m.get("name") or m.get("id") for m in _children(root, "message")}
 
-    wext = _ph(proc, "workflow")
-    ours = wext is not None
-    wdoc: dict = dict(wext or {})
-    elems = {}
-    flows = []
-    foreign_settings = []
+    # what the diagram holds: its steps (by the id export wrote on each), its starts, and what is not imported
+    drawn: list[str] = []
+    starts = []
     for el in proc:
         tag = _local(el.tag)
         if _ns(el.tag) != BPMN:
             continue
-        if tag == "sequenceFlow":
-            flows.append(el)
-        elif tag in TASKS or tag in GATEWAYS or tag in ("startEvent", "endEvent", "boundaryEvent"):
-            elems[el.get("id")] = el
+        if tag in STEPS:
+            sid = (_ph(el, "step") or {}).get("id")
+            drawn.append(sid if isinstance(sid, str) else "")  # "": added in another tool, so it has no id of ours
+        elif tag == "startEvent":
+            starts.append(el)
         elif tag in UNSUPPORTED:
             problems.append(f"{el.get('name') or el.get('id')!r} is {UNSUPPORTED[tag]}, which a workflow does not "
                             f"support; it is left out" + (" (steps inside it too)." if "rocess" in tag else "."))
-        elif tag not in IGNORED:
+        elif tag not in DRAWN and tag not in IGNORED:
             problems.append(f"{el.get('name') or el.get('id')!r} ({tag}) is not supported; it is left out.")
-    # lanes: a role each
-    lane_of: dict[str, str | None] = {}
-    for ls in _children(proc, "laneSet"):
-        for lane in ls.iter(q(BPMN, "lane")):
-            if _one(lane, "childLaneSet") is not None:
-                problems.append(f"The lane {lane.get('name')!r} has lanes inside it; each step takes the role of "
-                                f"its innermost lane.")
-            attr = lane.get(q(PH, "role"))
-            name = (lane.get("name") or "").strip()
-            if attr and name == _pretty(attr):
-                role = attr
-            elif ours and not attr and name == "Automatic":
-                role = None
-            else:
-                role = slug(name, "role") if name else None
-            for ref in _children(lane, "flowNodeRef"):
-                lane_of[(ref.text or "").strip()] = role
-
-    incoming: dict[str, list] = {}
-    outgoing: dict[str, list] = {}
-    for f in flows:
-        incoming.setdefault(f.get("targetRef"), []).append(f)
-        outgoing.setdefault(f.get("sourceRef"), []).append(f)
-
-    # steps, in the order the file lists them
-    step_of: dict[str, dict] = {}   # element id -> step dict
-    used: set[str] = set()
-    for eid, el in elems.items():
-        tag = _local(el.tag)
-        if tag not in TASKS:
-            continue
-        where = repr(el.get("name") or eid)
-        sext = _ph(el, "step")
-        s = dict(sext or {})
-        if _foreign_ext(el):
-            foreign_settings.append(el.get("name") or eid)
-        sid = s.get("id") if isinstance(s.get("id"), str) and wfmod.ID.fullmatch(s.get("id", "")) else None
-        if not sid or sid in used:
-            s = {} if sid in used else s
-            base = slug(el.get("name") or eid)
-            if base in RESERVED:
-                base = f"{base}-step"
-            sid, n = base, 2
-            while sid in used:
-                sid, n = f"{base}-{n}", n + 1
-        used.add(sid)
-        kinds = COMPATIBLE[tag]
-        if s.get("kind") not in kinds:
-            if s.get("kind") in KIND_WORDS:
-                problems.append(f"{where} was {KIND_WORDS[s['kind']]} and is now {KIND_WORDS[kinds[0]]}; check "
-                                f"its settings.")
-            s["kind"] = kinds[0]
-        s["id"] = sid
-        name = (el.get("name") or "").strip() or sid
-        if _norm(s.get("title") or sid) != _norm(name):
-            s["title"] = name
-        if el.get("isForCompensation") == "true":
-            problems.append(f"{where} is a compensation activity; compensation is not supported (a workflow undoes "
-                            f"work with steps of its own). It is imported as an ordinary step.")
-        for lc in ("standardLoopCharacteristics", "multiInstanceLoopCharacteristics"):
-            if _one(el, lc) is not None:
-                problems.append(f"{where} repeats (a loop or multi-instance), which a workflow step does not; it "
-                                f"runs once. An automation can act on each item of a list with for_each.")
-        if tag == "scriptTask" and _one(el, "script") is not None:
-            problems.append(f"{where} carries a script; scripts are never imported or run. Choose an action or "
-                            f"a python block for it.")
-        if eid in lane_of:
-            role = lane_of[eid]
-            if role is None:
-                s.pop("role", None)
-            else:
-                s["role"] = role
-        doc = _one(el, "documentation")
-        _keep(s, "instructions", _text(doc).strip() if doc is not None and (doc.text or "").strip() else None)
-        if s["kind"] == "wait":
-            defs = [c for c in el if _local(c.tag).endswith("EventDefinition")]
-            until = durs = at = None
-            for dfn in defs:
-                lt = _local(dfn.tag)
-                if lt == "conditionalEventDefinition":
-                    until = _condition(dfn, "condition", problems, where)
-                elif lt == "timerEventDefinition":
-                    if _one(dfn, "timeDuration") is not None:
-                        durs = (_text(_one(dfn, "timeDuration")) or "").strip()
-                    elif _one(dfn, "timeDate") is not None:
-                        at = (_text(_one(dfn, "timeDate")) or "").strip()
-                    else:
-                        problems.append(f"{where} waits on a repeating timer, which a wait does not support.")
-                else:
-                    problems.append(f"{where} waits for {EVENT_DEFS.get(lt, lt)}, which a wait does not support; "
-                                    f"say what it waits for with until (a condition).")
-            if tag == "receiveTask" or (tag == "intermediateCatchEvent" and not defs):
-                problems.append(f"{where} waits for a message; a workflow waits until a condition holds instead: "
-                                f"give it until.")
-            _keep(s, "until", until)
-            if durs is not None:
-                conv = duration_from_iso(durs)
-                if conv is None:
-                    problems.append(f"{where}: the timer {durs!r} is not a duration in minutes, hours, days or weeks.")
-                if s.get("for") is None or duration_iso(s["for"]) != durs:
-                    s["for"] = conv or durs
-            else:
-                s.pop("for", None)
-            if at is not None:
-                _keep(s, "at", at, str)
-            else:
-                s.pop("at", None)
-        step_of[eid] = s
-
-    # due times: a non-interrupting timer on a task or decision
-    due_of: dict[str, str] = {}
-    for eid, el in elems.items():
-        if _local(el.tag) != "boundaryEvent":
-            continue
-        host = el.get("attachedToRef")
-        where = repr(el.get("name") or eid)
-        timer = _one(el, "timerEventDefinition")
-        dur = _one(timer, "timeDuration") if timer is not None else None
-        if timer is None or dur is None or host not in step_of or outgoing.get(eid):
-            what = [EVENT_DEFS.get(_local(c.tag), _local(c.tag)) for c in el if _local(c.tag).endswith("Definition")]
-            problems.append(f"{where} is an event on the edge of a step ({', '.join(what) or 'with no trigger'}"
-                            f"{', with its own path' if outgoing.get(eid) else ''}); only a timer with no path of its "
-                            f"own (a due time) is supported. It is left out.")
-            continue
-        if el.get("cancelActivity", "true") != "false":
-            problems.append(f"{where} would interrupt its step; a due time never does: the step is flagged overdue "
-                            f"(and escalated, with escalate_to) instead.")
-        due_of[host] = (dur.text or "").strip()
-    for eid, s in step_of.items():
-        if s["kind"] in ("task", "gate"):
-            raw = due_of.get(eid)
-            if raw is None:
-                s.pop("due", None)
-            elif s.get("due") is None or duration_iso(s["due"]) != raw:
-                conv = duration_from_iso(raw)
-                if conv is None:
-                    problems.append(f"{s.get('title', s['id'])!r}: the due time {raw!r} is not a duration in "
-                                    f"minutes, hours, days or weeks.")
-                s["due"] = conv or raw
-
-    # the flows: after and when, through gateways and from the start
-    starts = {eid for eid, el in elems.items() if _local(el.tag) == "startEvent"}
-    for eid, el in elems.items():
-        tag = _local(el.tag)
-        if tag in GATEWAYS and el.get("default"):
-            problems.append(f"The gateway {el.get('name') or eid!r} has a default path; a workflow has no "
-                            f"'otherwise': give the step on it a condition of its own.")
-        if tag in ("exclusiveGateway",) and _ph(el, "gateway") is None:
-            conds = [f for f in outgoing.get(eid, []) if _one(f, "conditionExpression") is not None]
-            if len(conds) > 1:
-                problems.append(f"The gateway {el.get('name') or eid!r} takes one path; a workflow runs every step "
-                                f"whose condition holds. Check that its conditions do not overlap.")
-        if tag == "endEvent":
-            for c in el:
-                if _local(c.tag).endswith("EventDefinition"):
-                    problems.append(f"The end {el.get('name') or eid!r} has {EVENT_DEFS.get(_local(c.tag), 'a trigger')}"
-                                    f"; a workflow ends when its last steps are done. Imported as a plain end.")
-    for f in flows:
-        if f.get("sourceRef") in elems and _local(elems[f.get("sourceRef")].tag) == "endEvent":
-            problems.append("A flow leaves an end event; it is left out.")
-
-    def paths(target, seen):
-        """(step element id or None for the start, [conditions]) for each way into ``target``."""
-        out = []
-        for f in incoming.get(target, []):
-            where = repr(f.get("name") or f.get("id"))
-            cond = _condition(f, "conditionExpression", problems, f"the flow {where}")
-            src = f.get("sourceRef")
-            el = elems.get(src)
-            conds = [cond] if cond else []
-            if src in step_of:
-                out.append((src, conds))
-            elif src in starts:
-                out.append((None, conds))
-            elif el is not None and _local(el.tag) in GATEWAYS:
-                if src in seen:
-                    continue
-                out += [(s, c + conds) for s, c in paths(src, seen | {src})]
-            elif el is not None and _local(el.tag) == "boundaryEvent":
-                pass  # already reported
-            else:
-                problems.append(f"The flow {where} comes from something that is not imported; it is left out.")
-        return out
-
-    for eid, s in step_of.items():
-        ways = paths(eid, frozenset())
-        after = []
-        for src, _ in ways:
-            if src is not None and step_of[src]["id"] not in after:
-                after.append(step_of[src]["id"])
-        if set(after) != set(s.get("after") or []):
-            if after:
-                s["after"] = after
-            else:
-                s.pop("after", None)
-        conds = {tuple(c) for _, c in ways}
-        when = None
-        if len(conds) > 1:
-            problems.append(f"{s.get('title', s['id'])!r} is reached by paths with different conditions; a step "
-                            f"has one condition. The first is kept.")
-        if conds:
-            first = next(c for _, c in ways)
-            if len(first) == 1:
-                when = first[0]
-            elif first:
-                when = " and ".join(f"({c})" for c in first)
-        _keep(s, "when", when)
-    reached = {eid for eid in step_of if incoming.get(eid)}
-    if not ours:
-        for eid, s in step_of.items():
-            if eid not in reached:
-                problems.append(f"{s.get('title', s['id'])!r} has no flow into it; it starts as soon as the "
-                                f"workflow does.")
 
     # the workflow: title, summary, trigger
     wid = wdoc.get("id") if isinstance(wdoc.get("id"), str) else None
@@ -957,10 +789,10 @@ def import_bpmn(data, catalog=None) -> Imported:
         wdoc["title"] = wid.replace("-", " ").capitalize()
     pdoc = _one(proc, "documentation")
     _keep(wdoc, "summary", (pdoc.text or "").strip() if pdoc is not None and (pdoc.text or "").strip() else None)
-    trig = dict(wdoc.get("trigger") or {})
+    trig = dict(wdoc["trigger"]) if isinstance(wdoc.get("trigger"), dict) else {}
     schedule = event = None
-    for sid in starts:
-        el = elems[sid]
+    for el in starts:
+        where = repr(el.get("name") or el.get("id"))
         for dfn in el:
             lt = _local(dfn.tag)
             if lt == "timerEventDefinition":
@@ -970,17 +802,14 @@ def import_bpmn(data, catalog=None) -> Imported:
                 if trig.get("schedule") and schedule_iso(trig["schedule"]) == text:
                     conv = trig["schedule"]
                 if conv is None:
-                    problems.append(f"The timer start {el.get('name') or sid!r} ({text or 'no repeat'}) is not a "
-                                    f"schedule a workflow can keep: say hourly, daily 07:00 or weekly mon 08:00.")
+                    problems.append(f"The timer start {where} ({text or 'no repeat'}) is not a schedule a workflow "
+                                    f"can keep: say hourly, daily 07:00 or weekly mon 08:00.")
                 schedule = conv or text or None
             elif lt == "messageEventDefinition":
                 event = messages.get(dfn.get("messageRef")) or (el.get("name") or "").removeprefix("On ").strip()
-                if not ours:
-                    problems.append(f"The start {el.get('name') or sid!r} waits for a message; it is imported as the "
-                                    f"event {event!r}: check that it is one of the practice's events.")
             elif lt.endswith("EventDefinition"):
-                problems.append(f"The start {el.get('name') or sid!r} starts on {EVENT_DEFS.get(lt, lt)}, which a "
-                                f"workflow cannot; it starts by hand, on an event or on a schedule.")
+                problems.append(f"The start {where} starts on {EVENT_DEFS.get(lt, lt)}, which a workflow cannot; it "
+                                f"starts by hand, on an event or on a schedule.")
     for key, val in (("schedule", schedule), ("event", event)):
         if val is None:
             trig.pop(key, None)
@@ -995,24 +824,12 @@ def import_bpmn(data, catalog=None) -> Imported:
         wdoc["trigger"] = trig
     else:
         wdoc.pop("trigger", None)
-    if not ours:
-        problems.append("Say who may start it by hand (trigger.starters), which record it is about (record), and "
-                        "for each step what it produces (fields) or which action an automation takes.")
-    if foreign_settings:
-        problems.append(f"Settings for another BPMN tool (on {', '.join(sorted(set(foreign_settings))[:5])}"
-                        f"{'...' if len(set(foreign_settings)) > 5 else ''}) are not imported.")
-    steps = list(step_of.values())
-    head = ("id", "title", "kind", "role", "after", "when")
-    steps = [{**{k: s[k] for k in head if k in s}, **{k: v for k, v in s.items() if k not in head}} for s in steps]
     order = ("id", "title", "record", "summary", "trigger", "input")
     out = {**{k: wdoc[k] for k in order if k in wdoc}, **{k: v for k, v in wdoc.items() if k not in order}}
-    out.pop("steps", None)
-    if wfmod.is_states_form(out):
-        if [s.get("id") for s in steps] != [s.get("id") for s in compile_states(out, [])[0]]:
-            problems.append("This workflow is written as states and edges: its steps come from them, so steps added "
-                            "or removed in the diagram are not imported. Change its states and edges instead.")
-    else:
-        out["steps"] = steps
+    # the steps are the states' and edges', never the diagram's: say so when the diagram no longer shows the same ones
+    if sorted(drawn) != sorted(str(s.get("id")) for s in compile_states(out, [])[0]):
+        problems.append("A workflow's steps come from its states and edges, so steps added or removed in the diagram "
+                        "are not imported. Change its states and edges instead.")
     source = dumps_toml(out)
     try:
         wfmod.parse(source, catalog)
