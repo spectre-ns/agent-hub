@@ -378,9 +378,12 @@ def guard_no_signature(values, ctxview):
             for k, v in values.items() if isinstance(v, str) and SIGNING.search(v)]
 
 
+RX_CLOSED = ("active", "on-hold", "completed", "stopped", "cancelled", "entered-in-error")  # a request no longer worked
+
+
 def _same_drug_renewals(recs, asked, own, today):
-    """Other renewal work on the same drug for this patient: a renewal request still open (a draft proposal), or an
-    order issued today. Two requests a while apart (the pharmacy faxes, the patient asks on the portal an hour later)
+    """Other renewal work on the same drug for this patient: a renewal request still open (a proposal its renewal
+    has not prescribed or closed, wherever it has got to), or an order issued today. Two requests a while apart (the pharmacy faxes, the patient asks on the portal an hour later)
     are both walked; the physician must know of the other before renewing again."""
     word = str(asked or "").strip().split()[0].lower() if str(asked or "").strip() else ""
     out = []
@@ -388,7 +391,7 @@ def _same_drug_renewals(recs, asked, own, today):
         ref = f"MedicationRequest/{r.get('id')}"
         if r.get("resourceType") != "MedicationRequest" or ref == own or not word or word not in _med_text(r).lower():
             continue
-        if r.get("status") == "draft" and r.get("intent") == "proposal":
+        if r.get("intent") == "proposal" and r.get("status") not in RX_CLOSED:
             out.append((ref, "open"))
         elif r.get("status") == "active" and str(r.get("authoredOn") or "")[:10] == today:
             out.append((ref, "issued today"))

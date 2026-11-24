@@ -11,16 +11,19 @@ active = "record.status == 'active'"
 part_of = "subject"
 order = 30
 summary = "A prescription. A renewal request is a proposal its workflow prescribes or closes."
-# A renewal request (a draft proposal) is walked by its own workflow from asked for to prescribed or closed: the
-# request made, from the portal, the pharmacy or a person at the desk, is this record, and its status is where the work
-# is. A prescription a physician writes by hand (an order, not a proposal) starts no workflow: it is issued (made
-# active) only by a physician's signature, "I prescribe this medication as written", with its directions and quantity.
+# A renewal request (a proposal, made as a draft) is walked by its own workflow from asked for to prescribed or closed:
+# the request made, from the portal, the pharmacy or a person at the desk, is this record, and its status is where the
+# work is (preparing, deciding, issuing, not-on-chart, writing, signing: stops of the renewal that FHIR's status has no
+# code for, kept here as a visit keeps its own). A prescription a physician writes by hand (an order, not a proposal)
+# starts no workflow: it is issued (made active) only by a physician's signature, "I prescribe this medication as
+# written", with its directions and quantity.
 workflow = { id = "prescription-renewal", when = "record.status == 'draft' and record.intent == 'proposal'" }
 
 [[field]]
 name = "status"
 type = "choice"
-choices = ["active", "on-hold", "cancelled", "completed", "entered-in-error", "stopped", "draft", "unknown"]
+choices = ["active", "on-hold", "cancelled", "completed", "entered-in-error", "stopped", "draft", "unknown",
+           "preparing", "deciding", "issuing", "not-on-chart", "writing", "signing"]   # ...and a renewal's stops
 required = true
 
 [[field]]
@@ -156,12 +159,13 @@ fields = ["subject", "medication", "directions", "quantity", "quantity_unit", "r
 [lifecycle]
 field = "status"
 initial = "draft"
-# Its renewal cancelled, the request is closed.
-abandoned = { draft = "cancelled" }
-# Issued only by the renewal workflow (its prescriber signed for it) or by a physician signing the order: never moved
-# to active by hand, by a nurse or a service that writes clinical records.
+# Its renewal cancelled, wherever it had got to, the request is closed.
+abandoned = { draft = "cancelled", preparing = "cancelled", deciding = "cancelled", issuing = "cancelled", not-on-chart = "cancelled", writing = "cancelled", signing = "cancelled" }
+# Issued only by the renewal workflow (its prescriber signed for it: the edges out of issuing and signing) or by a
+# physician signing the order (a draft): never moved to active by hand, by a nurse or a service that writes clinical
+# records. However it is issued, it says what is prescribed.
 [[lifecycle.transition]]
-from = ["draft"]
+from = ["draft", "issuing", "signing"]
 to = "active"
 by = "workflow"
 label = "Issued"

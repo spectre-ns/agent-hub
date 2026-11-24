@@ -4767,6 +4767,67 @@ def test_a_state_only_its_workflow_leaves_says_where_cancelled_work_leaves_it(hu
     assert e.value.problems == [ERRAND_STRANDED.replace("'doing'", "'done'").replace('"doing"', '"done"')]
 
 
+# A standard's own codes that nothing the hub ships reaches. They stay values of the field so that a record brought
+# in from another system keeps the status it came with; anything else a state field lists, something must reach.
+STANDARD_CODES = {"ChargeItem": {"not-billable", "billed", "unknown"},  # FHIR R4 ChargeItem.status
+                  "Encounter": {"unknown"},                             # FHIR R4 Encounter.status
+                  "MedicationRequest": {"unknown"}}                     # FHIR R4 MedicationRequest.status
+
+
+def _writes(value, field):
+    """Each literal a workflow's params write to ``field`` (``record.update``'s set, a new record's data)."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == field and isinstance(v, str) and "{{" not in v:
+                yield v
+            yield from _writes(v, field)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _writes(v, field)
+
+
+def test_every_shipped_type_fits_its_workflow_and_lists_only_values_a_record_can_be_in():
+    """Rule, over every pack and module the hub ships. A type that names its own workflow fits it
+    (``catalog.lifecycle_fit``: a state's words said once, no move of the workflow's written again, a state only the
+    workflow leaves in ``abandoned``). Every state of that workflow is a value of the type's state field, so where a
+    record is, is on the record (the engine still lets a run keep a stop of its own; nothing shipped does). And every
+    value a state field lists is one a record can come to be in: where it starts, where a move, an edge, a signature
+    or ``abandoned`` puts it, or what a workflow writes; a standard's own codes aside (``STANDARD_CODES``)."""
+    from practicehub import pack as packmod, schema
+    from practicehub.catalog import lifecycle_fit
+    from practicehub.workflows import parse
+    types, flows = {}, {}
+    for part in sorted(d for top in (packmod.PACKS_DIR, packmod.MODULES_DIR) for d in top.iterdir() if d.is_dir()):
+        for f in sorted(part.glob("types/*.toml")):
+            rt = schema.parse(f.read_text())
+            types[rt.id] = rt
+        for f in sorted(part.glob("workflows/*.toml")):
+            wf = parse(f.read_text())
+            flows[wf.id] = wf
+    walked = 0
+    for tid, rt in types.items():
+        lc = rt.lifecycle
+        if not lc:
+            continue
+        own = flows.get((rt.workflow or {}).get("id"))
+        assert not rt.workflow or (own is not None and own.record == tid), f"{tid} names a workflow that is not its own"
+        reached = {lc["initial"], *lc["starts"], *lc["abandoned"].values(), *(t["to"] for t in lc["transition"]),
+                   *(g["moves_to"] for g in rt.signatures if g.get("moves_to"))}
+        if own is not None:
+            walked += 1
+            assert lifecycle_fit(rt, own) == [], tid
+            run_only = [s["id"] for s in own.shape["states"] if s["id"] not in lc["states"]]
+            assert not run_only, f"{tid}: {own.id} has states its {lc['field']} cannot hold: {run_only}"
+            for e in (own.shape["start"], *own.shape["edges"]):
+                reached |= set(e.get("lands") or [])
+        for wf in flows.values():
+            reached |= {v for s in wf.steps for v in _writes(s.params, lc["field"])}
+            reached |= set(_writes(wf.new_record, lc["field"])) if wf.record == tid else set()
+        never = set(lc["states"]) - reached
+        assert never == STANDARD_CODES.get(tid, set()), f"{tid}: nothing reaches {sorted(never)}"
+    assert walked >= 20 and set(STANDARD_CODES) <= set(types)
+
+
 # ------------------------------------------------------------------------------------------- the calendar
 def _visit(pat, who, start, end=None, status="planned"):
     rec = {"status": status, "subject": {"reference": pat}, "plannedStartDate": start,

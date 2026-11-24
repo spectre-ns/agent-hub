@@ -201,8 +201,8 @@ def test_on_the_record_a_decision_leads_its_step_before_the_request_it_is_about(
     step = page.split('class="rw-step"', 1)[1]
     assert "<h2>Decide</h2>" in step and "<h2>The request</h2>" in step
     assert step.index("<h2>Decide</h2>") < step.index("<h2>The request</h2>") < step.index("What this step reads")
-    # the request is a draft throughout; its status says the stop its run keeps, in the workflow's words and tone
-    assert hub.records.read(*run["record"].split("/", 1))["status"] == "draft" and run["at"] == "deciding"
+    # the request's own status is where its renewal is, said in the workflow's words and tone
+    assert hub.records.read(*run["record"].split("/", 1))["status"] == "deciding" and run.get("at") is None
     head = page.split('class="rw-step"', 1)[0]
     assert '<span class="loz moved">To decide</span>' in head and ">Draft</span>" not in head
 

@@ -2,10 +2,10 @@ id = "prescription-renewal"
 title = "Prescription renewal"
 record = "MedicationRequest"
 summary = """
-One renewal request, from asked for to closed: the request is a prescription proposal (draft) on the patient's chart,
-this workflow's record. While it is worked it stays a draft, and its run says where it stops: preparing, to decide,
-not on the chart, writing, to sign. Prescribed, the same record becomes the active order
-(active); declined, or a visit booked instead, it is closed (cancelled). Nobody issues it by hand while it is walked.
+One renewal request, from asked for to closed: the request is a prescription proposal on the patient's chart, this
+workflow's record. While it is worked its status says where it is: preparing, to decide, issuing, not on the chart,
+writing, to sign. Prescribed, the same record becomes the active order (active); declined, or a visit booked instead,
+it is closed (cancelled). Nobody issues it by hand while it is walked.
 
 A patient (or their pharmacy) asks for a renewal. The clinical admin agent prepares it from the chart (the current
 order, its dose, quantity and repeats), a physician decides and signs, the new prescription replaces the current one
@@ -22,7 +22,7 @@ event = "renewal.requested"
 one_open_per = "subject"              # the same submission twice (a double press, the pharmacy faxing twice)...
 one_open_same = ["input.medication"]  # ...for the same medication...
 one_open_within = "10m"               # ...a moment ago starts one; any other request is its own
-one_open_while = "record.status == 'draft'"
+one_open_while = "not record.status in ['active', 'cancelled', 'entered-in-error']"   # ...while that one is still open
 
 # Started on the patient (the portal, the pharmacy's fax, the desk), the run makes the request: a proposal for the
 # medication asked for, on the patient's chart, and this run works it from then on.
@@ -47,8 +47,9 @@ help = "name and fax of the pharmacy"
 # ---------------------------------------------------------------------------------------------------------------
 # Written as the request's states (where it stops, and the work done there) and the edges between them (what the
 # person working it chose, with the automations that run on the way). See practicehub/states.py. Preparing, To
-# decide, Issuing, Not on the chart, Writing and To sign are stops FHIR's status has no value for: the run keeps
-# where it is (the request stays a draft) until an edge makes it the active order or closes it (cancelled).
+# decide, Issuing, Not on the chart, Writing and To sign are stops FHIR's status has no code for: the request's type
+# lists them as values of its status all the same, so the record says where it is until an edge makes it the active
+# order or closes it (cancelled).
 
 [start]
 to = "preparing"

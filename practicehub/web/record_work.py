@@ -61,7 +61,7 @@ class RecordWork:
         by_move = {m["to"] for m in screen["may"] if m.get("does")}
         for run, wf in self.own_runs(me, ref):
             here = next((x for x in wf.shape["states"] if x["id"] == run.get("at")), None)
-            if here and status and run["at"] not in rt.states():  # a stop only the run keeps (the record a draft)
+            if here and status and run["at"] not in rt.states():  # a stop only the run keeps
                 tone = self.TONE_CLASS.get(here.get("tone") or "", "default")
                 status[0] = f'<span class="loz {tone}">{e(here.get("label") or run["at"])}</span>'
             n = self._pass_number(run)

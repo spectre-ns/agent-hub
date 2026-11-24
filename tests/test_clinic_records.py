@@ -24,14 +24,16 @@ def _items(hub, run):
 
 # ------------------------------------------------------------------------------------------- prescription renewal
 def test_a_renewal_request_is_a_proposal_that_becomes_the_order_it_renews(hub, worked):
-    """Asked for on the patient, the run makes the request (a draft proposal on the chart) and walks it: renewed, the
-    same record is the active order, and the order it replaces is completed. One run, one item."""
+    """Asked for on the patient, the run makes the request (a proposal on the chart) and walks it, the request's own
+    status saying where it is: renewed, the same record is the active order, and the order it replaces is completed.
+    One run, one item."""
     pat = _pat(hub)
     run = run_of(hub, "prescription-renewal")  # the demo's: the pharmacy asked through the portal
     ref = run["record"]
     assert ref.startswith("MedicationRequest/") and run["subject"] == pat and run["ctx"]["run"]["subject"] == pat
     req = _read(hub, ref)
-    assert req["status"] == "draft" and req["intent"] == "proposal" and req["subject"]["reference"] == pat
+    assert req["status"] == "deciding" and req["intent"] == "proposal" and req["subject"]["reference"] == pat
+    assert run.get("at") is None  # where it is, is on the record: the run keeps no stop of its own
     assert req["medicationCodeableConcept"]["text"] == "Ramipril 5 mg"
     hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "decide"), "renew", "")
     run_all_local(hub, log=quiet)
@@ -54,7 +56,7 @@ def test_nobody_issues_a_renewal_request_by_hand_and_a_hand_written_one_only_by_
     run = run_of(hub, "prescription-renewal")
     with pytest.raises((Denied, Invalid)):
         hub.update_record(amara, run["record"], {"status": "active"})
-    assert _read(hub, run["record"])["status"] == "draft"
+    assert _read(hub, run["record"])["status"] == "preparing"
     rx = hub.create_record(amara, "MedicationRequest", {
         "status": "draft", "intent": "order", "subject": {"reference": _pat(hub)},
         "medicationCodeableConcept": {"text": "Amoxicillin 500 mg capsule"}})

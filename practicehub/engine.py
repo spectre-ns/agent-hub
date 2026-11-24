@@ -1052,7 +1052,7 @@ class Engine:
         rt = hub.record_type(ref.split("/", 1)[0]) if "/" in ref else None
         if rt is not None and step.on_edge and (not rt.lifecycle or step.state not in rt.states()):
             # written as states and edges, a stop the record's state field has no value for (or a record with no
-            # state field): the run keeps where it is, and the record stays as it is (a renewal is a draft throughout)
+            # state field): the run keeps where it is, and the record stays as it is
             run["at"] = step.state
             hub.db.runs.set(run["id"], {"at": step.state})
             return
