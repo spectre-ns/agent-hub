@@ -3153,6 +3153,7 @@ class Engine:
         return out
 
     def _tick(self, now: datetime, now_utc: datetime, stamp: str) -> dict:
+        from .hub import Invalid
         hub = self.hub
         tz = self.zone()
         started, overdue = [], []
@@ -3194,7 +3195,10 @@ class Engine:
             began = _parse(item.get("step_started_at") or item["created_at"])
             allowed = min(max(timedelta(minutes=15), due - began), timedelta(days=1))
             run = self.run(item["run_id"])
-            wf, _ = hub.workflow(run["workflow_id"], run["version"])
+            try:
+                wf, _ = hub.workflow(run["workflow_id"], run["version"])
+            except Invalid:
+                continue  # its version no longer reads (``Hub.workflow`` says why): the clock goes on for the rest
             step = wf.step(item["step_id"])
             # whom it is stuck with: who took it, else everyone on duty it waits for
             held = item["claimed_by"] or item["assignee"]

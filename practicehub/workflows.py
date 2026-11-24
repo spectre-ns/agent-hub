@@ -266,11 +266,10 @@ class Workflow:
 NOT_BY_PEOPLE = ("run", "record.editors")
 
 
-def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
-    """Parse and validate a workflow. ``catalog`` (a Pack) checks roles, skills, actions and record types.
-    ``stored``: a version already approved and kept. Rules added since it was approved are not applied to it, so it
-    reads and runs as it was approved (a hub on new code must not lose a version it has in force); new versions,
-    proposed or installed, get every rule."""
+def parse(source: str, catalog=None) -> Workflow:
+    """Parse and validate a workflow. ``catalog`` (a Pack) checks roles, skills, actions and record types. Every
+    version is read by the same rules, whenever it was approved: one in force that a newer rule refuses is not read
+    (``Hub.workflows`` leaves it out and says why) until a version that passes is approved."""
     try:
         doc = tomllib.loads(source)
     except tomllib.TOMLDecodeError as exc:
@@ -359,17 +358,14 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
         problems += check_spec(spec)
         if spec.get("name"):
             inputs.append(normalize(spec))
-    shape: dict = {}
-    if is_states_form(doc):
-        from .states import compile_states
-        doc["steps"], shape = compile_states(doc, problems)
-        if not doc["steps"] and not problems:
-            problems.append("state: a workflow written as states and edges needs at least one state with its work")
-    elif doc.get("steps") and not stored:
-        # the old form: a list of steps. Versions approved in it still read (stored); new ones are written as states.
+    if "steps" in doc:  # the form workflows were once written in: its steps are what the states and edges compile to
         raise DefinitionError(problems + [
             "steps: a workflow is written as its record's states and the edges between them ([start], [[state]], "
             "[[edge]]), not as a list of [[steps]]. See \"States and edges\" in docs/workflows.md."])
+    from .states import compile_states
+    doc["steps"], shape = compile_states(doc, problems)
+    if not doc["steps"] and not problems:
+        problems.append("state: a workflow written as states and edges needs at least one state with its work")
     steps: list[Step] = []
     seen = set()
     for i, raw in enumerate(doc.get("steps", []) or []):
@@ -431,9 +427,9 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
         if step.state and not doc.get("record"):
             problems.append(f"{where}: state moves the run's record; the workflow is about none")
         hidden = sorted(set(step.params) & {"when", "after", "until", "due", "escalate_to", "timeout", "for_each"})
-        if hidden and not stored:  # written after [steps.params] in TOML, a step setting silently becomes a parameter
-            problems.append(f"{where}: {', '.join(hidden)} is a step setting, not a parameter: put it above "
-                            f"[steps.params], with the step's other settings")
+        if hidden:  # written after its params table in TOML, a step setting silently becomes a parameter
+            problems.append(f"{where}: {', '.join(hidden)} is a step setting, not a parameter: put it above its "
+                            f"params table, with its other settings")
         if step.for_each and kind not in ("automation", "wait", "task"):
             problems.append(f"{where}: for_each is for automations, waits and tasks (a task once per person)")
         if step.where and kind != "automation":
@@ -569,8 +565,6 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
                             problems.append(f"step {s.id}: the condition reads {p!r}, but there is no step {head!r}")
                 except expr.ExprError:
                     pass
-    if not steps:
-        problems.append("steps: a workflow needs at least one step")
     by_id = {s.id: s for s in steps}
     on_cancel = _on_cancel(doc.get("on_cancel"), ids, problems)
     cancel_by = doc.get("cancel_by") or []
@@ -679,11 +673,6 @@ def _fill(m, ctx: dict):
     if m.group(2):  # {{run.today + 1y}}: date arithmetic, in days (d), weeks (w), months (m) or years (y)
         v = shift_date(v, m.group(2), int(m.group(3)), m.group(4))
     return v
-
-
-def is_states_form(doc: dict) -> bool:
-    """Whether a workflow's TOML is written as states and edges (see practicehub/states.py), not as steps."""
-    return any(k in doc for k in ("state", "edge", "start"))
 
 
 def acts_only_source(wid: str, title: str, summary: str, step: str, step_title: str) -> str:

@@ -66,6 +66,11 @@ class Conflict(Invalid):
     status = 409
 
 
+class Unreadable(Invalid):
+    """A version of a workflow that does not pass today's rules (one approved before a rule that now refuses it):
+    not read, and said so in words wherever it is asked for, until a version that passes is approved."""
+
+
 class Duplicate(Conflict):
     """Another open run of the workflow already has the value its ``trigger.one_open_per`` names. ``run`` is that run;
     ``allowed``: the trigger lets the starter confirm and start another anyway (``allow_duplicate``)."""
@@ -4108,7 +4113,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             raise NotFound(f"there is no workflow {wid!r}" + (f" version {version}" if version else ""))
         if row["status"] in ("active", "retired"):
             self._require_sealed("workflow", row)
-        return wfmod.parse(row["source"], None, stored=True), row
+        try:
+            return wfmod.parse(row["source"]), row
+        except wfmod.DefinitionError as exc:
+            # every version is read by today's rules: one a newer rule refuses is said so, in words, wherever it is
+            # asked for (a page, a run of it), and ``workflows`` leaves it out
+            raise Unreadable(f"version {row['version']} of the {wid} workflow does not pass today's rules, so it is "
+                             f"not read: approve a version that does", exc.problems) from None
 
     def workflows(self) -> list[dict]:
         rows = self.db.workflow_versions.find({"status": "active"}, sort=[("workflow_id", ASC)])
@@ -4119,7 +4130,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             except Invalid:
                 continue  # shown nowhere and started by nobody until restored; 'verify' names it
             try:
-                wf = wfmod.parse(r["source"], None, stored=True)
+                wf = wfmod.parse(r["source"])
             except wfmod.DefinitionError as exc:  # one unreadable version must not take every page down with it
                 logging.getLogger(__name__).warning("workflow %s@%s is not readable: %s", r["workflow_id"],
                                                     r.get("version"), "; ".join(exc.problems))
@@ -4308,17 +4319,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                   {"$set": {"status": "withdrawn"}})
             self.track.append(actor, f"{kind}.withdrawn", f"{kind}:{did}", data={"version": version, "reason": reason})
 
-    def check_workflow(self, source: str, *, approving: bool = False, stored: bool = False) -> wfmod.Workflow:
+    def check_workflow(self, source: str, *, approving: bool = False) -> wfmod.Workflow:
         """Parse a workflow and check it against this practice: the pack's roles, skills and actions, and the blocks
-        it uses. Raises DefinitionError with every problem. ``stored``: a version already approved, checked by the
-        rules it was approved under (see ``workflows.parse``)."""
+        it uses. Raises DefinitionError with every problem. A text approved before is checked like any other: going
+        back to an earlier version is a proposal, by today's rules."""
         problems: list[str] = []
         try:
-            wf = wfmod.parse(source, self.pack, stored=stored)
+            wf = wfmod.parse(source, self.pack)
         except wfmod.DefinitionError as exc:
             problems = exc.problems
             try:
-                wf = wfmod.parse(source, None, stored=stored)
+                wf = wfmod.parse(source)
             except wfmod.DefinitionError:
                 raise exc from None
         problems += [p for p in self._block_problems(wf, approving=approving) if p not in problems]
@@ -4448,21 +4459,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if actor.get("status") != "active":
             raise Denied("an inactive member cannot propose changes")
         try:
-            wf = self.check_workflow(source, stored=self._approved_before(source))
+            wf = self.check_workflow(source)
         except wfmod.DefinitionError as exc:
             raise Invalid("the workflow has problems", exc.problems) from None
         return self._propose("workflow", actor, wf.id, source, note)
 
-    def _approved_before(self, source: str) -> bool:
-        """Whether this very text was approved before (going back to it: a roll back): it is checked by the rules it
-        was approved under, as the version kept is, so a hub never loses the way back to what it ran."""
-        table, _ = self.KINDS["workflow"]
-        return bool(self.db[table].find_one({"source": source, "approved_at": {"$nin": [None]}}))
-
     def approve_workflow(self, actor: dict, wid: str, version: int, meaning: str = "") -> dict:
         row = self._approvable("workflow", actor, wid, version)
         try:
-            wf = self.check_workflow(row["source"], approving=True, stored=self._approved_before(row["source"]))
+            wf = self.check_workflow(row["source"], approving=True)
         except wfmod.DefinitionError as exc:
             raise Invalid("the workflow no longer validates", exc.problems) from None
         meaning = meaning or f"I approve version {version} of the {wf.title} workflow"
@@ -4479,7 +4484,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         start nothing."""
         try:
             cur = self.workflow(wf.id)[0]
-        except NotFound:
+        except (NotFound, Unreadable):  # none in force, or one that starts nothing: this version is the way back
             return
         t = cur.record or ""
         before = (cur.event or "").startswith("record.") and (cur.event or "").endswith(f":{t}")

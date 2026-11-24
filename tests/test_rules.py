@@ -1437,22 +1437,47 @@ def test_a_step_setting_cannot_hide_among_its_parameters(hub):
         parse(src)
 
 
-def test_a_version_approved_before_a_new_rule_still_reads_and_runs_as_approved(hub):
-    """A new check applies to new versions, never to ones already approved and stored: a hub updated onto new code
-    keeps every page and its clock working (the demo hub went down on a stored version with when under its params)."""
+def test_a_version_in_force_that_a_newer_rule_refuses_stops_only_its_own_work(hub):
+    """Every version of a workflow is read by today's rules, whenever it was approved: there is no second reading
+    for a text kept from before. One in force that a newer rule refuses (the demo hub once held one with ``when``
+    under its params) is not read: it is left out of the workflows, so nothing starts it, and asking for it says
+    why. The hub still opens every other page and its clock goes on for everyone else's work; the way back is a
+    version that passes, and the refused text proposed again is refused like any other."""
+    rana = M(hub, "rana")
     src = hub.db.workflow_versions.find_one({"workflow_id": "appointment-request", "status": "active"})["source"]
     bad = src.replace('[start.do.params]\nchannel', '[start.do.params]\nwhen = "input.urgency == \'never\'"\nchannel', 1)
     assert bad != src
+    theirs = run_of(hub, "appointment-request")
+    other = next(r for r in hub.engine.runs(limit=1000) if r["workflow_id"] != "appointment-request"
+                 and hub.db.items.find_one({"run_id": r["id"], "status": "open", "kind": {"$in": ["task", "gate"]}}))
+    late = "2000-01-01T00:00:00Z"
+    for r in (theirs, other):  # work of each, overdue
+        hub.db.items.update({"run_id": r["id"], "status": {"$in": ["open", "claimed"]}, "kind": {"$ne": "notice"}},
+                            {"$set": {"due_at": late, "escalate_next": None}}, many=True)
     hub.db.workflow_versions.update({"workflow_id": "appointment-request", "status": "active"}, {"$set": {"source": bad}})
     hub._require_sealed = lambda *a, **k: None  # the edit above stands in for a version sealed before the rule
-    wf, _ = hub.workflow("appointment-request")
-    assert any("when" in s.params for s in wf.steps)  # read as it was approved: a parameter, as it ran
+    hub._defs_reset()
+    for ask in (lambda: hub.workflow("appointment-request"),
+                lambda: hub.engine.start(rana, "appointment-request", record=theirs["subject"],
+                                         inputs={"reason": "A cough"})):
+        with pytest.raises(Invalid, match="does not pass today's rules") as why:  # said in words, with what is wrong
+            ask()
+        assert any("step setting, not a parameter" in p for p in why.value.problems)
+    listed = [w["workflow"].id for w in hub.workflows()]
+    assert "appointment-request" not in listed and other["workflow_id"] in listed
+    # the clock: the other run's overdue work is escalated, and the unreadable one's stops nobody else's
+    done = hub.engine.tick()
+    mine = [i["id"] for i in hub.db.items.find({"run_id": other["id"], "due_at": late})]
+    assert mine and set(mine) <= set(done["overdue"])
+    assert not {i["id"] for i in hub.db.items.find({"run_id": theirs["id"], "due_at": late})} & set(done["overdue"])
+    # no way back by proposing the same text: a proposal is checked by today's rules, whatever was approved before
+    with pytest.raises(Invalid) as no:
+        hub.propose_workflow(rana, bad, "as it was")
+    assert any("step setting, not a parameter" in p for p in no.value.problems)
+    # a version that passes is the way back
+    p = hub.propose_workflow(rana, src.replace("\n", "\n# as it should be\n", 1), "put right")
+    hub.approve_workflow(M(hub, "dr-amara"), "appointment-request", p["version"])
     assert "appointment-request" in [w["workflow"].id for w in hub.workflows()]
-    # nor does it stop a change to what it uses: the in-force version is re-checked as it was approved
-    assert hub._workflows_broken_by("type", wf.record) == []
-    from practicehub.workflows import DefinitionError, parse
-    with pytest.raises(DefinitionError, match="step setting, not a parameter"):
-        parse(bad)  # proposed or installed anew, it is refused
 
 
 def test_only_the_authors_of_this_revision_may_not_approve_it(quality):

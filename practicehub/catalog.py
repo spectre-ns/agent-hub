@@ -117,7 +117,7 @@ class CatalogMixin:
         The type says which values its state field takes, and the moves people make by hand; the workflow, the rest."""
         wrow = self.db.workflow_versions.find_one({"workflow_id": rt.workflow["id"], "status": "active"},
                                                   fields=["_id", "version", "source"])
-        if not wrow or "[[edge]]" not in wrow["source"] and "[start]" not in wrow["source"]:
+        if not wrow:
             return rt
         key = ("type+moves", row["_id"] if row else rt.id, wrow["_id"],
                hashlib.sha256(wrow["source"].encode()).hexdigest())
@@ -125,11 +125,11 @@ class CatalogMixin:
             return self._defs[key]
         try:
             from . import workflows as wfmod
-            wf = wfmod.parse(wrow["source"], None, stored=True)
+            wf = wfmod.parse(wrow["source"])
         except Exception:  # noqa: BLE001 - an unreadable workflow is named on its own page; the type stands as written
             self._defs[key] = rt
             return rt
-        if not wf.shape or wf.record != rt.id:
+        if wf.record != rt.id:
             self._defs[key] = rt
             return rt
         import copy
@@ -624,7 +624,7 @@ class CatalogMixin:
             if not uses:
                 continue
             try:
-                self.check_workflow(w["row"]["source"], approving=True, stored=True)  # as it was approved
+                self.check_workflow(w["row"]["source"], approving=True)
             except DefinitionError as exc:
                 problems += [f"{wf.title}: {p}" for p in exc.problems]
         return problems

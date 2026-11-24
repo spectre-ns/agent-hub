@@ -2801,7 +2801,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                 try:
                     pwf, _ = hub.workflow(wid, v["version"])
                     pflow = f'<h3>The proposed flow</h3>{self._flow(pwf, legend=False).replace(f"flow-{wid}-def", f"flow-{wid}-v{v["version"]}")}'
-                except (NotFound, wfmod.DefinitionError):
+                except (NotFound, Invalid):  # a proposal today's rules no longer pass: its text below, no drawing
                     pflow = ""
                 extra = (f'<div class="card"><h3>What changes for agents</h3>{impact_html}{pflow}<details><summary>'
                          f'Changes to the text</summary><pre class="diff">{self._diff(diff)}</pre></details>'

@@ -118,7 +118,7 @@ kind = "task"
 role = "physician"
 ''')
     assert "says when it diverts" in problems(PICK.replace('when = "input.big == true"\n', ""))
-    assert "has no steps of its own" in problems(PICK + '[[steps]]\nid = "x"\ntitle = "x"\nkind = "task"\n')
+    assert "not as a list of [[steps]]" in problems(PICK + '[[steps]]\nid = "x"\ntitle = "x"\nkind = "task"\n')
     assert "worked by people or automated" in problems(PICK.replace(
         '[[state.work]]\nid = "decide"', '[[state.work]]\nid = "auto"\nkind = "automation"\naction = "clock.now"\n'
         '[[state.work]]\nid = "decide"'))

@@ -262,9 +262,6 @@ def compile_states(doc: dict, problems: list[str]) -> tuple[list[dict], dict]:
     if not isinstance(start, dict) or not start.get("to") and not acts_only:
         problems.append("start: say which state a record enters in ([start] to = \"<state>\")")
         start = {"to": None}
-    if doc.get("steps"):
-        problems.append("steps: a workflow written as states and edges has no steps of its own: put the work on "
-                        "its states and the automations on its edges")
     state_ids = [str(s.get("id", "")) for s in raw_states]
     known = set(state_ids)
     for sid in state_ids:
