@@ -306,3 +306,27 @@ def test_a_run_of_a_workflow_that_only_acts_ends_once_its_automations_are_done(h
     assert run["status"] == "completed" and not run.get("at")
     assert run["steps"]["note"]["state"] == "done" and run["steps"]["again"]["state"] == "done"
     assert hub.records.read(*pat.split("/")) == before  # nothing moved, nothing written
+
+
+def test_the_hubs_own_workflows_are_written_as_workflows_that_only_act(hub):
+    """The homes of the hub's own notices (an event no workflow took, an emergency access, a member's account, a
+    change waiting for approval, a mention) are about no record type: each is a workflow that only acts, read by
+    the same rules as any workflow, with the one step its notices are about. None is a list of steps."""
+    from practicehub.credentials import ACCOUNT_SOURCE, ACCOUNT_WORKFLOW
+    from practicehub.engine import UNHANDLED_SOURCE, UNHANDLED_WORKFLOW
+    from practicehub.hub import APPROVAL_SOURCE, APPROVAL_WORKFLOW
+    from practicehub.mentions import MENTION_SOURCE, MENTION_WORKFLOW
+    from practicehub.restrictions import OVERRIDE_SOURCE, OVERRIDE_WORKFLOW
+    homes = {UNHANDLED_WORKFLOW: (UNHANDLED_SOURCE, "look"), OVERRIDE_WORKFLOW: (OVERRIDE_SOURCE, "review"),
+             ACCOUNT_WORKFLOW: (ACCOUNT_SOURCE, "look"), APPROVAL_WORKFLOW: (APPROVAL_SOURCE, "look"),
+             MENTION_WORKFLOW: (MENTION_SOURCE, "look")}
+    for wid, (source, step) in homes.items():
+        assert "[[steps]]" not in source
+        wf = wfmod.parse(source)  # by today's rules, as a proposal would be
+        assert wf.id == wid and not wf.record and [s.id for s in wf.steps] == [step]
+        assert wf.shape["start"]["to"] is None and wf.shape["states"] == [] and wf.shape["edges"] == []
+        got, row = hub.workflow(wid, 0)  # what a page that shows one of its runs reads
+        assert [s.id for s in got.steps] == [step] and row["version"] == 0 and row["source"] == source
+    assert wfmod.acts_only_source("x", 'A "quoted" title', "It's a summary", "look", "Look") == (
+        'id = "x"\ntitle = "A \\"quoted\\" title"\nsummary = "It\'s a summary"\n\n[start]\nlabel = "Told"\n\n'
+        '[[start.do]]\nid = "look"\ntitle = "Look"\naction = "context.set"\n')

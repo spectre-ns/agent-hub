@@ -39,14 +39,15 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import schema
+from .workflows import acts_only_source
 
 BASE = "Restriction"
 OVERRIDE_WINDOW = timedelta(hours=1)
 OVERRIDE_WORKFLOW = "emergency-access"
-OVERRIDE_SOURCE = (f'id = "{OVERRIDE_WORKFLOW}"\ntitle = "Emergency access to restricted information"\n'
-                   'summary = "Someone opened information a subject asked to have withheld, giving a reason. The '
-                   'privacy officer reviews it."\n[[steps]]\nid = "review"\ntitle = "Review the emergency access"\n'
-                   'kind = "wait"\nuntil = "false"\n')
+OVERRIDE_SOURCE = acts_only_source(
+    OVERRIDE_WORKFLOW, "Emergency access to restricted information",
+    "Someone opened information a subject asked to have withheld, giving a reason. The privacy officer reviews it.",
+    "review", "Review the emergency access")
 MIN_REASON = 8
 _TTL = 2.0  # seconds a process keeps the restrictions it read (a change in this process clears it at once)
 

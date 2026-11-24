@@ -15,6 +15,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from .db import utcnow
+from .workflows import acts_only_source
 
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 MIN_LENGTH = 12
@@ -29,9 +30,10 @@ SETUP_LIFETIME = timedelta(hours=72)
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I: read aloud or copied by hand
 SIGN_IN = {"id": "sign-in", "kind": "automation", "name": "Sign-in"}  # who records an attempt nobody is signed in for
 ACCOUNT_WORKFLOW = "account-notice"  # the home of a notice to a member about their own account
-ACCOUNT_SOURCE = (f'id = "{ACCOUNT_WORKFLOW}"\ntitle = "About your account"\n'
-                  'summary = "Something was done to a member\'s own account that they should know of at once."\n'
-                  '[[steps]]\nid = "look"\ntitle = "Check that you expected it"\nkind = "wait"\nuntil = "false"\n')
+ACCOUNT_SOURCE = acts_only_source(
+    ACCOUNT_WORKFLOW, "About your account",
+    "Something was done to a member's own account that they should know of at once.",
+    "look", "Check that you expected it")
 
 
 def hash_passphrase(passphrase: str, salt: bytes | None = None, n: int = SCRYPT_N, r: int = SCRYPT_R,

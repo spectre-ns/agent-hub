@@ -36,9 +36,9 @@ from .track import Track, hub_secret
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 APPROVAL_WORKFLOW = "approval-notice"  # the home of a notice that a change waits for a policy owner's approval
-APPROVAL_SOURCE = (f'id = "{APPROVAL_WORKFLOW}"\ntitle = "Waiting for a policy owner"\n'
-                   'summary = "A change someone asked for waits for a second policy owner to approve it."\n'
-                   '[[steps]]\nid = "look"\ntitle = "Approve or decline it"\nkind = "wait"\nuntil = "false"\n')
+APPROVAL_SOURCE = wfmod.acts_only_source(
+    APPROVAL_WORKFLOW, "Waiting for a policy owner",
+    "A change someone asked for waits for a second policy owner to approve it.", "look", "Approve or decline it")
 
 
 class HubError(Exception):
@@ -4088,7 +4088,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     def workflow(self, wid: str, version: int | None = None) -> tuple[wfmod.Workflow, dict]:
         if version == 0:
             # the homes of the hub's own notices (an event no workflow took, an emergency access, a member's account,
-            # a change waiting for approval, a mention): written by the hub, kept as steps, never proposed
+            # a change waiting for approval, a mention): written by the hub (``workflows.acts_only_source``), never
+            # proposed
             from .credentials import ACCOUNT_SOURCE, ACCOUNT_WORKFLOW
             from .engine import UNHANDLED_SOURCE, UNHANDLED_WORKFLOW
             from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
@@ -4096,7 +4097,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             homes = {UNHANDLED_WORKFLOW: UNHANDLED_SOURCE, OVERRIDE_WORKFLOW: OVERRIDE_SOURCE,
                      ACCOUNT_WORKFLOW: ACCOUNT_SOURCE, APPROVAL_WORKFLOW: APPROVAL_SOURCE, MENTION_WORKFLOW: MENTION_SOURCE}
             if wid in homes:
-                return wfmod.parse(homes[wid], None, stored=True), {
+                return wfmod.parse(homes[wid]), {
                     "workflow_id": wid, "version": 0, "status": "active", "source": homes[wid], "author": "hub",
                     "note": "", "module": "", "approved_by": None, "approved_at": None}
         if version is None:

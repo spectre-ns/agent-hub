@@ -31,11 +31,12 @@ import secrets
 
 from .hub import Denied, Invalid, NotFound, member_ref
 from .store import utcnow
+from .workflows import acts_only_source
 
 MENTION_WORKFLOW = "mention"
-MENTION_SOURCE = (f'id = "{MENTION_WORKFLOW}"\ntitle = "You were mentioned"\n'
-                  'summary = "Someone named a member in a record\'s text or in a comment on it."\n'
-                  '[[steps]]\nid = "look"\ntitle = "Read where you were mentioned"\nkind = "wait"\nuntil = "false"\n')
+MENTION_SOURCE = acts_only_source(
+    MENTION_WORKFLOW, "You were mentioned", "Someone named a member in a record's text or in a comment on it.",
+    "look", "Read where you were mentioned")
 
 _AT = re.compile(r"(?<![\w@/])@([a-z0-9][a-z0-9_.-]*[a-z0-9])")
 

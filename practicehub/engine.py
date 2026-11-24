@@ -39,9 +39,10 @@ RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 # The run that holds the notice about an event no workflow took: not a workflow anyone wrote, so it is not under change
 # control and starts nothing; ``Hub.workflow`` gives it this one step, already skipped, for the pages that show a run.
 UNHANDLED_WORKFLOW = "event-not-taken"
-UNHANDLED_SOURCE = (f'id = "{UNHANDLED_WORKFLOW}"\ntitle = "An event no workflow took"\n'
-                    'summary = "An event arrived and no workflow listening for it started. The track has what it '
-                    'carried."\n[[steps]]\nid = "look"\ntitle = "Look at the event"\nkind = "wait"\nuntil = "false"\n')
+UNHANDLED_SOURCE = wfmod.acts_only_source(
+    UNHANDLED_WORKFLOW, "An event no workflow took",
+    "An event arrived and no workflow listening for it started. The track has what it carried.",
+    "look", "Look at the event")
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{secrets.token_hex(4)}"

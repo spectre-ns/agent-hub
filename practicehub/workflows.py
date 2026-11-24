@@ -680,6 +680,17 @@ def is_states_form(doc: dict) -> bool:
     return any(k in doc for k in ("state", "edge", "start"))
 
 
+def acts_only_source(wid: str, title: str, summary: str, step: str, step_title: str) -> str:
+    """The source of one of the hub's own workflows: the home of its notices (an event no workflow took, an emergency
+    access, a member's account, a change waiting for approval, a mention). Nobody wrote it and nothing starts it: it
+    is about no record type, so it has no states, and is written as a workflow that only acts, with the one step its
+    notices are about. A run of it is made already ended (``engine.home_run``), the step passed over."""
+    import json
+    q = json.dumps  # a TOML basic string is written as a JSON one
+    return (f'id = {q(wid)}\ntitle = {q(title)}\nsummary = {q(summary)}\n\n[start]\nlabel = "Told"\n\n'
+            f'[[start.do]]\nid = {q(step)}\ntitle = {q(step_title)}\naction = "context.set"\n')
+
+
 def render(value, ctx: dict):
     """Fill {{path}} placeholders from the run context. A string that is exactly one placeholder keeps the value's
     type (a list stays a list). ``{{run.today + 1y}}`` is a date moved on: ``+``/``-`` a number of days, weeks,
