@@ -1,15 +1,13 @@
 """Wiki to SOP: the step that files a PDF of a wiki page in document control as a new controlled document."""
 
-from practicehub import pdf
-
-# a document in one of these states holds its number: a new one may not take it
-_IN_USE = ("draft", "in-review", "approved", "retiring")
+from practicehub import pdf, schema
 
 
 def file_page(engine, run, step, params, actor):
-    """``wiki-sop.file-page``: a PDF of the page (``page``, a WikiPage reference) at its version now, as a new draft
-    Document numbered ``number`` (refused while another document in use has that number), titled ``title`` (else the
-    page's), owned by ``owner``. Returns the new document's reference."""
+    """``wiki-sop.file-page``: a PDF of the page (``page``, a WikiPage reference) at its version now, as a new
+    Document (in its type's first state: a draft) numbered ``number``, titled ``title`` (else the page's), owned by
+    ``owner``. Refused while another document in use has that number: one its type's own workflow still walks, as
+    the Document type says (never a list of states kept here). Returns the new document's reference."""
     hub = engine.hub
     ref = str(params.get("page") or "")
     if not ref.startswith("WikiPage/"):
@@ -22,8 +20,9 @@ def file_page(engine, run, step, params, actor):
     number = str(params.get("number") or "").strip()
     if not number:
         raise ValueError("give the controlled document a number")
+    rt = hub.record_type("Document")
     taken = [d for d in hub.records.search("Document", limit=None)
-             if str(d.get("number") or "").strip().lower() == number.lower() and d.get("status") in _IN_USE]
+             if str(d.get("number") or "").strip().lower() == number.lower() and schema.starts_workflow(rt, d)]
     if taken:
         raise ValueError(f"{number} is already the number of a document in use: {hub.short_title(taken[0])}")
     name = str(page.get("title") or "")
@@ -35,7 +34,7 @@ def file_page(engine, run, step, params, actor):
     data = pdf.render(f"{number} {title}", str(page.get("body") or ""), footer)
     att = hub.add_file(actor, "Document", data, f"{number} {title}.pdf", "application/pdf")
     doc = hub.create_record(actor, "Document", {
-        "title": title, "number": number, "status": "draft", "owner": params.get("owner") or page.get("owner"),
+        "title": title, "number": number, "owner": params.get("owner") or page.get("owner"),
         "file": att,
         "change_summary": f"First issue, made from the wiki page {name}.",
         "body": (f"Made from the wiki page [[{ref}|{name}]] (version {version}) on {today}. The controlled text is "
