@@ -376,7 +376,8 @@ class Viewer:
             classes = workflow_classes(wf)
             if not self.may_read_classes(classes) and data.get("input"):
                 hidden = self.missing(classes)
-        elif action == "event.received":
+        elif action == "event.received" or (action == "event.unhandled" and data.get("refused")):
+            # what an event carried, and what a workflow's start form said was wrong with it (which quotes it)
             classes = self._event_classes(data.get("type"))
             if not self.may_read_classes(classes):
                 hidden = self.missing(classes)
@@ -390,6 +391,10 @@ class Viewer:
                 if gone and set(data["changed"]) & gone:
                     data = {**data, "changed": [k for k in data["changed"] if k not in gone]}
                     ev = {**ev, "data": data}
+        elif action == "file.added":  # a file's name is its hash: only those who read what it was added for see it
+            dc = self.hub.class_or_none(data.get("type") or "")
+            if ev.get("actor") != self.me.get("id") and (dc is None or not self.may_read_classes({dc})):
+                return {**ev, "subject": "file", "data": {"hidden": f"content needs access to: {dc or 'its records'}"}}
         elif action == "booking.overbooked" and data.get("classes"):  # why it was booked over another: its field's class
             classes = set(data["classes"])
             if not self.may_read_classes(classes) and "reason" in data:

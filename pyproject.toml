@@ -20,6 +20,10 @@ practicehub = "practicehub.cli:main"
 [tool.setuptools.packages.find]
 include = ["practicehub*"]
 
+# the core's base types are read from beside the code (practicehub/schema.py BASE_DIR): an installed hub needs them
+[tool.setuptools.package-data]
+"practicehub.base" = ["*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["own_shapes: the test stores documents of its own making, which practicehub/db.py does not name"]

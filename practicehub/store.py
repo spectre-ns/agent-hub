@@ -546,6 +546,14 @@ class Store:
         if self.file_meta(file_id) is None:
             self.fs.upload_from_stream_with_id(file_id, file_id, data, metadata=meta)
 
+    def note_file(self, file_id: str, **sets) -> None:
+        """Add to what is known of a file: ``adders`` (who added its bytes), ``records`` (which records named it).
+        Outside any transaction, like the file itself: a record noted here whose write was rolled back never named
+        the file, and whoever relies on the note reads the record's versions to see that it does."""
+        add = {f"metadata.{k}": v for k, v in sets.items() if v}
+        if add:
+            self.db["files.files"].update_one({"_id": file_id}, {"$addToSet": add})
+
     def get_file(self, file_id: str) -> tuple[bytes, dict] | None:
         meta = self.file_meta(file_id)
         if meta is None:

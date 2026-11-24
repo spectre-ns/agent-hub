@@ -132,6 +132,30 @@ def test_only_the_document_workflow_moves_it_and_another_workflow_only_through_a
         hub.engine.start(rana, "dms-review", record=ref, via_automation=True)
 
 
+def test_a_document_in_force_is_proposed_obsolete_with_its_reason_and_nothing_else_changes(docs):
+    """An approved document is locked: it is not edited. A person still moves it on, and the move writes what its
+    dialog asks for (the reason it is withdrawn) and nothing else."""
+    hub = docs
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    d = hub.create_record(rana, "Document", {"title": "Sharps", "body": "Use the yellow bin."})
+    ref = f"Document/{d['id']}"
+    hub.update_record(rana, ref, {"status": "in-review"})
+    i = item_for(hub, open_run(hub, "dms-review", ref), "approve")
+    hub.engine.claim(amara, i)
+    hub.engine.decide(amara, i, "approve")
+    assert hub.records.read("Document", d["id"])["status"] == "approved"
+    with pytest.raises(Invalid, match="is not edited"):
+        hub.update_record(rana, ref, {"body": "Use any bin."})
+    with pytest.raises(Invalid, match="is not edited"):  # the move does not carry an edit with it
+        hub.update_record(rana, ref, {"status": "retiring", "obsolete_reason": "Replaced", "body": "Use any bin."})
+    with pytest.raises(Invalid):  # and its reason is still required: spaces say nothing
+        hub.move_record(rana, ref, "retiring", {"obsolete_reason": "   "})
+    hub.move_record(rana, ref, "retiring", {"obsolete_reason": "Replaced by the sharps procedure"})
+    rec = hub.records.read("Document", d["id"])
+    assert rec["status"] == "retiring" and rec["obsolete_reason"] == "Replaced by the sharps procedure"
+    assert rec["body"] == "Use the yellow bin."
+
+
 def test_making_a_document_obsolete_is_a_controllers_signed_decision_with_a_reason(docs):
     hub = docs
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")

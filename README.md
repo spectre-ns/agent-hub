@@ -68,6 +68,10 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
   reads or writes restricted data (every data class, unless the pack marks it `restricted = false`), or raising an
   agent's `max_risk`, waits for a second policy owner, who is neither the one who asked nor the member. Lowering
   `max_risk`, taking skills away (nothing added) or taking a role away applies at once, as a version on the track.
+- **An agent changes records through its work.** An agent's skills, its `max_risk`, its sponsor's hold and who else
+  must check its work are all checked on the work it is given, and the workflow writes what it answers. Its roles'
+  write grants alone do not let it create, change, move or attach to records by the API or an MCP tool: that takes
+  `direct_writes` in its profile, off unless a second policy owner approved it (taking it away applies at once).
 - **Two policy owners.** Changes are approved by a second policy owner, so the hub refuses whatever leaves fewer than
   two active ones: switching one off, or taking away their role. If the practice is already down to one (someone
   left in a hurry), whoever holds the server and its secret adds one: `practicehub owners recover --grant <member>`.
@@ -94,7 +98,9 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
   but never one for themselves.
 - **The outbox is delivered, or someone is told.** A connector delivers only on the channels it has been granted,
   and claims only messages whose every data class it reads. Each claim, send, failure and hand delivery is on the
-  track. A message still queued past its channel's deadline goes to the escalation role. On an urgent channel (a
+  track. A message about a file that a subject's directive keeps from someone is kept from them too, on the Outbox
+  page and everywhere else it is listed: neither its words nor its subject line are shown. Whoever it is addressed
+  to by name reads it, and the connector granted its channel still carries it. A message still queued past its channel's deadline goes to the escalation role. On an urgent channel (a
   page), and after any failure, a person is also given the delivery work ("Phone the physician"). A person who reads
   the message marks it delivered by hand, saying how.
 - **Separation of duties.** `not_by` stops whoever did an earlier step from also doing this one. The billing agent
@@ -118,12 +124,16 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
     hub's secret is ignored.
   - Retiring a workflow, block, skill or record type is a proposal too: a second policy owner approves it.
   - An event that no workflow takes is not dropped: the track records it (`event.unhandled`) and the escalation role
-    gets an urgent notice.
+    gets an urgent notice. The same holds when the workflow that listens refuses to start on what the event carried
+    (a lab result its start form does not accept): the sender gets the refusal and the escalation role is told.
 - **Verifying the track.** `practicehub verify` checks every event. The Track page (policy owners only, like
   `GET /api/track/verify`) checks the events since the last verify and builds on that kept, sealed result; the
   rows are read in chunks so a long track does not hold up the hub.
 - **Model output is data.**
   - An agent's answer is validated against the step's fields and the pack's guards, exactly like a person's form.
+  - A guard lives in its pack's or module's code, which runs only as reviewed. While that code waits for review
+    (it changed on disk, or the module was left out), the steps it guards take no answer: a guard fails closed, as
+    an action does.
   - Nothing a model returns is executed, and conditions use a small safe expression language, not `eval`.
   - An unsure agent escalates to people instead of guessing.
 - **Blocks are approved code, prompts and engine calls.**
@@ -146,7 +156,11 @@ exception to the permissive-licence rule, chosen for its transactions.
 
 A record type's `attachment` field holds a file: it is added from the record's page (or `POST /api/files/<Type>`), kept
 in GridFS by its SHA-256 (25 MB at most), and read only through a record that names it, by someone who may read that
-record. Each read is a view of the record on the track, and the file is served sandboxed, with no scripts.
+record. Each read is a view of the record on the track, and the file is served sandboxed, with no scripts. A record
+names a file only for a writer who could already get at it: they added those bytes themselves, the record named it
+before, or they may read it in a record that names it (a workflow's step carries files as the workflow says). So
+knowing a file's hash is never a way to read it, and the hash is shown on the track only to those who read what
+the file was added for.
 
 Each part of the target stack is an adapter you switch on with
 environment variables. The Medplum, OpenFGA and Keycloak adapters are written against those projects' APIs but have

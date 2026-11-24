@@ -127,8 +127,40 @@ class OutboxMixin:
         """The data classes a message's words come from (``engine.message_classes``): never none."""
         return list(row["classes"])
 
+    def message_about(self, row: dict) -> str | None:
+        """Whose message it is (a patient's record): the record it is sent to, or for a page to a role or a member,
+        the record its run is about."""
+        to = row.get("recipient") or ""
+        about = to if "/" in to and not to.startswith(("role:", "member:")) else None
+        if about is None and row.get("run_id"):
+            run = self.db.runs.find_one({"_id": row["run_id"]}, fields=["record"])
+            about = run["record"] if run else None
+        return about
+
+    def message_restricted(self, member: dict, row: dict) -> bool:
+        """Whether a subject's directive (a lockbox) keeps this message from the member: it is about a file the
+        directive withholds from them. A message quotes that file, so it is kept from whoever the file is kept from,
+        wherever it is listed. Two are not kept out: whoever the message is addressed to by name (a role's message
+        about such a file is split when queued, and those it is kept from get wording that says nothing), and the
+        connector that carries it on a channel it was granted (it delivers the message to whom it is for; data
+        classes still limit it)."""
+        if row.get("recipient") == f"member:{member.get('id')}":
+            return False
+        if member.get("kind") == "service" and self.can(member, "sender", f"channel:{row['channel']}"):
+            return False
+        return self.restrictions.withholds_from(member, self.message_about(row), reaching=True)
+
+    def message_kept_note(self, row: dict) -> str:
+        """What is said in place of a message a directive keeps from the reader (``Information withheld at the
+        patient's request``)."""
+        about = self.message_about(row)
+        return self.restrictions.note(self.restrictions.subject_of_ref(about) or about)
+
     def may_read_message(self, member: dict, row: dict) -> bool:
-        return all(self.can(member, "reader", f"data_class:{c}") for c in self.message_classes_of(row))
+        """A message's words are read by a member who reads every data class they come from, and from whom no
+        directive on the file it is about withholds it."""
+        return (all(self.can(member, "reader", f"data_class:{c}") for c in self.message_classes_of(row))
+                and not self.message_restricted(member, row))
 
     def _message(self, oid) -> dict:
         from .hub import NotFound
@@ -190,6 +222,8 @@ class OutboxMixin:
         else:
             out["body"] = None
             out["withheld"] = sorted(c for c in out["classes"] if not self.can(member, "reader", f"data_class:{c}"))
+            if self.message_restricted(member, r):  # its subject line may quote the file too
+                out["subject"], out["restricted"] = self.message_kept_note(r), True
         return out
 
     def _require_channel(self, member: dict, row: dict, what: str) -> None:

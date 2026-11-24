@@ -4062,6 +4062,10 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                 rows.append(("Model", e(prof.get("model", "") or "—"), e(new.get("model", "") or "—")))
             if new.get("max_risk") != prof.get("max_risk"):
                 rows.append(("Highest risk", e(prof["max_risk"].capitalize()), e(new["max_risk"].capitalize())))
+            if bool(new.get("direct_writes")) != bool(prof.get("direct_writes")):
+                words = lambda on: "Yes: by hand, outside its work" if on else "No: only through its work"
+                rows.append(("Changes records directly", words(prof.get("direct_writes")),
+                             words(new.get("direct_writes"))))
             if sorted(new.get("skills", [])) != sorted(prof["skills"]):
                 def skills(xs, other):  # the whole list, with what the change adds or takes away marked
                     return ", ".join(f'<b>{e(self.human(x))}</b>' if x not in other else e(self.human(x))
@@ -4094,12 +4098,20 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                             for k in skills)
             out.append(f'<h2>What it may do</h2><form method="post" action="/team/{e(mid)}/profile" class="card">'
                        f'<p class="muted">A change that adds (a higher risk, a skill, another model) is proposed, '
-                       f'not made: it takes effect when a policy owner other than you approves it. Lowering the risk '
-                       f'or taking skills away, and nothing else, takes effect at once. Every version is kept, on '
+                       f'not made: it takes effect when a policy owner other than you approves it. Lowering the risk, '
+                       f'taking skills away or turning direct changes off, and nothing else, takes effect at once. Every version is kept, on '
                        f'the track.</p>'
                        f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
                        f'<fieldset class="choices options"><legend>Highest risk it may take</legend>{risks}</fieldset>'
                        f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset>'
+                       f'<fieldset class="choices options"><legend>Records</legend><label class="radio multi">'
+                       f'<input type="checkbox" class="opt-input" name="direct_writes" value="1"'
+                       f'{" checked" if prof.get("direct_writes") else ""}> It may change records directly, '
+                       f'outside the work it is given</label><p class="muted">Left off, the agent changes records '
+                       f'only by answering the steps it is given: the workflow writes what it answers, within its '
+                       f'skills, its highest risk and its sponsor\'s hold. Turned on, it may also create, change '
+                       f'and move the records its roles may write, by the API or a tool, where none of those apply.'
+                       f'</p></fieldset>'
                        f'<label>Why (for the reviewer)<input name="note" placeholder="what the change is for"></label>'
                        f'<button>Propose the change</button></form>')
         versions = hub.agent_profile_versions(mid)
@@ -4107,7 +4119,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             rows = "".join(
                 f'<tr><td>v{v["version"]}</td><td><span class="badge {e(v["status"])}">{e(v["status"])}</span></td>'
                 f'<td>{e(v["profile"].get("model", ""))} · {e(v["profile"].get("max_risk", "low"))} · '
-                f'{e(", ".join(self.human(x) for x in v["profile"].get("skills", [])))}</td>'
+                f'{e(", ".join(self.human(x) for x in v["profile"].get("skills", [])))}'
+                f'{" · changes records directly" if v["profile"].get("direct_writes") else ""}</td>'
                 f'<td>{self.who(v["author"]) if hub.db.members.get(v["author"]) else e(v["note"])}</td>'
                 f'<td>{self.who(v["approved_by"]) if v["approved_by"] else ""}</td></tr>' for v in versions)
             out.append(f'<details><summary>Profile versions ({len(versions)})</summary><div class="tablewrap"><table>'
@@ -4232,7 +4245,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                 hub.set_sponsor(me, mid, str(f.get("sponsor", "")))
             elif verb == "profile":
                 hub.propose_agent_profile(me, mid, {"model": str(f.get("model", "")), "max_risk": f.get("max_risk"),
-                                                    "skills": many("skills")}, str(f.get("note", "")))
+                                                    "skills": many("skills"),
+                                                    "direct_writes": bool(f.get("direct_writes"))},
+                                          str(f.get("note", "")))
             elif verb == "approve-profile":
                 hub.approve_agent_profile(me, mid, int(f.get("version") or 0))
             elif verb == "withdraw-profile":
@@ -4417,12 +4432,14 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
 
     def _message_about(self, r) -> str | None:
         """Whose message it is (a patient's record), for the record of who saw their information."""
-        about = r["recipient"] if "/" in (r["recipient"] or "") and not r["recipient"].startswith(
-            ("role:", "member:")) else None
-        if about is None and r["run_id"]:  # a page to a role or a member: it is about the run's patient
-            run = self.hub.db.runs.find_one({"_id": r["run_id"]}, fields=["record"])
-            about = run["record"] if run else None
-        return about
+        return self.hub.message_about(r)
+
+    def _message_kept(self, me, r) -> str | None:
+        """The words shown in place of a message a subject's directive keeps from the reader: neither its subject
+        line nor its body, both of which may quote the file."""
+        if not self.hub.message_restricted(me, r):
+            return None
+        return f'<span class="muted">{e(self.hub.message_kept_note(r))}.</span>'
 
     OUTBOX_STATUS = {"queued": "Waiting for the connector", "sending": "Being sent", "sent": "Sent",
                      "failed": "Failed", "delivered": "Delivered by hand",
@@ -4454,9 +4471,11 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         readable = self.hub.may_read_message(me, r)
         if readable and self._message_about(r):
             self.hub.note_view(me, self._message_about(r), how=f"outbox message {r['id']}")
+        kept = self._message_kept(me, r)
         words = (f'<p><b>{e(r["subject"])}</b></p><p>{e(r["body"])}</p>' if readable else
+                 f'<p>The message is not shown. {kept}</p>' if kept else
                  '<p class="muted">The message is not shown: it holds information you do not read.</p>')
-        why = f'<p class="muted">{e(r["note"])}</p>' if r.get("note") else ""
+        why = f'<p class="muted">{e(r["note"])}</p>' if r.get("note") and not kept else ""
         return (f'<div class="card"><p>{e(r["channel"].capitalize())} message #{r["id"]} to {e(r["recipient"])}: '
                 f'{self._message_status(r)}</p>{words}{why}{self._deliver_form(me, r)}'
                 f'<p class="muted"><a href="/outbox#msg-{r["id"]}">In the outbox</a></p></div>')
@@ -4474,7 +4493,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             about = self._message_about(r)
             if readable and about:
                 self.hub.note_view(me, about, how="outbox")
+            kept = self._message_kept(me, r)
             words = (f'<b>{e(r["subject"])}</b><div>{e(r["body"])}</div>' if readable else
+                     f'<div>Not shown. {kept}</div>' if kept else
                      f'<b>{e(r["subject"])}</b><div class="muted">Not shown: it holds '
                      f'{e(", ".join(self._class_name(c) for c in classes if not self.hub.can(me, "reader", f"data_class:{c}")))} '
                      f'information you do not read.</div>')

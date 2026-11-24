@@ -3103,12 +3103,24 @@ class Engine:
             guard = None
             if hub.pack:
                 block = self.block_of(run, step)
+                owned = []  # the definitions whose part's pack.py would hold this answer's guard
                 if block:  # a block's own guard; the extended skill's guard only while its answer has that shape
                     guard = hub.pack.guards.get(f"block:{block.id}")
+                    owned.append(("block", block.id))
                     if not guard and not block.outputs and block.extends:
                         guard = hub.pack.guards.get(block.extends)
+                        owned.append(("skill", block.extends))
                 elif step.skill:
                     guard = hub.pack.guards.get(step.skill)
+                    owned.append(("skill", step.skill))
+                if not guard:
+                    # no guard is loaded: that means "this answer has no hard rule" only while the code that would
+                    # hold one is running. Code waiting for review is not run, so its guards fail closed, as its
+                    # actions do: the answer is not taken unchecked.
+                    why = next((w for w in (hub.code_not_running(k, d) for k, d in owned) if w), None)
+                    if why:
+                        raise Invalid("the answer cannot be checked now, so it is not taken: the code that checks "
+                                      f"this step is not running ({why})")
             if guard:
                 problems = guard(values, ctxview) or []
                 if problems:
@@ -3322,30 +3334,57 @@ class Engine:
     def emit(self, actor: dict, event_type: str, *, record: str | None = None, data: dict | None = None) -> list[dict]:
         """An event from outside (a lab interface, a patient portal, a schedule) starts the workflows listening for it,
         when their ``trigger.when`` holds. The emitter must be a member allowed to start them."""
+        from .hub import Conflict, Invalid
         seq = self.hub.track.append(actor, "event.received", record or "", data={"type": event_type, **(data or {})})
-        started = []
+        started, refused = [], []
         rec = self.hub.records.read(*record.split("/", 1)) if record and "/" in record else None
         for w in self.hub.workflows():
             wf = w["workflow"]
             if self._starts_on(wf, event_type, {"event": data or {}, "record": rec or {}}):
-                started.append(self.start(actor, wf.id, record=record, inputs=data or {}, cause=seq))
+                try:
+                    started.append(self.start(actor, wf.id, record=record, inputs=data or {}, cause=seq))
+                except Conflict:
+                    raise  # the same work is already open for this (the event sent again): it is being handled
+                except Invalid as exc:
+                    # what the event carried does not pass the workflow's start form (a lab flag the form does not
+                    # list), or the workflow cannot be read: nothing started, so it is not dropped either
+                    refused.append((wf, exc))
+        if refused:
+            self._unhandled(actor, event_type, record, seq, refused=refused)
+            raise refused[0][1]  # the sender is told as well: the event was not taken
         if not started:
             self._unhandled(actor, event_type, record, seq)
         return started
 
-    def _unhandled(self, actor: dict, event_type: str, record: str | None, cause: int) -> str:
-        """An event that no workflow took (none listens for it, or none's ``when`` held) is not dropped: the track
-        records it and the escalation role gets an urgent notice, on a run of its own so the notice has a home. Only
-        the event's type is kept on the run; what it carried stays in the track."""
+    def _unhandled(self, actor: dict, event_type: str, record: str | None, cause: int, refused=()) -> str:
+        """An event that no workflow took (none listens for it, none's ``when`` held, or the one that listens refused
+        to start on what it carried: ``refused``, ``[(workflow, error)]``) is not dropped: the track records it and
+        the escalation role gets an urgent notice, on a run of its own so the notice has a home. Only the event's
+        type is kept on the run and in the notice; what it carried, and what was wrong with it, stay in the track
+        (shown, like the event, to those who read its data classes)."""
         hub = self.hub
+        who = actor.get("name") or actor["id"]
+        if refused:
+            names = ", ".join(f"\u201c{wf.title}\u201d" for wf, _ in refused)
+            n = sum(len(getattr(exc, "problems", None) or [1]) for _, exc in refused)
+            title = f"An event a workflow did not start on: {event_type}"
+            words = (f"Urgent: {who} sent the event \u201c{event_type}\u201d and {names} did not start on it: what it "
+                     f"carried did not pass the start form ({n} problem{'s' if n != 1 else ''}; the track says "
+                     f"which). Nothing was started for it. Deal with what it was about by hand, and check the "
+                     f"sender or the workflow's start form.")
+            data = {"type": event_type, "refused": [{"workflow": wf.id, "problems": list(
+                getattr(exc, "problems", None) or [str(exc)])[:20]} for wf, exc in refused]}
+        else:
+            title = f"An event no workflow took: {event_type}"
+            words = (f"Urgent: {who} sent the event \u201c{event_type}\u201d and no workflow took it. Check the "
+                     f"sender, or the workflow meant to listen for it.")
+            data = {"type": event_type}
         with hub.db:
-            seq = hub.track.append(actor, "event.unhandled", record or "", cause=cause, data={"type": event_type})
-            run_id = home_run(hub, UNHANDLED_WORKFLOW, title=f"An event no workflow took: {event_type}",
-                              started_by=actor["id"], cause=cause, record=record, ctx={"event": {"type": event_type}})
+            seq = hub.track.append(actor, "event.unhandled", record or "", cause=cause, data=data)
+            run_id = home_run(hub, UNHANDLED_WORKFLOW, title=title, started_by=actor["id"], cause=cause, record=record,
+                              ctx={"event": {"type": event_type}})
             run = {"id": run_id}
-            self.alert(run, None, f"Urgent: {actor.get('name') or actor['id']} sent the event \u201c{event_type}\u201d "
-                                  f"and no workflow took it. Check the sender, or the workflow meant to listen for it.",
-                       role=hub.practice.get("escalation_role"), cause=seq, priority="urgent")
+            self.alert(run, None, words, role=hub.practice.get("escalation_role"), cause=seq, priority="urgent")
         return run_id
 
     def on_record(self, change: str, rt, rec: dict, before: dict | None, actor: dict, cause: int) -> list[dict]:

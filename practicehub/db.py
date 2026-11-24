@@ -39,8 +39,9 @@ about a subject by it.
 ``signin_failures`` is keyed by a member's id, and by the portal's own keys ("portal client <address>",
 "portal id <hash>"). ``setup_codes.used_at`` is the time a code was used, or "superseded <time>".
 Files (attachments) are in GridFS (``store.put_file``; the collections ``files.files`` and ``files.chunks``), named
-by their SHA-256, with metadata size contentType data_class added_by at; ``Hub.add_file`` adds one and
-``Hub.read_file`` reads one through a record that names it.
+by their SHA-256, with metadata size contentType data_class added_by at, and adders (everyone who added those bytes)
+and records (every record that named it); ``Hub.add_file`` adds one, a record names one only for a writer who could
+already get at it (``Hub._check_files_named``), and ``Hub.read_file`` reads one through a record that names it.
 """
 
 from __future__ import annotations

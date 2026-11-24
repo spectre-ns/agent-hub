@@ -978,6 +978,27 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         table, col = self.KINDS[kind]
         return self.db[table].find_one({col: did, "status": "active"})
 
+    def code_not_running(self, kind: str, did: str) -> str | None:
+        """Why the code that came with a definition is not running, or None when it is. A skill's or block's guard
+        (a hard rule on its answers) lives in the pack.py of the part that brought it: the practice pack or a
+        module. That code runs only as reviewed, so while it waits for review (it changed on disk, there is no
+        signed record of it, the module was left out or removed) its guards are not loaded. Whoever would take an
+        answer unchecked asks this first."""
+        if not self.pack:
+            return None
+        owner = self._owner_of(kind, did)
+        if owner is None:
+            return None
+        if owner == "":
+            part = self.pack
+            if part.module is None and part.module_sha256:
+                return self.pack_problem or "the practice pack's code is not running"
+            return None
+        part = next((m for m in self.pack.modules if m.id == owner), None)
+        if part is None or (part.module is None and part.module_sha256):
+            return self.module_problems.get(owner) or f"the module {owner} is not running"
+        return None
+
     def _owner_of(self, kind: str, did: str) -> str | None:
         """Who brought a definition in: a module's id, or '' for the practice. None if it was never defined."""
         table, col = self.KINDS[kind]
@@ -2355,7 +2376,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     # What an agent may do (its model, the skills and prompt blocks it takes, the highest risk) is a versioned record
     # under the same change control as a definition: proposed, approved by a second person who is a policy owner,
     # then in force. Nothing changes an agent's behaviour at once, and every version is kept.
-    PROFILE_KEYS = ("model", "max_risk", "skills")
+    PROFILE_KEYS = ("model", "max_risk", "skills", "direct_writes")
 
     def _check_profile(self, profile: dict) -> dict:
         extra = sorted(set(profile) - set(self.PROFILE_KEYS))
@@ -2364,6 +2385,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         out = {k: profile[k] for k in self.PROFILE_KEYS if k in profile}
         if out.get("max_risk") not in RISK_ORDER:
             raise Invalid("max_risk is low, medium or high")
+        if out.get("direct_writes") is True:
+            pass  # may change records by hand, within its roles' write grants (``writes_directly``)
+        elif out.get("direct_writes") in (None, False):
+            out.pop("direct_writes", None)  # off is the absence of the key: a profile says only what it allows
+        else:
+            raise Invalid("direct_writes is true, or left out")
         if "model" in out:
             out["model"] = str(out["model"] or "").strip()
             if not out["model"]:
@@ -2411,7 +2438,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     def propose_agent_profile(self, actor: dict, mid: str, changes: dict, note: str = "") -> dict:
         """Propose a new version of an agent's profile (a member admin, or its sponsor). It is in force only once a
         policy owner other than whoever proposed it approves it. A newer proposal replaces one still waiting.
-        A pure reduction (a lower ``max_risk`` and/or skills taken away, the model and everything else as it is)
+        A pure reduction (a lower ``max_risk``, skills taken away, direct writes taken away, the model as it is)
         only ever lets the agent do less: it is in force at once, as a version on the track (``status`` active)."""
         target = self.member(mid)
         if target["kind"] != "agent":
@@ -2428,7 +2455,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             raise Invalid("that is the profile in force: there is nothing to propose")
         reduction = (profile.get("model") == current.get("model")
                      and RISK_ORDER[profile["max_risk"]] <= RISK_ORDER[current["max_risk"]]
-                     and set(profile["skills"]) <= set(current["skills"]))
+                     and set(profile["skills"]) <= set(current["skills"])
+                     and (current.get("direct_writes") or not profile.get("direct_writes")))
         with self.db:
             base = self._profile_in_force(actor, target)
             if reduction:
@@ -2448,7 +2476,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                           "after": profile})
             self._tell_approvers(actor, seq, {mid}, f"A change to what {target['name']} may do waits for your approval",
                                  f"{actor.get('name') or actor['id']} proposed version {version} of "
-                                 f"{target['name']}'s profile (its model, highest risk and skills). A policy owner "
+                                 f"{target['name']}'s profile (its model, highest risk, skills and whether it may change "
+                                 f"records directly). A policy owner "
                                  f"other than whoever proposed it approves it on {target['name']}'s page in the "
                                  f"team.", f"/team/{mid}")
         return {"agent_id": mid, "version": version, "profile": profile, "status": "proposed"}
@@ -2643,7 +2672,26 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         return self.can(member, "reader", f"data_class:{self.class_of(rtype)}")
 
     def may_write(self, member: dict, rtype: str) -> bool:
-        return self.can(member, "writer", f"data_class:{self.class_of(rtype)}")
+        return self.can(member, "writer", f"data_class:{self.class_of(rtype)}") and self.writes_directly(member)
+
+    @staticmethod
+    def writes_directly(member: dict) -> bool:
+        """Whether the member may change records by hand (a page, the API, a tool), given the write grant. People and
+        services may. An agent may only if its approved profile says so (``direct_writes``, off unless a second
+        policy owner approved it): what bounds an agent (its skills, its highest risk, the sponsor's hold, who else
+        must check its work) is checked on the work it is given, so a write outside any work would have none of it.
+        An agent's answer to a step is written by the workflow."""
+        return member.get("kind") != "agent" or bool((member.get("profile") or {}).get("direct_writes"))
+
+    def require_writer(self, member: dict, rt, what: str, *, run_id: str | None = None) -> None:
+        """The write grant on the type's data class and, for a write outside any run, ``writes_directly``."""
+        self.require(member, "writer", f"data_class:{rt.data_class}", what)
+        if run_id is None and not self.writes_directly(member):
+            self.db.surviving(lambda: self.track.append(member, "access.denied", f"data_class:{rt.data_class}",
+                                                        data={"relation": "writer", "what": what,
+                                                              "why": "an agent without direct writes"}))
+            raise Denied(f"{member['name']} may not {what}: an agent changes records through the work it is given, "
+                         f"not directly (its profile does not allow direct writes)")
 
     def read_record(self, member: dict, ref: str, *, raw: bool = False) -> dict:
         """The record as the member may see it: without the fields of a data class they may not read (``raw``: the
@@ -2812,7 +2860,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         content-addressed: the same bytes added twice are one file."""
         rt = self._type(rtype)
         if member.get("kind") != "automation":
-            self.require(member, "writer", f"data_class:{rt.data_class}", f"attach files to {rtype} records")
+            self.require_writer(member, rt, f"attach files to {rtype} records")
         if not data:
             raise Invalid("the file is empty")
         if len(data) > self.MAX_FILE:
@@ -2823,6 +2871,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         sha = hashlib.sha256(data).hexdigest()
         self.db.put_file(sha, data, {"size": len(data), "contentType": ctype, "data_class": rt.data_class,
                                      "added_by": member["id"], "at": utcnow()})
+        self.db.note_file(sha, adders=member["id"])  # the same bytes added again are one file with two adders
         with self.db:
             self.track.append(member, "file.added", f"file:{sha}",
                               data={"type": rtype, "size": len(data), "contentType": ctype})
@@ -2850,6 +2899,49 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         self.note_view(member, ref, how="file")
         return data, {"name": named.get("name") or blob[:12], "contentType": meta.get("contentType")
                       or "application/octet-stream", "size": len(data)}
+
+    def _reads_file_in(self, member: dict, ref: str, blob: str) -> bool:
+        """Whether the member may read the file through the record ``ref``: they read that record's class, and some
+        version of it, as a subject's directive lets them see it, names the file (``read_file``'s rule)."""
+        rtype, _, rid = ref.partition("/")
+        dc = self.class_or_none(rtype)
+        if not rid or dc is None or not self.can(member, "reader", f"data_class:{dc}"):
+            return False
+        cur = self.records.read(rtype, rid)
+        if cur is None:
+            return False
+        masked = self.restrictions.mask(member, cur)
+        for v in self.db.record_versions.find({"type": rtype, "id": rid}, sort=[("version", DESC)], fields=["data"]):
+            seen = self.restrictions.apply(member, v["data"]) if masked else v["data"]
+            if any(a["blob"] == blob for a in _files_in(seen)):
+                return True
+        return False
+
+    def _check_files_named(self, member: dict, rec: dict, before: dict | None, vouched=()) -> list[str]:
+        """A record names a file only for a writer who could already get at it: the record named it before, they
+        added those bytes themselves, or they may read it in a record that names it. Files are read through the
+        records that name them (``read_file``), so without this, naming any file's hash in a record of one's own
+        would be the way to read it, whatever its data class and whatever a directive keeps from the writer.
+        A workflow's step (an automation) carries files from record to record as the workflow says. ``vouched``:
+        files the hub itself put there for this writer (an office session's working copy). Returns the files the
+        record newly names."""
+        had = {a["blob"] for a in _files_in(before or {})}
+        new = list(dict.fromkeys(a["blob"] for a in _files_in(rec) if a["blob"] not in had))
+        if member.get("kind") == "automation":
+            return new
+        for blob in new:
+            if blob in vouched:
+                continue
+            meta = self.db.file_meta(blob) or {}
+            if member.get("id") in (meta.get("adders") or [meta.get("added_by")]):
+                continue
+            if any(self._reads_file_in(member, r, blob) for r in (meta.get("records") or [])[:200]):
+                continue
+            self.db.surviving(lambda blob=blob: self.track.append(
+                member, "access.denied", f"file:{blob}", data={"what": "attach a file they may not read"}))
+            raise Denied(f"{member['name']} may not attach the file {blob[:12]}…: add the file first, or attach "
+                         f"one from a record you read")
+        return new
 
     def views_of(self, member: dict, ref: str, limit: int = 200) -> list[dict]:
         """Who saw a record, newest first. A policy owner (the privacy officer) reads it."""
@@ -2966,7 +3058,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         rtype, rid = ref.split("/", 1)
         rt = self._type(rtype)
         if member.get("kind") != "automation":
-            self.require(member, "writer", f"data_class:{rt.data_class}", f"link {rtype} records")
+            self.require_writer(member, rt, f"link {rtype} records", run_id=run_id)
         x = rt.link(rel)
         if not x:
             raise Invalid(f"a {rt.label.lower()} has no link {rel!r}"
@@ -3758,7 +3850,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         ``origin`` (``{step, edge}``) says which step, on which edge, made it."""
         rt = self._type(rtype)
         if member.get("kind") != "automation":
-            self.require(member, "writer", f"data_class:{rt.data_class}", f"write {rtype} records")
+            self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
         data = dict(data)
         lc = rt.lifecycle
         if lc:
@@ -3780,10 +3872,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if over and self.may_overbook(member, rt):
             data = self._overbooked(rt, data, over)
         self._check_record(rt, {"resourceType": rtype, **data})
+        named = self._check_files_named(member, data, None)
         with self.db:  # the clash check and the write are one step: two people booking one time are never both told yes
             self._check_unique(rt, {"resourceType": rtype, **data})
             clashes = self._check_clashes(rt, {"resourceType": rtype, **data}, member, over)
             rec = self.records.create(rtype, data)
+            for blob in named:
+                self.db.note_file(blob, records=f"{rtype}/{rec['id']}")
             self._write_version(rt, rec, member, run_id)
             ev = self.track.append(member, "record.created", f"{rtype}/{rec['id']}", cause=cause, run_id=run_id,
                                    data={"subject": self.subject_of(rec),
@@ -3821,9 +3916,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
                       expected_version: str | None = None, comment: str | None = None,
-                      authors: list[str] | None = None, overbook: str | None = None) -> dict:
+                      authors: list[str] | None = None, overbook: str | None = None,
+                      _files: tuple = ()) -> dict:
         """``comment``: why, kept on the version (and on the move, if the record moves). ``authors``: who wrote the
-        change, when several people did (each must be a member who may write the record).
+        change, when several people did (each must be a member who may write the record). ``_files``: files the hub
+        itself vouches for in this change (``_check_files_named``).
 
         ``_signature``: the move is made by a signature the record type allows (``moves_to``), which the signer's
         role was checked for; it may make moves reserved to workflows. ``expected_version``: the version the editor
@@ -3832,7 +3929,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         rtype, rid = ref.split("/", 1)
         rt = self._type(rtype)
         if member.get("kind") != "automation" and _signature is None:
-            self.require(member, "writer", f"data_class:{rt.data_class}", f"write {rtype} records")
+            self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
         with self.db:  # read, check and write as one step: a change made in between is never lost or skipped
             before = self.records.read(rtype, rid)
             if not before:
@@ -3858,7 +3955,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 if old is None and rt.lifecycle.get("initial"):
                     old, after, new = self._filed_before_lifecycle(rt, after, new)
                 if old in rt.lifecycle.get("locked", []) and not self._by_workflow(member, run_id) and _signature is None:
-                    strip = lambda r: {k: v for k, v in schema.put(r, rt.lifecycle["path"], None).items() if k != "meta"}
+                    # a locked record is not edited, but a person still moves it on: the move writes what its dialog
+                    # asks for (why it is made obsolete, the date the client authorised it) and nothing else
+                    out = rt.transition(old, new) if old != new else None
+                    asked = ([rt.field(n)["path"] for n in out.get("asks", []) if rt.field(n)]
+                             if out and out["by"] != "workflow" and not out.get("entry") else [])
+
+                    def strip(r):
+                        for path in (rt.lifecycle["path"], *asked):
+                            r = schema.put(r, path, None)
+                        return {k: v for k, v in r.items() if k != "meta"}
                     if strip(before) != strip(after):
                         moves = [t["label"] for t in rt.lifecycle["transition"] if old in t["from"] and t["by"] != "workflow"]
                         raise Invalid(f"a {rt.label.lower()} that is {old} is not edited: "
@@ -3877,8 +3983,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     if early:
                         raise Invalid(early)
                     # the move's own rule (a transition's requires), whoever makes it: a person, a workflow, a signature
+                    blank = lambda v: (v.strip() if isinstance(v, str) else v) in (None, "", [], {})  # spaces say nothing
                     empty = [rt.field(n)["label"] for n in t.get("requires", [])
-                             if schema.first(after, rt.field(n)["path"]) in (None, "", [], {})]
+                             if blank(schema.first(after, rt.field(n)["path"]))]
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
                     self._move_signed(rt, t, _signature)
@@ -3895,6 +4002,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     after = self._overbooked(rt, after, over)
                     now_held = self._held_time(rt, after)
             self._check_record(rt, after, before)
+            named = self._check_files_named(member, after, before, _files)
             self._check_unique(rt, after, before)
             if rt.is_a("Booking") and held != now_held:  # only a change of time, members or state can make a clash
                 clashes = self._check_clashes(rt, after, member, over)
@@ -3903,6 +4011,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     if a != member.get("id") and not self.may_write(self.member(a), rtype):
                         raise Denied(f"{a} may not write {rtype} records")
             rec = self.records.update(rtype, rid, after)  # a store replaces the record: store what was validated
+            for blob in named:
+                self.db.note_file(blob, records=ref)
             note = comment.strip()[:500] if comment and comment.strip() else None
             self._write_version(rt, rec, member, run_id, comment=comment, authors=authors)
             changed = sorted(k for k in set(before) | set(rec) if k != "meta" and before.get(k) != rec.get(k))

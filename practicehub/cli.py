@@ -387,6 +387,8 @@ def cmd_member(args):
         print(f"{out['name']} is switched on")
     elif args.sub == "profile":
         changes = {k: v for k, v in (("model", args.model), ("max_risk", args.max_risk)) if v is not None}
+        if args.direct_writes is not None:
+            changes["direct_writes"] = args.direct_writes == "yes"
         if args.skill is not None:
             changes["skills"] = args.skill
         out = hub.propose_agent_profile(actor, args.id, changes, args.note or "")
@@ -992,6 +994,8 @@ def main(argv=None):
     p.add_argument("--model")
     p.add_argument("--max-risk", choices=["low", "medium", "high"])
     p.add_argument("--skill", action="append", help="every skill or prompt block it takes (repeat)")
+    p.add_argument("--direct-writes", choices=["yes", "no"],
+                   help="whether it may change records directly, outside the work it is given (no, unless approved)")
     p.add_argument("--note")
     p = mb.add_parser("approve-profile", help="a policy owner other than its author puts a proposed profile in force")
     p.add_argument("id")
@@ -1135,7 +1139,9 @@ def main(argv=None):
     try:
         args.fn(args)
     except HubError as exc:
-        raise SystemExit(f"error: {exc}") from None
+        # a refusal with several problems says each one (a type that does not parse, a form with three bad fields)
+        said = [str(x) for x in (getattr(exc, "problems", None) or []) if str(x) != str(exc)]
+        raise SystemExit("\n".join([f"error: {exc}", *("  " + x for x in said)])) from None
 
 
 if __name__ == "__main__":

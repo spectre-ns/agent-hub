@@ -748,6 +748,10 @@ An agent can take work only when all of these hold:
 - the risk is within the agent's limit;
 - the data-class rules allow it.
 
+Those rules bound the work an agent is given. An agent does not change records outside that work: its roles' write
+grants let the workflow write what it answers, and nothing else, unless its profile has `direct_writes`, which a
+second policy owner approves.
+
 An agent that is unsure, or whose answer fails validation, gives the item back with a reason. The item is then for
 people only.
 

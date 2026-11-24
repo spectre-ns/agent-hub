@@ -533,6 +533,7 @@ class CalendarPages:
         whom = f"the {self._lower(rt.label)}" if rt else "them"
         items = "".join(
             f'<li><b>{e(r["subject"])}</b>: {e(r["body"])}</li>' if self.hub.may_read_message(me, r) else
+            f'<li>A message {self._message_kept(me, r)}</li>' if self._message_kept(me, r) else
             f'<li><b>{e(r["subject"])}</b> <span class="muted">(what it says is not shown to you)</span></li>'
             for r in rows)
         return (f'<div class="card"><p><b>Sent to {e(whom)}</b> <span class="muted">(a message they will find; '

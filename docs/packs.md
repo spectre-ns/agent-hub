@@ -102,7 +102,10 @@ Everything is optional. These module-level names are picked up:
 | `STANDINS = {"skill-id": fn(ctx) -> {answer, escalate, reason}}` | deterministic answers, so demos and tests need no model. `"block:<id>"` answers a prompt block |
 | `demo(hub)` | demo records and runs, for `init --demo` |
 
-Guards are where a practice's hard rules live. In the general-practice pack:
+Guards are where a practice's hard rules live. A guard is code, and a pack's code runs only as reviewed: while a
+changed `pack.py` waits for its review and upgrade, the hub runs none of it, and every step whose skill or block came
+with that pack or module takes no answer until it does (its guard cannot run, so the answer is not taken unchecked).
+In the general-practice pack:
 
 - a claim's amount must match the fee schedule;
 - lab triage never downgrades the lab's own abnormal flag;

@@ -26,13 +26,18 @@ Notes for anyone, human or agent, changing this code.
 | Sponsors, kill switch, tokens, change control | `practicehub/hub.py` |
 | Hash chain and signatures | `practicehub/track.py` |
 | Collections, document shapes, indexes; transactions and files | `practicehub/db.py`, `practicehub/store.py` |
-| Answer validation | `practicehub/fields.py`, plus the pack's `GUARDS` |
+| Answer validation | `practicehub/fields.py`, plus the pack's `GUARDS`; a guard whose code is not running fails closed (`Hub.code_not_running`, checked in `Engine._complete`) |
+| What an agent may write outside its work (nothing, unless its profile has `direct_writes`) | `Hub.writes_directly`, `Hub.require_writer` in `practicehub/hub.py` |
+| Which files a record may name, and who reads a file | `Hub._check_files_named`, `Hub.read_file` in `practicehub/hub.py` |
+| Who reads a queued message (data classes, and a subject's directive on the file it is about) | `Hub.may_read_message`, `Hub.message_restricted` in `practicehub/outbox.py` |
+| An event nothing started on is not dropped | `Engine.emit`, `Engine._unhandled` in `practicehub/engine.py` |
 | Blocks: parsing, who may propose (agents: prompt blocks only), workflow checks, version pinning | `practicehub/blocks.py`, `Hub.propose_block`, `Hub._block_problems`, `Engine.start` |
 | What Python block code may do | `practicehub/sandbox.py` (static check and the child's audit hook) |
 | Which engine runs a block, and what it is sent | `practicehub/backends.py` |
 | Consent to commercial messages (CASL: express, implied for 2 years, withdrawn), checked at queue and at delivery | `Hub.consent_problem` in `practicehub/outbox.py`, a type's `[consent]` (`practicehub/schema.py`) |
 
-If you change one of these, add or update a test in `tests/test_rules.py` that states the rule.
+If you change one of these, add or update a test in `tests/test_rules.py` that states the rule (the rules the
+2026-11-24 review panel found broken are stated in `tests/test_panel_fixes.py`).
 
 ## Checks before you finish
 

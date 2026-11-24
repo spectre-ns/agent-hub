@@ -173,7 +173,8 @@ class Wopi:
         else:
             value = new
         names = [self._name(m) for m in (sess.get("editors") or [member["id"]])]
-        rec = hub.update_record(member, ref, {path: value}, comment=EDITED_BY + ", ".join(names))
+        # the working copy was saved by one of the session's editors; whoever's save ends the session commits it
+        rec = hub.update_record(member, ref, {path: value}, comment=EDITED_BY + ", ".join(names), _files=(work,))
         self.db.update({"_id": sess["_id"]}, {"$set": {"base": work, "working": None, "editors": [],
                                                         "updated_at": _iso(_now())}})
         return rec
