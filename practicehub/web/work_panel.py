@@ -21,6 +21,7 @@ from ..visibility import Viewer
 e = html.escape
 
 STEP_WORDS = {"done": "Done", "active": "Now", "waiting": "Waiting", "failed": "Stopped", "pending": "To come",
+              "queued": "In the queue", "running": "Under way",
               "if-needed": "If needed", "skipped": "Not needed", "hidden": "Not shown"}
 
 
@@ -215,6 +216,12 @@ class WorkPanel:
                 for it in [self.hub.db.items.get(sst["item"])]
                 if it and it.get("status") in ("open", "claimed", "held") and it.get("kind") != "notice"]
         if not live:
+            job = next((sid for sid, sst in (run.get("steps") or {}).items()
+                        if (sst or {}).get("state") in ("queued", "running")), None)
+            if job is not None:  # a job a worker runs: it will go on by itself
+                shown = wf is not None and viewer.step_state(wf, run, job) is not None
+                return (f'<span class="loz inprogress">Under way: '
+                        f'{e(wf.step(job).title if shown else "a step you may not see")}</span>'), (2, "")
             return '<span class="muted">waiting</span>', (3, "")
         it = min(live, key=lambda i: (i.get("priority") != "urgent", i.get("due_at") or "~"))
         return self._holder(it) + self._urgency(it), (1 if it.get("priority") == "urgent" else 2, it.get("due_at") or "~")
@@ -306,7 +313,7 @@ class WorkPanel:
         out = []
         for s in hidden:
             sst = run["steps"].get(s.id) or {}
-            if sst.get("state") not in ("active", "waiting", "failed"):
+            if sst.get("state") not in ("active", "waiting", "failed", "queued", "running"):
                 continue
             item = self.hub.db.items.get(sst["item"]) if sst.get("item") else None
             bits = ['<span class="muted">At a step you may not see</span>']
@@ -332,8 +339,9 @@ class WorkPanel:
                   for s in wf.steps for x in [viewer.step_state(wf, run, s.id)]]
         seen = [(s, x) for s, x in states if x is not None]
         hidden = [s for s, x in states if x is None]
-        now_steps = [s for s, x in seen if x in ("active", "waiting", "failed")]
-        hidden_now = any((run["steps"].get(s.id) or {}).get("state") in ("active", "waiting", "failed")
+        now_steps = [s for s, x in seen if x in ("active", "waiting", "failed", "queued", "running")]
+        hidden_now = any((run["steps"].get(s.id) or {}).get("state") in ("active", "waiting", "failed", "queued",
+                                                                         "running")
                          for s in hidden)
         # where it is now
         now_html, mine = [], []
@@ -350,6 +358,8 @@ class WorkPanel:
                 bits.append('<span class="loz removed">Stopped</span>')
             elif sst.get("state") == "waiting":
                 bits.append('<span class="muted">waiting</span>')
+            elif sst.get("state") in ("queued", "running"):
+                bits.append(f'<span class="loz inprogress">{e(STEP_WORDS[sst["state"]])}</span>')
             bits += self._step_facts(run, s, item, rt)
             if sst.get("state") == "waiting":  # a wait over several records: each, where it is, who has it
                 bits.append(self._wait_records_html(me, run, s))
@@ -382,7 +392,7 @@ class WorkPanel:
                 continue
             if x == "skipped":
                 continue  # not on this run's path
-            cls = ("done" if x == "done" else "now" if x in ("active", "waiting", "failed") else
+            cls = ("done" if x == "done" else "now" if x in ("active", "waiting", "failed", "queued", "running") else
                    "maybe" if x == "if-needed" else "todo")
             n[cls] += 1
             segs.append(f'<li class="seg {cls}" title="{e(STEP_WORDS.get(x, x))}: {e(s.title)}"></li>')
@@ -411,27 +421,53 @@ class WorkPanel:
 
     # ------------------------------------------------------------------------------------------ the lifecycle
     def page_record_workflow(self, req, rtype, rid):
-        """The record's lifecycle as a diagram (its states and moves, where it is now), for the dialog."""
+        """The record's workflow as a map, for the dialog: its states and the moves between them, the way this record
+        came drawn over it (numbered, in order), where it is now, and the moves a person can make from here. Below
+        the map, folded, every move in words and its workflow stage by stage."""
         me, hub = req["me"], self.hub
         from ..hub import Invalid
         rt = hub.record_type(rtype)
         if not rt or not rt.lifecycle:
             raise Invalid(f"{rtype} records have no lifecycle")
-        rec = hub.read_record(me, f"{rtype}/{rid}")
+        ref = f"{rtype}/{rid}"
+        rec = hub.read_record(me, ref)
         st = schema.first(rec, rt.lifecycle["path"])
         url = f"/records/{e(rtype)}/{e(rid)}"
+        journey = hub.record_journey(me, ref)
+        been = [s for s in journey["stages"] if s["kind"] == "lifecycle"]
+        came = (f' It has been through {len(been)} stages to get here; the way it came is numbered.'
+                if len(been) > 1 else "")
+        wf = hub._own_workflow(rt)
+        outline = ""
+        if wf is not None and getattr(wf, "shape", None) and Viewer(hub, me).full(wf):
+            taken = {m["edge"] for s in journey["stages"] for m in self._moves_of(s) if m.get("edge")}
+            marks = {"visited": {s["state"] for s in journey["stages"]}, "current": st, "taken": taken}
+            outline = (f'<details class="lc-moves"><summary>Its workflow, stage by stage</summary>'
+                       f'{self._states_view(wf, marks)}</details>')
         body = (f'<div data-modal-body class="lc-modal"><h2>How {e(self._lower(rt.plural))} move</h2>'
-                f'<p class="muted">{e(hub.title(rec))} is <b>{e(rt.state_label(st))}</b>. Its moves from here are '
-                f'drawn in blue.</p>{self.lifecycle_svg(rt, st)}{self._lifecycle_table(rt, st)}'
+                f'<p class="muted">{e(hub.title(rec))} is <b>{e(rt.state_label(st))}</b>.{e(came)}</p>'
+                f'{self.lifecycle_svg(rt, st, journey)}{self._lifecycle_table(rt, st)}{outline}'
                 f'<div class="filters"><a class="btn secondary" href="{url}" data-modal-close>Close</a></div></div>')
         return self.layout(req, f"Workflow: {hub.title(rec)}", body,
                            crumbs=[("/records", "Records"), (f"/records/{rtype}", rt.plural), (url, hub.title(rec)),
                                    (None, "Workflow")])
 
+    @staticmethod
+    def _moves_of(stage: dict) -> list[dict]:
+        """A stage's moves and the ones that followed on from them, flat."""
+        out, todo = [], list(stage.get("moves") or [])
+        while todo:
+            m = todo.pop(0)
+            out.append(m)
+            todo += m.get("then") or []
+        return out
+
     def _lifecycle_table(self, rt, st) -> str:
         lc = rt.lifecycle
         rows = []
         for t in lc["transition"]:
+            if t.get("entry"):
+                continue  # where its workflow starts it: the map's Start, not a move out of every state
             frm = "any state" if "*" in t["from"] else ", ".join(rt.state_label(f) for f in t["from"])
             here = (st in t["from"] or "*" in t["from"]) and t["by"] != "workflow"
             who = "only when its work is cancelled" if t.get("abandon") else \
@@ -441,117 +477,178 @@ class WorkPanel:
         return ('<details class="lc-moves"><summary>Every move, in words</summary><div class="tablewrap"><table>'
                 '<tr><th>From</th><th>To</th><th>Button</th><th>Who</th></tr>' + "".join(rows) + "</table></div></details>")
 
-    def lifecycle_svg(self, rt, st) -> str:
-        """The lifecycle drawn as boxes (states) and arrows (moves), top to bottom from the initial state; the
-        current state filled, its moves from here in the accent colour, moves only a workflow makes dashed, moves
-        from any state as a small "any state" tab above their target."""
+    MAP_W, MAP_H, MAP_GX, MAP_GY = 150, 40, 26, 50
+    MAP_START = "\x00start"  # the map's own node for where a record begins: no state has this name
+
+    def lifecycle_graph(self, rt) -> dict:
+        """A type's states and moves as the map draws them: ``{"nodes", "edges": {(a, b): [move]}, "start": [state],
+        "endings": [state], "any": {state: [move]}}``. The moves are the type's own and its workflow's edges
+        (``catalog._with_workflow_moves``). Where its workflow starts a record is one Start node with a move to each
+        such state, never a move from every state into them; a move from any state is kept apart (``any``): it is
+        said on its target, not drawn from everywhere."""
         lc = rt.lifecycle
         states = list(lc["states"])
-        trans = lc["transition"]
-        # layers: how many moves from the initial state, by the moves that name where they come from; a state no
-        # move leaves (an end: finished, cancelled, entered in error) goes on the last row, so the arrows run down
-        leaves = {f for t in trans for f in t["from"] if f != "*" and f != t["to"]}
-        layer = {lc["initial"]: 0} if lc["initial"] in states else {}
-        frontier = list(layer)
-        while frontier:
-            nxt = []
-            for s in frontier:
-                for t in trans:
-                    if s in t["from"] and t["to"] not in layer and t["to"] in leaves:
-                        layer[t["to"]] = layer[s] + 1
-                        nxt.append(t["to"])
-            frontier = nxt
-        last = max(layer.values(), default=-1) + 1
-        for s in states:
-            layer.setdefault(s, last)
-        rows: dict[int, list[str]] = {}
-        for s in states:
-            rows.setdefault(layer[s], []).append(s)
-        W, H, GX, GY, PAD, LANE = 136, 34, 20, 64, 16, 9
-        inner = max(len(r) for r in rows.values()) * (W + GX) - GX + 2 * PAD + 60
-        pos = {}
-        for li, (k, row) in enumerate(sorted(rows.items())):
-            # each row in the order of where its moves come from, so the arrows cross as little as they can
-            src = lambda s: [pos[f][0] for t in trans if t["to"] == s for f in t["from"] if f in pos]
-            row.sort(key=lambda s: (sum(src(s)) / len(src(s)) if src(s) else 1e9, states.index(s)))
-            rw = len(row) * (W + GX) - GX
-            x0 = (inner - 60 - rw) / 2
-            for i, s in enumerate(row):
-                pos[s] = [x0 + i * (W + GX), PAD + 22 + li * (H + GY)]
-        # a move that skips a row runs down a lane at the side nearer its target, not through the boxes between
-        lanes: dict = {}
-        for t in trans:
-            for f in t["from"]:
-                if "*" not in t["from"] and f in layer and layer[t["to"]] - layer[f] > 1:
-                    side = "L" if pos[t["to"]][0] + W / 2 <= (inner - 60) / 2 else "R"
-                    lanes[(id(t), f)] = (side, sum(1 for v in lanes.values() if v[0] == side))
-        gl = sum(1 for v in lanes.values() if v[0] == "L") * LANE + 12
-        gr = sum(1 for v in lanes.values() if v[0] == "R") * LANE + 12
-        for p_ in pos.values():
-            p_[0] += gl
-        width = gl + inner + gr
-        height = PAD + 22 + len(rows) * (H + GY) - GY + PAD
-        tone = lambda s: self._state_tone(s, rt)
-        edges, any_tabs = [], []
-        for t in trans:
-            # "a move from here" is per source: only the arrow that leaves the current state, and never one only a
-            # workflow makes (the viewer cannot make it)
-            mine = t["by"] != "workflow" and t["to"] != st
-            look = lambda cur: ("lc-edge" + (" auto" if t["by"] == "workflow" else "") + (" here" if cur else ""),
-                                "url(#lc-arrow-here)" if cur else "url(#lc-arrow)")
-            tx, ty = pos[t["to"]]
+        edges: dict = {}
+        begins: list = []
+        anywhere: dict = {}
+        for t in lc["transition"]:
+            if t["to"] not in states:
+                continue
+            if t.get("entry"):
+                if t["to"] not in begins:
+                    begins.append(t["to"])
+                continue
             if "*" in t["from"]:
-                cur = mine
-                cls, mk = look(cur)
-                ax, ay = tx + W / 2, ty - 24
-                any_tabs.append(f'<g class="lc-any{" here" if cur else ""}"><rect x="{ax - 38}" y="{ay - 10}" width="76" '
-                                f'height="18" rx="9"/><text x="{ax}" y="{ay + 3}">any state</text></g>'
-                                f'<path class="{cls}" d="M{ax},{ay + 8} L{ax},{ty - 2}" marker-end="{mk}"/>')
+                anywhere.setdefault(t["to"], []).append(t)
                 continue
             for f in t["from"]:
-                if f == t["to"] or f not in pos:
-                    continue
-                fx, fy = pos[f]
-                cls, mk = look(mine and f == st)
-                if (id(t), f) in lanes:  # down into the gap, along to its lane, down, along, into the target
-                    side, k = lanes[(id(t), f)]
-                    lx = gl - 8 - k * LANE if side == "L" else gl + inner - 4 + k * LANE
-                    x1, y1 = fx + W / 2 + (k % 3 - 1) * 14, fy + H
-                    ya = y1 + 10 + (k % 5) * 8
-                    yd = ty - 10 - (k % 5) * 8
-                    x2 = tx + W / 2 + (k % 5 - 2) * 10
-                    d = f"M{x1},{y1} L{x1},{ya} L{lx},{ya} L{lx},{yd} L{x2},{yd} L{x2},{ty - 2}"
-                elif layer[t["to"]] > layer[f]:  # down: bottom of one to the top of the other
-                    x1, y1, x2, y2 = fx + W / 2, fy + H, tx + W / 2, ty
-                    d = f"M{x1},{y1} C{x1},{y1 + GY / 2} {x2},{y2 - GY / 2} {x2},{y2 - 2}"
-                elif layer[t["to"]] == layer[f]:  # beside: an arc over the gap
-                    left = tx > fx
-                    x1, x2 = (fx + W, tx) if left else (fx, tx + W)
-                    y = fy + H / 2
-                    d = f"M{x1},{y} C{x1 + (12 if left else -12)},{y - 22} {x2 + (-12 if left else 12)},{y - 22} {x2 + (-2 if left else 2)},{y}"
-                else:  # back up: out of the right side and round
-                    x1, y1, x2, y2 = fx + W, fy + H / 2, tx + W, ty + H / 2
-                    bend = max(x1, x2) + 30
-                    d = f"M{x1},{y1} C{bend},{y1} {bend},{y2} {x2 + 2},{y2}"
-                edges.append(f'<path class="{cls}" d="{d}" marker-end="{mk}"/>')
+                if f in states and f != t["to"]:
+                    edges.setdefault((f, t["to"]), []).append(t)
+        first = [s for s in [lc.get("initial"), *(lc.get("starts") or [])] if s in states]
+        start = list(dict.fromkeys(begins or first))
+        leaves = {a for a, _ in edges}
+        endings = [s for s in states if s not in leaves and s not in start]
+        return {"nodes": states, "edges": edges, "start": start, "endings": endings, "any": anywhere}
+
+    def lifecycle_svg(self, rt, st, journey: dict | None = None) -> str:
+        """The map: states as boxes in rows from where a record starts down to where it ends (``flowmap.layout``:
+        no arrow crosses a box), moves as arrows. Drawn over it, the way this record came (``journey``, from
+        ``Hub.record_journey``): its moves numbered in order and named, the states it has been in solid and the rest
+        faint, where it is now ringed. The moves a person can make from here are in the accent colour and named;
+        moves only its workflow makes are dashed. Every other arrow says what it is when pointed at. A way to an
+        ending (cancelled, entered in error) that many states have is not an arrow from each: the state says it in
+        small words, so the map keeps to the ways a record usually goes."""
+        from . import flowmap
+        g = self.lifecycle_graph(rt)
+        states, edges, START = g["nodes"], dict(g["edges"]), self.MAP_START
+        W, H = self.MAP_W, self.MAP_H
+        # the way it came: each change of state in order (a stop only its workflow keeps is no state of the map)
+        walked = [s["state"] for s in (journey or {}).get("stages") or [] if s["kind"] == "lifecycle"
+                  and s["state"] in states]
+        if len(walked) > 1 and (walked[0], walked[1]) not in edges and walked[1] in g["start"]:
+            walked = walked[1:]  # made, then put where its workflow starts it: that is where it began
+        route: dict = {}
+        for n, (a, b) in enumerate(zip(walked, walked[1:]), 1):
+            if a != b:
+                route.setdefault((a, b), []).append(n)
+        visited = set(walked) or {st}
+        entered = walked[0] if walked else None
+        # a way to an ending that three or more states have is said on each state, not drawn (unless it was taken)
+        into: dict = {}
+        for (a, b) in edges:
+            if b in g["endings"]:
+                into.setdefault(b, []).append(a)
+        crowded = {b for b, froms in into.items() if len(froms) >= 3}
+        said: dict = {}  # state -> the endings it can also go to, in words
+        drawn: dict = {}
+        ways_on = {s: sum(1 for (a, _) in edges if a == s) for s in states}
+        for (a, b), moves in edges.items():
+            # ... but a state whose only way on is that ending keeps its arrow: the map still ends somewhere
+            if b in crowded and (a, b) not in route and ways_on[a] > 1:
+                said.setdefault(a, []).append(b)
+            else:
+                drawn[(a, b)] = moves
+        for pair in route:  # a move it made that no arrow says (one from any state, a correction): drawn as made
+            if pair not in drawn:
+                drawn[pair] = list(g["any"].get(pair[1], [])) or edges.get(pair) or []
+        # one arrow from Start: to where this record began (else where the type says a record begins); the other
+        # states a record can start in say so when pointed at, and keep their heavier edge
+        begin = entered or next(iter(g["start"]), None)
+        pairs = ([(START, begin)] if begin else []) + list(drawn)
+        joined = {x for pair in pairs for x in pair} | set(said) | set(g["any"]) | crowded | visited | {st}
+        states = [s for s in states if s in joined]  # a value no move reaches or leaves is no part of the map
+        fed = {b for _, b in pairs}
+        lay = flowmap.layout([START, *states], pairs, [START], last=[s for s in g["endings"] if s not in fed],
+                             w=W, h=H, gx=self.MAP_GX, gy=self.MAP_GY)
+        own = self.hub._own_workflow(rt)
+        begin_label = ((getattr(own, "shape", None) or {}).get("start") or {}).get("label") if own else None
+        runs_of = {x["id"]: len(x.get("steps") or []) for x in ((getattr(own, "shape", None) or {}).get("edges") or [])}
+        short = lambda words, n=24: words if len(words) <= n else words[:n - 1] + "…"
+        paths, tags = [], []
+        for (a, b) in pairs:
+            pts = lay["routes"][(a, b)]
+            if a == START:
+                on = b == entered
+                cls = "lc-edge begin" + (" route" if on else " dim" if journey else "")
+                paths.append(f'<path class="{cls}" d="{flowmap.path_d(pts)}" marker-end="url(#lc-arrow'
+                             f'{"-route" if on else ""})"><title>A {e(self._lower(rt.label))} can start as '
+                             f'{e(rt.state_label(b))}</title></path>')
+                if on and begin_label:
+                    x, y = lay["labels"][(a, b)]
+                    tags.append((0, f'<g class="lc-tag route"><text class="lc-name" x="{x + 8:.1f}" '
+                                    f'y="{y + 3.5:.1f}">{e(short(begin_label))}</text></g>'))
+                continue
+            moves = drawn[(a, b)]
+            auto = bool(moves) and all(t["by"] == "workflow" for t in moves)
+            mine = a == st and any(t["by"] != "workflow" for t in moves) and b != st
+            came = route.get((a, b))
+            names = list(dict.fromkeys(t["label"] for t in moves if t.get("label"))) or ["Moved"]
+            ran = sum(runs_of.get(t.get("edge"), 0) for t in moves)
+            cls = "lc-edge" + (" auto" if auto else "") + (" here" if mine else "") + (" route" if came else "") \
+                + (" dim" if journey and not came and not mine else "")
+            mark = "-route" if came else "-here" if mine else ""
+            how = ("its workflow makes it" + (f", running {ran} automation{'s' if ran != 1 else ''}" if ran else "")) \
+                if auto else "made by hand"
+            paths.append(f'<path class="{cls}" d="{flowmap.path_d(pts)}" marker-end="url(#lc-arrow{mark})">'
+                         f'<title>{e(rt.state_label(a))} to {e(rt.state_label(b))}: {e("; ".join(names))} '
+                         f'({e(how)})</title></path>')
+            if came or mine:
+                x, y = lay["labels"][(a, b)]
+                num = ""
+                if came:
+                    nums = ", ".join(str(n) for n in came)
+                    wide = 12 + 6 * len(nums)
+                    num = (f'<rect class="lc-num" x="{x - wide / 2:.1f}" y="{y - 8:.1f}" width="{wide}" height="16" '
+                           f'rx="8"/><text class="lc-num" x="{x:.1f}" y="{y + 3.5:.1f}">{e(nums)}</text>')
+                    x += wide / 2 + 4
+                words = short(names[0]) + (f" ⚙{ran}" if ran else "")
+                anchor = "" if came else ' text-anchor="middle"'
+                tags.append((min(came) if came else 10 ** 6,  # read in the order it went, then what is open
+                             f'<g class="lc-tag{" route" if came else " here"}">{num}'
+                             f'<text class="lc-name" x="{x:.1f}" y="{y + 3.5:.1f}"{anchor}>{e(words)}</text></g>'))
         nodes = []
+        tone = lambda s: self._state_tone(s, rt)
+        sx, sy = lay["pos"][START]
+        nodes.append(f'<g class="lc-begin"><rect x="{sx + W / 2 - 30:.1f}" y="{sy + H - 22:.1f}" width="60" height="22" '
+                     f'rx="11"/><text x="{sx + W / 2:.1f}" y="{sy + H - 7:.1f}">Start</text></g>')
         for s in states:
-            x, y = pos[s]
-            words = rt.state_label(s)
-            words = words if len(words) <= 20 else words[:19] + "…"
+            x, y = lay["pos"][s]
+            also = [rt.state_label(b) for b in said.get(s, [])]
+            if s in g["any"] and (s not in visited or s == st):
+                note = "from any state"
+            elif also:
+                note = "or: " + ", ".join(also)
+            else:
+                note = ""
             cur = " current" if s == st else ""
-            start = " start" if s == lc["initial"] else ""
-            nodes.append(f'<g class="lc-node {tone(s)}{cur}{start}"><title>{e(rt.state_label(s))}'
-                         f'{" (where it is now)" if cur else ""}</title><rect x="{x}" y="{y}" width="{W}" height="{H}" '
-                         f'rx="4"/><text x="{x + W / 2}" y="{y + H / 2 + 4}">{e(words.upper())}</text></g>')
-        return (f'<div class="lc-wrap"><svg class="lc-svg" viewBox="0 0 {width:.0f} {height:.0f}" width="{width:.0f}" style="max-width:{width:.0f}px" '
-                f'height="{height:.0f}" role="img" aria-label="Lifecycle of {e(self._lower(rt.label))}: '
-                f'{e(", ".join(rt.state_label(s) for s in states))}; now {e(rt.state_label(st))}">'
-                '<defs><marker id="lc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" '
-                'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="lc-head"/></marker>'
-                '<marker id="lc-arrow-here" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" '
-                'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="lc-head here"/></marker></defs>'
-                + "".join(edges) + "".join(any_tabs) + "".join(nodes) + "</svg></div>"
-                '<p class="lc-legend muted small"><span class="lc-key cur"></span> where it is now '
-                '<span class="lc-key here"></span> a move from here <span class="lc-key auto"></span> only a workflow '
-                'makes it</p>')
+            cls = f"lc-node {tone(s)}" + (" start" if s in g["start"] else "") \
+                + (" dim" if journey and s not in visited else "") + cur
+            name_y = y + (H / 2 + 4 if not note else 17)
+            title = rt.state_label(s) + (" (where it is now)" if cur else "") + (f"; {note}" if note else "") \
+                + ("; a record can start here" if s in g["start"] else "")
+            nodes.append(f'<g class="{cls}"><title>{e(title)}</title><rect x="{x:.1f}" y="{y:.1f}" width="{W}" '
+                         f'height="{H}" rx="4"/><text x="{x + W / 2:.1f}" y="{name_y:.1f}">'
+                         f'{e(short(rt.state_label(s), 22).upper())}</text>'
+                         + (f'<text class="lc-note" x="{x + W / 2:.1f}" y="{y + 31:.1f}">{e(short(note, 30))}</text>'
+                            if note else "") + "</g>")
+        width, height = lay["width"], lay["height"]
+        marker = lambda mid, cls: (
+            f'<marker id="{mid}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" '
+            f'markerHeight="9" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="lc-head{cls}"/></marker>')
+        went = (f'; it went {e(", then ".join(rt.state_label(s) for s in walked))}' if len(walked) > 1 else "")
+        legend = ['<span class="lc-key cur"></span> where it is now']
+        if route:
+            legend.append('<span class="lc-key came"></span> the way it came, in order')
+        legend.append('<span class="lc-key here"></span> a move you can make from here')
+        legend.append('<span class="lc-key auto"></span> only its workflow makes it')
+        if journey and any(s not in visited for s in states):
+            legend.append('<span class="lc-key faint"></span> not been there')
+        wide = " data-wide" if width > 640 else ""  # a broad map asks its dialog for room
+        return (f'<div class="lc-wrap"{wide}><svg class="lc-svg" viewBox="0 0 {width:.0f} {height:.0f}" '
+                f'width="{width:.0f}" height="{height:.0f}" style="max-width:{width:.0f}px" role="img" '
+                f'aria-label="How {e(self._lower(rt.label))} records move: '
+                f'{e(", ".join(rt.state_label(s) for s in states))}{went}; now {e(rt.state_label(st))}">'
+                f'<defs>{marker("lc-arrow", "")}{marker("lc-arrow-here", " here")}{marker("lc-arrow-route", " route")}'
+                f'</defs>' + "".join(paths) + "".join(nodes) + "".join(t for _, t in sorted(tags, key=lambda t: t[0]))
+                + "</svg></div>"
+                f'<p class="lc-legend muted small">{" ".join(legend)}</p>')

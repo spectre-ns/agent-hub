@@ -250,31 +250,24 @@ class MovesMixin:
         return {"state": cur, "state_label": rt.state_label(cur), "may": may, "may_not": may_not}
 
     # ------------------------------------------------------------------ the record's history in words
-    def record_timeline(self, viewer: dict, ref: str, *, activity: list[dict] | None = None) -> list[dict]:
-        """The record's history as one list in words, oldest first: its edits (which fields changed), its moves (who,
-        when, the values the move wrote, the signature it carried) and the steps of the runs about it (started, done
-        by whom, decided, skipped, waiting). What the viewer may not read is folded, one line per hidden stretch
-        ("3 clinical steps"). Each entry is ``{"at", "who", "text"}`` (``hidden``: the count it folds; ``ran``: what a
-        move ran). ``activity``: ``record_activity(viewer, ref)`` when the caller has it already."""
+    def _who(self, names: dict, mid) -> str:
+        if mid not in names:
+            row = self.db.members.get(mid) if mid else None
+            names[mid] = (row or {}).get("name") or ("the hub" if not mid or ":" in str(mid) else "someone")
+        return names[mid]
+
+    def _record_changes(self, viewer: dict, rt, ref: str) -> list[dict]:
+        """Each write of the record, oldest first, as the viewer may know it: ``{"seq", "at", "actor", "kind"}`` and,
+        by kind: ``filed`` (a version seeded with no event; ``seq`` -1), ``created`` (``state``), ``move`` (``from``,
+        ``to``, ``run``: the run that made it, None by hand; ``moved``: the transition's seq; ``cause``: what caused
+        the write; ``said``: the values it wrote, ``[label, words]``; ``signed``: ``{"meaning", "actor"}``), ``edit``
+        (``changed``: the labels of the fields changed), ``same`` (saved with no change) and ``signature`` (one that
+        moved nothing: ``meaning``). ``unread``: it also changed fields the viewer may not read; ``hide``: it changed
+        only such fields (the data classes they are of, and nothing else is told); ``comment``. The one reading of a
+        record's versions against its events, for the history in words and for its journey."""
         from .export import _item_words
         rtype, _, rid = ref.partition("/")
-        rt = self._type(rtype)
-        self.require(viewer, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
-        view = visibility.Viewer(self, viewer)
         gone = visibility.hidden_keys(self, viewer, rtype)
-        label = rt.label.lower()
-        names: dict = {}
-
-        def who(mid):
-            if mid not in names:
-                row = self.db.members.get(mid) if mid else None
-                names[mid] = (row or {}).get("name") or ("the hub" if not mid or ":" in str(mid) else "someone")
-            return names[mid]
-
-        def words(f, v) -> str:
-            text = _item_words(self, viewer, f, v)
-            return re.sub(r" \([A-Z][A-Za-z]*/[^)]+\)", "", text)
-
         lc = rt.lifecycle
         top = lambda f: f["path"].split(".")[0]
         fields = [f for f in rt.fields if "*" not in f["path"] and not (lc and f["path"] == lc["path"])]
@@ -282,6 +275,18 @@ class MovesMixin:
         events = self.db.events.find({"subject": ref, "action": {"$in": ["record.created", "record.updated",
                                                                           "record.transitioned", "record.signed"]}},
                                      sort=[("seq", ASC)])
+        # what a restriction of its subject withholds from this viewer is not read here either: the whole record's
+        # fields, or the ones it names
+        kept = visibility.withheld(self.redact(viewer, versions[-1]["data"])) if versions else None
+        if kept and kept.get("whole"):
+            gone = gone | {top(f) for f in fields}
+        elif kept:
+            gone = gone | {top(f) for f in fields if f["label"] in (kept.get("fields") or [])}
+
+        def words(f, v) -> str:
+            text = _item_words(self, viewer, f, v)
+            return re.sub(r" \([A-Z][A-Za-z]*/[^)]+\)", "", text)
+
         writes = [e for e in events if e["action"] in ("record.created", "record.updated")]
         # each version is written by the event of its write; versions written without one (seeded) come first
         lead = len(versions) - len(writes)
@@ -289,10 +294,11 @@ class MovesMixin:
         moves = {e["cause"]: e for e in events if e["action"] == "record.transitioned"}
         signed = {(e["data"].get("signed") or {}).get("version"): e for e in events if e["action"] == "record.signed"
                   and e.get("signature")}
-        rows: list[tuple[int, dict]] = []
+        out: list[dict] = []
         prev = None
         for v in versions[:max(0, lead)]:
-            rows.append((-1, {"at": v["at"], "who": who(v["actor"]), "text": f"{rt.label} filed"}))
+            out.append({"seq": -1, "at": v["at"], "actor": v["actor"], "kind": "filed",
+                        "state": schema.first(v["data"], lc["path"]) if lc else None})
             prev = v["data"]
         for e in writes:
             v = at_seq.get(e["seq"])
@@ -303,44 +309,78 @@ class MovesMixin:
             changed = [f for f in fields if prev is not None
                        and schema.first(data, f["path"]) != schema.first(prev, f["path"])]
             seen_ = [f for f in changed if top(f) not in gone]
+            row = {"seq": e["seq"], "at": v["at"], "actor": v["actor"], "cause": e.get("cause"),
+                   "unread": len(seen_) < len(changed), "hide": None, "comment": v.get("comment") or None}
             if prev is None:
-                text, hide = f"{rt.label} created", None
-                if lc:
-                    text += f" ({rt.state_label(schema.first(data, lc['path'])).lower()})"
+                row.update(kind="created", state=schema.first(data, lc["path"]) if lc else None, unread=False)
             elif mv:
-                text = (f"Moved from {rt.state_label(mv['data'].get('from')).lower()} to "
-                        f"{rt.state_label(mv['data'].get('to')).lower()}")
-                said = [f"{f['label']}: {words(f, schema.first(data, f['path']))}" for f in seen_
-                        if schema.first(data, f["path"]) not in (None, "", [], {})]
-                if said:
-                    text += ", with " + "; ".join(said)
-                if len(seen_) < len(changed):
-                    text += " (and fields you may not read)"
                 sg = signed.pop(v["version"], None)
-                if sg:
-                    text += f"; signed {sg['data']['signed'].get('meaning')!r} by {who(sg['actor'])}"
-                hide = None
+                row.update(kind="move", **{"from": mv["data"].get("from")}, to=mv["data"].get("to"),
+                           run=mv.get("run_id"), moved=mv["seq"], by_kind=mv.get("actor_kind"),
+                           said=[[f["label"], words(f, schema.first(data, f["path"]))] for f in seen_
+                                 if schema.first(data, f["path"]) not in (None, "", [], {})],
+                           signed={"meaning": sg["data"]["signed"].get("meaning"), "actor": sg["actor"]} if sg
+                           else None)
             elif changed and not seen_:
-                text, hide = "", self._classes_of(rt, changed)
+                row.update(kind="edit", changed=[], hide=self._classes_of(rt, changed), comment=None)
             elif changed:
-                text, hide = "Changed " + ", ".join(f["label"] for f in seen_), None
-                if len(seen_) < len(changed):
-                    text += " and fields you may not read"
+                row.update(kind="edit", changed=[f["label"] for f in seen_])
             else:
-                text, hide = "Saved with no change to what it says", None
-            if v.get("comment") and hide is None:
-                text += f": {v['comment']}"
-            row = {"at": v["at"], "who": who(v["actor"]), "text": text}
-            if mv:  # a move a run made merges with the run's own account of it (``_move_rows``)
-                row["_move"] = (mv.get("run_id"), mv["data"].get("to"))
-            if hide:
-                row = {"at": v["at"], "who": "", "text": "", "fold": ("change", hide)}
-            rows.append((e["seq"], row))
+                row.update(kind="same")
+            out.append(row)
             prev = data
         for e in signed.values():  # a signature that moved nothing
-            rows.append((e["seq"], {"at": e["at"], "who": who(e["actor"]),
-                                    "text": f"Signed {(e['data'].get('signed') or {}).get('meaning')!r} by "
-                                            f"{who(e['actor'])}"}))
+            out.append({"seq": e["seq"], "at": e["at"], "actor": e["actor"], "kind": "signature",
+                        "meaning": (e["data"].get("signed") or {}).get("meaning")})
+        return out
+
+    def record_timeline(self, viewer: dict, ref: str, *, activity: list[dict] | None = None) -> list[dict]:
+        """The record's history as one list in words, oldest first: its edits (which fields changed), its moves (who,
+        when, the values the move wrote, the signature it carried) and the steps of the runs about it (started, done
+        by whom, decided, skipped, waiting). What the viewer may not read is folded, one line per hidden stretch
+        ("3 clinical steps"). Each entry is ``{"at", "who", "text"}`` (``hidden``: the count it folds; ``ran``: what a
+        move ran). ``activity``: ``record_activity(viewer, ref)`` when the caller has it already. The record's page
+        tells the same history nested by stage (``Hub.record_journey``)."""
+        rtype, _, rid = ref.partition("/")
+        rt = self._type(rtype)
+        self.require(viewer, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
+        view = visibility.Viewer(self, viewer)
+        names: dict = {}
+        who = lambda mid: self._who(names, mid)
+        rows: list[tuple[int, dict]] = []
+        for c in self._record_changes(viewer, rt, ref):
+            kind = c["kind"]
+            if kind == "filed":
+                text = f"{rt.label} filed"
+            elif kind == "created":
+                text = f"{rt.label} created"
+                if rt.lifecycle:
+                    text += f" ({rt.state_label(c['state']).lower()})"
+            elif kind == "move":
+                text = f"Moved from {rt.state_label(c['from']).lower()} to {rt.state_label(c['to']).lower()}"
+                if c["said"]:
+                    text += ", with " + "; ".join(f"{label}: {said}" for label, said in c["said"])
+                if c["unread"]:
+                    text += " (and fields you may not read)"
+                if c["signed"]:
+                    text += f"; signed {c['signed']['meaning']!r} by {who(c['signed']['actor'])}"
+            elif kind == "edit":
+                text = "Changed " + ", ".join(c["changed"])
+                if c["unread"]:
+                    text += " and fields you may not read"
+            elif kind == "signature":
+                text = f"Signed {c['meaning']!r} by {who(c['actor'])}"
+            else:
+                text = "Saved with no change to what it says"
+            if c.get("hide"):
+                rows.append((c["seq"], {"at": c["at"], "who": "", "text": "", "fold": ("change", c["hide"])}))
+                continue
+            if c.get("comment"):
+                text += f": {c['comment']}"
+            row = {"at": c["at"], "who": who(c["actor"]), "text": text}
+            if kind == "move":  # a move a run made merges with the run's own account of it (``_move_rows``)
+                row["_move"] = (c["run"], c["to"])
+            rows.append((c["seq"], row))
         rows += self._run_rows(viewer, view, ref, who)
         rows += self._move_rows(viewer, rt, ref, rows, who, activity)
         rows.sort(key=lambda r: r[0])
@@ -374,7 +414,10 @@ class MovesMixin:
             if not ran and to in states:
                 continue  # the record was already there (its first state): nothing to tell
             label = m.get("label") or rt.state_label(to)
-            if any(a.get("state") in ("failed", "held") for a in ran):
+            if any(a.get("state") in ("queued", "running") for a in ran) \
+                    and not any(a.get("state") == "failed" for a in ran):
+                text = f"Moving on by “{label}”, under way"
+            elif any(a.get("state") in ("failed", "held") for a in ran):
                 text = f"Moving on by “{label}” did not go through"
             else:
                 text = f"Moved on by “{label}”"

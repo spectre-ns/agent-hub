@@ -227,6 +227,8 @@ class RecordWork:
         changed = max((str(r.get("updated_at") or r.get("created_at") or "") for r in runs), default="")
         at_attr = f'{((rec.get("meta") or {}).get("versionId", ""))}|{changed}'
         data_live = f' data-live="{e(self.activity_url(ref))}"' if not settled else ""
+        if any(r.get("state") in ("queued", "running") for r in ran):
+            data_live += " data-busy"  # a job in the queue or under way: the script asks again sooner
         opened = " open" if not settled or recent else ""
         return (f'<section id="activity" class="rw-activity" aria-labelledby="rw-activity-h" data-at="{e(at_attr)}"'
                 f'{data_live}><details class="ra-fold"{opened}><summary><h3 id="rw-activity-h" class="ra-h">'
@@ -243,7 +245,8 @@ class RecordWork:
         holder but neither its title nor a link. Automations kept from the member fold to one line. Shared by the
         work section's block and the History tab."""
         hub, viewer = self.hub, Viewer(self.hub, me)
-        failed = next((r for r in ran if r.get("state") == "failed"), None)
+        failed = next((r for r in ran if r.get("state") == "failed"), None) \
+            or next((r for r in ran if r.get("state") in ("running", "queued")), None)
         blocker = ("a step you may not see" if failed is None or failed.get("hidden")
                    else f"“{failed.get('title') or ''}”")
         lines, hidden = [], 0
@@ -260,6 +263,13 @@ class RecordWork:
             elif state == "held":
                 said = (f'<span class="ra-mark" aria-hidden="true">…</span> '
                         f'<span class="ra-word">waiting on {e(blocker)}</span>')
+            elif state == "queued":
+                said = ('<span class="ra-mark" aria-hidden="true">…</span> '
+                        '<span class="ra-word going">in the queue</span>')
+            elif state == "running":
+                said = ('<span class="ra-mark spin" aria-hidden="true">◌</span> '
+                        '<span class="ra-word going">under way</span>'
+                        + (f' <span class="muted small">since {self._at(r["since"])}</span>' if r.get("since") else ""))
             elif r.get("message"):
                 word = self.MESSAGE_WORDS.get(r["message"], r["message"])
                 mark = "✕" if r["message"] == "failed" else "✓" if r["message"] in ("sent", "delivered") else "…"
@@ -267,6 +277,13 @@ class RecordWork:
                         f'<span class="ra-word{" bad" if r["message"] == "failed" else ""}">{e(word)}</span>')
             else:
                 said = '<span class="ra-mark" aria-hidden="true">✓</span> <span class="ra-word">done</span>'
+                if r.get("ms") is not None:  # a job that ran by itself: how long it took
+                    took = f'{r["ms"] / 1000:.1f} s' if r["ms"] >= 1000 else "under a second"
+                    said += f' <span class="muted small">in {e(took)}</span>'
+            for t in r.get("retried") or []:
+                said += (f' <span class="muted small ra-retried">tried again by '
+                         f'{e((t.get("by") or {}).get("name") or "someone")}'
+                         + (f': {e(str(t["reason"])[:120])}' if t.get("reason") else "") + "</span>")
             kids = "".join(self._started_html(me, s, viewer) for s in r.get("started") or [])
             lines.append(f'<li class="ra-{e(str(state or ""))}"><b>{title}</b>: {said}'
                          + (f'<ul class="plain ra-started">{kids}</ul>' if kids else "") + "</li>")

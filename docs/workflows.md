@@ -363,12 +363,30 @@ physicians", "Ask a nurse to call the patient"):
   taken, and those skipped by their own `when`, are not listed. The block stays on a closed record while what it
   started is open, refreshes itself while anything is still going on (`GET /records/<Type>/<id>/activity`, with a
   Refresh link without JavaScript), and folds to one line once settled.
-- **History** lists the same under each move ("3 automations ran, 1 record started").
+- **History** tells the record's whole journey, nested (`Hub.record_journey`, `practicehub/journey.py`). Across
+  the top are the stages it has been in, in order. Under that is one block per stage: when it got there and how
+  long it stayed; the work done there, each line marked by who did it (a person, an agent, or the workflow by
+  itself); and each move out of it (the edge's label, or the type's own words for a move made by hand) with its
+  automations nested under it. A move by hand that the workflow then followed carries what followed ("Then, by
+  itself"). Automations of the taken edge that were not needed, the other ways out that were not taken, and work
+  not needed in a stage each fold to one line; nothing is listed of a state the record never reached. A move that
+  did not go through stays in the stage it was tried from, with what went wrong and each retry. The section
+  refreshes itself while a job is in the queue or under way, an agent has work open, or a message is on its way
+  (`GET /records/<Type>/<id>/journey`, answered `304` until something changes; a Refresh link without JavaScript).
+- **View workflow** opens the type's states and moves as a map (`practicehub/web/flowmap.py` places it: no arrow
+  crosses a box). Drawn over it is the way this record came: its moves numbered in order and named, the states it
+  has been in solid and the rest faint, where it is now ringed, and the moves a person can make from here in the
+  accent colour. Where the workflow starts a record is one Start, and an ending many states can reach (cancelled,
+  entered in error) is said on each of them in small words, not drawn from each. Folded below: every move in
+  words, and the workflow stage by stage with the stages it has been in and the edges it took marked.
 - **Started from this …** lists the records a move started (`workflow.start`, `record.create`) beside the
   sub-records `record.child` made, and the started record's page says "Started by “<edge label>” on <record>".
 
-What a member may not see stays out: an automation they may not see folds to "a step you may not see", and a
-started record of a type they may not read keeps its kind, state and holder but not its title or a link.
+What a member may not see stays out: an automation they may not see folds to "a step you may not see", work they
+may not see folds to a line with its data class and a count, and a started record of a type they may not read keeps
+its kind, state and holder but not its title or a link. Which way a record left a state is what the work there
+decided, so who may not see that work is told where the record went (that is the record's own history) but not the
+edge's name, who chose it, or the ways out it was chosen over (`Viewer.edge_visible`).
 
 ## Work and automations
 
@@ -648,6 +666,19 @@ tone = "warm"
 - A run keeps the block versions that were active when it started (`run.blocks`).
 - Work that uses a block takes no `action`, `skill` or `fields`: those come from the block. A failing block fails the
   work and sends a notice to the practice's escalation role, like any automation.
+- **A python or external block is a job where the hub is served.** `practicehub serve` runs workers
+  (`--job-workers`, 3 by default; the first takes only python blocks, so a quick screen never waits behind a slow
+  engine). There a block automation is not run in the request that makes it ready: it is queued, a worker takes it
+  (running), calls its engine with no transaction open, and writes the answer (done or failed) before the run goes
+  on. The record's page shows it in the queue, under way and done as it happens. What reads its output waits for
+  it; everything else goes on. A command or a test has no worker, and runs a block where it becomes ready
+  (`--job-workers 0` does the same in a served hub). The portal always runs a block in place, since it answers the
+  patient from what the screen found (`Engine.jobs_inline`).
+- A job cut short (its worker stopped, or it ran past twice its engine's time limit) fails saying so when it was
+  on an engine: whether it finished there is not known, so it is never run again by itself; a policy owner checks
+  the engine and retries the step. Python in the sandbox does nothing outside itself, so it goes back in the queue
+  once. An answer that arrives after its work was stopped, or after the step was run again, changes nothing and is
+  kept on the track (`step.late`).
 
 ## Context: what work reads
 

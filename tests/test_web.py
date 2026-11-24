@@ -2188,7 +2188,7 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     assert "View workflow" in panel and f'{addr(hub, visit)}/workflow" data-modal' in panel
     status, modal = call(server, "GET", f"/records/{visit}/workflow", token(hub, "dr-amara"))
     assert status == 200 and "data-modal-body" in modal and "<svg" in modal
-    assert re.search(r'class="lc-node [a-z]+ current"><title>Note being drafted', modal)
+    assert re.search(r'class="lc-node [a-z ]+ current"><title>Note being drafted', modal)
     # the chart of the patient lists the same run beside it
     chart = call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", token(hub, "dr-amara"))[1]
     assert f'href="{addr(hub, visit)}#work"' in _panel(chart) and "On this patient" in chart
@@ -2788,3 +2788,35 @@ def test_a_records_activity_block_is_fetched_alone_with_an_etag_and_refused_as_i
     assert _get_with(server, f"/records/{ref}/activity", token(hub, "jo"))[0] == 403  # no clinical read
     assert call(server, "GET", f"/records/{ref}", token(hub, "jo"))[0] == 403  # as its page
     assert _get_with(server, f"/records/{ref.split('/')[0]}/nothing-here/activity", tok)[0] == 404
+
+
+def test_a_records_history_is_fetched_alone_and_answers_304_until_something_changes(hub, server):
+    """``GET /records/<T>/<I>/journey``: the History section alone, as the page has it. Its ETag changes only when
+    the journey could have (a step of its work, a write of the record; never a view), so a page that keeps asking
+    is answered 304. Live (``data-live``, a Refresh link) only while something is going on that no one here is
+    doing; busy (``data-busy``) while a job is in the queue or under way. Refused as the page is."""
+    from test_clinic_records import LAB, _pat
+    hub.jobs_async = True  # as under ``practicehub serve``: the range check is a job
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub), inputs=dict(LAB))
+    ref = hub.engine.run(run["id"])["record"]
+    tok = token(hub, "dr-amara")
+    code, head, frag = _get_with(server, f"/records/{ref}/journey", tok)
+    assert code == 200 and frag.startswith('<section id="journey" class="jr"')
+    assert f'data-live="/records/{ref}/journey"' in frag and " data-busy" in frag and ">Refresh</a>" in frag
+    assert "in the queue" in frag and "Check the value against its range" in frag
+    page = call(server, "GET", f"/records/{ref}?tab=history", tok)[1]
+    assert frag in page  # the very section the page carries
+    tag = head.get("ETag")
+    code, h304, body = _get_with(server, f"/records/{ref}/journey", tok, {"If-None-Match": tag})
+    assert code == 304 and body == "" and h304.get("ETag") == tag  # opening the page was a view: no change
+    job = hub.engine.job_start(run["id"], "check")
+    code, head2, frag2 = _get_with(server, f"/records/{ref}/journey", tok, {"If-None-Match": tag})
+    assert code == 200 and head2.get("ETag") != tag and "under way" in frag2 and " data-busy" in frag2
+    hub.engine.job_finish(job, *hub.engine.job_call(job))
+    code, head3, frag3 = _get_with(server, f"/records/{ref}/journey", tok, {"If-None-Match": head2.get("ETag")})
+    assert code == 200 and " data-busy" not in frag3 and "under way" not in frag3 and "in the queue" not in frag3
+    assert 'class="jr-move' in frag3  # it moved on by itself once the check was done
+    assert _get_with(server, f"/records/{ref}/journey", token(hub, "jo"))[0] == 403  # no clinical read
+    assert _get_with(server, f"/records/{ref.split('/')[0]}/nothing-here/journey", tok)[0] == 404
+    js = call(server, "GET", "/static/app.js", tok)[1]
+    assert "function liveSections()" in js and 'section[data-live][id]' in js and "data-busy" in js

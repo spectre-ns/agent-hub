@@ -296,6 +296,22 @@ class Viewer:
             self._wf[key] = (wf, self.may_read_classes(workflow_classes(wf)))  # wf kept: its id stays its own
         return self._wf[key][1]
 
+    def edge_visible(self, wf: Workflow, edge_id: str) -> bool:
+        """Whether the member may be told that the record left a state by this edge (its label, and the ways out it
+        was chosen over). Which way a record went is what the work of the state it left decided: the entry and a
+        state's one way out tell nothing; an automated state's choice reads what the workflow reads; a person's
+        choice is theirs to know only when they may see every piece of work it was made in."""
+        shape = getattr(wf, "shape", None) or {}
+        edge = next((x for x in shape.get("edges") or [] if x["id"] == edge_id), None)
+        if edge is None or not edge.get("from"):
+            return True  # the entry (or no such edge: nothing to name)
+        state = next((s for s in shape.get("states") or [] if s["id"] == edge["from"]), None)
+        if state is None or len(state.get("out") or []) < 2:
+            return True
+        if state.get("automated"):
+            return self.full(wf)
+        return all(self.step_visible(wf, w)[0] for w in state.get("work") or [])
+
     def conditional(self, wf: Workflow) -> set[str]:
         """Steps that run only under a condition, or after one: whether they ran is the run's path."""
         key = ("cond", id(wf))
@@ -327,7 +343,9 @@ class Viewer:
             shown = self.step_state(wf, run, sid)
             if shown is None:
                 continue
-            out[sid] = dict(st) if shown == st.get("state") else {"state": shown}
+            # which worker has a job, and the token it answers with, are the hub's own
+            out[sid] = {k: v for k, v in st.items() if k not in ("worker", "job")} if shown == st.get("state") \
+                else {"state": shown}
         return out
 
     def _step_of(self, ev: dict) -> str | None:
@@ -349,7 +367,8 @@ class Viewer:
             if masked:
                 missing = missing or self.missing(workflow_classes(wf))
                 return {**ev, "subject": "step", "data": {"hidden": f"{self.HIDDEN_STEP}: {', '.join(missing)}"}}
-        if action in ("item.completed", "gate.decided", "action.ran", "step.failed", "item.held") and wf and data.get("step"):
+        if action in ("item.completed", "gate.decided", "action.ran", "step.failed", "item.held", "step.started",
+                      "step.late") and wf and data.get("step"):
             ok, missing = self.step_visible(wf, data["step"])
             if not ok:
                 hidden = missing

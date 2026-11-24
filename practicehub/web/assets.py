@@ -709,7 +709,8 @@ color:var(--subtle)}.col>header .col-name{font-size:14px;line-height:20px;color:
 .wf-add button{font-size:12px;padding:0 6px}.wf-says{display:block;color:var(--subtle)}
 .wf-do{padding-left:12px}.wf-steps{margin-top:8px}.wf-steps summary{cursor:pointer;color:var(--subtle)}
 .lc-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:3px;background:var(--sunken);padding:8px;margin:8px 0}
-.lc-svg{display:block;margin:0 auto;width:100%;min-width:600px;height:auto}
+.lc-svg{display:block;margin:0 auto;max-width:none;height:auto}
+dialog.form-modal.wide{width:min(1120px,calc(100vw - 32px))}
 .lc-node rect{fill:var(--loz-default-bg);stroke:var(--border);stroke-width:1}
 .lc-node text{fill:var(--loz-default-fg);font-size:11px;font-weight:700;text-anchor:middle;letter-spacing:.02em}
 .lc-node.success rect{fill:var(--loz-success-bg)}.lc-node.success text{fill:var(--loz-success-fg)}
@@ -717,10 +718,22 @@ color:var(--subtle)}.col>header .col-name{font-size:14px;line-height:20px;color:
 .lc-node.inprogress rect{fill:var(--loz-inprogress-bg)}.lc-node.inprogress text{fill:var(--loz-inprogress-fg)}
 .lc-node.start rect{stroke-width:2}
 .lc-node.current rect{stroke:var(--brand);stroke-width:3}
+.lc-node.dim{opacity:.5}.lc-node .lc-note{font-size:9px;font-weight:400;letter-spacing:0;opacity:.85}
 .lc-edge{fill:none;stroke:var(--border-bold);stroke-width:1.5;stroke-linejoin:round}
 .lc-edge.auto{stroke-dasharray:5 4}
-.lc-edge.here{stroke:var(--brand);stroke-width:2.5}
-.lc-head{fill:var(--border-bold)}.lc-head.here{fill:var(--brand)}
+.lc-edge.dim{opacity:.4}
+.lc-edge.here{stroke:var(--brand);stroke-width:2}
+.lc-edge.route{stroke:var(--fg);stroke-width:2.5;opacity:1}
+.lc-head{fill:var(--border-bold)}.lc-head.here{fill:var(--brand)}.lc-head.route{fill:var(--fg)}
+.lc-begin rect{fill:var(--surface);stroke:var(--border-bold);stroke-dasharray:3 3}
+.lc-begin text{fill:var(--subtle);font-size:11px;text-anchor:middle}
+.lc-tag text.lc-name{font-size:11px;fill:var(--fg);paint-order:stroke;stroke:var(--sunken);stroke-width:4px;stroke-linejoin:round}
+.lc-tag.here text.lc-name{fill:var(--brand)}
+.lc-tag rect.lc-num{fill:var(--fg)}.lc-tag text.lc-num{fill:var(--surface);font-size:10px;font-weight:700;text-anchor:middle}
+.lc-key.came{height:0;border-top:3px solid var(--fg)}.lc-key.faint{background:var(--loz-default-bg);opacity:.5}
+.wf-mark{font-size:12px;line-height:16px;color:var(--subtle);border:1px solid var(--border);border-radius:3px;padding:0 4px}
+.wf-mark.now{color:var(--brand);border-color:var(--brand)}
+.lc-moves .wf-state:not(.visited)>.wf-state-head .loz{opacity:.6}.wf-edge.taken>.wf-edge-head .wf-edge-name{font-weight:700}
 .lc-any rect{fill:var(--surface);stroke:var(--border)}.lc-any text{fill:var(--subtle);font-size:10px;text-anchor:middle}
 .lc-any.here rect{stroke:var(--brand)}
 .lc-key{display:inline-block;width:18px;height:10px;vertical-align:middle;margin:0 4px 0 12px;border-radius:2px}
@@ -2536,6 +2549,9 @@ function formModal() {
     dlg.querySelector("#fm-title").textContent = title;
     const body = dlg.querySelector(".fm-body");
     body.innerHTML = html;
+    dlg.classList.toggle("wide", !!body.querySelector("[data-wide]"));  // a map, not a form: room to read it
+    const here = body.querySelector(".lc-node.current");  // a long map opens where the record is
+    if (here && here.scrollIntoView) here.scrollIntoView({ block: "center" });
     dirty = !!refused && !clean;  // a refused form still holds what was typed
     body.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
     formTabs(body);
@@ -2793,55 +2809,71 @@ function boards(modal) {
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && press) endPress(); });
 }
 
-// What a record's latest move set going (RecordWork._activity_html), kept current while some of it is still open:
-// the block alone is fetched again (every 4 s, every 15 s after two minutes, only while the tab is shown) and swapped
-// when its ETag changes, saying what changed in a polite live region. It stops when the block comes back without
-// data-live. When the record itself has moved on (data-at differs), the page's forms are left as they are and a
-// status line offers the page as it is now, so nothing typed is lost. Without the script: the block's Refresh link.
-function activity() {
-  let sec = document.querySelector("#activity[data-live]");
-  if (!sec) return;
-  const at0 = sec.dataset.at, t0 = Date.now();
+// The parts of a record's page that keep themselves current while something is going on that no one here is doing:
+// what its latest move set going (#activity, RecordWork._activity_html) and its History (#journey,
+// JourneyPages._journey_html). Each says where it alone is fetched from (data-live). It is fetched again every 4 s
+// (every 1.5 s while a job is in the queue or under way: data-busy; every 15 s after two minutes; only while the tab
+// is shown) and swapped when its ETag changes, saying what changed in a polite live region; what the reader opened or
+// closed stays so. It stops when the section comes back without data-live, or after ten minutes with nothing new.
+// When the record itself has moved on, the page's forms are left as they are and a status line offers the page as it
+// is now, so nothing typed is lost. Without the script: the section's Refresh link.
+function liveSections() {
+  const first = [...document.querySelectorAll("section[data-live][id]")];
+  if (!first.length) return;
   const say = el("div", { class: "visually-hidden", role: "status", "aria-live": "polite" });
   document.body.appendChild(say);
-  let tag = null, paused = false, told = false;
   const words = (n) => (n.textContent || "").replace(/\s+/g, " ").trim();
   const lines = (n) => [...n.querySelectorAll("li")].map(words);
-  const later = () => setTimeout(poll, Date.now() - t0 > 120000 ? 15000 : 4000);
-  async function poll() {
-    if (!sec || !sec.dataset.live) return;
-    if (document.hidden) { paused = true; return; }
-    let res = null;
-    try {
-      res = await fetch(sec.dataset.live, { credentials: "same-origin", headers: tag ? { "If-None-Match": tag } : {} });
-    } catch (e) { res = null; }
-    if (!res || res.status === 304) { later(); return; }
-    if (!res.ok) { if (res.status >= 500) later(); return; }  // refused or gone: stop asking
-    tag = res.headers.get("ETag");
-    const fresh = new DOMParser().parseFromString(await res.text(), "text/html").getElementById("activity");
-    if (!fresh) return;
-    const before = new Set(lines(sec)), was = sec.querySelector("details");
-    const now = fresh.querySelector("details");
-    if (was && now) now.open = was.open || !!fresh.dataset.live;  // what the reader opened stays open
-    const node = document.adoptNode(fresh);
-    sec.replaceWith(node);
-    sec = node;
-    const changed = lines(sec).filter((t) => !before.has(t));
-    if (changed.length) say.textContent = "Updated: " + changed.slice(0, 3).join("; ");
-    else if (!sec.dataset.live) say.textContent = "Everything this move set going has settled.";
-    if (!told && sec.dataset.at !== undefined && at0 !== undefined && sec.dataset.at !== at0) {
-      told = true;
-      const work = document.getElementById("work");
-      const note = el("p", { class: "flash info moved-on", role: "status" },
-        "This has moved on since you opened it. ", el("a", { href: location.pathname + location.search }, "Show it as it is now"));
-      if (work) work.prepend(note);
+  // a fold is the same fold after a swap when it sits in the same stage and says the same thing
+  const key = (d) => d.dataset.key || (((d.parentElement && d.parentElement.closest("details[data-key]")) || { dataset: {} }).dataset.key || "")
+    + "|" + words(d.querySelector("summary") || d).replace(/\d+/g, "#");
+  const mark = (n) => (n.dataset.version !== undefined ? n.dataset.version : n.dataset.at);
+  let told = false;
+  first.forEach((start) => {
+    let sec = start;
+    const id = sec.id, mark0 = mark(sec), t0 = Date.now();
+    let tag = null, paused = false, news = Date.now();
+    const later = () => setTimeout(poll, sec.hasAttribute("data-busy") ? 1500 : Date.now() - t0 > 120000 ? 15000 : 4000);
+    async function poll() {
+      if (!sec || !sec.dataset.live) return;
+      if (document.hidden) { paused = true; return; }
+      if (Date.now() - news > 600000) return;  // nothing new for ten minutes: the Refresh link is still there
+      let res = null;
+      try {
+        res = await fetch(sec.dataset.live, { credentials: "same-origin", headers: tag ? { "If-None-Match": tag } : {} });
+      } catch (e) { res = null; }
+      if (!res || res.status === 304) { later(); return; }
+      if (!res.ok) { if (res.status >= 500) later(); return; }  // refused or gone: stop asking
+      tag = res.headers.get("ETag");
+      const fresh = new DOMParser().parseFromString(await res.text(), "text/html").getElementById(id);
+      if (!fresh) return;
+      const before = new Set(lines(sec));
+      const open = new Map([...sec.querySelectorAll("details")].map((d) => [key(d), d.open]));
+      fresh.querySelectorAll("details").forEach((d) => {
+        const k = key(d);
+        if (!open.has(k)) return;
+        d.open = d.dataset.key || id !== "activity" ? open.get(k) : open.get(k) || !!fresh.dataset.live;
+      });
+      const node = document.adoptNode(fresh);
+      sec.replaceWith(node);
+      sec = node;
+      const changed = lines(sec).filter((t) => !before.has(t));
+      if (changed.length) { news = Date.now(); say.textContent = "Updated: " + changed.slice(0, 3).join("; "); }
+      else if (!sec.dataset.live) say.textContent = id === "activity" ? "Everything this move set going has settled." : "Nothing more is going on here.";
+      if (!told && mark(sec) !== undefined && mark0 !== undefined && mark(sec) !== mark0) {
+        told = true;
+        const work = document.getElementById("work");
+        const note = el("p", { class: "flash info moved-on", role: "status" },
+          "This has moved on since you opened it. ", el("a", { href: location.pathname + location.search }, "Show it as it is now"));
+        if (work) work.prepend(note);
+      }
+      if (sec.dataset.live) later();
     }
-    if (sec.dataset.live) later();
-  }
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && paused) { paused = false; poll(); }
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && paused) { paused = false; poll(); }
+    });
+    later();
   });
-  later();
 }
 
 window.PH = { MD, el };  // for the live editor's script, which follows
@@ -2849,7 +2881,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".avatar-menu").forEach(avatarMenu);
   const modal = formModal();
   if (document.querySelector(".board [data-moves]")) boards(modal);
-  activity();
+  liveSections();
   document.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
   formTabs(document);
   kindFields(document);
@@ -5258,6 +5290,54 @@ ul.ra-started{margin:4px 0 0 20px}ul.ra-started>li{padding:2px 0}
 .ra-live{margin:8px 0 0}
 .tl-ran{margin:4px 0 0 9em}.tl-ran>summary{cursor:pointer;color:var(--subtle);font-size:13px}
 @media (max-width:640px){.tl-ran{margin-left:0}}
+/* a record's journey (JourneyPages): the stages it has been in, the work done in each, the moves between them */
+.jr-strip{list-style:none;display:flex;flex-wrap:wrap;gap:6px 0;align-items:center;padding:0;margin:0 0 8px}
+.jr-strip li{display:inline-flex;align-items:center}
+.jr-strip li+li::before{content:"\203A";color:var(--subtlest);margin:0 6px}
+.jr-strip a{text-decoration:none}.jr-strip a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.jr-strip li.now .loz{outline:2px solid var(--brand);outline-offset:1px}
+.jr-legend{margin:0 0 12px}
+.jr-key{display:inline-block;width:10px;height:10px;margin:0 4px 0 12px;background:var(--subtle)}
+.jr-key:first-child{margin-left:0}.jr-key.person{border-radius:50%}
+.jr-key.agent{clip-path:polygon(25% 3%,75% 3%,100% 50%,75% 97%,25% 97%,0 50%)}
+.jr-key.auto{background:none;width:auto;height:auto;color:var(--subtle)}
+ol.jr-stages li{border-bottom:0;padding:0}
+ol.jr-stages>li.jr-stage>details{border-left:2px solid var(--line);margin-left:7px;padding:0 0 4px 16px}
+ol.jr-stages>li.jr-stage.now>details{border-left-color:var(--brand)}
+.jr-stage>details>summary{position:relative;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;padding:8px 0 4px;
+list-style:none;cursor:pointer}
+.jr-stage>details>summary::-webkit-details-marker{display:none}
+.jr-stage>details>summary::before{content:"";position:absolute;left:-24px;top:11px;box-sizing:border-box;width:14px;height:14px;
+border-radius:50%;background:var(--surface);border:2px solid var(--border-bold)}
+.jr-stage.now>details>summary::before{border-color:var(--brand);background:var(--brand)}
+.jr-stage>details:not([open])>summary::after{content:"\2026";color:var(--subtlest)}
+ul.jr-lines{margin:2px 0 4px}
+ol.jr-stages li.jr-line{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:center;padding:3px 0;min-height:28px}
+.jr-mark{display:inline-grid;place-items:center;flex:none;width:24px;height:24px;color:var(--subtle)}
+.jr-who .who{display:inline-flex;align-items:center;gap:6px}
+.jr-work.jr-person .jr-who,.jr-work.jr-agent .jr-who{order:-1}
+.jr-said{color:var(--subtle)}.jr-at{margin-left:auto;white-space:nowrap}
+.jr-going .jr-said,.ra-word.going,.jr-word.going{color:var(--brand);font-weight:600}
+.jr-open .jr-said,.jr-taken .jr-said{color:var(--fg);font-weight:600}
+.jr-none{margin:2px 0 6px}
+.jr-move{margin:6px 0 8px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--sunken)}
+.jr-move.jr-failed{border-color:var(--danger-fg)}.jr-move.jr-going{border-color:var(--brand)}
+.jr-move-head{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+.jr-rail{color:var(--subtlest)}.jr-arrow{color:var(--subtlest)}
+.jr-tag{font-size:12px;line-height:16px;color:var(--subtle);border:1px solid var(--line);border-radius:3px;padding:0 4px}
+.jr-wrote{margin:4px 0 0}.jr-move ul.ra-list{margin:6px 0 0 4px}
+.jr-fold{margin:4px 0 0}.jr-fold>summary{cursor:pointer;color:var(--subtle);font-size:13px}
+.jr-fold ul{margin:4px 0 0 20px;padding:0;color:var(--subtle);font-size:13px;list-style:disc}
+ol.jr-stages .jr-fold li{padding:1px 0}
+.jr-line>.jr-fold{margin:0}
+.jr-then{margin:8px 0 0 4px;padding-left:12px;border-left:2px solid var(--line)}.jr-then>p{margin:0 0 4px}
+.jr-move.nested{border:0;background:none;padding:0;margin:0 0 4px}
+.jr-live{margin:12px 0 0}
+.ra-retried{display:block;margin-left:1.4em}
+.ra-mark.spin{animation:jr-spin 1.4s linear infinite}
+@keyframes jr-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.ra-mark.spin{animation:none}}
+@media (max-width:640px){.jr-at{margin-left:0;flex-basis:100%}}
 """
 
 CSS = CSS + RECWORK_CSS

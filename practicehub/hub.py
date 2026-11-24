@@ -31,6 +31,7 @@ from .credentials import CredentialsMixin
 from .outbox import OutboxMixin
 from .moves import MovesMixin
 from .activity import ActivityMixin
+from .journey import JourneyMixin
 from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
 
@@ -157,7 +158,7 @@ def _how(data: dict) -> str:
     return f"{how} ({data['format']})" if how == "export" and data.get("format") else how
 
 
-class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin):
+class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin, JourneyMixin):
     def __init__(self, state_dir: Path | str | None, *, pack: str | packmod.Pack | None = None,
                  authorizer: Authorizer | None = None, records: RecordStore | None = None, models=None):
         self.state_dir = Path(state_dir) if state_dir else None
@@ -202,6 +203,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         self.engine = Engine(self)
         self.engine.zone()  # an unknown time zone, or no tz data on this machine, fails here: never wrong dates later
         self.agents_wanted = threading.Event()  # set when new work appears; an in-process agent loop waits on it
+        self.jobs_wanted = threading.Event()  # set when a block is queued; the job workers wait on it
         if self.pack and pack is None and self.pack.upgrades and self._pack_in_force() is not None:
             # an upgrade whose definitions were approved before this pack.py was running, or one a restart stopped
             # part way: the hub still opens if it fails, and the track says what did not happen
@@ -717,6 +719,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         """New work: an agent loop running in this process (``serve --agents``) picks it up now, not at its next
         poll. Agents still take only what ``Engine.eligibility`` allows."""
         self.agents_wanted.set()
+
+    # Whether block automations are queued for a worker (``Engine.jobs``) or run where they become ready. Set by
+    # whatever starts workers in this process (``cli.start_job_loop``, for ``practicehub serve``); a command or a
+    # test has none, and runs them in place.
+    jobs_async = False
+
+    def wake_jobs(self) -> None:
+        """A job is in the queue: a worker in this process takes it now, not at its next look."""
+        self.jobs_wanted.set()
 
     # ------------------------------------------------------------------ setup
     def _subjects(self) -> None:

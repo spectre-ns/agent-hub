@@ -27,7 +27,9 @@ class ActivityMixin:
              "ran": [{"step", "title", "state", "at", "error", "hidden", "started", "message"}],
              "settled"}
 
-        ``state`` is done, failed, or held (pending behind a failed one, while the run still runs). ``who`` is the
+        ``label`` is "" when the viewer may not know which way the record left its state (``Viewer.edge_visible``).
+        ``state`` is done, failed, held (pending behind a failed one, or behind a job, while the run still runs),
+        or queued or running (a block a worker runs: ``since`` when it began, ``ms`` how long it took). ``who`` is the
         actor id of the event that set the move going (a decision, a completion, ``run.started`` for the start edge,
         an automation's for an automated state). ``after_person`` False: the move followed on from the one before (an
         automated state's edge); a cascade is a move with it True and the moves after it with it False. A run whose
@@ -40,7 +42,8 @@ class ActivityMixin:
             return []
         evs: dict = {}  # (run id, step id) -> its action.ran / step.failed events, oldest first
         for e in self.db.events.find({"run_id": {"$in": [r["id"] for r in runs]},
-                                      "action": {"$in": ["action.ran", "step.failed"]}}, sort=[("seq", ASC)]):
+                                      "action": {"$in": ["action.ran", "step.failed", "step.queued",
+                                                         "step.started"]}}, sort=[("seq", ASC)]):
             sid = (e.get("data") or {}).get("step")
             if isinstance(sid, str):
                 evs.setdefault((e["run_id"], sid), []).append(e)
@@ -67,7 +70,7 @@ class ActivityMixin:
             fails = [FAILED.format(step=s) for s in own if _has(wf, FAILED.format(step=s))]
             arrive = ARRIVE.format(edge=edge["id"])
             every = own + fails + ([arrive] if _has(wf, arrive) else [])
-            if not any((steps.get(s) or {}).get("state") in ("done", "failed") for s in every):
+            if not any((steps.get(s) or {}).get("state") in ("done", "failed", "queued", "running") for s in every):
                 continue  # not taken
             first = min((evs[(run["id"], s)][0] for s in every if (run["id"], s) in evs),
                         key=lambda e: e["seq"], default=None)
@@ -82,6 +85,8 @@ class ActivityMixin:
                     state = "done"
                 elif st == "failed":
                     state = "failed"
+                elif st in ("queued", "running") and running:
+                    state = st  # a block a worker runs: in the queue, then under way
                 elif st == "pending" and running:
                     state = "held"
                 else:
@@ -100,11 +105,15 @@ class ActivityMixin:
                     title = sid
                 error = (steps.get(sid) or {}).get("error") if state == "failed" else None
                 ran.append({"step": sid, "title": title if ok else "", "state": state,
+                            "since": (steps.get(sid) or {}).get("started_at") if ok else None,
+                            "ms": (steps.get(sid) or {}).get("ms") if ok else None,
                             "at": mine[-1]["at"] if mine else None,
                             "error": error if ok and not withheld else None, "hidden": not ok,
                             "started": [{k: s[k] for k in ("ref", "run", "readable")} for s in started] if ok else [],
                             "message": message if ok else None})
-            out.append({"run": run["id"], "edge": edge["id"], "label": edge.get("label") or edge["id"],
+            # which way a record went is told only to who may see the work that chose it (``Viewer.edge_visible``)
+            out.append({"run": run["id"], "edge": edge["id"],
+                        "label": (edge.get("label") or edge["id"]) if view.edge_visible(wf, edge["id"]) else "",
                         "to": self._landed(wf, run, every, evs) or edge.get("to"),
                         "seq": start["seq"] if start else 0, "at": start["at"] if start else None,
                         "who": start["actor"] if start else None,

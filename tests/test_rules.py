@@ -9,6 +9,7 @@ import pytest
 from conftest import M, claim_run, item_for, quiet, run_of, snapshot_onto, visit_run
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid, NotFound, member_ref
+from practicehub import visibility
 from practicehub.models import ModelError, ModelGateway
 
 
@@ -726,6 +727,70 @@ def quality(hub):
 
 def _doc(hub):
     return f"Document/{hub.records.search('Document')[0]['id']}"
+
+
+
+def test_a_block_is_a_job_where_a_worker_runs_and_no_transaction_waits_on_its_engine(hub, monkeypatch):
+    """Rule: where a worker runs (``Hub.jobs_async``, which ``practicehub serve`` sets), a block automation is not
+    run in the request that makes it ready. It is queued (``runs.steps[sid].state`` queued, ``runs.jobs``), taken by
+    one worker (running: ``step.started`` puts what it is sent on the track before it is sent), run with no
+    transaction open (no other request waits on its engine), and its answer written in a transaction of its own
+    (done or failed, as in place: outputs checked, the practice told of a failure). It is sent only its declared
+    inputs, as in place. A job on an engine that was cut short fails and is never run again by itself: whether it
+    finished there is not known, so a person decides. With no worker (a command, a test) a block runs where it
+    becomes ready, as it always did."""
+    from practicehub import backends
+    from test_clinic_records import LAB
+    lab = M(hub, "lab-feed")
+    inline = hub.engine.run(hub.engine.start(lab, "lab-result-review", record=_patient(hub), inputs=dict(LAB))["id"])
+    assert inline["steps"]["check"]["state"] == "done" and not hub.jobs_async  # no worker: where it became ready
+    hub.jobs_async = True
+    run = hub.engine.start(lab, "lab-result-review", record=_patient(hub), inputs={**LAB, "value": "131"})
+    row = hub.db.runs.get(run["id"])
+    assert row["steps"]["check"]["state"] == "queued" and row["jobs"] == ["check"] and "check" not in row["ctx"]
+    seen = {}
+    real = backends.LocalPython.run
+
+    def watched(self, block, inputs, meta):
+        seen.update(open=hub.db.in_transaction(), inputs=dict(inputs),
+                    state=hub.db.runs.get(run["id"])["steps"]["check"]["state"],
+                    told=[x["data"]["params"] for x in hub.track.list(run_id=run["id"])
+                          if x["action"] == "step.started"])
+        return real(self, block, inputs, meta)
+    monkeypatch.setattr(backends.LocalPython, "run", watched)
+    assert hub.engine.run_jobs() == 1
+    assert seen["open"] is False and seen["state"] == "running"
+    assert set(seen["inputs"]) == {"test", "value", "unit", "range"} and seen["told"] == [seen["inputs"]]
+    row = hub.db.runs.get(run["id"])
+    assert row["steps"]["check"]["state"] == "done" and row["jobs"] is None and row["ctx"]["check"]["band"]
+    # an engine's job cut short: failed, said to be cut short, and not in the queue again
+    again = hub.engine.start(lab, "lab-result-review", record=_patient(hub), inputs={**LAB, "value": "120"})
+    hub.engine.job_start(again["id"], "check")
+    row = hub.engine.run(again["id"])
+    row["steps"]["check"].update(engine="webhook", started_at="2020-01-01T00:00:00Z")
+    hub.engine._save(row)
+    assert hub.engine.recover_jobs() == 1
+    st = hub.engine.run(again["id"])["steps"]["check"]
+    assert st["state"] == "failed" and st["interrupted"] and "not known" in st["error"] and hub.engine.jobs() == []
+    assert hub.db.items.find({"run_id": again["id"], "kind": "notice"})  # a person is told
+
+
+def test_the_portal_answers_from_the_screen_though_blocks_are_jobs(hub):
+    """Rule: a caller that answers from what a block found runs it in place (``Engine.jobs_inline``). The portal
+    tells a patient what the screen of their message advised in the same request, worker or no worker: someone who
+    writes of chest pain is told what to do now, not once a worker gets to it."""
+    from test_portal import signed_in
+    hub.jobs_async = True
+    p, ref, token = signed_in(hub)
+    got = p.book(ref, "new-concern", None, {"reason": "crushing chest pain and I can't breathe", "urgency": "urgent"})
+    assert got["alarm"] is True and got["advice"] and hub.engine.jobs() == []
+    run = hub.engine.run(got["run"])
+    assert run["steps"]["screen"]["state"] == "done" and "queued_at" not in run["steps"]["screen"]
+    # the same request made by staff in the hub is a job: nobody is waiting on its answer in that request
+    other = "Patient/" + [r for r in hub.records.search("Patient", limit=None) if f"Patient/{r['id']}" != ref][0]["id"]
+    jo_run = hub.engine.start(M(hub, "jo"), "appointment-request", record=other,
+                              inputs={"reason": "a rash on my arm", "kind": "new-concern"})
+    assert hub.engine.run(jo_run["id"])["steps"]["screen"]["state"] == "queued"
 
 
 def test_every_record_is_checked_against_its_type(hub):
@@ -6902,6 +6967,59 @@ def test_a_record_s_history_tells_its_edits_moves_and_steps_in_words_folding_wha
     folds = [e for e in tl if e.get("hidden")]
     assert folds and all(re.fullmatch(r"\d+ clinical steps?", e["text"]) for e in folds)
     assert sum(e["hidden"] for e in folds) >= 4 and len(folds) < sum(e["hidden"] for e in folds)
+
+
+def test_a_journey_folds_what_the_viewer_may_not_read_and_never_names_the_edge_a_hidden_step_chose(hub):
+    """Rule: ``Hub.record_journey(viewer, ref)`` tells the record's history nested by stage, and tells a viewer no
+    more than the flat history does. A piece of work they may not see is a fold with its data classes and a count:
+    no title, no one's name, no choice. A stop only the workflow keeps is a stage only for who may see the step that
+    put the record there. Which way a record left a state is what the work there decided
+    (``Viewer.edge_visible``): who may not see that work is told where the record went (its own history) but not
+    the edge's name, who chose it, or the ways out it was chosen over; ``Hub.record_activity`` names it no more."""
+    _jobs(hub)
+    amara, liam, rana = M(hub, "dr-amara"), M(hub, "dr-liam"), M(hub, "rana")
+    ref, run = _job(hub)
+    hub.move_record(amara, ref, "doing")
+    hub.move_record(liam, ref, "done", {"outcome": "New seal fitted", "hours": 3})
+    hub.engine.complete(amara, item_for(hub, run, "file"), {"filed": True})
+    hub.move_record(amara, ref, "approved", signature="Approved")
+    full = hub.record_journey(amara, ref)
+    assert [st["label"] for st in full["stages"]] == ["Open", "Doing", "Done", "Filed", "Approved"]
+    assert "Do the work" in json.dumps(full) and "File the job sheet" in json.dumps(full)
+    seen = hub.record_journey(rana, ref)  # a practice manager reads visits, not clinical records
+    assert [st["label"] for st in seen["stages"]] == ["Open", "Doing", "Done", "Approved"]  # no stop of the workflow's
+    blob = json.dumps(seen)
+    assert "Do the work" not in blob and "File the job sheet" not in blob and run["id"] not in blob
+    folds = [ln for st in seen["stages"] for ln in st["lines"] if ln["kind"] == "fold"]
+    assert folds and all(set(f) == {"kind", "what", "count", "classes", "titles"} and f["what"] == "step"
+                         and f["classes"] == "clinical" and f["titles"] == [] for f in folds)
+    assert not [ln for st in seen["stages"] for ln in st["lines"] if ln["kind"] == "work"]
+    # the record's own moves are its history: where it went, who moved it by hand, what the move wrote
+    moves = [m for st in seen["stages"] for m in st["moves"] if m["how"] == "hand"]
+    assert [(m["label"], m["to_label"]) for m in moves] == [("Start", "Doing"), ("Finish", "Done"),
+                                                            ("Approve", "Approved")]
+    # a state with several ways out: the nurse's reading of a request is clinical, and the desk may not see it
+    jo, noor = M(hub, "jo"), M(hub, "noor")
+    pat = hub.records.search("Patient")[0]
+    run = hub.engine.start(jo, "appointment-request", record=f"Patient/{pat['id']}",
+                           inputs={"reason": "my knee hurts when I run", "kind": "new-concern"})
+    visit = hub.engine.run(run["id"])["record"]
+    hub.engine.complete(noor, item_for(hub, run, "triage"), {"outcome": "book-it-soon"})
+    wf = hub.workflow("appointment-request")[0]
+    assert not visibility.Viewer(hub, jo).edge_visible(wf, "book-it-soon")
+    assert visibility.Viewer(hub, amara).edge_visible(wf, "book-it-soon")
+    assert visibility.Viewer(hub, jo).edge_visible(wf, "start")  # the entry chooses nothing
+    reading = next(st for st in hub.record_journey(amara, visit)["stages"] if st["label"] == "Being read")
+    assert reading["moves"][0]["label"] == "Book it soon" and reading["moves"][0]["by"]["name"] == noor["name"]
+    assert reading["moves"][0]["not_taken"] == ["An ordinary slot is fine", "I will call and book"]
+    reading = next(st for st in hub.record_journey(jo, visit)["stages"] if st["label"] == "Being read")
+    (move,) = reading["moves"]
+    assert move["label"] is None and move["by"] is None and move["not_taken"] == [] and move["not_needed"] is None
+    assert move["to_label"] == "Requested" and move["steps"] == []  # where it went is the record's own history
+    blob = json.dumps(hub.record_journey(jo, visit))
+    assert "Book it soon" not in blob and "ordinary slot" not in blob and noor["name"] not in blob
+    assert [m["label"] for m in hub.record_activity(jo, visit) if m["edge"] == "book-it-soon"] == [""]
+    assert [m["label"] for m in hub.record_activity(amara, visit) if m["edge"] == "book-it-soon"] == ["Book it soon"]
 
 
 # ------------------------------------------------------------------ cancelling a run: who may, and who is told

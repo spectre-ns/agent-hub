@@ -106,12 +106,14 @@ def test_the_history_tells_the_steps_and_folds_what_the_member_may_not_read(hub,
     run = visit_run(hub)
     url = f"/records/{run['record']}?tab=history"
     page = call(server, "GET", url, token(hub, "dr-amara"))[1]
-    timeline = html.unescape(page.split('<ol class="timeline">', 1)[1].split("</ol>", 1)[0])
-    assert "'End the visit'" in timeline or "End the visit" in timeline
-    assert "started" in timeline and "done" in timeline
+    journey = html.unescape(page.split('<section id="journey"', 1)[1].split("</section>", 1)[0])
+    assert 'class="jr-strip"' in journey and journey.count('<li class="jr-stage') >= 3  # nested by stage
+    assert "<b>End the visit</b>" in journey and "done" in journey
+    assert 'class="jr-move jr-edge jr-done"' in journey  # a move along its workflow's edge, with what it ran
     jo = call(server, "GET", url, token(hub, "jo"))[1]
-    shown = jo.split('<ol class="timeline">', 1)[1].split("</ol>", 1)[0]
+    shown = jo.split('<section id="journey"', 1)[1].split("</section>", 1)[0]
     assert "not shown to you" in shown and "Draft the note" not in shown  # a clinical step, folded to one line
+    assert shown.count('<li class="jr-stage') == journey.count('<li class="jr-stage')  # where it went is its own
 
 
 def test_work_is_cancelled_from_the_record_and_a_refusal_says_why_there(hub, server):
@@ -428,9 +430,9 @@ def _called_back(hub):
 
 
 def test_the_history_tells_a_move_once_with_what_it_ran_and_nothing_of_the_edges_not_taken(hub, server):
-    """History tells a move in the record's own "Moved from … to …" row, with what the move ran and started folded
-    under it (``tl-ran``). The automations of edges the record did not take are not lines ("skipped"), nor is the
-    step that moves the record ("Move to Closed" done); an automated state's own work keeps its line."""
+    """History tells a move once, with what the move ran and started nested under it. The automations of edges the
+    record did not take are not lines ("skipped"); an automated state's own work keeps its line. The page nests
+    the same history by stage (``Hub.record_journey``): the move out of a stage, then its automations."""
     ref, _ = _called_back(hub)
     rows = hub.record_timeline(M(hub, "dr-amara"), ref)
     (moved,) = [r for r in rows if r["text"].startswith("Moved from in review to closed")]
@@ -446,15 +448,19 @@ def test_the_history_tells_a_move_once_with_what_it_ran_and_nothing_of_the_edges
         assert gone not in said, gone  # edges not taken, and the move itself, are no lines of their own
     assert sum(1 for r in rows if r.get("ran")) == 1  # the other moves ran nothing
     page = call(server, "GET", f"/records/{ref}?tab=history", token(hub, "dr-amara"))[1]
-    timeline = page.split('<ol class="timeline">', 1)[1].split("</ol>", 1)[0]
-    # the move's row, up to the end of its folded list (the list has <li>s of its own)
-    li = timeline.split("Moved from in review to closed", 1)[1].split("</details>", 1)[0]
-    assert '<details class="tl-ran">' in li
-    summary = html.unescape(li.split("<summary>", 1)[1].split("</summary>", 1)[0])
-    assert summary == "3 automations ran, 1 record started"
-    assert "Ask a nurse to call the patient" in html.unescape(li.split("</summary>", 1)[1])
-    assert "skipped" not in html.unescape(timeline).split("Moved from in review to closed", 1)[1]
-    assert not re.search(r'href="/runs/run-', timeline)
+    journey = html.unescape(page.split('<section id="journey"', 1)[1].split("</section>", 1)[0])
+    # the move out of "In review": the edge the physician chose, where it went, and what it ran under it
+    review = journey.split('<li class="jr-stage', )[-2]  # the stage before the one it is in now
+    assert ">In review<" in review.split("</summary>", 1)[0]
+    move = review.split('<div class="jr-move jr-edge jr-done">', 1)[1]
+    assert "<b>Call the patient</b>" in move.split("</div>", 1)[0] and ">Closed<" in move.split("</div>", 1)[0]
+    listed = move.split('<ul class="plain ra-list">', 1)[1].split("</details>", 1)[0]
+    assert "Ask a nurse to call the patient" in listed and "Note who reviewed the result, and when" in listed
+    assert 'class="plain ra-started"' in listed  # the follow-up it started, as it is now
+    assert "other ways out not taken" in move and "not needed" in move
+    for gone in ("Tell the patient it is normal", "Ask for a visit", "Page the physicians"):
+        assert gone not in journey, gone  # automations of the edges not taken are told nowhere
+    assert "skipped" not in journey and not re.search(r'href="/runs/run-', journey)
 
 
 def test_a_move_summary_counts_what_ran_what_did_not_go_through_and_what_it_started():

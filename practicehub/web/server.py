@@ -67,6 +67,7 @@ from .office_pages import OfficePages
 from .live_pages import LivePages
 from .record_work import RecordWork
 from .records_pages import Download, RecordPages, a_an
+from .journey_pages import JourneyPages
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
 MAX_BODY = 26 * 1024 * 1024  # the largest file (Hub.MAX_FILE) and the form around it
@@ -104,7 +105,7 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, DefinitionPages, StructurePages, OfficePages, LivePages, McpPages,
+class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, DashboardPages, DefinitionPages, StructurePages, OfficePages, LivePages, McpPages,
           AnalyticsPages, BpmnPages, HolderWords, PassPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
@@ -960,6 +961,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                    "done": ("Done", "done"), "cancelled": ("Cancelled", ""), "waiting": ("Waiting", "wait")}
     STEP_STATE = {"pending": ("To come", ""), "active": ("Now", "prog"), "done": ("Done", "done"),
                   "skipped": ("Not needed", ""), "failed": ("Stopped", "bad"), "waiting": ("Now", "wait"),
+                  "queued": ("In the queue", "wait"), "running": ("Under way", "prog"),
                   "if-needed": ("If needed", "")}
     RUN_STATUS = {"running": ("In progress", "prog"), "completed": ("Done", "done"), "cancelled": ("Cancelled", "")}
 
@@ -2297,6 +2299,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         "run.deadline_missed": "noted that this work missed its deadline", "action.ran": "did an automatic step",
         "step.activated": "started a step", "step.done": "finished a step", "step.skipped": "found a step not needed",
         "step.waiting": "is waiting", "step.failed": "could not do a step", "step.retried": "tried a step again",
+        "step.queued": "put an automatic step in the queue", "step.started": "began an automatic step",
+        "step.requeued": "put a step that was cut short back in the queue",
+        "step.late": "got the answer to a step after it was over",
         "item.claimed": "took the work", "item.released": "gave the work back", "item.escalated": "passed the work up",
         "item.overdue": "noted the work is late", "item.taken_over": "took the work over", "item.held": "held the work "
         "for approval", "item.passed_on": "passed the work on", "item.refused": "refused the work",
@@ -2368,12 +2373,14 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         return (f'<div class="flowwrap"><svg data-flow="{fid}"></svg></div>{leg}'
                 f'<script type="application/json" id="{fid}">{self._flow_json(wf, run, links, viewer)}</script>')
 
-    def _states_view(self, wf) -> str:
+    def _states_view(self, wf, marks: dict | None = None) -> str:
         """A workflow written as states and edges (practicehub/states.py), as its page shows it: where the record
         enters, then each state it stops in with the work done there, and each edge out of it: what the person
         chooses (or, on an automated state, when the record leaves that way), the automations that run on the way,
-        and where it lands."""
+        and where it lands. ``marks`` (a record's own view of it): ``{"visited", "current", "taken"}``, the states
+        that record has been in, the one it is in, and the edges it took, each said in a word beside its name."""
         shape = wf.shape
+        marks = marks or {}
         tones = {st["id"]: st.get("tone") for st in shape["states"]}
         names = {st["id"]: st.get("label") or self.human(st["id"]) for st in shape["states"]}
 
@@ -2418,8 +2425,11 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                     line += f' <span class="muted">and sends it to</span> {loz(own["to"])}'
                 dos.append(f"<li>{line}</li>")
             lands = (f'{loz(edge["to"])}' if edge.get("to") else "")
-            return (f'<li class="wf-edge"><div class="wf-edge-head"><span class="wf-edge-name">{e(edge["label"])}</span>'
-                    f' <span class="wf-arrow" aria-label="goes to">→</span> {lands}</div>{cond}'
+            took = edge["id"] in (marks.get("taken") or ())
+            return (f'<li class="wf-edge{" taken" if took else ""}"><div class="wf-edge-head">'
+                    f'<span class="wf-edge-name">{e(edge["label"])}</span>'
+                    f' <span class="wf-arrow" aria-label="goes to">→</span> {lands}'
+                    f'{" <span class=wf-mark>taken</span>" if took else ""}</div>{cond}'
                     + (f'<ul class="wf-do">{"".join(dos)}</ul>' if dos else "") + "</li>")
 
         edges = {x["id"]: x for x in shape["edges"]}
@@ -2436,7 +2446,10 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             else:
                 how = "It ends here"
             ways = "".join(edge_block(edges[x], st.get("automated")) for x in st["out"])
-            out.append(f'<div class="wf-state" id="state-{e(st["id"])}"><div class="wf-state-head">{loz(st["id"])}'
+            mark = ('<span class="wf-mark now">it is here</span>' if st["id"] == marks.get("current") else
+                    '<span class="wf-mark">been here</span>' if st["id"] in (marks.get("visited") or ()) else "")
+            out.append(f'<div class="wf-state{" visited" if mark else ""}" id="state-{e(st["id"])}">'
+                       f'<div class="wf-state-head">{loz(st["id"])} {mark}'
                        f' <span class="muted">{e(how)}</span></div>'
                        + (f'<p class="muted">{e(st["help"])}</p>' if st.get("help") else "")
                        + (f'<ul class="wf-work">{work}</ul>' if work else "")
@@ -2572,7 +2585,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                 lines.append(("Held by", self.holder_html(item)))
         if run["status"] == "running":
             beside = [s for s in wf.steps if s.id in shown_steps and s.id != at
-                      and shown_steps[s.id]["state"] in ("waiting", "active")]
+                      and shown_steps[s.id]["state"] in ("waiting", "active", "queued", "running")]
             for s in beside:
                 lines.append(("Also", f'{e(s.title)} {self._loz(self.STEP_STATE, shown_steps[s.id]["state"])}'))
             nxt = [s for s in wf.steps if s.id in shown_steps and shown_steps[s.id]["state"] == "pending"][:2]

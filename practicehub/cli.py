@@ -138,6 +138,8 @@ def cmd_serve(args):
         print(f"warning: {hub.member(row['id'])['name']}'s sponsor does not reach what it does "
               f"({', '.join(row['beyond'])}): a member admin names a sponsor who does (practicehub member sponsor)")
     hub.track.anchor()
+    if args.job_workers > 0:  # blocks run outside the requests that make them ready (0: where they become ready)
+        start_job_loop(hub, args.job_workers, delay=args.job_delay if args.dev else 0.0)
     start_clock(hub, args.tick_interval)
     if args.agents:
         start_agent_loop(hub, args.agent_interval)
@@ -217,6 +219,42 @@ def start_agent_loop(hub, interval: float = 30.0):
     t = threading.Thread(target=loop, name="agents", daemon=True)
     t.start()
     return t
+
+
+def start_job_loop(hub, workers: int = 3, interval: float = 5.0, delay: float = 0.0):
+    """Run block automations in this process, outside the requests that make them ready (``Engine.jobs``): from now
+    on the hub queues them (``Hub.jobs_async``), and ``workers`` threads take them as they are queued and every
+    ``interval`` seconds. The first worker takes only python blocks (the sandbox: quick), so a screen that decides
+    whether someone is paged never waits behind a slow engine. ``delay``: seconds each job waits before it runs,
+    to watch one go by in ``--dev``."""
+    import threading
+
+    hub.jobs_async = True
+    hub.engine.job_delay = delay
+    try:
+        cut = hub.engine.recover_jobs(startup=True)
+        if cut:
+            print(f"[jobs] {cut} job(s) were cut short when the hub last stopped", flush=True)
+    except Exception as exc:  # noqa: BLE001 - the hub still serves; the tick tries again
+        print(f"[jobs] could not look for jobs cut short: {exc}", flush=True)
+
+    def loop(lane):
+        while True:
+            hub.jobs_wanted.wait(interval)
+            hub.jobs_wanted.clear()
+            try:
+                hub.sync_modules()
+                hub.engine.run_jobs(lane)
+            except Exception as exc:  # noqa: BLE001 - keep the worker alive; a job cut short is found by the tick
+                print(f"[jobs] a worker stopped a round: {exc}", flush=True)
+            if hub.engine.jobs(lane):
+                hub.jobs_wanted.set()  # more came in meanwhile (another worker cleared the flag)
+
+    threads = [threading.Thread(target=loop, args=("local" if n == 0 and workers > 1 else None,),
+                                name=f"jobs-{n}", daemon=True) for n in range(max(1, workers))]
+    for t in threads:
+        t.start()
+    return threads
 
 
 def cmd_agents_run(args):
@@ -726,6 +764,7 @@ def cmd_module_remove(args):
 def cmd_tick(args):
     hub = build_hub(args)
     out = hub.engine.tick()
+    hub.engine.run_jobs()  # a job still in the queue (no served hub took it) runs now
     late = hub.outbox_tick()
     swept = portal_sweep(hub)
     hub.track.anchor()
@@ -860,6 +899,11 @@ def main(argv=None):
     p.add_argument("--agents", action="store_true", help="also run the agents in this process, as work appears")
     p.add_argument("--agent-interval", type=float, default=30.0, help="seconds between agent rounds when idle")
     p.add_argument("--tick-interval", type=float, default=60.0, help="seconds between ticks (scheduled work, overdue items); 0 turns it off")
+    p.add_argument("--job-workers", type=int, default=3,
+                   help="threads that run block automations outside the requests that make them ready; 0 runs "
+                        "each where it becomes ready")
+    p.add_argument("--job-delay", type=float, default=0.0,
+                   help="with --dev: seconds each job waits before it runs, to watch one go by")
     p.set_defaults(fn=cmd_serve)
 
     po = sub.add_parser("portal", help="the online booking portal for the people the practice serves"

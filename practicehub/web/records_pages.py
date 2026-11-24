@@ -29,8 +29,10 @@ def ran_summary(ran: list[dict]) -> str:
     done = sum(1 for a in ran if a.get("state") == "done")
     failed = sum(1 for a in ran if a.get("state") == "failed")
     held = sum(1 for a in ran if a.get("state") == "held")
+    going = sum(1 for a in ran if a.get("state") in ("queued", "running"))
     started = sum(len(a.get("started") or []) for a in ran if not a.get("hidden"))
     parts = ([n(done, "automation", "automations") + " ran"] if done else []) \
+        + ([n(going, "automation", "automations") + " under way"] if going else []) \
         + ([n(failed, "automation", "automations") + " did not go through"] if failed else []) \
         + ([n(held, "automation", "automations") + " waiting"] if held else []) \
         + ([n(started, "record", "records") + " started"] if started else [])
@@ -116,6 +118,7 @@ class RecordPages:
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/export", self.page_export_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)", self.page_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/activity", self.page_record_activity)
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/journey", self.page_record_journey)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>edit|move|sign)", self.post_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/move", self.page_move)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/attach", self.post_attach)
@@ -2027,22 +2030,12 @@ class RecordPages:
         return "".join(out) or "<p class='muted'>Nothing links to or from this record.</p>"
 
     def _history_panel(self, me, rt, ref) -> str:
-        """Its history as one list, oldest first (``Hub.record_timeline``): its edits, its moves with what they wrote
-        and the signature they carried, and the steps of the work walking it; a stretch the member may not read is one
-        quiet line. Each version, in detail, is folded below."""
+        """Its history nested by stage (``JourneyPages._journey_html`` over ``Hub.record_journey``): where it has
+        been, the work done in each stage and by whom, and each move with what it ran; what the member may not read
+        is one quiet line. Each version, in detail, is folded below."""
         versions = self.hub.record_history(me, ref)
-        rows = []
-        for t in self.hub.record_timeline(me, ref, activity=self.activity_of(me, ref)):
-            if t.get("hidden"):
-                rows.append(f'<li class="tl-hidden muted">{e(t["text"])}, not shown to you</li>')
-                continue
-            ran = t.get("ran") or []  # a move: what it ran and started, the started records as they are now
-            rows.append(f'<li><span class="tl-at muted">{self._at(t["at"])}</span> {e(t["text"])}'
-                        + (f' <span class="muted">— {e(t["who"])}</span>' if t.get("who") and t["who"] not in t["text"] else "")
-                        + (f'<details class="tl-ran"><summary>{e(ran_summary(ran))}</summary>'
-                           f'{self._ran_list_html(me, ran)}</details>' if ran else "")
-                        + "</li>")
-        out = (f'<ol class="timeline">{"".join(rows)}</ol>' if rows else "<p class='muted'>Nothing yet.</p>")
+        url = e(self.record_href(ref)) if rt.part_of else f"/records/{e(ref)}"
+        out = self._journey_html(me, rt, ref, url)
         out += (f'<details class="tl-versions"><summary>Each version, in detail</summary>'
                 f'{self._history_in_words(me, rt, ref, versions)}</details>')
         if self.hub.is_policy_owner(me):  # the privacy officer answers "who looked at my chart?"

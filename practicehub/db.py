@@ -20,7 +20,8 @@ The same in every collection:
 
 What the lists below cannot say:
 
-``runs.steps`` is ``{step id: {"state": pending | active | waiting | done | skipped | failed, ...}}`` and ``runs.ctx``
+``runs.steps`` is ``{step id: {"state": pending | active | waiting | done | skipped | failed, ...}}`` (a block
+automation run by a worker is also queued, then running; ``runs.jobs`` lists those, None when there are none) and ``runs.ctx``
 what each step produced, with ``ctx.run`` (the run's own: record, subject, started_by, parent, previous, origin...)
 and ``ctx.input``. ``runs.status`` is running, completed or cancelled. ``runs.refs`` is every record the run carries;
 ``runs.waits_on`` the record its waits can see ("*": any), ``runs.resting`` that nothing is to be done about it;
@@ -93,7 +94,7 @@ SHAPES = {
                                 "resolved_at resolved_by"),
     # work
     "runs": ("id", "id workflow_id version title record subject status ctx steps started_by root_event item refs "
-                   "waits_on resting picks at deadline_at deadline_missed_at created_at updated_at"),
+                   "waits_on resting jobs picks at deadline_at deadline_missed_at created_at updated_at"),
     "items": ("id", "id n run_id step_id kind title role assignee persons_only status claimed_by output note cause "
                     "created_at updated_at due_at escalated priority escalate_next escalates repeats "
                     "step_title history parent_id children wave step_started_at waiting resting"),
@@ -136,7 +137,7 @@ INDEXES = {
     "live_sessions": ["ref"],
     "live_ops": [{"fields": ["session", "seq"], "unique": True}, {"fields": ["session", "cid"], "unique": True}],
     "live_comments": [("ref", "at")],
-    "runs": ["status", "record", "workflow_id", "refs", "waits_on"],
+    "runs": ["status", "record", "workflow_id", "refs", "waits_on", "jobs"],
     "items": ["status", "run_id", ("assignee", "status"), "n"],
     "events": [{"fields": ["hash"], "unique": True}, "run_id", ("subject", "action"), ("action", "seq"), "actor",
                ("action", "data.refs"), ("data.refs_sha256", "actor"), ("data.subject", "actor")],

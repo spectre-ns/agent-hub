@@ -17,10 +17,15 @@ Rules that apply to everyone: separation of duties (``not_by``) and data-class r
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
+import os
 import re
 import secrets
+import socket
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from . import blocks as blockmod
@@ -31,7 +36,7 @@ from . import visibility
 from . import workflows as wfmod
 from .states import FAILED
 from .db import utcnow
-from .backends import backend_for
+from .backends import backend_for, _timeout as engine_timeout
 from .fields import FieldError, coerce, json_schema
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
@@ -488,8 +493,23 @@ def _waits(run: dict) -> dict:
     if not waiting or run.get("status") != "running":
         return {"waits_on": None, "resting": False}
     on = "*" if any(v.get("each") for v in waiting) or not run.get("record") else run["record"]
-    rests = all(v.get("rests") for v in waiting) and not any(v.get("state") in ("active", "failed") for v in st)
+    rests = all(v.get("rests") for v in waiting) \
+        and not any(v.get("state") in ("active", "failed", *JOB_STATES) for v in st)
     return {"waits_on": on, "resting": rests}
+
+
+JOB_STATES = ("queued", "running")  # a block automation waiting for a worker, and one a worker is running
+JOB_MARGIN = 60    # seconds past twice an engine's own time limit before a job still "running" is taken as cut short
+JOB_ATTEMPTS = 2   # how often a python job cut short is put back in the queue by itself (an engine's: never)
+
+
+def _jobs(run: dict) -> list | None:
+    """The steps of a run that are jobs in the queue or under way (``runs.jobs``, so a worker finds them by index);
+    None when there are none, or the run no longer runs."""
+    if run.get("status") != "running":
+        return None
+    return [sid for sid, v in (run.get("steps") or {}).items()
+            if isinstance(v, dict) and v.get("state") in JOB_STATES] or None
 
 
 def _item_doc(hub, **fields) -> dict:
@@ -511,7 +531,7 @@ def _run_doc(**fields) -> dict:
     """A new run with every field it has: what is not given takes its default."""
     doc = {"id": None, "workflow_id": None, "version": None, "title": "", "record": None, "subject": None,
            "status": "running", "ctx": {}, "steps": {}, "started_by": None, "root_event": None, "item": None,
-           "waits_on": None, "resting": False, "picks": None, "at": None, "deadline_at": None,
+           "waits_on": None, "resting": False, "jobs": None, "picks": None, "at": None, "deadline_at": None,
            "deadline_missed_at": None, "created_at": utcnow(), "updated_at": utcnow()}
     doc.update(fields)
     doc["_id"] = doc["id"]
@@ -541,6 +561,8 @@ class Engine:
         # the people chosen, in the transition that is being made, for the work it sets going: "<workflow>/<step>" ->
         # member id (``assignments_needed``); read by ``_route`` for work that names no one itself
         self._picks: dict = {}
+        self._local = threading.local()  # per thread: whether blocks run here and now (``jobs_inline``)
+        self.job_delay = 0.0  # seconds a worker waits before each job (``serve --dev --job-delay``: to watch one run)
 
     def zone(self):
         """The practice's time zone (``[practice] timezone``, as its policy owners last set it). Raises
@@ -599,7 +621,8 @@ class Engine:
         if mine:
             run["picks"] = {**(run.get("picks") or {}), **mine}
         self.hub.db.runs.set(run["id"], {"ctx": run["ctx"], "steps": run["steps"], "status": run["status"],
-                                         "refs": run_refs(run), **_waits(run), "updated_at": utcnow(),
+                                         "refs": run_refs(run), **_waits(run), "jobs": _jobs(run),
+                                         "updated_at": utcnow(),
                                          **({"picks": run["picks"]} if mine else {})})
 
     def automation_actor(self, run: dict) -> dict:
@@ -1183,6 +1206,251 @@ class Engine:
                     grew = True
         return out
 
+    def _step_done(self, run_id: str, step, actor: dict, output: dict, params: dict, extra: dict, cause,
+                   more: dict | None = None) -> int:
+        """An automation did what it does: its output is the run's, the step is done (``more``: a job's times), and
+        the track says so. Returns the event's number: what it caused follows from it."""
+        run = self.run(run_id)  # the action may have changed the run (e.g. started a child)
+        run["ctx"][step.id] = output
+        run["steps"][step.id] = {"state": "done", "by": actor["id"], **({"moved": True} if step.state else {}),
+                                 **(more or {})}
+        self._save(run)
+        self._hist_note(run, step, outcome="done", by=actor["id"])
+        return self.hub.track.append(actor, "action.ran", f"step:{step.id}", run_id=run_id, cause=cause,
+                                     data={"step": step.id, "action": step.action, "params": params,
+                                           "output": output, **extra})
+
+    def _step_failed(self, run: dict, wf, step, actor: dict, exc: Exception, cause, more: dict | None = None) -> int:
+        """An automation failed: the step stops with what went wrong (``more``: a job's times, that it was cut
+        short), the practice is told, and its record goes where ``on_fail`` says if it says. Returns the event's
+        number."""
+        problems = getattr(exc, "problems", None)
+        if problems and problems != [str(exc)]:
+            exc = ValueError(f"{exc}: {'; '.join(problems)}")
+        run["steps"][step.id] = {"state": "failed", "error": str(exc), **(more or {})}
+        self._save(run)
+        self._hist_note(run, step, outcome="failed", by=actor["id"])
+        seq = self.hub.track.append(actor, "step.failed", f"step:{step.id}", run_id=run["id"], cause=cause,
+                                    data={"step": step.id, "action": step.action, "error": str(exc),
+                                          **({"block": step.block} if step.block else {}),
+                                          **{k: v for k, v in (more or {}).items() if k in ("attempt", "interrupted")}})
+        self._failed(run, step, exc, seq)
+        self._fail_over(run, wf, step, actor, seq)
+        return seq
+
+    # ------------------------------------------------------------------ jobs: blocks run outside the request
+    # A block (python in the sandbox, or an engine: a webhook, Kestra) can take seconds, a minute. Run where it
+    # became ready, it would hold the request that made it ready, its transaction and every other request with it.
+    # So where a worker is running (``Hub.jobs_async``: ``practicehub serve``), a block automation is queued
+    # (``queued``), a worker takes it (``running``), calls its engine with no transaction open, and writes what came
+    # back (``done`` or ``failed``) before the run goes on. Each of the three is its own transaction, so the page
+    # can show a job in the queue, under way and done. Without a worker (a command, a test) a block runs where it
+    # became ready, as every other automation always does.
+    @contextlib.contextmanager
+    def jobs_inline(self):
+        """Blocks run here and now in this thread, whatever the hub says: for a caller that answers from what a
+        block found in the same request (the portal tells a person what the screen of their message advised)."""
+        self._local.inline = getattr(self._local, "inline", 0) + 1
+        try:
+            yield
+        finally:
+            self._local.inline -= 1
+
+    def _in_background(self, step) -> bool:
+        return bool(step.block) and bool(getattr(self.hub, "jobs_async", False)) \
+            and not getattr(self._local, "inline", 0)
+
+    def _queue_job(self, run: dict, wf, step, actor: dict, cause) -> None:
+        hub = self.hub
+        st = run["steps"][step.id]
+        try:
+            block = self.block_of(run, step)
+            engine = backend_for(block).name
+        except Exception as exc:  # no such block, no engine for it: it fails where it stands
+            self._step_failed(run, wf, step, actor, exc, cause)
+            return
+        attempt = int(st.get("attempt") or 0) + 1
+        seq = hub.track.append(actor, "step.queued", f"step:{step.id}", run_id=run["id"], cause=cause,
+                               data={"step": step.id, "block": block.id, "engine": engine, "attempt": attempt,
+                                     "block_version": (run["ctx"]["run"].get("blocks") or {}).get(block.id)})
+        run["steps"][step.id] = {"state": "queued", "queued_at": utcnow(), "engine": engine, "attempt": attempt,
+                                 "cause": seq}
+        self._save(run)
+        hub.wake_jobs()
+
+    def jobs(self, lane: str | None = None) -> list[tuple[str, str]]:
+        """The jobs in the queue, oldest first, as ``(run id, step id)``. ``lane``: only those of that engine
+        ("local": python in the sandbox, quick and never waiting behind a slow engine)."""
+        found = []
+        for run in self.hub.db.runs.find({"status": "running", "jobs": {"$ne": None}}, fields=["id", "steps"]):
+            for sid, st in (run.get("steps") or {}).items():
+                if isinstance(st, dict) and st.get("state") == "queued" and lane in (None, st.get("engine")):
+                    found.append((str(st.get("queued_at") or ""), run["id"], sid))
+        return [(rid, sid) for _, rid, sid in sorted(found)]
+
+    def job_start(self, run_id: str, step_id: str) -> dict | None:
+        """Take a job from the queue: check what it is given, mark it running, and say so on the track, in one
+        transaction. Returns what ``job_call`` needs, or None when it is no longer in the queue (another worker took
+        it, its work was stopped) or could not start (its inputs have problems: the step failed)."""
+        hub = self.hub
+
+        def take():
+            run = self.run(run_id)
+            st = (run.get("steps") or {}).get(step_id) or {}
+            if run["status"] != "running" or st.get("state") != "queued":
+                return None
+            wf, _ = hub.workflow(run["workflow_id"], run["version"])
+            step = wf.step(step_id)
+            actor = self.automation_actor(run)
+            try:
+                params = wfmod.render(step.params, self._live_ctx(run))
+                block, engine, inputs, meta = self._block_call(run, step, params)
+            except Exception as exc:
+                seq = self._step_failed(run, wf, step, actor, exc, st.get("cause"),
+                                        {k: st[k] for k in ("queued_at", "engine", "attempt") if k in st})
+                self.advance(run_id, seq)
+                return None
+            token = secrets.token_hex(8)
+            run["steps"][step_id] = {**st, "state": "running", "started_at": utcnow(), "job": token,
+                                     "worker": f"{socket.gethostname()}:{os.getpid()}"}
+            self._save(run)
+            seq = hub.track.append(actor, "step.started", f"step:{step_id}", run_id=run_id, cause=st.get("cause"),
+                                   data={"step": step_id, "block": block.id, "engine": engine.name,
+                                         "attempt": st.get("attempt"), "params": inputs,
+                                         "block_version": meta.get("version")})
+            if run.get("item"):
+                self._place(run_id, seq)  # its item says what it waits on
+            return {"run": run_id, "step": step_id, "token": token, "block": block, "engine": engine,
+                    "inputs": inputs, "meta": meta, "params": params, "cause": seq}
+        return hub.db.atomic(take)
+
+    def job_call(self, job: dict) -> tuple[dict | None, Exception | None, int]:
+        """Run the job on its engine. No transaction is open and no lock is held: this is the part that takes time.
+        Returns what came back, or what went wrong, and how long it took in milliseconds."""
+        if self.job_delay:
+            time.sleep(self.job_delay)
+        began = time.monotonic()
+        try:
+            res, exc = job["engine"].run(job["block"], job["inputs"], job["meta"]), None
+        except Exception as e:  # noqa: BLE001 - whatever went wrong on the engine is the step's failure
+            res, exc = None, e
+        return res, exc, int((time.monotonic() - began) * 1000)
+
+    def job_finish(self, job: dict, res: dict | None, exc: Exception | None, ms: int) -> None:
+        """Write what the engine answered, in one transaction: its outputs are checked, the record moves if the step
+        moves it, the step is done or failed, and the run goes on. An answer that comes after its work was stopped,
+        or after the step was failed as cut short and run again, changes nothing: the track says it came."""
+        hub = self.hub
+        run_id, sid = job["run"], job["step"]
+
+        def write():
+            run = self.run(run_id)
+            st = (run.get("steps") or {}).get(sid) or {}
+            wf, _ = hub.workflow(run["workflow_id"], run["version"])
+            step = wf.step(sid)
+            actor = self.automation_actor(run)
+            block = job["block"]
+            late = {"step": sid, "block": block.id, "engine": job["engine"].name,
+                    "outcome": "failed" if exc else "done", **({"error": str(exc)} if exc else {}),
+                    **({"engine_ref": res["ref"]} if isinstance(res, dict) and res.get("ref") else {})}
+            if st.get("state") != "running" or st.get("job") != job["token"]:
+                hub.track.append(actor, "step.late", f"step:{sid}", run_id=run_id, cause=job["cause"],
+                                 data={**late, "why": "superseded"})
+                return
+            times = {**{k: st[k] for k in ("queued_at", "started_at", "engine", "attempt") if k in st},
+                     "done_at": utcnow(), "ms": ms}
+            if run["status"] != "running":  # its work was stopped while it ran: nothing follows from its answer
+                run["steps"][sid] = {"state": "failed" if exc else "done", "late": True, **times,
+                                     **({"error": str(exc)} if exc else {"by": actor["id"]})}
+                self._save(run)
+                hub.track.append(actor, "step.late", f"step:{sid}", run_id=run_id, cause=job["cause"],
+                                 data={**late, "why": "cancelled"})
+                return
+            failed, output, extra = exc, {}, {}
+            if failed is None:
+                try:
+                    with hub.db:  # a savepoint: outputs that do not fit, or a move refused, leave nothing behind
+                        output, extra = self._block_result(run, block, job["engine"], res or {})
+                        if step.state:
+                            self._move_record(run, step, actor, job["cause"])
+                except Exception as e:  # noqa: BLE001
+                    failed = e
+            if failed is not None:
+                seq = self._step_failed(run, wf, step, actor, failed, job["cause"], times)
+            else:
+                seq = self._step_done(run_id, step, actor, output, job["params"], {**extra, "ms": ms,
+                                                                                   "attempt": st.get("attempt")},
+                                      job["cause"], times)
+            self.advance(run_id, seq)
+        hub.db.atomic(write)
+
+    def run_jobs(self, lane: str | None = None, limit: int | None = None) -> int:
+        """Run what is in the queue (of ``lane``), one job after another, until it is empty: a worker's round, and
+        what a test or ``practicehub tick`` calls. Returns how many jobs it ran."""
+        n = 0
+        while limit is None or n < limit:
+            job = None
+            for run_id, sid in self.jobs(lane):
+                job = self.job_start(run_id, sid)
+                if job:
+                    break
+            if not job:
+                return n
+            self.job_finish(job, *self.job_call(job))
+            n += 1
+        return n
+
+    def recover_jobs(self, startup: bool = False) -> int:
+        """Jobs left "running" by a worker that is gone: one whose worker was a process on this machine that no
+        longer lives (``startup``), or that has run past twice its engine's time limit. A job on an engine fails,
+        saying it was cut short: whether it finished there is not known, and it is never run again by itself (a
+        person checks the engine, then retries the step). Python in the sandbox does nothing outside itself, so it
+        goes back in the queue, ``JOB_ATTEMPTS`` times at most. Returns how many it found."""
+        hub = self.hub
+        host, limit, found = socket.gethostname(), 2 * engine_timeout() + JOB_MARGIN, 0
+        now = datetime.now(timezone.utc)
+        for row in hub.db.runs.find({"status": "running", "jobs": {"$ne": None}}, fields=["id", "steps"]):
+            for sid, st in (row.get("steps") or {}).items():
+                if not isinstance(st, dict) or st.get("state") != "running":
+                    continue
+                w_host, _, w_pid = str(st.get("worker") or "").rpartition(":")
+                gone = startup and w_host == host and w_pid.isdigit() and int(w_pid) != os.getpid() \
+                    and not _alive(int(w_pid))
+                try:
+                    late = (now - _parse(st["started_at"])).total_seconds() > limit
+                except (KeyError, TypeError, ValueError):
+                    late = True
+                if gone or late:
+                    found += 1
+                    hub.db.atomic(self._cut_short, row["id"], sid, st.get("job"))
+        return found
+
+    def _cut_short(self, run_id: str, sid: str, token) -> None:
+        hub = self.hub
+        run = self.run(run_id)
+        st = (run.get("steps") or {}).get(sid) or {}
+        if run["status"] != "running" or st.get("state") != "running" or st.get("job") != token:
+            return
+        wf, _ = hub.workflow(run["workflow_id"], run["version"])
+        step = wf.step(sid)
+        actor = self.automation_actor(run)
+        attempt = int(st.get("attempt") or 1)
+        if st.get("engine") == "local" and attempt < JOB_ATTEMPTS:
+            seq = hub.track.append(actor, "step.requeued", f"step:{sid}", run_id=run_id, cause=st.get("cause"),
+                                   data={"step": sid, "attempt": attempt + 1,
+                                         "why": "the worker running it stopped before it finished"})
+            run["steps"][sid] = {"state": "queued", "queued_at": utcnow(), "engine": "local",
+                                 "attempt": attempt + 1, "cause": seq}
+            self._save(run)
+            hub.wake_jobs()
+            return
+        why = ("it was cut short and did not finish" if st.get("engine") == "local" else
+               "it was cut short: whether it finished on its engine is not known. Check there, then try it again")
+        seq = self._step_failed(run, wf, step, actor, RuntimeError(why), st.get("cause"),
+                                {**{k: st[k] for k in ("queued_at", "started_at", "engine", "attempt") if k in st},
+                                 "interrupted": True})
+        self.advance(run_id, seq)
+
     def _advance(self, run_id: str, cause: int | None) -> None:
         hub = self.hub
         progressed = True
@@ -1238,6 +1506,9 @@ class Engine:
                     break
                 if step.kind == "automation":
                     actor = self.automation_actor(run)
+                    if self._in_background(step):  # a block: a worker runs it, outside this request
+                        self._queue_job(run, wf, step, actor, cause)
+                        break
                     live = self._live_ctx(run)
                     params = wfmod.render(step.params, live) if not step.for_each else {}
                     extra: dict = {}
@@ -1260,27 +1531,10 @@ class Engine:
                             if step.state:
                                 self._move_record(run, step, actor, cause)
                     except Exception as exc:  # an automation that fails stops the run and asks a person
-                        problems = getattr(exc, "problems", None)
-                        if problems and problems != [str(exc)]:
-                            exc = ValueError(f"{exc}: {'; '.join(problems)}")
-                        st.update(state="failed", error=str(exc))
-                        self._save(run)
-                        self._hist_note(run, step, outcome="failed", by=actor["id"])
-                        seq = hub.track.append(actor, "step.failed", f"step:{step.id}", run_id=run_id, cause=cause,
-                                               data={"step": step.id, "action": step.action, "error": str(exc),
-                                                     **({"block": step.block} if step.block else {})})
-                        self._failed(run, step, exc, seq)
-                        self._fail_over(run, wf, step, actor, seq)
+                        self._step_failed(run, wf, step, actor, exc, cause)
                         progressed = True  # steps that do not wait on this one go on: an urgent call is not held
                         break
-                    run = self.run(run_id)  # the action may have changed the run (e.g. started a child)
-                    run["ctx"][step.id] = output
-                    run["steps"][step.id] = {"state": "done", "by": actor["id"], **({"moved": True} if step.state else {})}
-                    self._save(run)
-                    self._hist_note(run, step, outcome="done", by=actor["id"])
-                    cause = hub.track.append(actor, "action.ran", f"step:{step.id}", run_id=run_id, cause=cause,
-                                             data={"step": step.id, "action": step.action, "params": params,
-                                                   "output": output, **extra})
+                    cause = self._step_done(run_id, step, actor, output, params, extra, cause)
                 else:
                     seq = hub.track.append(self.automation_actor(run), "step.activated", f"step:{step.id}",
                                            run_id=run_id, cause=cause,
@@ -1744,13 +1998,13 @@ class Engine:
                 raise Invalid(f"step {step_id!r} has not failed")
             if st.get("failed_over"):
                 raise Invalid(f"step {step_id!r} failed and the record went on without it: it is not run again")
-            run["steps"][step_id] = {"state": "pending"}
+            run["steps"][step_id] = {"state": "pending", **({"attempt": st["attempt"]} if st.get("attempt") else {})}
             self._save(run)
             self.hub.db.items.update({"run_id": run_id, "step_id": step_id, "kind": "notice", "status": "open"},
                                      {"$set": {"status": "done", "updated_at": utcnow()}}, many=True)
             seq = self.hub.track.append(actor, "step.retried", f"step:{step_id}", run_id=run_id,
                                         data={"step": step_id, "error": st.get("error"), "reason": reason})
-        self.advance(run_id, seq)
+            self.advance(run_id, seq)  # in the same transaction: a worker's answer never lands halfway through it
 
     def _abandon(self, run: dict, cause: int, *, stranded_only: bool = False) -> None:
         """A run about a record was cancelled: move the record where its lifecycle says abandoned work goes
@@ -1798,11 +2052,19 @@ class Engine:
 
     def _run_block(self, run: dict, step, params: dict) -> tuple[dict, dict]:
         """Run a python or external block: check its inputs, run it on its engine, check its outputs."""
+        block, engine, inputs, meta = self._block_call(run, step, params)
+        return self._block_result(run, block, engine, engine.run(block, inputs, meta))
+
+    def _block_call(self, run: dict, step, params: dict) -> tuple:
+        """What a block is run with: the block, its engine, its inputs (checked) and what the engine is told of the
+        call. Nothing is run."""
         block = self.block_of(run, step)
         inputs = self._block_inputs(block, step, params)
-        engine = backend_for(block)
-        res = engine.run(block, inputs, {"run": run["id"], "step": step.id,
-                                         "version": (run["ctx"]["run"].get("blocks") or {}).get(block.id)})
+        return block, backend_for(block), inputs, {"run": run["id"], "step": step.id,
+                                                   "version": (run["ctx"]["run"].get("blocks") or {}).get(block.id)}
+
+    def _block_result(self, run: dict, block, engine, res: dict) -> tuple[dict, dict]:
+        """What a block's engine answered, as the step's output (checked) and what the track keeps of the call."""
         try:
             output = coerce(block.outputs, res.get("output") or {})
         except FieldError as exc:
@@ -2034,6 +2296,8 @@ class Engine:
             wake = run["steps"][s.id].get("wake_at")
             words.append(f"waiting until {clock.shown(wake, tz)}" if wake else f"waiting: {s.title}")
         words += [f"stopped: {s.title} failed" for s in wf.steps if run["steps"][s.id]["state"] == "failed"]
+        words += [f"under way: {s.title}" for s in wf.steps if run["steps"][s.id]["state"] == "running"]
+        words += [f"in the queue: {s.title}" for s in wf.steps if run["steps"][s.id]["state"] == "queued"]
         step = waits[0] if waits else None
         hub.db.items.set(item_id, {"waiting": "; ".join(words), "kind": "wait", "step_id": step.id if step else "",
                                    "step_title": step.title if step else "", "role": None, "assignee": None,
@@ -3132,6 +3396,14 @@ class Engine:
             out = self._tick(now, now_utc, stamp)
         finally:
             self._tick_at = None
+        # jobs: one cut short is failed or queued again, and one no worker has taken for two minutes is run here
+        # (the workers stopped, or this hub is not served and something else queued it)
+        self.recover_jobs()
+        old = [st for row in self.hub.db.runs.find({"status": "running", "jobs": {"$ne": None}}, fields=["steps"])
+               for st in (row.get("steps") or {}).values() if isinstance(st, dict) and st.get("state") == "queued"
+               and (datetime.now(timezone.utc) - _parse(st["queued_at"])).total_seconds() > 120]
+        if old:
+            self.run_jobs()
         return out
 
     def _tick(self, now: datetime, now_utc: datetime, stamp: str) -> dict:
@@ -3232,6 +3504,17 @@ class Engine:
 def _parse(stamp: str) -> datetime:
     """A track time (UTC, ISO, Z) as an aware datetime."""
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process of this machine still runs."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # it is there, and not ours to signal
+        return True
+    return True
 
 
 def _timing(step) -> dict:

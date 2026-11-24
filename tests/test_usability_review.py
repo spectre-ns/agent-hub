@@ -174,7 +174,7 @@ def test_run_and_track_pages_speak_plainly(worked, server):  # noqa: F811
     run = next(r for r in hub.engine.runs(limit=50) if r["workflow_id"] == "lab-result-review")
     _, page = call(server, "GET", f"/records/{run['record']}?tab=history", amara)  # its steps, in its history
     seen = _text(page)
-    assert "input." not in seen and "==" not in seen and "'Review the result" in seen
+    assert "input." not in seen and "==" not in seen and "Review the result" in seen
     _, page = call(server, "GET", "/track", rana)
     assert 'class="plain ev-lines"' in page and "<summary class=\"meta\">Details</summary>" in page
     lines = " ".join(re.findall(r'<ul class="plain ev-lines">(.*?)</ul>', page))
@@ -238,7 +238,8 @@ def test_the_board_by_step(hub, server):  # noqa: F811
 
 
 def test_what_a_move_ran_reads_plainly_in_history(hub, server):  # noqa: F811
-    """The list under a move in History (``tl-ran``) speaks as the page does: no ids, no conditions."""
+    """History's nested journey (each stage, its work, each move and what it ran) speaks as the page does: no ids,
+    no conditions, no "run", and never "skipped"."""
     from tests.test_clinic_records import LAB, _pat as _patient
     run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_patient(hub),
                            inputs={**LAB, "value": "131", "flag": "abnormal"})
@@ -249,10 +250,10 @@ def test_what_a_move_ran_reads_plainly_in_history(hub, server):  # noqa: F811
     hub.engine.decide(amara, iid, "call-patient", "", seen=hub.engine.shown_digest(amara, iid))
     ref = hub.engine.run(run["id"])["record"]
     _, page = call(server, "GET", f"/records/{ref}?tab=history", token(hub, "dr-amara"))
-    nested = re.findall(r'<details class="tl-ran">.*?</details>', page, flags=re.S)
-    assert nested
-    seen = _text(" ".join(nested))
-    assert "automations ran" in seen and "Ask a nurse to call the patient" in seen
+    nested = re.findall(r'<section id="journey".*?</section>', page, flags=re.S)
+    assert nested and 'class="jr-move' in nested[0]
+    seen = _text(nested[0])
+    assert "Ask a nurse to call the patient" in seen and "not needed" in seen and "skipped" not in seen.lower()
     assert not re.search(r"\b(run|item)-[0-9a-f]{6,}", seen)
     assert "input." not in seen and "==" not in seen and " run " not in f" {seen.lower()} "
 

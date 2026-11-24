@@ -1129,7 +1129,8 @@ class Portal:
         routine = bool(found and found.get("routine")) and not alarm
         if routine or not text or not ol.get("workflow"):
             raise Denied(self.say("too_many"))  # the refusal page says what to do in an emergency (safety)
-        run = self.hub.engine.start(self.member, ol["workflow"], record=person, inputs={ol["input"]: text})
+        with self.hub.engine.jobs_inline():  # the answer given here is read from what the run found
+            run = self.hub.engine.start(self.member, ol["workflow"], record=person, inputs={ol["input"]: text})
         return {"run": run["id"], "kind": k["label"], "mode": k["mode"], "advice": advice, "alarm": alarm,
                 "found": flags, "when": None, "with": None, "failed": False, "requested": True, "over_limit": True,
                 "closed": self.closed_words()}
@@ -1189,7 +1190,10 @@ class Portal:
                 inputs[q["name"]] = answers[q["name"]]
         if slot:
             inputs[k.get("slot_input", "slot")] = slot
-        return self.hub.engine.start(self.member, k["workflow"], record=person, inputs=inputs)
+        # the person is answered from what the screen of their message found, in this same request: it runs
+        # here, never in the queue (an emergency is told what to do now, not once a worker gets to it)
+        with self.hub.engine.jobs_inline():
+            return self.hub.engine.start(self.member, k["workflow"], record=person, inputs=inputs)
 
     # --- the person's own view
     def upcoming(self, person: str) -> list[dict]:
@@ -1335,4 +1339,5 @@ class Portal:
         with self.hub.db:
             made = self.hub.create_record(self.member, rt.id, rec)
             ref = f"{rt.id}/{made['id']}"
-            return self.hub.engine.start(self.member, wid, record=ref)
+            with self.hub.engine.jobs_inline():
+                return self.hub.engine.start(self.member, wid, record=ref)
