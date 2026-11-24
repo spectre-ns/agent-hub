@@ -35,7 +35,14 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
     the moves people make by hand; the workflow says the rest, once:
 
     - a state the workflow has is named and given its tone there, not in the type's ``lifecycle.labels`` or
-      ``tones`` (those are for a value the workflow has no state for)."""
+      ``tones`` (those are for a value the workflow has no state for);
+    - a move an edge of the workflow makes (where it goes, a diversion or an ``on_fail`` included) is not written
+      again as a transition ``by = "workflow"``. Such a row is still the type's to write for a move made from
+      outside its own run (another workflow's, a signature), for one from a value the workflow has no state for,
+      and for one it attaches ``asks``, ``requires`` or ``sign`` to;
+    - a value that only the workflow moves a record out of, over the type's moves and the workflow's edges
+      together, says in ``abandoned`` where the record goes if that work is cancelled (itself, if it stays): the
+      check a type makes of its own moves alone (``schema._parse``) cannot see the edges."""
     lc, shape = rt.lifecycle, getattr(wf, "shape", None) or {}
     if not lc or not shape.get("states"):
         return []
@@ -44,6 +51,24 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
     for key, says in (("labels", "names it"), ("tones", "says how it reads")):
         problems += [f"lifecycle.{key}: {st!r} is a state of the {wf.id} workflow, which {says}; leave it out"
                      for st in lc.get(key) or {} if st in has]
+    rows = [t for t in lc["transition"] if not t.get("abandon")]  # the moves the type writes
+    made = {}  # (from, to) -> the first edge that lands a record there
+    for e in shape.get("edges") or []:
+        for to in e.get("lands") or []:
+            if e["from"] and to != e["from"]:
+                made.setdefault((e["from"], to), e["id"])
+    for t in rows:
+        if t["by"] != "workflow" or t["asks"] or t["requires"] or t["sign"] or t["screen"]:
+            continue
+        problems += [f"lifecycle.transition to {t['to']!r}: the {wf.id} workflow already moves a record from {f!r} "
+                     f"to {t['to']!r} (its edge {made[f, t['to']]}); leave it out"
+                     for f in t["from"] if (f, t["to"]) in made]
+    for st in lc["states"]:
+        by = [t["by"] for t in rows if (st in t["from"] or "*" in t["from"]) and t["to"] != st]
+        by += ["workflow" for f, to in made if f == st and to in lc["states"]]
+        if by and all(x == "workflow" for x in by) and st not in lc["abandoned"]:
+            problems.append(f"lifecycle.abandoned: only the {wf.id} workflow moves a record out of {st!r}; say where "
+                            f"it goes if that work is cancelled (\"{st}\" itself if it stays)")
     return problems
 
 

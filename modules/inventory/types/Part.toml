@@ -130,12 +130,6 @@ label = "Submit for approval"
 # moves people make by hand are listed here. Where cancelled work leaves it is abandoned, above.
 
 [[lifecycle.transition]]
-from = ["in-review"]
-to = "active"
-by = "workflow"            # the approve edge; said here too so the type knows a revision goes back in use (in_use)
-label = "Approve"
-
-[[lifecycle.transition]]
 from = ["active"]
 to = "draft"
 label = "Revise"

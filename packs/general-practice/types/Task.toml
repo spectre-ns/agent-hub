@@ -87,3 +87,5 @@ choices = ["to-call", "not-reached", "done"]
 [lifecycle]
 field = "stage"
 initial = "to-call"
+# its work cancelled, a follow-up stays where it is: the call is still to make
+abandoned = { to-call = "to-call", not-reached = "not-reached" }

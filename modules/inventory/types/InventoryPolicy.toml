@@ -107,12 +107,6 @@ label = "Submit for signing"
 # hand and its retiring (by the next policy's run) are listed here. Where cancelled work leaves it is abandoned, above.
 
 [[lifecycle.transition]]
-from = ["in-review"]
-to = "in-force"
-by = "workflow"            # the in-force edge; said here too so the type knows a revision goes back in force (in_use)
-label = "Put in force"
-
-[[lifecycle.transition]]
 from = ["in-force"]
 to = "draft"
 label = "Revise"

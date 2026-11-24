@@ -3797,14 +3797,6 @@ field = "status"
 initial = "stocked"
 abandoned = { "low" = "stocked" }
 [[lifecycle.transition]]
-from = ["stocked"]
-to = "low"
-by = "workflow"
-[[lifecycle.transition]]
-from = ["low"]
-to = "on-order"
-by = "workflow"
-[[lifecycle.transition]]
 from = ["low", "on-order"]
 to = "stocked"
 label = "Clear reorder"
@@ -3853,14 +3845,6 @@ locked = ["submitted", "posted"]
 [[lifecycle.transition]]
 from = ["draft"]
 to = "submitted"
-[[lifecycle.transition]]
-from = ["submitted"]
-to = "posted"
-by = "workflow"
-[[lifecycle.transition]]
-from = ["submitted"]
-to = "rejected"
-by = "workflow"
 [[lifecycle.transition]]
 from = ["rejected"]
 to = "draft"
@@ -4647,14 +4631,26 @@ def _errands(hub, type_more="", flow_more=""):
     return rana, amara
 
 
-def _errand_module(mods, type_more="", flow_more=""):
+def _errand_module(mods, errand, flow=ERRAND_FLOW):
     """The same two as a module on disk (``mods``): installed together, where neither one's own check sees the pair."""
     m = mods / "errand"
     for d in ("types", "workflows"):
-        (m / d).mkdir(parents=True)
+        (m / d).mkdir(parents=True, exist_ok=True)
     (m / "module.toml").write_text('[module]\nid = "errand"\nname = "Errands"\nversion = "1"\n')
-    (m / "types" / "Errand.toml").write_text(ERRAND.format(top=ERRAND_OWN) + type_more)
-    (m / "workflows" / "errand-flow.toml").write_text(ERRAND_FLOW + flow_more)
+    (m / "types" / "Errand.toml").write_text(errand)
+    (m / "workflows" / "errand-flow.toml").write_text(flow)
+
+
+def _by_workflow(frm, to, more=""):
+    return f'[[lifecycle.transition]]\nfrom = ["{frm}"]\nto = "{to}"\nby = "workflow"\n{more}'
+
+
+# what a type may not say beside the errand's workflow, each with the problem it is
+ERRAND_SAYS_A_NAME_TWICE = "lifecycle.labels: 'asked' is a state of the errand-flow workflow, which names it; leave it out"
+ERRAND_REPEATS_A_MOVE = ("lifecycle.transition to 'doing': the errand-flow workflow already moves a record from 'asked' "
+                         "to 'doing' (its edge set-off); leave it out")
+ERRAND_STRANDED = ("lifecycle.abandoned: only the errand-flow workflow moves a record out of 'doing'; say where it goes "
+                   'if that work is cancelled ("doing" itself if it stays)')
 
 
 def test_a_state_s_words_and_tone_are_said_once(hub):
@@ -4672,7 +4668,7 @@ def test_a_state_s_words_and_tone_are_said_once(hub):
                                   "states), not the field's labels"]
     said = ('[lifecycle.labels]\nasked = "Asked for"\ndropped = "Given up"\n'
             '[lifecycle.tones]\nasked = "waiting"\ndropped = "ended"\n')
-    twice = ["lifecycle.labels: 'asked' is a state of the errand-flow workflow, which names it; leave it out",
+    twice = [ERRAND_SAYS_A_NAME_TWICE,
              "lifecycle.tones: 'asked' is a state of the errand-flow workflow, which says how it reads; leave it out"]
     flow = parse(ERRAND_FLOW)
     assert lifecycle_fit(schema.parse(ERRAND.format(top=ERRAND_OWN) + said), flow) == twice
@@ -4696,13 +4692,79 @@ def test_a_state_s_words_and_tone_are_said_once(hub):
 def test_a_type_and_its_workflow_brought_in_together_are_checked_as_a_pair(hub, mods):
     """Rule: a pack or module installs its types before its workflows, so neither one's own check sees the other.
     Once both are in, each type is checked against its own workflow (``lifecycle_fit``), and what the two may not
-    both say refuses the install, naming the type."""
-    _errand_module(mods, '[lifecycle.labels]\nasked = "Asked for"\n')
-    with pytest.raises(Invalid, match="the record type Errand in errand has problems") as e:
-        install(hub, "errand")
-    assert e.value.problems == ["lifecycle.labels: 'asked' is a state of the errand-flow workflow, which names it; "
-                                "leave it out"]
-    assert hub.record_type("Errand") is None and "errand" not in hub.installed_modules()
+    both say refuses the install, naming the type: a state named twice, a move of the workflow's written again, a
+    state only the workflow leaves with nowhere to go when that work is cancelled."""
+    own = ERRAND.format(top=ERRAND_OWN)
+    for errand, problem in ((own + '[lifecycle.labels]\nasked = "Asked for"\n', ERRAND_SAYS_A_NAME_TWICE),
+                            (own + _by_workflow("asked", "doing"), ERRAND_REPEATS_A_MOVE),
+                            (own.replace('doing = "doing"\n', ""), ERRAND_STRANDED)):
+        _errand_module(mods, errand)
+        with pytest.raises(Invalid, match="the record type Errand in errand has problems") as e:
+            install(hub, "errand")
+        assert e.value.problems == [problem]
+        assert hub.record_type("Errand") is None and "errand" not in hub.installed_modules()
+    _errand_module(mods, own)
+    install(hub, "errand")
+    assert hub.record_type("Errand").transition("asked", "doing")["edge"] == "set-off"
+
+
+def test_a_type_does_not_repeat_the_moves_its_workflow_makes(hub):
+    """Rule: the moves a type's own workflow makes are that workflow's edges, written once. A transition
+    ``by = "workflow"`` with no ``asks``, ``requires`` or ``sign`` for a move one of its edges makes is refused,
+    whichever side is changed (the type gaining the row, the workflow gaining the edge). Such a row is still the
+    type's to write where it attaches ``asks``, ``requires`` or ``sign`` to the move, for a move no edge makes (one
+    made from outside its own run, by another workflow or a signature) and from a value the workflow has no state
+    for."""
+    from practicehub import schema
+    from practicehub.catalog import lifecycle_fit
+    from practicehub.workflows import parse
+    own, flow = ERRAND.format(top=ERRAND_OWN), parse(ERRAND_FLOW)
+    assert lifecycle_fit(schema.parse(own), flow) == []
+    assert lifecycle_fit(schema.parse(own + _by_workflow("asked", "doing")), flow) == [ERRAND_REPEATS_A_MOVE]
+    outside = 'done = "done"\n' + _by_workflow("done", "asked")  # nothing of its workflow's: another run reopens it
+    for kept in (_by_workflow("asked", "doing", 'asks = ["title"]\n'), _by_workflow("asked", "doing", 'sign = "Seen"\n'),
+                 _by_workflow("asked", "doing", 'requires = ["title"]\n'), outside,
+                 'dropped = "dropped"\n' + _by_workflow("dropped", "asked")):  # the workflow has no state dropped
+        assert lifecycle_fit(schema.parse(own + kept), flow) == [], kept
+    rana, amara = _errands(hub)
+    with pytest.raises(Invalid) as e:  # from the type's side
+        hub.propose("type", rana, own + _by_workflow("asked", "doing"))
+    assert e.value.problems == [ERRAND_REPEATS_A_MOVE]
+    p = hub.propose("type", rana, own + _by_workflow("checking", "dropped"), "dropped by another workflow's run")
+    hub.approve(amara, "type", "Errand", p["version"])
+    drops = '[[edge]]\nid = "drop"\nfrom = "checking"\nto = "dropped"\n[[state]]\nid = "dropped"\n'
+    with pytest.raises(Invalid) as e:  # from the workflow's side: an edge for a move the type in force writes
+        hub.propose_workflow(rana, ERRAND_FLOW + drops)
+    assert e.value.problems == ["lifecycle.transition to 'dropped': the errand-flow workflow already moves a record "
+                                "from 'checking' to 'dropped' (its edge drop); leave it out"]
+
+
+def test_a_state_only_its_workflow_leaves_says_where_cancelled_work_leaves_it(hub):
+    """Rule: a state that only workflows move a record out of says, in ``abandoned``, where the record goes if that
+    work is cancelled (itself, if it stays), so a cancelled run never strands it unseen. The type's own moves and its
+    workflow's edges are read together: an edge out of a state counts, a move by hand or a correction open from every
+    state means a person can still move it. Refused whichever side is changed."""
+    from practicehub import schema
+    from practicehub.catalog import lifecycle_fit
+    from practicehub.workflows import parse
+    flow = parse(ERRAND_FLOW)
+    bare = ERRAND.format(top=ERRAND_OWN).replace('doing = "doing"\n', "")
+    assert schema.parse(bare).transition("doing", "checking") is None  # alone, the type has no move out of doing
+    assert lifecycle_fit(schema.parse(bare), flow) == [ERRAND_STRANDED]
+    by_hand = '[[lifecycle.transition]]\nfrom = ["doing"]\nto = "dropped"\nlabel = "Give up"\n'
+    correction = '[[lifecycle.transition]]\nto = "dropped"\nlabel = "Entered in error"\n'  # from every state
+    assert lifecycle_fit(schema.parse(bare + by_hand), flow) == []
+    assert lifecycle_fit(schema.parse(bare + correction), flow) == []
+    rana, _ = _errands(hub)
+    with pytest.raises(Invalid) as e:  # from the type's side
+        hub.propose("type", rana, bare)
+    assert e.value.problems == [ERRAND_STRANDED]
+    filing = ('[[state]]\nid = "done"\n[[state.work]]\nid = "file"\ntitle = "File it"\nkind = "task"\n'
+              'role = "physician"\n[[state.work.fields]]\nname = "note"\ntype = "text"\n'
+              '[[edge]]\nid = "filed"\nfrom = "done"\nto = "dropped"\n[[state]]\nid = "dropped"\n')
+    with pytest.raises(Invalid) as e:  # from the workflow's side: an edge out of a state the type leaves nowhere
+        hub.propose_workflow(rana, ERRAND_FLOW.replace('[[state]]\nid = "done"\n', filing))
+    assert e.value.problems == [ERRAND_STRANDED.replace("'doing'", "'done'").replace('"doing"', '"done"')]
 
 
 # ------------------------------------------------------------------------------------------- the calendar

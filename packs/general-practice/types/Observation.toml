@@ -200,6 +200,8 @@ fields = ["subject", "status", "test", "category_text", "effectiveDateTime", "va
 [lifecycle]
 field = "review"
 initial = "received"
+# a review cancelled part way leaves the result where it is: it is still to be reviewed
+abandoned = { received = "received", checking = "checking", sorting = "sorting" }
 [[lifecycle.transition]]
 from = ["reviewed", "told"]
 to = "closed"

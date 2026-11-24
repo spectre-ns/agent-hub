@@ -199,7 +199,9 @@ states = ["client-signed"]
 [lifecycle]
 field = "status"
 initial = "gathering"
-abandoned = { filing = "client-signed" }   # its work cancelled mid-transmission, it waits for a partner again
+# Its work cancelled mid-transmission, it waits for a partner again; cancelled while an assessment that differs is being
+# looked at, it stays there.
+abandoned = { filing = "client-signed", assessment-differs = "assessment-differs" }
 
 [[lifecycle.transition]]
 from = ["gathering", "reminded"]

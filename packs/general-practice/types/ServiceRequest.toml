@@ -177,5 +177,6 @@ fields = ["subject", "status", "referral_to", "specialist", "priority", "intent"
 [lifecycle]
 field = "stage"
 initial = "filed"
-abandoned = { drafting = "cancelled", finalizing = "cancelled", signing = "cancelled" }
+# cancelled before it is sent, the referral is cancelled; once sent it stays where it is (the specialist has it)
+abandoned = { drafting = "cancelled", finalizing = "cancelled", signing = "cancelled", sent = "sent", booked = "booked", declined = "declined" }
 tones = { filed = "waiting" }
