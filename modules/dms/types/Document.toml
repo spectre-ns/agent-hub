@@ -126,8 +126,8 @@ label = "Revise"        # its workflow numbers the new revision
 from = ["draft", "approved"]
 to = "retiring"
 label = "Propose making it obsolete"
-fields = ["obsolete_reason"]
-require = ["obsolete_reason"]
+asks = ["obsolete_reason"]
+requires = ["obsolete_reason"]
 
 [[signature]]
 meaning = "I have read and understood this document"

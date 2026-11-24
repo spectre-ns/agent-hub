@@ -239,8 +239,7 @@ KEYS = {
               "roles", "required_unless"},
     "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "abandoned", "ended", "in_use",
                   "labels", "tones"},
-    "transition": {"from", "to", "by", "label", "screen", "fields", "require", "comment", "asks", "requires", "sign",
-                   "opens", "confirm"},
+    "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "link": {"rel", "label", "to", "many", "help", "back"},
     "screen": {"id", "on", "tab", "fields", "label"},
@@ -410,6 +409,15 @@ def _resolves(path: str, fields: list[dict]) -> bool:
                for f in fields)
 
 
+def move_row(frm, to, *, by, label, asks=(), requires=(), **more) -> dict:
+    """One move of a lifecycle, as everything that reads a type's transitions takes it: a ``[[lifecycle.transition]]``
+    as parsed, and a move the type's workflow makes (``catalog._with_workflow_moves``). ``asks``: the fields its
+    screen asks for; ``requires``: those that must be set once it has moved. ``more``: its ``screen``, ``comment``,
+    ``sign``, ``opens`` and ``confirm``, and what marks a workflow's move (``edge``, ``entry``)."""
+    return {"from": list(frm), "to": to, "by": by, "label": label, "screen": None, "asks": list(asks),
+            "requires": list(requires), "comment": False, "sign": None, **more}
+
+
 def revising_states(states: list, trans: list, in_use) -> list:
     """The states a revision passes through: those with a way back to ``in_use`` (not 'obsolete')."""
     if in_use not in states:
@@ -539,12 +547,10 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                     problems.append(f"lifecycle.transition: {s!r} is not one of its states")
             if by not in BY:
                 problems.append(f"{where}: by is one of {', '.join(BY)}")
-            # asks/requires are the words a type author writes; fields/require the older names of the same lists
-            req = [x for k in ("require", "requires") for x in (lambda v: [v] if isinstance(v, str) else v)(t.get(k) or [])]
-            tf = [x for k in ("fields", "asks") for x in (lambda v: [v] if isinstance(v, str) else v)(t.get(k) or [])]
-            if not _strings(req) or not _strings(tf):
+            asks, requires = ([v] if isinstance(v, str) else v or [] for v in (t.get("asks"), t.get("requires")))
+            if not _strings(asks) or not _strings(requires):
                 problems.append(f"{where}: asks and requires are lists of field names")
-                req, tf = [], []
+                asks, requires = [], []
             sign = t.get("sign")
             if sign is not None and not (isinstance(sign, str) and sign.strip()):
                 problems.append(f"{where}: sign is what the mover's signature means, e.g. sign = \"Approved\"")
@@ -556,12 +562,12 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             opens = _transition_opens(t.get("opens"), where, problems)
             if t.get("confirm") is not None and not isinstance(t["confirm"], str):
                 problems.append(f"{where}: confirm is what the person is told before the move, in words")
-            trans.append({"from": frm, "to": to, "by": by, "label": str(t.get("label") or labels.get(to) or state_words(to)),
-                          "screen": t.get("screen") if isinstance(t.get("screen"), str) else None,
-                          "fields": list(tf), "require": list(req), "comment": t.get("comment") is True,
-                          "sign": sign.strip() if sign else None,
-                          **({"opens": opens} if opens else {}),
-                          **({"confirm": t["confirm"]} if isinstance(t.get("confirm"), str) else {})})
+            trans.append(move_row(frm, to, by=by, label=str(t.get("label") or labels.get(to) or state_words(to)),
+                                  asks=asks, requires=requires,
+                                  screen=t.get("screen") if isinstance(t.get("screen"), str) else None,
+                                  comment=t.get("comment") is True, sign=sign.strip() if sign else None,
+                                  **({"opens": opens} if opens else {}),
+                                  **({"confirm": t["confirm"]} if isinstance(t.get("confirm"), str) else {})))
         # further states a person may make a new record in, besides the initial one (a record of work already done,
         # filed after the fact), each starting whatever the type's workflow starts for it
         starts = lc.get("starts") or []
@@ -1055,7 +1061,7 @@ def _screens(doc: dict, fields: list[dict], base_map: dict, lc: dict | None, pro
             if sc is None:
                 problems.append(f"lifecycle.transition to {t['to']!r}: there is no screen {t['screen']!r}")
             else:
-                t["fields"] = [n for tab in sc["tabs"] for n in tab["fields"]] + t["fields"]
+                t["asks"] = [n for tab in sc["tabs"] for n in tab["fields"]] + t["asks"]
         def ok(names):
             out = []
             for n in names:
@@ -1067,12 +1073,12 @@ def _screens(doc: dict, fields: list[dict], base_map: dict, lc: dict | None, pro
                 elif r not in out:
                     out.append(r)
             return out
-        t["require"] = ok(t["require"])
+        t["requires"] = ok(t["requires"])
         if t.get("opens") and resolve(t["opens"]["field"]) is None:
             problems.append(f"lifecycle.transition to {t['to']!r}: opens names no field {t['opens']['field']!r}")
         # what a move requires, its screen asks for
-        asked = ok(t["fields"])
-        t["fields"] = asked + [n for n in t["require"] if n not in asked]
+        asked = ok(t["asks"])
+        t["asks"] = asked + [n for n in t["requires"] if n not in asked]
         t["comment"] = bool(t["comment"])
     return out
 

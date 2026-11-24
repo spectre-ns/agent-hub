@@ -457,11 +457,13 @@ def test_the_type_builder_round_trips_through_toml(hub, server):
     assert code == 200 and 'id="type-builder"' in page and "Edit as TOML" in page
     form = _BuilderForm(page).pairs
     assert ("t.id", "Document") in form and any(k.endswith(".name") for k, _ in form)
+    assert any(re.fullmatch(r"tr\.\d+\.requires", k) and v == "obsolete_reason" for k, v in form)  # what a move requires
     code, page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "toml")])
     assert code == 200
     source = _textarea(page, "source")
     doc = __import__("tomllib").loads(source)
     assert doc["id"] == "Document" and doc["field"]
+    assert any(t.get("requires") == ["obsolete_reason"] == t.get("asks") for t in doc["lifecycle"]["transition"])
     code, page = call(server, "POST", "/define/types/build", rana,
                       form=[("source", source), ("did", "Document"), ("note", ""), ("op", "form")])
     assert code == 200 and _BuilderForm(page).pairs == form

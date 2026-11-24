@@ -2601,7 +2601,7 @@ def test_a_screen_arranges_fields_and_a_bad_one_is_refused():
                               '[[screen]]\nid = "b"\non = "edit"\nfields = ["note"]\n', "one screen per operation"),
                       (head + '[[screen]]\nid = "x"\non = ["print"]\nfields = ["code"]\n', "not 'print'"),
                       (head.replace('to = "shut"\n', 'to = "shut"\nscreen = "nope"\n'), "no screen 'nope'"),
-                      (head.replace('to = "shut"\n', 'to = "shut"\nrequire = ["status"]\n'), "the move itself")):
+                      (head.replace('to = "shut"\n', 'to = "shut"\nrequires = ["status"]\n'), "the move itself")):
         with pytest.raises(DefinitionError, match=says):
             schema.parse(bad)
     # a screen of the same id twice is one screen: how a module's extends/types adds a tab to the practice's
@@ -2610,13 +2610,13 @@ def test_a_screen_arranges_fields_and_a_bad_one_is_refused():
     assert rt.screen("create") == [{"label": "Main", "fields": ["code"]}, {"label": "Quality", "fields": ["note"]}]
     assert rt.screen("edit") is None  # no screen for edit: every field, as before
     # what a move requires, its transition screen asks for
-    rt = schema.parse(head.replace('to = "shut"\n', 'to = "shut"\nrequire = ["note"]\ncomment = true\n'))
+    rt = schema.parse(head.replace('to = "shut"\n', 'to = "shut"\nrequires = ["note"]\ncomment = true\n'))
     t = rt.transition("open", "shut")
-    assert t["fields"] == ["note"] and t["require"] == ["note"] and t["comment"]
+    assert t["asks"] == ["note"] and t["requires"] == ["note"] and t["comment"]
 
 
 def test_a_move_that_requires_a_value_is_refused_without_it_whoever_makes_it(hub):
-    """A transition's ``require`` holds for a person, a workflow step and a signature alike; its comment is kept."""
+    """A transition's ``requires`` holds for a person, a workflow step and a signature alike; its comment is kept."""
     install(hub, "dms")
     install(hub, "qms")
     for m in hub.pack.modules:
@@ -2632,7 +2632,7 @@ def test_a_move_that_requires_a_value_is_refused_without_it_whoever_makes_it(hub
     hub.update_record(rana, ref, {"status": "investigating", "owner": qm["id"]}, comment="  starting today ")
     moved = next(x for x in hub.track.list(actor=qm["id"]) if x["action"] == "record.transitioned" and x["subject"] == ref)
     assert moved["data"] == {"from": "open", "to": "investigating", "comment": "starting today"}
-    assert hub.record_type("CAPA").transition("investigating", "actions")["require"] == ["root_cause", "plan"]
+    assert hub.record_type("CAPA").transition("investigating", "actions")["requires"] == ["root_cause", "plan"]
 
 
 # ------------------------------------------------------------------------- review panel: the track is trusted
@@ -6363,7 +6363,7 @@ def test_a_transition_asks_requires_and_signs_and_a_move_missing_a_required_fiel
     from practicehub.workflows import DefinitionError
     rt = schema.parse(JOB.format(top=""))
     t = rt.transition("doing", "done")
-    assert t["fields"] == ["outcome", "hours"] and t["require"] == ["outcome"] and t["sign"] is None
+    assert t["asks"] == ["outcome", "hours"] and t["requires"] == ["outcome"] and t["sign"] is None
     assert rt.transition("done", "approved")["sign"] == "Approved"
     for bad, says in ((JOB.format(top="").replace('sign = "Approved"', 'sign = "Okayed"'), "not one of its signatures"),
                       (JOB.format(top="").replace('sign = "Approved"', 'sign = 3'), "sign is what"),
@@ -6390,6 +6390,29 @@ def test_a_transition_asks_requires_and_signs_and_a_move_missing_a_required_fiel
     with pytest.raises(Denied, match="signed 'Approved'"):
         hub.update_record(actor, ref, {"status": "approved"})
     assert run and hub.records.read(*ref.split("/"))["status"] == "done"
+
+
+def test_a_move_says_asks_and_requires_and_the_older_names_are_refused(hub):
+    """Rule: a lifecycle transition says what its screen asks for as ``asks`` and what must be set once it has moved
+    as ``requires``, and has no other names for them: ``fields`` and ``require``, the older ones, are keys a
+    transition does not have, refused like any other and with the nearest key named where one is near. Every move a
+    reader of a type meets, one the type writes or one its workflow's edge makes, is made by ``schema.move_row``
+    and so carries the same keys."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    job = JOB.format(top="")
+    for old, says in ((job.replace('requires = ["outcome"]', 'require = ["outcome"]'),
+                       'lifecycle.transition to \'done\': unknown key "require" (did you mean "requires"?)'),
+                      (job.replace('asks = ["outcome", "hours"]', 'fields = ["outcome", "hours"]'),
+                       'lifecycle.transition to \'done\': unknown key "fields"')):
+        with pytest.raises(DefinitionError) as exc:
+            schema.parse(old)
+        assert exc.value.problems == [says]
+    _jobs(hub)
+    rows = hub.record_type("Job").lifecycle["transition"]
+    assert any(t.get("edge") for t in rows) and any(not t.get("edge") for t in rows)  # its workflow's, and its own
+    for t in rows:
+        assert set(schema.move_row([], "", by="anyone", label="")) <= set(t) and not {"fields", "require"} & set(t), t
 
 
 def _job(hub, title="Fix the autoclave"):

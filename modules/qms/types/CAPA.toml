@@ -97,7 +97,7 @@ from = ["open"]
 to = "investigating"
 label = "Start investigating"
 screen = "start"              # a transition screen: who owns it, asked as it starts
-require = ["owner"]
+requires = ["owner"]
 comment = true
 
 # the qms-capa workflow's edges are its other moves; from investigating (a move by hand) its plan agreed is this one
@@ -105,8 +105,8 @@ comment = true
 from = ["open", "investigating"]
 to = "actions"
 by = "workflow"
-fields = ["root_cause", "plan"]   # the investigation's answers, as its task is done
-require = ["root_cause", "plan"]
+asks = ["root_cause", "plan"]   # the investigation's answers, as its task is done
+requires = ["root_cause", "plan"]
 label = "Plan agreed"
 
 [[lifecycle.transition]]
@@ -131,8 +131,8 @@ label = "Not effective: more action"
 from = ["open", "investigating"]   # once actions are under way, its workflow finishes or a quality manager cancels the run
 to = "cancelled"
 label = "Cancel"
-fields = ["cancel_reason"]
-require = ["cancel_reason"]
+asks = ["cancel_reason"]
+requires = ["cancel_reason"]
 
 [[screen]]
 id = "start"

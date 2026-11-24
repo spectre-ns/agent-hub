@@ -1068,7 +1068,7 @@ class Engine:
             # a person's step with a state is that move: what its form answered goes in as the fields the move asks
             got = run["ctx"].get(step.id) if step.kind == "task" and isinstance(run["ctx"].get(step.id), dict) else {}
             names = {f["name"] for f in self.fields_for(step, run)} if got else set()
-            for n in (t or {}).get("fields", []):
+            for n in (t or {}).get("asks", []):
                 f = rt.field(n)
                 if f and n in names and got.get(n) not in (None, ""):
                     moved = schema.put(moved, f["path"], got[n])

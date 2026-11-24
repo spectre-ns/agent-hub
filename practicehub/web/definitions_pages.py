@@ -366,7 +366,7 @@ class DefinitionPages:
 TOP_FORM = ("id", "label", "plural", "summary", "data_class", "order", "field", "lifecycle", "screen")
 FIELD_FORM = ("name", "label", "type", "required", "choices", "target", "help")
 LC_FORM = ("field", "states", "initial", "locked", "transition")
-TR_FORM = ("from", "to", "by", "label", "require")
+TR_FORM = ("from", "to", "by", "label", "requires")
 SCREEN_FORM = ("id", "on", "tab", "fields", "label")
 _BARE = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -532,8 +532,8 @@ def doc_from_form(f: dict) -> dict:
                 t["by"] = s(p + "by")
             if s(p + "label"):
                 t["label"] = s(p + "label")
-            if _many(f, p + "require"):
-                t["require"] = _many(f, p + "require")
+            if _many(f, p + "requires"):
+                t["requires"] = _many(f, p + "requires")
             for k, v in _json(_one(f, p + "more")).items():
                 t.setdefault(k, v)
             moves.append(t)
@@ -886,7 +886,7 @@ def render_builder(doc: dict, *, did, types, classes, module_fields, problems, n
                          [("anyone", "Anyone who may write it"), ("workflow", "Only a workflow step")],
                          str(t.get("by") or "anyone"))
                 + text(f"{a}-label", p + "label", "Button label", t.get("label", "")) + '</div>'
-                + chips(f"{a}-require", p + "require", "Fields it requires", pick_opts, t.get("require") or [],
+                + chips(f"{a}-requires", p + "requires", "Fields it requires", pick_opts, t.get("requires") or [],
                         help_="Filled in before the move is made.")
                 + more(p + "more", t, TR_FORM)
                 + '<div class="actions fb-row-actions">' + btn(f"del-trans:{i}", "Remove", aria=f"Remove {words}")

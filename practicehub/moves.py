@@ -73,8 +73,8 @@ class MovesMixin:
         elif not self.may_write(actor, rt.id):
             return f"moving a {label} needs writing {rt.data_class} records"
         hidden = visibility.hidden_keys(self, actor, rt.id, write=True)
-        locked = [rt.field(n)["label"] for n in t["fields"] if rt.field(n)
-                  and rt.field(n)["path"].split(".")[0] in hidden and n in t["require"]]
+        locked = [rt.field(n)["label"] for n in t["asks"] if rt.field(n)
+                  and rt.field(n)["path"].split(".")[0] in hidden and n in t["requires"]]
         if locked:
             return f"it needs {', '.join(locked)}, which you may not fill in"
         opened = self.open_step(rt, ref) if opened is None else opened
@@ -159,9 +159,9 @@ class MovesMixin:
             if t is None or old == to or t.get("entry"):  # a workflow's entry is where a run puts it, not a person
                 raise Invalid(f"a {rt.label.lower()} does not move from {rt.state_label(old).lower() or 'nowhere'} "
                               f"to {rt.state_label(to).lower()}")
-            extra = [k for k in values if k not in t["fields"]]
+            extra = [k for k in values if k not in t["asks"]]
             if extra:
-                asked = ", ".join(rt.field(n)["label"] for n in t["fields"]) or "nothing"
+                asked = ", ".join(rt.field(n)["label"] for n in t["asks"]) or "nothing"
                 raise Invalid(f"moving it to {rt.state_label(to).lower()} asks for {asked}, not "
                               + ", ".join(str(rt.field(k)["label"] if rt.field(k) else k) for k in extra))
             after = dict(rec)
@@ -200,7 +200,7 @@ class MovesMixin:
         run, wf, step, item = opened
         names = {f["name"] for f in self.engine.fields_for(step, run)}
         answer = {}
-        for n in t["fields"]:
+        for n in t["asks"]:
             f = rt.field(n)
             if n in names and f:
                 v = schema.first(rec, f["path"])
@@ -238,12 +238,12 @@ class MovesMixin:
                 may_not.append({**entry, "why": why})
                 continue
             asks = []
-            for n in t["fields"]:
+            for n in t["asks"]:
                 f = rt.field(n)
                 if f and visibility.may_field(self, actor, f, write=True):
                     asks.append({**{k: v for k, v in f.items() if k not in ("path",)}, "value": schema.first(rec, f["path"]),
-                                 "required": f.get("required") is True or n in t["require"]})
-            may.append({**entry, "asks": asks, "requires": [rt.field(n)["label"] for n in t["require"]],
+                                 "required": f.get("required") is True or n in t["requires"]})
+            may.append({**entry, "asks": asks, "requires": [rt.field(n)["label"] for n in t["requires"]],
                         "assign": self.move_assignments(ref, t["to"]),
                         "sign": t.get("sign"), "comment": t.get("comment", False), "forward": t["to"] == forward,
                         **({"does": opened[2].title} if opened and self.step_makes_move(opened[2], t["to"]) else {})})

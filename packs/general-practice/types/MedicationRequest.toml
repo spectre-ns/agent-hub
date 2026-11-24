@@ -167,7 +167,7 @@ from = ["draft"]
 to = "active"
 by = "workflow"
 label = "Issued"
-require = ["medication", "directions", "quantity"]
+requires = ["medication", "directions", "quantity"]
 [[lifecycle.transition]]
 from = ["active"]
 to = "completed"

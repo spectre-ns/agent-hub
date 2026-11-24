@@ -2176,9 +2176,9 @@ class RecordPages:
         rec = hub.read_record(me, ref)
         st, to = schema.first(rec, rt.lifecycle["path"]), f.get("to", "")
         t = rt.transition(st, to)
-        asked = t["fields"] if t else []
+        asked = t["asks"] if t else []
         needed = hub.move_assignments(ref, to) if t else []  # who does the work it sets going: chosen on its screen
-        screened = bool(t and (asked or t["comment"] or t.get("sign") or t["require"] or needed))
+        screened = bool(t and (asked or t["comment"] or t.get("sign") or t["requires"] or needed))
         back = self.safe_back(f.get("_back"))  # from a board: back to it
         if f.get("_ask") and screened and t["by"] != "workflow":
             # a board's Move to…: a move that asks for something shows its screen first
@@ -2384,7 +2384,7 @@ class RecordPages:
         for t in rt.lifecycle.get("transition", []):
             if t["by"] == "workflow" or t["to"] == st or not (st in t["from"] or "*" in t["from"]) or t["to"] in out:
                 continue
-            asks = bool(t["fields"] or t["comment"])
+            asks = bool(t["asks"] or t["comment"])
             out[t["to"]] = {"how": "screen" if asks else "post",
                             "label": (t["label"] if t.get("label") and not t["label"].startswith("Move to ")
                                       else self._state_words(rt, t["to"])) + ("…" if asks else ""),

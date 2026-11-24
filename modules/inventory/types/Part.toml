@@ -152,5 +152,5 @@ comment = true
 from = ["active"]
 to = "obsolete"
 label = "Make obsolete"
-fields = ["obsolete_reason"]
-require = ["obsolete_reason"]
+asks = ["obsolete_reason"]
+requires = ["obsolete_reason"]

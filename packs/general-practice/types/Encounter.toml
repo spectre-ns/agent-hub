@@ -343,7 +343,7 @@ label = "Patient stepped out"
 from = ["planned", "arrived"]
 to = "cancelled"
 label = "Cancel the visit"
-fields = ["cancelled_by"]
+asks = ["cancelled_by"]
 confirm = "Cancelled now, that is {plannedStartDate:notice}. Cancelled by the patient with less than 24 hours' notice, the missed-appointment policy applies (a reminder, or a fee) and the patient is told; cancelled by the practice, no fee, and the patient is told and asked to rebook. The {plannedStartDate:time} slot is freed."
 [[lifecycle.transition]]
 from = ["planned"]

@@ -92,7 +92,7 @@ from = ["new", "contacted", "qualified"]
 to = "lost"
 label = "Lost"
 screen = "lost"
-require = ["lost_reason"]
+requires = ["lost_reason"]
 
 [[screen]]
 id = "won"

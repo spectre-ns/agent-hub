@@ -433,7 +433,7 @@ def record_schema(hub, rt: schema.RecordType) -> dict:
         out["x-practicehub"]["lifecycle"] = {
             "field": rt.lifecycle["path"], "states": rt.lifecycle["states"], "initial": rt.lifecycle.get("initial"),
             "transitions": [{"from": t["from"], "to": t["to"], "by": t["by"], "label": t["label"],
-                             "fields": t["fields"], "require": t["require"]} for t in rt.lifecycle["transition"]]}
+                             "asks": t["asks"], "requires": t["requires"]} for t in rt.lifecycle["transition"]]}
     return out
 
 
@@ -512,12 +512,12 @@ def tools(hub, sid: str, member: dict) -> list[dict]:
             need = []
             for t in moves:
                 frm = "any state" if "*" in t["from"] else " or ".join(t["from"])
-                extra = [rt.field(x)["name"] for x in t["fields"] if rt.field(x)]
-                must = [rt.field(x)["name"] for x in t["require"] if rt.field(x)]
+                extra = [rt.field(x)["name"] for x in t["asks"] if rt.field(x)]
+                must = [rt.field(x)["name"] for x in t["requires"] if rt.field(x)]
                 need.append(f"{t['label']}: {frm} -> {t['to']}"
                             + (f" (fields: {', '.join(extra)})" if extra else "")
                             + (f" (must be filled: {', '.join(must)})" if must else ""))
-            mfields = [f for f in fs if any(f["name"] in t["fields"] for t in moves)]
+            mfields = [f for f in fs if any(f["name"] in t["asks"] for t in moves)]
             mprops, _ = _fields_props(hub, mfields, all_optional=True)
             mprops = {"id": ID_PROP, "version": VERSION_PROP,
                       "to": {"type": "string", "enum": sorted({t["to"] for t in moves}), "description": "the state"},
@@ -795,7 +795,7 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
                 raise Refused(f"only a workflow moves a {rt.label.lower()} to {a['to']!r}")
             raise Refused(f"moving a {rt.label.lower()} to {a['to']!r} puts it into force: a person does that, "
                           f"never an agent")
-        data = _values(rt, a, {k: v for k, v in before.items() if k != "meta"}, only=t["fields"])
+        data = _values(rt, a, {k: v for k, v in before.items() if k != "meta"}, only=t["asks"])
         data = schema.put(data, rt.lifecycle["path"], a["to"])
         rec = hub.update_record(member, ref, data, cause=seq, expected_version=a["version"],
                                 comment=a.get("comment") if t["comment"] else None)

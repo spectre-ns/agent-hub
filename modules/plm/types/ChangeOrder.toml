@@ -104,7 +104,7 @@ locked = ["review", "approved", "releasing", "implemented", "cancelled"]   # wha
 from = ["draft"]
 to = "review"
 label = "Send for review"
-require = ["reason"]
+requires = ["reason"]
 
 # Approving, rejecting, releasing and returning it are the plm-change workflow's edges; only the moves people make by
 # hand, and where cancelled work leaves it, are listed here.
@@ -124,8 +124,8 @@ label = "Back to its author"
 from = ["draft", "rejected"]   # not while the board has it: its review ends it
 to = "cancelled"
 label = "Cancel"
-fields = ["cancel_reason"]
-require = ["cancel_reason"]
+asks = ["cancel_reason"]
+requires = ["cancel_reason"]
 
 # No [[signature]]: the plm-change workflow's review gate is where the change board signs its approval; a second
 # meaning on the record only said the same thing again.

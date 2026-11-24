@@ -151,9 +151,8 @@ class CatalogMixin:
                 frm = [f for f in frm if f in states and f != to
                        and not any(t["to"] == to and f in t["from"] for t in moves)]
                 if frm:
-                    moves.append({"from": frm, "to": to, "by": "workflow", "label": e["label"], "screen": None,
-                                  "fields": [], "require": [], "comment": False, "sign": None, "edge": e["id"],
-                                  **({"entry": True} if not e["from"] else {})})
+                    moves.append(schema.move_row(frm, to, by="workflow", label=e["label"], edge=e["id"],
+                                                 **({"entry": True} if not e["from"] else {})))
         lc.update(transition=moves, labels=labels, tones=tones,
                   # a workflow starting on the record again (its entry) is no way back into use
                   revising=schema.revising_states(states, [t for t in moves if not t.get("entry")], lc.get("in_use")))

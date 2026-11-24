@@ -3856,8 +3856,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     early = self.move_not_open_yet(rt, t, before, member, run_id)
                     if early:
                         raise Invalid(early)
-                    # the move's own rule (a transition's require), whoever makes it: a person, a workflow, a signature
-                    empty = [rt.field(n)["label"] for n in t.get("require", [])
+                    # the move's own rule (a transition's requires), whoever makes it: a person, a workflow, a signature
+                    empty = [rt.field(n)["label"] for n in t.get("requires", [])
                              if schema.first(after, rt.field(n)["path"]) in (None, "", [], {})]
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
