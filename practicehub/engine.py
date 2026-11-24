@@ -1037,7 +1037,7 @@ class Engine:
         edge = (rc.get("origin") or {}).get("edge")
         if edge:
             try:
-                shape = getattr(self.hub.workflow(prow["workflow_id"], prow["version"])[0], "shape", None) or {}
+                shape = self.hub.workflow(prow["workflow_id"], prow["version"])[0].shape
             except Exception:  # noqa: BLE001 - a workflow that cannot be read names no edge
                 shape = {}
             label = next((e.get("label") for e in [shape.get("start"), *(shape.get("edges") or [])]

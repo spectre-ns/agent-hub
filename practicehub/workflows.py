@@ -1,7 +1,13 @@
 """Workflow definitions: how a practice writes down the way it works.
 
-A workflow is a TOML document a practice manager can read and edit. Its steps are done by roles, and a role is held
-by people, agents or both; the workflow never says which. Three kinds of step:
+A workflow is a TOML document a practice manager can read and edit. It is written as its record's states and the
+edges between them (``practicehub/states.py``): a state is where the record waits, with the work done there; an edge
+is a way out of it, with the automations that run on the way. That text is compiled to steps, which are what a run
+walks and what the rest of this page describes: the work on a state is a step, and so is each automation of an edge.
+A list of ``[[steps]]`` is not a way to write one, and is refused.
+
+Steps are done by roles, and a role is held by people, agents or both; the workflow never says which. The kinds of
+step:
 
 * ``task``: someone holding the role does the work and fills in the step's fields. An agent does it with the step's
   ``skill``; a person with a form. Same fields, same validation. A task may name how it can end (``outcomes``, e.g.
@@ -17,7 +23,9 @@ Any task or automation may use a **block** (``block = "<id>"``, see ``practicehu
 parameterised step. ``params`` fill the block's inputs. A prompt block makes a task an injected prompt for an agent;
 a python or external block makes an automation run code or another engine.
 
-Steps run when every step in ``after`` has finished, and only if ``when`` holds; otherwise they are skipped.
+A step runs when the steps before it have finished (which those are comes from the states and edges: a state's work
+follows whatever moves the record there, an edge's automations follow the work that chose the edge), and only if
+its ``when`` holds; otherwise it is skipped.
 
 A workflow starts by hand (``trigger.starters``), on an event (``trigger.event``, e.g. ``record.created:Observation``
 or one from the practice's event catalogue) when ``trigger.when`` holds, or on a schedule (``trigger.schedule``,
@@ -30,10 +38,10 @@ open after it is flagged once (``run.deadline_missed``, a notice to that role) a
 
 **A record's own workflow.** A record type may name the workflow that walks it (``workflow = "<id>"`` in the type,
 see ``practicehub/schema.py``): creating a record of that type, by any path, starts that workflow about it. The
-record's lifecycle state is where the work is: a step with ``state = "<lifecycle state>"`` puts the record in that
-state (a person's or wait step when it starts, an automation when it is done; an automation may have only a
-``state``), and a ``wait`` whose ``until`` reads ``record.<state field>`` goes on when someone moves the record on its
-own page. The run keeps one item, moved from step to step: the hand-off of that record. A workflow started on what
+record's state is where the work is: the workflow's states are the values the record's state field takes, and an
+edge moves the record to the state it leads to as its last step (a state the field has no value for is the run's
+own to keep: ``run["at"]``). A ``wait`` whose ``until`` reads ``record.<state field>`` goes on when someone moves
+the record on its own page. The run keeps one item, moved from step to step: the hand-off of that record. A workflow started on what
 its record is about (a subject) makes the record first, from ``[new_record]`` (field = value, placeholders over
 ``run`` and ``input``); ``run.subject`` is then what it is about and ``run.start_state`` the state it began in.
 ``trigger.one_open_within = "10m"`` and ``trigger.one_open_same = ["input.<name>", ...]`` narrow one_open_per to
@@ -246,20 +254,6 @@ class Workflow:
             if s.id == sid:
                 return s
         raise KeyError(sid)
-
-    def order(self) -> list[list[Step]]:
-        """Steps in layers: each layer's steps depend only on earlier layers (for the diagram)."""
-        depth: dict[str, int] = {}
-
-        def d(s: Step) -> int:
-            if s.id not in depth:
-                depth[s.id] = 0 if not s.after else 1 + max(d(self.step(a)) for a in s.after)
-            return depth[s.id]
-
-        layers: dict[int, list[Step]] = {}
-        for s in self.steps:
-            layers.setdefault(d(s), []).append(s)
-        return [layers[k] for k in sorted(layers)]
 
 
 # not_by names, besides earlier steps: whoever started the run, and whoever created or changed the run's record

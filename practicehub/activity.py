@@ -30,8 +30,8 @@ class ActivityMixin:
         ``state`` is done, failed, or held (pending behind a failed one, while the run still runs). ``who`` is the
         actor id of the event that set the move going (a decision, a completion, ``run.started`` for the start edge,
         an automation's for an automated state). ``after_person`` False: the move followed on from the one before (an
-        automated state's edge); a cascade is a move with it True and the moves after it with it False. A workflow
-        not written as states and edges gives no moves."""
+        automated state's edge); a cascade is a move with it True and the moves after it with it False. A run whose
+        workflow version cannot be read gives no moves."""
         rtype = ref.split("/", 1)[0]
         self.require(viewer, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
         view = visibility.Viewer(self, viewer)
@@ -52,9 +52,9 @@ class ActivityMixin:
 
     def _run_moves(self, viewer, view, run: dict, evs: dict) -> list[dict]:
         wf = view.workflow_of_run(run["id"])
-        shape = getattr(wf, "shape", None) or {}
-        if not shape:
+        if wf is None:
             return []
+        shape = wf.shape
         automated = {s["id"]: bool(s.get("automated")) for s in shape.get("states") or []}
         steps = run.get("steps") or {}
         running = run.get("status") == "running"

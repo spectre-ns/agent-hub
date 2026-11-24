@@ -4,9 +4,10 @@ record's history in words.
 A record type's lifecycle transitions say what a move needs (``asks``, ``requires``, ``sign``; see schema.py). One
 call makes any move (``Hub.move_record``): whoever may make it, with the values its screen asked for and, for a signed
 move, the mover's signature, written with the state in one transaction. While the type's workflow walks the record, the
-open person's step of that run decides who may make the moves it governs (its role, and whoever holds it), and a step
-with ``state`` is done by the move to that state: its form takes the transition's ``asks`` by field name, so doing the
-transition is doing the step, and finishing the step on its item makes the same move through the same transition.
+open person's step of that run decides who may make the moves it governs (its role, and whoever holds it), and a
+person's task on a state with one way out is done by that move: its form takes the transition's ``asks`` by field
+name, so making the move is doing the task, and finishing the task on its item makes the same move through the same
+transition.
 ``Hub.transition_screen`` lists the moves a member may make now and why the others are not theirs to make;
 ``Hub.record_timeline`` tells the record's history in words, oldest first.
 """
