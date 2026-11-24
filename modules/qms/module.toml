@@ -6,7 +6,7 @@
 #  (Found not effective because), and the next pass reopens only the documents its further action names. The record's
 #  own signature meaning, which repeated the verification gate's, is removed.
 # 4: The CAPA workflow is written as its states and edges; the moves it makes are its edges, no longer listed on the
-#  CAPA type. Versions approved before keep running as they were.
+#  CAPA type.
 
 [module]
 requires_core = "1.0"

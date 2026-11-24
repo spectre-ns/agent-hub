@@ -707,6 +707,11 @@ def install(hub, name, by="rana"):
     return hub.install_module(M(hub, by), name)
 
 
+def _qms_code_runs(hub) -> bool:
+    """The qms module's pack.py is running in this practice: only its own ``summarize`` names a CAPA this way."""
+    return hub.pack.summarize({"resourceType": "CAPA", "kind": "corrective", "title": "T"}) == "Corrective action: T"
+
+
 @pytest.fixture
 def quality(hub):
     """The demo practice with document control and quality installed, and their demo data."""
@@ -1001,12 +1006,15 @@ def test_a_module_install_that_fails_leaves_the_practice_as_it_was(hub, monkeypa
     rana = M(hub, "rana")
     install(hub, "dms")
 
+    running = []
+
     def boom(*a, **k):
+        running.append(_qms_code_runs(hub))
         raise Invalid("broken definition")
     monkeypatch.setattr(hub, "_install_definitions", boom)
     with pytest.raises(Invalid):
         install(hub, "qms")
-    assert "qms.send-documents-for-review" not in hub.pack.actions
+    assert running == [True] and not _qms_code_runs(hub)  # its code ran while it installed, and was taken out again
     assert [m.id for m in hub.pack.modules] == ["dms"]
     assert not hub.db.roles.exists({"_id": "quality-manager"})
     assert hub.db.get_setting("modules") and all("qms" not in d for d in hub.db.get_setting("modules"))
@@ -1125,11 +1133,11 @@ def test_changed_module_code_is_not_run_until_someone_upgrades_to_it(tmp_path, m
     install(h, "qms")
     del h
     h = Hub(state)
-    assert "qms.send-documents-for-review" in h.pack.actions and not h.module_problems
+    assert _qms_code_runs(h) and not h.module_problems
     code = mods / "qms" / "pack.py"
     code.write_text(code.read_text() + "\n# changed on the server\n")
     h = Hub(state)
-    assert "qms" in h.module_problems and "qms.send-documents-for-review" not in h.pack.actions
+    assert "qms" in h.module_problems and not _qms_code_runs(h)
     assert h.db.events.exists({"action": "module.refused", "subject": "module:qms"})
     assert h.track.verify()["ok"]
     with pytest.raises(Denied):  # new code is put in force only after a second policy owner reviewed it
@@ -1139,7 +1147,7 @@ def test_changed_module_code_is_not_run_until_someone_upgrades_to_it(tmp_path, m
         h.upgrade_module(M(h, "dr-amara"), "qms")
     h.upgrade_module(M(h, "rana"), "qms")  # a policy owner signs the new code in
     h = Hub(state)
-    assert "qms.send-documents-for-review" in h.pack.actions and not h.module_problems
+    assert _qms_code_runs(h) and not h.module_problems
     import shutil
     shutil.move(mods / "qms", tmp_path / "elsewhere")
     h = Hub(state)  # a module that went missing does not stop the practice starting
@@ -1673,6 +1681,361 @@ def test_a_pack_upgrade_checks_a_new_workflow_against_the_data_classes_it_brings
     with pytest.raises(Invalid):
         hub.upgrade_pack(M(hub, "dr-amara"))
     assert {d["id"] for d in hub.pack.all_data_classes()} == before
+
+
+# -------------------------------------------------------- what a new pack version does to the records an older one left
+# ``UPGRADES`` in a pack's pack.py, run by ``Hub.run_pack_upgrades``. No pack here has an upgrade of its own (no
+# practice runs an older version of one), so these rules are held on a copy of the accounting practice whose version 2
+# gives a client a standing: a field its Client type gains, and an upgrade that makes each client on file a current one.
+ACCOUNTING = Path(__file__).parent / "packs" / "accounting"
+STANDING = "2-clients-have-a-standing"
+STANDING_FIELD = '''
+[[field]]
+name = "standing"
+label = "Standing"
+type = "choice"
+choices = ["current", "former"]
+'''
+STANDING_UPGRADE = '''
+
+def give_each_client_a_standing(hub, actor):
+    """Version 2: each client an older version left is a current one. None until the Client type that has a standing
+    is in force; then ``hub.UPGRADE_BATCH`` clients a call, in id order from where the call before stopped."""
+    rt = hub.record_type("Client")
+    if rt is None or rt.field("standing") is None:
+        return None
+    rows = hub.db.records.find({"type": "Client", "_id": {"$gt": hub.upgrade_state.get("after") or ""}},
+                               sort="_id", limit=hub.UPGRADE_BATCH, fields=["data"])
+    for row in rows:
+        hub.update_record(actor, row["_id"], {"standing": "current"})
+        hub.upgrade_state["after"] = row["_id"]
+    return {"clients_given_a_standing": [row["_id"] for row in rows], "more": len(rows) == hub.UPGRADE_BATCH}
+
+
+UPGRADES = {"2-clients-have-a-standing": give_each_client_a_standing}
+'''
+
+
+def _upgrade_calls(monkeypatch):
+    """Every call the hub makes of a pack's upgrade function, whichever Hub object makes it, in order: where the
+    function was told it stopped (``hub.upgrade_state``), whether it was called inside a transaction, and how many of
+    its batches someone else reading the database found written at that moment (so: committed before the call)."""
+    from practicehub import pack as packmod
+    calls, real = [], packmod.load
+
+    def load(*a, **k):
+        p = real(*a, **k)
+        for uid, fn in list(p.upgrades.items()):
+            def spied(hub, actor, uid=uid, fn=fn):
+                assert len(calls) < 50, "the upgrade is called without end"
+                written = (_raw_db().get_setting(hub.UPGRADE_PROGRESS) or {}).get(uid) or {}
+                calls.append({"upgrade": uid, "state": dict(hub.upgrade_state), "inside": hub.db.in_transaction(),
+                              "written": written.get("batches", 0)})
+                return fn(hub, actor)
+            p.upgrades[uid] = spied
+        return p
+    monkeypatch.setattr(packmod, "load", load)
+    return calls
+
+
+def _version_2_arrives(copy):
+    """Version 2 of the firm's pack, on disk: a client has a standing, and pack.py says what that does to the clients
+    an older version left (``UPGRADES``)."""
+    toml, code, client = copy / "pack.toml", copy / "pack.py", copy / "types" / "Client.toml"
+    toml.write_text('version = "2"\n' + toml.read_text())
+    code.write_text(code.read_text() + STANDING_UPGRADE)
+    client.write_text(client.read_text() + STANDING_FIELD)
+
+
+def _firm_on_disk(tmp_path, monkeypatch, *, version=1, clients=0):
+    """A copy of the accounting practice (tests/packs/accounting) with a second partner, so that one reviews what the
+    other puts into force, installed on ``version`` in a state directory of its own, with ``clients`` clients on file.
+    Returns (the state directory, the copy, the clients' refs in id order)."""
+    import shutil
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    copy = tmp_path / "packs" / "accounting"
+    shutil.copytree(ACCOUNTING, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    toml = copy / "pack.toml"
+    toml.write_text(toml.read_text() + '\n[[members]]\nid = "pat"\nname = "Pat Comeau, CPA"\nroles = ["partner"]\n')
+    if version == 2:
+        _version_2_arrives(copy)
+    state = tmp_path / "state"
+    hub = Hub(state, pack=str(copy))
+    hub.install(str(copy))
+    kim = M(hub, "kim")
+    refs = sorted(f"Client/{hub.create_record(kim, 'Client', {'name': [{'text': f'Client {i}'}]})['id']}"
+                  for i in range(clients))
+    return state, copy, refs
+
+
+def _upgrade_to_version_2(state, copy) -> int:
+    """Version 2 arrives; one partner reviews it and the other upgrades to it. Its changed Client type is proposed
+    (returned: the version the first partner may approve), and its pack.py runs from the next time the hub opens."""
+    from practicehub.hub import Hub
+    _version_2_arrives(copy)
+    hub = Hub(state)
+    hub.review_pack(M(hub, "lee"))
+    (new,) = hub.upgrade_pack(M(hub, "pat"))["proposed"]
+    assert (new["kind"], new["id"]) == ("type", "Client")
+    return new["version"]
+
+
+def _standings(hub, refs) -> list:
+    return [hub.records.read(*ref.split("/", 1)).get("standing") for ref in refs]
+
+
+def _times_written(hub, refs) -> list:
+    """How many versions each record has: one for its filing, one more for each change."""
+    return [len(hub.db.record_versions.find({"type": ref.split("/")[0], "id": ref.split("/")[1]})) for ref in refs]
+
+
+def test_a_pack_upgrade_runs_once(tmp_path, monkeypatch):
+    """What a new pack version does to the records an older one left (``UPGRADES`` in its pack.py) is done once. When
+    its function returns what it did, the hub records the upgrade as done (``pack_upgrades_done``) and says so on the
+    track (``practice.upgrade_applied``: by the hub, after whose approval, what it did), and the function is never
+    called again: not when another definition is approved, not when it is asked for, not when the hub opens again."""
+    from practicehub.hub import Hub
+    calls = _upgrade_calls(monkeypatch)
+    state, copy, refs = _firm_on_disk(tmp_path, monkeypatch, clients=3)
+    version = _upgrade_to_version_2(state, copy)
+    hub = Hub(state)
+    lee, pat = M(hub, "lee"), M(hub, "pat")
+    hub.approve(lee, "type", "Client", version)  # the type the upgrade waited for
+    assert len(calls) == 2  # when the hub opened (too early), and at the approval
+    assert _standings(hub, refs) == ["current"] * 3 and hub.db.get_setting("pack_upgrades_done") == [STANDING]
+    (ev,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    assert ev["actor"] == "hub" and ev["subject"] == "practice:lighthouse"
+    assert ev["data"] == {"upgrade": STANDING, "pack_version": "2", "after": "lee", "batches": 1,
+                          "clients_given_a_standing": 3}
+    src = hub.workflow("personal-return")[1]["source"].replace('title = "Personal tax return"', 'title = "Tax return"')
+    out = hub.propose_workflow(pat, src, "a shorter name")
+    hub.approve_workflow(lee, "personal-return", out["version"])  # another definition is approved
+    assert hub.run_pack_upgrades(lee) == []                       # it is asked for
+    hub = Hub(state)                                              # the hub opens again
+    assert len(calls) == 2 and len(hub.db.events.find({"action": "practice.upgrade_applied"})) == 1
+    assert hub.db.get_setting("pack_upgrades_done") == [STANDING]
+    assert _times_written(hub, refs) == [2, 2, 2]  # filed, then given a standing: once
+    assert hub.track.verify()["ok"]
+
+
+def test_a_pack_upgrade_that_cannot_run_yet_is_tried_again_until_it_can(tmp_path, monkeypatch):
+    """A function that returns None is not done: what it needs is not in force yet (here the Client type version 2
+    brings is still proposed). Nothing is recorded, and it is called again each time the hub opens and when a record
+    type is approved, so the upgrade happens whichever comes last: here at the approval of the type it waited for."""
+    from practicehub.hub import Hub
+    calls = _upgrade_calls(monkeypatch)
+    state, copy, refs = _firm_on_disk(tmp_path, monkeypatch, clients=2)
+    version = _upgrade_to_version_2(state, copy)
+    assert calls == []  # the hub that upgraded was running version 1's pack.py: version 2's runs from the next start
+    for opened in (1, 2):
+        hub = Hub(state)
+        assert len(calls) == opened and _standings(hub, refs) == [None, None]
+        assert hub.db.get_setting("pack_upgrades_done") == [] and not hub.db.get_setting("pack_upgrade_progress")
+        assert not hub.db.events.exists({"action": {"$in": ["practice.upgrade_progress", "practice.upgrade_applied",
+                                                             "practice.upgrade_failed"]}})
+    hub.approve(M(hub, "lee"), "type", "Client", version)
+    assert len(calls) == 3 and _standings(hub, refs) == ["current", "current"]
+    assert hub.db.get_setting("pack_upgrades_done") == [STANDING]
+
+
+def test_a_pack_upgrade_works_in_batches_each_a_transaction_of_its_own(tmp_path, monkeypatch):
+    """A function that returns ``more`` did one batch and is called again. Each call is inside a transaction of its
+    own, written before the next call is made, and finds in ``hub.upgrade_state`` what the call before left there.
+    Every batch is on the track (``practice.upgrade_progress``, with what it did, counted); the last is
+    ``practice.upgrade_applied``, with what all of them did together, and the upgrade's place is cleared."""
+    from practicehub.hub import Hub
+    monkeypatch.setattr(Hub, "UPGRADE_BATCH", 2)  # two clients a batch: five take three
+    calls = _upgrade_calls(monkeypatch)
+    state, copy, refs = _firm_on_disk(tmp_path, monkeypatch, clients=5)
+    version = _upgrade_to_version_2(state, copy)
+    hub = Hub(state)
+    del calls[:]  # the call when the hub opened, too early
+    hub.approve(M(hub, "lee"), "type", "Client", version)
+    assert calls == [{"upgrade": STANDING, "state": {}, "inside": True, "written": 0},
+                     {"upgrade": STANDING, "state": {"after": refs[1]}, "inside": True, "written": 1},
+                     {"upgrade": STANDING, "state": {"after": refs[3]}, "inside": True, "written": 2}]
+    assert _standings(hub, refs) == ["current"] * 5
+    said = {"upgrade": STANDING, "pack_version": "2", "after": "lee"}
+    assert [ev["data"] for ev in hub.db.events.find({"action": "practice.upgrade_progress"}, sort="seq")] == [
+        {**said, "batch": 1, "clients_given_a_standing": 2}, {**said, "batch": 2, "clients_given_a_standing": 2}]
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    assert done["data"] == {**said, "batches": 3, "clients_given_a_standing": 5}
+    assert hub.db.get_setting("pack_upgrades_done") == [STANDING]
+    assert not hub.db.get_setting("pack_upgrade_progress") and hub.upgrade_state == {}
+
+
+def test_a_pack_upgrade_that_fails_part_way_keeps_its_batches_and_goes_on_from_there(tmp_path, monkeypatch):
+    """A batch that fails is undone whole, and the batches written before it stay, with the upgrade's place
+    (``pack_upgrade_progress``). The approval that set the upgrade off stands and the hub still opens: the failure is
+    on the track (``practice.upgrade_failed``). The next start goes on from the last batch written, so every record is
+    done, and none twice."""
+    from practicehub.hub import Hub
+    monkeypatch.setattr(Hub, "UPGRADE_BATCH", 2)
+    calls = _upgrade_calls(monkeypatch)
+    state, copy, refs = _firm_on_disk(tmp_path, monkeypatch, clients=6)
+    version = _upgrade_to_version_2(state, copy)
+    real, tried = Hub.update_record, []
+
+    def stops(self, member, ref, data, **k):
+        if "standing" in data:
+            tried.append(ref)
+            if len(tried) >= 6:  # the sixth, and every one after it, until the server is mended
+                raise RuntimeError("the server stopped")
+        return real(self, member, ref, data, **k)
+    monkeypatch.setattr(Hub, "update_record", stops)
+
+    def as_two_batches_left_it(hub, failures):
+        assert _standings(hub, refs) == ["current"] * 4 + [None, None]
+        assert hub.db.get_setting("pack_upgrade_progress") == {STANDING: {
+            "batches": 2, "state": {"after": refs[3]}, "done": {"clients_given_a_standing": 4}}}
+        assert hub.db.get_setting("pack_upgrades_done") == []
+        failed = hub.db.events.find({"action": "practice.upgrade_failed"})
+        assert len(failed) == failures and all("the server stopped" in ev["data"]["error"] for ev in failed)
+        assert len(hub.db.events.find({"action": "practice.upgrade_progress"})) == 2
+    hub = Hub(state)
+    hub.approve(M(hub, "lee"), "type", "Client", version)  # two batches; the third fails at its second client
+    assert hub.record_type("Client").field("standing")     # the approval stands
+    assert tried[4:] == refs[4:]
+    as_two_batches_left_it(hub, 1)                          # the fifth client was written in the batch that failed
+    as_two_batches_left_it(Hub(state), 2)                   # the hub still opens; it fails again and loses nothing
+    monkeypatch.setattr(Hub, "update_record", real)         # the server is mended
+    del calls[:]
+    hub = Hub(state)                                        # the next start
+    assert [c["state"] for c in calls] == [{"after": refs[3]}, {"after": refs[5]}]  # on from where it stopped
+    assert _standings(hub, refs) == ["current"] * 6 and _times_written(hub, refs) == [2] * 6
+    (done,) = hub.db.events.find({"action": "practice.upgrade_applied"})
+    assert done["data"]["batches"] == 4 and done["data"]["clients_given_a_standing"] == 6
+    assert hub.db.get_setting("pack_upgrades_done") == [STANDING] and not hub.db.get_setting("pack_upgrade_progress")
+    assert hub.track.verify()["ok"]
+
+
+def test_a_practice_that_starts_on_a_version_has_none_of_its_upgrades_to_run(tmp_path, monkeypatch):
+    """A practice installed on a version has nothing an older one left: its upgrades are recorded as done when it is
+    installed, and their functions are never called, then or when the hub opens."""
+    from practicehub.hub import Hub
+    calls = _upgrade_calls(monkeypatch)
+    state, _, refs = _firm_on_disk(tmp_path, monkeypatch, version=2, clients=1)
+    hub = Hub(state)
+    assert list(hub.pack.upgrades) == [STANDING] and hub.db.get_setting("pack_upgrades_done") == [STANDING]
+    assert hub.run_pack_upgrades(M(hub, "lee")) == [] and calls == []
+    assert _standings(hub, refs) == [None]  # a client filed on version 2 with no standing is left as it was filed
+    assert not hub.db.events.exists({"action": "practice.upgrade_applied"})
+
+
+def _firm_with_prospects(tmp_path, monkeypatch):
+    """The accounting practice with one more type, Prospect: someone who asked about the firm, kept apart from its
+    clients in a type of the same shape, as a pack might before a version that merges the two."""
+    import shutil
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    copy = tmp_path / "packs" / "accounting"
+    shutil.copytree(ACCOUNTING, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    client = (copy / "types" / "Client.toml").read_text()
+    (copy / "types" / "Prospect.toml").write_text(re.sub(r'"Client(s?)"', r'"Prospect\1"', client))
+    hub = Hub(None, pack=str(copy))
+    hub.install(str(copy))
+    return hub
+
+
+def test_a_converted_record_is_one_of_the_other_type_and_what_pointed_at_it_points_there(tmp_path, monkeypatch):
+    """``Hub.convert_record``, for an upgrade that merges two types: the record becomes one of the other type with the
+    same id (or, with ``into``, the record of that type it already stood for, rewritten), checked as any record of that
+    type is. The old one is gone from the store and its versions stay; every record that pointed at it points at the
+    new one, in a version of its own; a queued message to it goes to the new one (``repoint=False`` leaves that to a
+    caller that repoints many at once); and the track says what became what. A conversion refused changes nothing."""
+    from practicehub.engine import act_message_send
+    hub = _firm_with_prospects(tmp_path, monkeypatch)
+    kim, by = M(hub, "kim"), {"id": "hub", "kind": "automation", "name": "Practice Hub"}  # as an upgrade is run
+    asked = lambda name, **more: hub.create_record(kim, "Prospect", {"name": [{"text": name}], **more})  # noqa: E731
+    fields = lambda rec: {k: v for k, v in rec.items() if k not in ("resourceType", "id", "meta")}  # noqa: E731
+    avery, robin = asked("Avery Boudreau", email="a@example.com"), asked("Robin LeBlanc", email="r@example.com")
+    a_old, r_old, a_new = f"Prospect/{avery['id']}", f"Prospect/{robin['id']}", f"Client/{avery['id']}"
+    file = hub.create_record(kim, "Client", {"name": [{"text": "Robin LeBlanc"}], "sin_tail": "123"})  # Robin's own
+    r_new = f"Client/{file['id']}"
+    complained = lambda about: hub.create_record(kim, "Complaint", {"about": {"reference": about},  # noqa: E731
+                                                                    "what": "Nobody called back"})
+    complaint = {old: f"Complaint/{complained(old)['id']}" for old in (a_old, r_old)}
+    run = hub.engine.run(hub.engine.start(kim, "personal-return", record=r_new, inputs={"year": 2026})["id"])
+    step = hub.workflow("personal-return")[0].step("invoice")
+    told = {old: act_message_send(hub.engine, run, step, {"to": old, "subject": "Welcome", "body": "We will call."},
+                                  kim)["message_id"] for old in (a_old, r_old)}
+
+    # refused: nothing to convert, not a client as the Client type says one is, nothing to convert it into
+    with pytest.raises(NotFound):
+        hub.convert_record(by, "Prospect/nobody", "Client", {"name": [{"text": "Nobody"}]})
+    with pytest.raises(Invalid, match="the client has problems"):
+        hub.convert_record(by, a_old, "Client", {"email": "a@example.com"})
+    with pytest.raises(Invalid, match="there is no Client/nobody"):
+        hub.convert_record(by, a_old, "Client", fields(avery), into="Client/nobody")
+    assert hub.records.read("Prospect", avery["id"]) == avery and hub.records.read("Client", avery["id"]) is None
+    assert not hub.db.events.exists({"action": "record.converted"})
+
+    # a prospect becomes a client with the same id
+    made = hub.convert_record(by, a_old, "Client", fields(avery))
+    assert (made["resourceType"], made["id"]) == ("Client", avery["id"]) and fields(made) == fields(avery)
+    assert hub.records.read("Client", avery["id"]) == made and hub.records.read("Prospect", avery["id"]) is None
+    assert [v["actor"] for v in hub.record_history(kim, a_new)] == ["hub"]  # the client's history starts here
+    assert [v["actor"] for v in hub.record_history(kim, a_old)] == ["kim"]  # and what it was before is kept
+    about = hub.records.read(*complaint[a_old].split("/", 1))
+    assert about["about"] == {"reference": a_new} and about["meta"]["versionId"] == "2"
+    assert hub.linked(kim, a_new) == [{"rel": "subject", "ref": complaint[a_old]}] and hub.linked(kim, a_old) == []
+    assert hub.db.outbox.get(told[a_old])["recipient"] == a_new
+    (ev,) = hub.db.events.find({"action": "record.converted"})
+    assert (ev["actor"], ev["subject"], ev["data"]["from"]) == ("hub", a_new, a_old)
+    with pytest.raises(Invalid, match="already"):  # a prospect filed under the id of a client that is there
+        hub.convert_record(by, f"Prospect/{asked('Avery again', id=avery['id'])['id']}", "Client", fields(avery))
+
+    # a prospect who has a client's file already becomes that file, rewritten
+    merged = hub.convert_record(by, r_old, "Client", {**fields(file), "email": robin["email"]}, into=r_new,
+                                repoint=False)
+    assert merged["id"] == file["id"] and (merged["email"], merged["sin_tail"]) == ("r@example.com", "123")
+    assert hub.records.read("Prospect", robin["id"]) is None and hub.records.read("Client", robin["id"]) is None
+    assert [v["actor"] for v in hub.record_history(kim, r_new)] == ["hub", "kim"]  # one version more of that file
+    assert hub.records.read(*complaint[r_old].split("/", 1))["about"] == {"reference": r_new}
+    assert hub.db.outbox.get(told[r_old])["recipient"] == r_old  # left to the caller
+    assert hub.repoint_work({r_old: r_new}) == 1 and hub.db.outbox.get(told[r_old])["recipient"] == r_new
+    assert hub.track.verify()["ok"]
+
+
+def test_work_under_way_follows_a_record_to_its_new_ref_and_finished_work_keeps_what_it_named(monkeypatch):
+    """``Hub.repoint_work``, after records got new refs (a conversion, two files of one client made one): a run still
+    running names the new ref wherever it named the old (its record, its subject, its context), and so do an open
+    item's output and a queued message, so the work goes on with the record that is there. Finished work (a cancelled
+    run and its item, a message delivered) keeps what it named, as the track does. It returns how many it rewrote."""
+    from practicehub.engine import act_message_send
+    from practicehub.hub import Hub
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    firm = Hub(None, pack=str(ACCOUNTING))
+    firm.install(str(ACCOUNTING))
+    firm.authz.write([("data_class:messages", "reader", member_ref("lee"))])  # the firm names no message class
+    lee, kim = M(firm, "lee"), M(firm, "kim")
+    old, new = (f"Client/{firm.create_record(kim, 'Client', {'name': [{'text': name}]})['id']}"
+                for name in ("Avery Boudreau", "Avery Boudreau-Roy"))  # one client, filed twice
+    over = firm.engine.start(kim, "personal-return", record=old, inputs={"year": 2025})
+    firm.engine.cancel(kim, over["id"], "started for the wrong year")
+    run = firm.engine.start(kim, "personal-return", record=old, inputs={"year": 2026})
+    for r in (over, run):  # an answer that names the client, kept on each run's item
+        firm.db.items.set(firm.db.runs.get(r["id"])["item"], {"output": {"client": {"reference": old}}})
+    step = firm.workflow("personal-return")[0].step("invoice")
+    queued, delivered = (act_message_send(firm.engine, firm.engine.run(run["id"]), step,
+                                          {"to": old, "subject": "Your return", "body": "We have started."},
+                                          kim)["message_id"] for _ in range(2))
+    firm.outbox_delivered_by_hand(lee, delivered, "Told at the desk")
+
+    assert firm.repoint_work({}) == 0
+    assert firm.repoint_work({old: new}) == 3  # the run, its item, the queued message
+    now = firm.db.runs.get(run["id"])
+    assert now["status"] == "running" and now["record"] == now["subject"] == new and now["refs"] == [new]
+    assert now["ctx"]["run"]["record"] == new and now["ctx"]["input"] == {"year": 2026}
+    assert firm.db.items.get(now["item"])["status"] == "open"
+    assert firm.db.items.get(now["item"])["output"] == {"client": {"reference": new}}
+    assert firm.db.outbox.get(queued)["recipient"] == new
+    was = firm.db.runs.get(over["id"])
+    assert was["status"] == "cancelled" and was["record"] == old and was["ctx"]["run"]["record"] == old
+    assert firm.db.items.get(was["item"])["output"] == {"client": {"reference": old}}
+    assert firm.db.outbox.get(delivered)["recipient"] == old
+    assert firm.repoint_work({old: new}) == 0  # nothing under way names the old ref any more
 
 
 def test_a_forged_event_is_never_sealed_or_trusted(tmp_path, monkeypatch):
@@ -4245,37 +4608,11 @@ def test_the_front_desk_books_through_the_red_flag_screen(hub):
         assert hub.engine.run(run["id"])["steps"]["book-chosen"]["state"] == "skipped"
 
 
-def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub, monkeypatch):
-    """The diagnosis codes billed go in the visit's diagnosis; why it was booked stays its reason. A practice that
-    upgrades gets the codes moved off the reason, and the reason it was booked with back."""
-    amara = M(hub, "dr-amara")
-    pat = _pat(hub)
+def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub):
+    """The diagnosis codes billed go in the visit's diagnosis; why it was booked stays its reason."""
     wf = hub.workflow("appointment-request")[0]  # the visit's own workflow finishes it
     finish = next(st for st in wf.steps if st.id == "finish")
     assert "diagnosis" in finish.params["set"] and "reasonCode" not in finish.params["set"]
-    # a visit finished by version 2, which wrote the codes over the reason it was booked with
-    v = hub.create_record(amara, "Encounter", {**_visit(pat, "dr-amara", "2026-03-09T09:00"),
-                                               "reasonCode": [{"text": "Knee pain"}]})
-    v = hub.update_record(amara, f"Encounter/{v['id']}", {"reasonCode": [{"text": "ICD-9 719.46"}]})
-    hub.records.update("Encounter", v["id"], {**{k: x for k, x in v.items() if k != "meta"}, "status": "finished"})
-    for r in hub.engine.runs(record=f"Encounter/{v['id']}"):  # finished by version 2: its run is over
-        hub.db.runs.set(r["id"], {"status": "completed"})
-    walk_in = hub.records.create("Encounter", {**_visit(pat, "dr-amara", "2026-03-09T10:00", status="finished"),
-                                               "reasonCode": [{"text": "ICD-9 034"}]})
-    hub.db.set_setting("pack_upgrades_done", [u for u in hub.db.get_setting("pack_upgrades_done") or []
-                                              if u != "3-diagnosis-apart-from-reason"])
-    monkeypatch.setattr(hub, "UPGRADE_BATCH", 1)  # one visit a batch: the two take two
-    (got,) = hub.run_pack_upgrades(M(hub, "rana"))
-    assert got["upgrade"] == "3-diagnosis-apart-from-reason"
-    (ev,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": got["upgrade"]})
-    assert ev["data"]["batches"] == 2
-    assert got["visits_with_diagnosis_apart"] == 2 and got["booked_reason_restored"] == 1
-    fixed = hub.records.read("Encounter", v["id"])
-    assert fixed["reasonCode"] == [{"text": "Knee pain"}] and fixed["status"] == "finished"
-    assert fixed["diagnosis"] == [{"condition": [{"concept": {"text": "ICD-9 719.46"}}]}]
-    w = hub.records.read("Encounter", walk_in["id"])
-    assert "reasonCode" not in w and w["diagnosis"][0]["condition"][0]["concept"]["text"] == "ICD-9 034"
-    assert hub.run_pack_upgrades(M(hub, "rana")) == []  # once
 
 
 def test_the_visit_a_note_is_for_is_one_of_this_patients_active_visits(hub):
@@ -4298,144 +4635,6 @@ def test_the_visit_a_note_is_for_is_one_of_this_patients_active_visits(hub):
     page = App(hub)._active_ref_input(amara, f, pat, None)
     assert f'value="Encounter/{here["id"]}" selected' in page and f'value="Encounter/{later["id"]}"' in page
     assert done["id"] not in page and theirs["id"] not in page and "Dr. Liam Fraser" in page
-
-
-def _practice_on_version_1(tmp_path, monkeypatch):
-    """A practice installed on version 1 (Appointment and Visit apart), with appointments, a visit filed for one and
-    work under way about one; then version 2's files on disk, reviewed and upgraded to. Returns (state, made)."""
-    import shutil
-    from practicehub import pack as packmod
-    from practicehub.hub import Hub
-    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
-    src = Path(packmod.find("general-practice", "practice"))
-    copy = tmp_path / "packs" / "general-practice"
-    shutil.copytree(src, copy, ignore=shutil.ignore_patterns("__pycache__"))
-    v1 = Path(__file__).parent / "packs" / "clinic-v1-types"
-    for name in ("Appointment.toml", "Encounter.toml"):
-        shutil.copy(v1 / name, copy / "types" / name)
-    state = tmp_path / "state"
-    hub = Hub(state, pack=str(copy))
-    hub.install(str(copy))
-    hub.db.set_setting("pack_upgrades_done", [])  # installed before version 2
-    assert sorted(hub.of_base("Booking")) == ["Appointment"]
-    pat = f"Patient/{hub.records.create('Patient', {'name': [{'given': ['Omar'], 'family': 'Haddad'}]})['id']}"
-    appt = lambda status, start, why: hub.records.create("Appointment", {
-        "status": status, "start": start, "minutesDuration": 15, "description": why,
-        "participant": [{"actor": {"reference": pat}}, {"actor": {"reference": "Practitioner/dr-liam"}}]})
-    made = {"booked": appt("booked", "2027-03-02T09:00", "Flu shot")}
-    gone = appt("cancelled", "2027-03-02T09:00", "Annual physical")
-    made["gone"] = hub.records.update("Appointment", gone["id"], {**gone, "cancelationReason": {"text": "Patient sick"}})
-    made["seen"] = seen = appt("fulfilled", "2026-11-02T10:00", "Sore throat")
-    made["filed"] = filed = hub.records.create("Encounter", {
-        "status": "finished", "subject": {"reference": pat}, "appointment": [{"reference": f"Appointment/{seen['id']}"}],
-        "period": {"start": "2026-11-02T10:05"}})
-    made["note"] = hub.records.create("Composition", {"status": "final", "subject": {"reference": pat}, "title": "Note",
-                                                      "encounter": {"reference": f"Encounter/{filed['id']}"}})
-    made["walk_in"] = hub.records.create("Encounter", {"status": "finished", "subject": {"reference": pat},
-                                                       "period": {"start": "2026-11-03T11:00", "end": "2026-11-03T11:20"}})
-    booked = f"Appointment/{made['booked']['id']}"  # a reminder run under way about a booking, and its work
-    hub.db.runs.insert({"_id": "r-remind", "id": "r-remind", "status": "running", "record": booked,
-                        "ctx": {"run": {"record": booked}, "input": {"visit": {"reference": booked}}}, "steps": {}})
-    hub.db.items.insert({"_id": "i-remind", "id": "i-remind", "run_id": "r-remind", "status": "open",
-                         "output": {"about": booked}})
-    hub.db.outbox.insert({"_id": 9001, "id": 9001, "status": "queued", "run_id": "r-remind", "about": booked})
-    hub.db.runs.insert({"_id": "r-old", "id": "r-old", "status": "completed", "record": booked, "ctx": {}, "steps": {}})
-    for name in ("Appointment.toml", "Encounter.toml"):  # version 2 arrives
-        (copy / "types" / name).unlink()
-    shutil.copy(src / "types" / "Encounter.toml", copy / "types" / "Encounter.toml")
-    hub = Hub(state)
-    hub.review_pack(M(hub, "rana"))
-    hub.upgrade_pack(M(hub, "dr-amara"))
-    return state, made
-
-
-def _approve_the_new_visit(state):
-    from practicehub.hub import Hub
-    hub = Hub(state)
-    for row in hub.db.type_versions.find({"type_id": "Encounter", "status": "proposed"}):  # its second owner
-        hub.approve(M(hub, "rana"), "type", "Encounter", row["version"])
-
-
-def _converted_as_version_2_says(state, made):
-    from practicehub.hub import Hub
-    hub = Hub(state)
-    booked, gone, seen, filed, walk_in = (made[k] for k in ("booked", "gone", "seen", "filed", "walk_in"))
-    assert hub.records.search("Appointment", limit=None) == []
-    assert hub.record_type("Appointment") is None and hub.of_base("Booking") == ["Encounter"]
-    visits = {v["id"]: v for v in hub.records.search("Encounter", limit=None)}
-    assert visits[booked["id"]]["status"] == "planned"
-    assert visits[booked["id"]]["plannedStartDate"] == "2027-03-02T09:00"
-    assert visits[booked["id"]]["plannedEndDate"] == "2027-03-02T09:15"
-    assert visits[booked["id"]]["reasonCode"][0]["text"] == "Flu shot"
-    assert visits[gone["id"]]["status"] == "cancelled"  # a cancelled booking at the same time is no clash
-    assert "Patient sick" in json.dumps(visits[gone["id"]]["extension"])
-    assert seen["id"] not in visits  # the appointment a visit was filed for is that visit
-    assert visits[filed["id"]]["plannedStartDate"] == "2026-11-02T10:00"
-    assert visits[filed["id"]]["period"]["start"] == "2026-11-02T10:05" and "appointment" not in visits[filed["id"]]
-    assert visits[filed["id"]]["reasonCode"][0]["text"] == "Sore throat"  # the visit said no reason: the booking's
-    assert visits[walk_in["id"]]["plannedStartDate"] == "2026-11-03T11:00"
-    assert hub.records.read("Composition", made["note"]["id"])["encounter"]["reference"] == f"Encounter/{filed['id']}"
-    assert all(v.get("plannedStartDate") for v in visits.values())
-    # work under way names the visit now; finished work keeps what it named
-    now = f"Encounter/{booked['id']}"
-    run = hub.db.runs.get("r-remind")
-    assert run["record"] == now and run["ctx"]["run"]["record"] == now and run["ctx"]["input"]["visit"]["reference"] == now
-    assert hub.db.items.get("i-remind")["output"]["about"] == now and hub.db.outbox.get(9001)["about"] == now
-    assert hub.db.runs.get("r-old")["record"] == f"Appointment/{booked['id']}"
-    assert hub.track.verify()["ok"]
-    from practicehub.engine import bookings
-    assert {b["record"]["id"] for b in bookings(hub)} == {booked["id"], filed["id"], walk_in["id"]}  # not cancelled
-    assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")
-    assert not hub.db.get_setting("pack_upgrade_progress")
-    return hub
-
-
-@pytest.mark.own_shapes  # its version 1 reminder is a message as no hub writes one now
-def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, monkeypatch):
-    """A practice on version 1 (Appointment and Visit apart) upgrades: each appointment becomes a visit (the visit
-    filed for it, or a new one with its id), whatever pointed at it points at the visit (open runs, items and queued
-    messages too), the booking's reason is kept on a visit that had none, none is left behind, and the Appointment
-    type is retired."""
-    state, made = _practice_on_version_1(tmp_path, monkeypatch)
-    _approve_the_new_visit(state)
-    hub = _converted_as_version_2_says(state, made)
-    (done,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": "2-appointments-are-visits"})
-    assert done["data"]["appointments_now_visits"] == 2 and done["data"]["appointments_merged_into_their_visit"] == 1
-
-
-@pytest.mark.own_shapes  # its version 1 reminder is a message as no hub writes one now
-def test_the_appointment_upgrade_runs_in_batches_and_a_stopped_one_goes_on_where_it_stopped(tmp_path, monkeypatch):
-    """Each batch is a transaction of its own, written with the upgrade's place. An upgrade that stops part way (here
-    the third conversion fails, as a crash would) leaves what it did whole, and what it did not do as it was (no
-    appointment is lost or half converted); the next start goes on from there and finishes."""
-    from practicehub.hub import Hub
-    monkeypatch.setattr(Hub, "UPGRADE_BATCH", 1)
-    state, made = _practice_on_version_1(tmp_path, monkeypatch)
-    real, calls = Hub.convert_record, []
-
-    def crashes(self, *a, **k):
-        calls.append(a[1])
-        if len(calls) >= 3:  # the third and every one after, until the server is mended
-            raise RuntimeError("the server stopped")
-        return real(self, *a, **k)
-    monkeypatch.setattr(Hub, "convert_record", crashes)
-    _approve_the_new_visit(state)
-    hub = Hub(state, pack=None)
-    assert hub.db.events.exists({"action": "practice.upgrade_failed"})
-    progress = hub.db.get_setting("pack_upgrade_progress")["2-appointments-are-visits"]
-    assert progress["batches"] == 2  # one appointment a batch: two written, the third undone whole
-    left = {a["id"] for a in hub.records.search("Appointment", limit=None)}
-    visits = {v["id"] for v in hub.records.search("Encounter", limit=None)}
-    assert len(left) == 1 and all(f"Appointment/{i}" not in calls[:2] for i in left)
-    for k in ("booked", "gone", "seen"):  # each appointment is an appointment still, or converted: never gone
-        assert made[k]["id"] in left or made[k]["id"] in visits or made[k]["id"] == made["seen"]["id"]
-    assert made["seen"]["id"] in left or made["filed"]["id"] in visits
-    assert len(hub.db.events.find({"action": "practice.upgrade_progress"})) == 2
-    monkeypatch.setattr(Hub, "convert_record", real)  # the next start
-    hub = _converted_as_version_2_says(state, made)
-    (done,) = hub.db.events.find({"action": "practice.upgrade_applied", "data.upgrade": "2-appointments-are-visits"})
-    assert done["data"]["appointments_now_visits"] + done["data"]["appointments_merged_into_their_visit"] == 3
-    assert done["data"]["batches"] >= 5
 
 
 # ------------------------------------------------------------------------------------------- live co-editing and SOPs

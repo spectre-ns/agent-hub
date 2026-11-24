@@ -2,11 +2,10 @@
 #
 # The practice and its people are fictional.
 
-# 2: appointments and visits are one record, the Visit (an Encounter from booking to the end). pack.py's UPGRADES turns
-# the appointments of a practice on version 1 into visits.
+# 2: appointments and visits are one record, the Visit (an Encounter from booking to the end).
 # 3: a visit keeps what it is booked for (serviceType, read by the front desk), how soon (priority) and what was billed
 # (diagnosis) apart from the clinical reason; an urgent visit may be squeezed in over another; the front desk books
-# through the appointment request's red-flag screen. UPGRADES moves diagnosis codes written over a reason.
+# through the appointment request's red-flag screen.
 # 3.1: the lab feed and other services are sponsored by a member who reads what they write (seeded members only: a
 # practice installed before keeps its own until a policy owner changes them); the red-flag screen catches more ways
 # of saying an emergency; a desk booking from a calendar slot is booked at once only when the reason is plainly

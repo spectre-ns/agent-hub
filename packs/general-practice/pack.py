@@ -6,7 +6,7 @@
   and a baseline to compare a model against). They are deliberately simple; when they cannot answer, they escalate.
 * ``summarize``: a one-line label for a record.
 * ``demo``: a few fictional patients, the week's bookings and some work in progress.
-* ``UPGRADES``: what version 2 does to a practice on version 1 (its appointments become visits).
+* ``UPGRADES``: what a new version does to the records an older one left (none now: no practice runs an older one).
 """
 
 from __future__ import annotations
@@ -887,165 +887,10 @@ def _book(hub, member, patient, who, start, reason, minutes=15, kind=None):
     return hub.update_record(hub.member(who), f"Encounter/{visit['id']}", {"reasonCode": [{"text": reason}]})
 
 
-# ------------------------------------------------------------------------------------------------------ upgrades
 AMBULATORY = {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB", "display": "ambulatory"}
 CANCEL_REASON = "https://harbourview.example/fhir/cancellation-reason"
-NOTE = "https://harbourview.example/fhir/booking-note"
-# a version-1 Appointment's status, as the Visit (FHIR R5 Encounter) it becomes
-APPOINTMENT_STATUS = {"proposed": "planned", "pending": "planned", "booked": "planned", "waitlist": "planned",
-                      "arrived": "arrived", "checked-in": "arrived", "fulfilled": "finished",
-                      "cancelled": "cancelled", "noshow": "noshow", "entered-in-error": "entered-in-error"}
 
 
-def visit_from_appointment(appt: dict, visit: dict | None = None) -> dict:
-    """A version-1 Appointment as a Visit: its booked time, patient, physicians, reason and status; on top of the
-    visit that was filed for it, when there was one (that visit keeps what it recorded of the visit itself)."""
-    people = [p.get("actor", {}).get("reference", "") for p in appt.get("participant", []) or []]
-    patient = next((r for r in people if r.startswith("Patient/")), "")
-    staff = [r for r in people if r and not r.startswith("Patient/")]
-    out = {k: v for k, v in (visit or {}).items() if k not in ("appointment", "meta", "id", "resourceType")}
-    out.setdefault("class", AMBULATORY)
-    start = appt.get("start") or ""
-    end = appt.get("end") or ""
-    if start and not end and appt.get("minutesDuration"):
-        end = (datetime.fromisoformat(start[:16]) + timedelta(minutes=int(appt["minutesDuration"]))).isoformat(
-            timespec="minutes")
-    out["plannedStartDate"] = start
-    if end:
-        out["plannedEndDate"] = end
-    reasons = list(appt.get("reasonCode") or [])
-    if appt.get("description"):
-        reasons = [{**(reasons[0] if reasons else {}), "text": appt["description"]}] + reasons[1:]
-    if visit is not None and reasons and not any(
-            isinstance(r, dict) and (r.get("text") or r.get("coding")) for r in out.get("reasonCode") or []):
-        out["reasonCode"] = reasons  # the visit says nothing of why: the booking's reason is kept, never lost
-    if visit is None:
-        out["status"] = APPOINTMENT_STATUS.get(appt.get("status") or "", "planned")
-        out["subject"] = {"reference": patient}
-        out["participant"] = [{"individual": {"reference": r}} for r in staff]
-        if reasons:
-            out["reasonCode"] = reasons
-        if appt.get("serviceType"):
-            out["type"] = appt["serviceType"]
-        if out["status"] == "finished" and appt.get("minutesDuration"):
-            out["length"] = {"value": appt["minutesDuration"], "unit": "min"}
-    ext = list(out.get("extension") or [])
-    why = appt.get("cancelationReason") or appt.get("cancellation_reason")
-    if isinstance(why, dict):
-        why = why.get("text") or ", ".join(c.get("display") or c.get("code", "") for c in why.get("coding", []) or [])
-    if why:
-        ext.append({"url": CANCEL_REASON, "valueString": str(why)})
-    if appt.get("comment"):
-        ext.append({"url": NOTE, "valueString": str(appt["comment"])})
-    if ext:
-        out["extension"] = ext
-    return out
-
-
-def _first_appointment(hub, v: dict) -> str | None:
-    """The appointment a visit was filed for: the first one it names that is still there."""
-    return next((a.get("reference") for a in v.get("appointment", []) or [] if isinstance(a, dict)
-                 and str(a.get("reference") or "").startswith("Appointment/")
-                 and hub.records.read("Appointment", a["reference"].split("/", 1)[1])), None)
-
-
-def upgrade_appointments_to_visits(hub, actor):
-    """Version 2 merges Appointment into Visit. Once the Visit that is a Booking is in force: an appointment a visit
-    was filed for becomes that visit (whatever pointed at the appointment points at it, open work included); any other
-    appointment becomes a visit with the same id; then every visit gets its booked time; the Appointment type is
-    retired. None until the new Visit is approved.
-
-    It works in batches of ``hub.UPGRADE_BATCH`` (each a transaction the hub writes with the upgrade's place): the
-    appointments still there first (each batch converts some, so the next finds the rest), then the visits to date, in
-    id order from where the last batch stopped (``hub.upgrade_state``). A batch converts or dates each record whole, so
-    stopping between batches loses nothing: an appointment not converted yet is still an appointment."""
-    rt = hub.record_type("Encounter")
-    if rt is None or not rt.is_a("Booking") or rt.field("plannedStartDate") is None:
-        return None
-    size = max(1, int(getattr(hub, "UPGRADE_BATCH", 200) or 200))
-    state = hub.upgrade_state
-    appts = hub.records.search("Appointment", limit=size)
-    if appts:
-        refs = {f"Appointment/{a['id']}" for a in appts}
-        filed: dict = {}  # Appointment/<id> -> the visit filed for it (the newest that names it first)
-        for row in hub.db.records.find({"type": "Encounter", "data.appointment.reference": {"$in": sorted(refs)}},
-                                       sort=[("updated_at", -1)], fields=["data"]):
-            ref = _first_appointment(hub, row["data"])
-            if ref in refs and ref not in filed:
-                filed[ref] = row["data"]
-        merged, made, moved = [], [], {}
-        for a in appts:
-            ref = f"Appointment/{a['id']}"
-            visit = filed.get(ref)
-            if visit is not None:
-                hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a, visit),
-                                   into=f"Encounter/{visit['id']}", repoint=False)
-                merged.append(ref)
-                moved[ref] = f"Encounter/{visit['id']}"
-            else:
-                hub.convert_record(actor, ref, "Encounter", visit_from_appointment(a), repoint=False)
-                made.append(ref)
-                moved[ref] = f"Encounter/{a['id']}"
-        hub.repoint_work(moved)  # runs, items and messages under way, once for the batch
-        return {"more": True, "visits_dated": 0, "appointments_merged_into_their_visit": merged,
-                "appointments_now_visits": made, "appointment_type_retired": False}
-    after = state.get("dated_after") or ""
-    rows = hub.db.records.find({"type": "Encounter", "_id": {"$gt": after}, "$or": [
-        {"data.plannedStartDate": {"$in": [None, ""]}}, {"data.appointment": {"$exists": True}}]},
-        sort="_id", limit=size, fields=["data"])
-    for row in rows:
-        v = row["data"]
-        period = v.get("period") or {}
-        hub.update_record(actor, f"Encounter/{v['id']}", {
-            "plannedStartDate": v.get("plannedStartDate") or period.get("start")
-            or (v.get("meta") or {}).get("lastUpdated", "")[:16],
-            "plannedEndDate": v.get("plannedEndDate") or period.get("end"), "appointment": None})
-        state["dated_after"] = row["_id"]
-    if len(rows) == size:
-        return {"more": True, "visits_dated": len(rows), "appointments_merged_into_their_visit": [],
-                "appointments_now_visits": [], "appointment_type_retired": False}
-    retired = False
-    if hub._active_row("type", "Appointment") is not None:
-        hub._retire_now(actor, "type", "Appointment", "merged into Visit (pack version 2)")
-        retired = True
-    return {"visits_dated": len(rows), "appointments_merged_into_their_visit": [], "appointments_now_visits": [],
-            "appointment_type_retired": retired}
-
-
-def upgrade_diagnosis_apart_from_reason(hub, actor):
-    """Version 3 keeps what was billed (diagnosis) apart from why the visit was booked (reasonCode): before, finishing a
-    visit wrote the diagnosis codes over the booked reason. Once the Visit with a diagnosis is in force, each visit
-    whose reason is the codes ("ICD-9 ...") gets them as its diagnosis, and its reason back from the version before
-    the codes were written (none, if it never had another). None until the new Visit is approved.
-
-    It works in batches of ``hub.UPGRADE_BATCH``: a visit done has a diagnosis, so the next batch finds the rest."""
-    rt = hub.record_type("Encounter")
-    if rt is None or rt.field("diagnosis_text") is None:
-        return None
-    moved, restored, more = [], [], False
-    for v in hub.records.search("Encounter", limit=None):
-        reasons = [r for r in v.get("reasonCode") or [] if isinstance(r, dict)]
-        codes = [r for r in reasons if str(r.get("text") or "").startswith("ICD-9 ")]
-        if not codes or v.get("diagnosis"):
-            continue
-        if len(moved) >= hub.UPGRADE_BATCH:
-            more = True
-            break
-        earlier = None
-        for row in hub.db.record_versions.find({"type": "Encounter", "id": v["id"]}, sort=[("version", -1)],
-                                               fields=["data"]):
-            had = [r for r in (row["data"] or {}).get("reasonCode") or [] if isinstance(r, dict)]
-            if had and not any(str(r.get("text") or "").startswith("ICD-9 ") for r in had):
-                earlier = had
-                break
-        hub.update_record(actor, f"Encounter/{v['id']}", {
-            "diagnosis": [{"condition": [{"concept": {"text": r["text"]}}]} for r in codes],
-            "reasonCode": earlier or [r for r in reasons if r not in codes] or None})
-        moved.append(f"Encounter/{v['id']}")
-        if earlier:
-            restored.append(f"Encounter/{v['id']}")
-    return {"visits_with_diagnosis_apart": moved, "booked_reason_restored": restored, "more": more}
-
-
-UPGRADES = {"2-appointments-are-visits": upgrade_appointments_to_visits,
-            "3-diagnosis-apart-from-reason": upgrade_diagnosis_apart_from_reason}
+# ------------------------------------------------------------------------------------------------------ upgrades
+# what a new version does to the records an older one left: id -> fn(hub, actor) (see Hub.run_pack_upgrades)
+UPGRADES: dict = {}
