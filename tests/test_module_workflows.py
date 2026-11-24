@@ -4,17 +4,14 @@ lifecycle, one item per run, reassigned at each step; a lifecycle that loops (a 
 order sent back) is walked by the next run, which knows who did what before. Workflows that are not a lifecycle (a
 scheduled sweep, a reaction) start on their schedule or event and never move a state another workflow owns."""
 
+import re
 import shutil
-import subprocess
-from pathlib import Path
 
 import pytest
 
 from conftest import M, item_for, snapshot_onto
 from practicehub.hub import Denied, Invalid
 from test_web import call, server, token  # noqa: F401 - server is a fixture: the pages a signer reads
-
-ROOT = Path(__file__).parent.parent
 
 
 def install(hub, name, by="rana"):
@@ -227,118 +224,186 @@ def test_when_separation_of_duties_keeps_every_holder_out_a_policy_owner_is_told
     assert any("Nobody may take" in (n.get("note") or n.get("title") or n.get("step_title") or str(n)) for n in told)
 
 
-def _v1(tmp_path, name):
-    """The module as it was before its records named their workflows (git, at the commit before the port)."""
-    d = tmp_path / "v1" / name
-    out = subprocess.run(["git", "-C", str(ROOT), "archive", "46766b3", f"modules/{name}"], capture_output=True,
-                         check=True).stdout
-    (tmp_path / "v1").mkdir(exist_ok=True)
-    subprocess.run(["tar", "-x", "-C", str(tmp_path / "v1"), "--strip-components=1"], input=out, check=True)
-    return d
-
-
+# ------------------------------------------------------------------------------------------- dms: upgraded, rolled back
 @pytest.fixture
-def old_modules(tmp_path, monkeypatch):
-    """A modules directory holding each module as version 1 was; ``upgrade(name)`` puts the current one there."""
+def earlier_dms(hub, tmp_path, monkeypatch):
+    """The hub with an earlier version of document control installed, made from the files shipped today: its Document
+    type does not name its workflow yet, and that workflow starts itself when a document is made
+    (``record.created:Document``), as modules did before types named their workflows. Calling it puts today's files
+    in the modules directory, has them reviewed and upgrades to them: what that proposed, ``{(kind, id): version}``."""
     from practicehub import pack as packmod
-    d = tmp_path / "modules"
-    d.mkdir()
-    for name in ("dms", "qms", "plm", "wiki", "inventory", "crm"):
-        shutil.copytree(_v1(tmp_path, name), d / name)
-    monkeypatch.setattr(packmod, "MODULES_DIR", d)
-    # version 1 was written in the old step form, refused now: a hub that has it installed got it before that rule,
-    # so it goes in as then (read as stored) until the upgrade, which gets every rule
-    from practicehub import workflows as wfmod
-    parse, then = wfmod.parse, {"on": True}
-    monkeypatch.setattr(wfmod, "parse", lambda source, catalog=None, *, stored=False:
-                        parse(source, catalog, stored=stored or then["on"]))
+    shipped, d = packmod.MODULES_DIR / "dms", tmp_path / "modules" / "dms"
 
-    def upgrade(hub, name):
-        then["on"] = False
-        shutil.rmtree(d / name)
-        shutil.copytree(ROOT / "modules" / name, d / name)
-        hub.approve_module_code(M(hub, "dr-amara"), name)
-        out = hub.upgrade_module(M(hub, "rana"), name)
+    def copy():
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(shipped, d, ignore=shutil.ignore_patterns("__pycache__"))
+
+    def change(name, pattern, to):
+        text, n = re.subn(pattern, to, (d / name).read_text(), flags=re.M)
+        assert n == 1, f"{name}: {pattern!r} is there {n} times, not once"
+        (d / name).write_text(text)
+
+    copy()
+    change("types/Document.toml", r"^workflow = .*\n", "")
+    change("workflows/dms-review.toml", r'^record = "Document"\n',
+           'record = "Document"\n\n[trigger]\nevent = "record.created:Document"\n')
+    change("module.toml", r'^version = "(\d+)"$', lambda m: f'version = "{int(m.group(1)) - 1}"')
+    monkeypatch.setattr(packmod, "MODULES_DIR", d.parent)
+    install(hub, "dms")
+    demo(hub, "dms")  # the policy owners hold its roles
+
+    def upgrade():
+        copy()
+        hub.approve_module_code(M(hub, "dr-amara"), "dms")
+        out = hub.upgrade_module(M(hub, "rana"), "dms")
         return {(p["kind"], p["id"]): p["version"] for p in out["proposed"]}
     return upgrade
 
 
-def test_upgrading_dms_proposes_the_type_and_workflow_and_work_under_way_goes_on(hub, old_modules):
-    install(hub, "dms")
-    demo(hub, "dms")
+def _document(hub, title, by="rana"):
+    d = hub.create_record(M(hub, by), "Document", {"title": title, "body": "B.", "owner": by})
+    return f"Document/{d['id']}"
+
+
+def _versions(hub, wid, ref):
+    return [r["version"] for r in runs(hub, wid, ref)]
+
+
+def test_an_upgrade_hands_documents_over_type_first_and_work_under_way_keeps_its_version(hub, earlier_dms):
+    """Rule: an upgrade after which a record type names its workflow proposes both, and they are approved in order:
+    the workflow version that stops starting itself only after the type that names it (``Hub._check_hand_over``).
+    Between the two approvals the earlier version goes on starting itself, once per new record. When the workflow is
+    approved, a record nothing walks (its earlier run ended) is picked up where it is, once (``Hub.walk_unwalked``),
+    and a run under way keeps the version it started on: the version in force walks the record's next pass."""
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    d = hub.create_record(rana, "Document", {"title": "Cover rota", "body": "Name cover."})
-    ref = f"Document/{d['id']}"
-    assert not hub.db.runs.find_one({"record": ref})  # version 1: nothing walks a draft
-    hub.update_record(rana, ref, {"status": "in-review"})
-    old = open_run(hub, "dms-review", ref)  # started by its event, version 1
-    proposed = old_modules(hub, "dms")
-    assert ("type", "Document") in proposed and ("workflow", "dms-review") in proposed
-    with pytest.raises(Invalid) as no:  # else new ones start nothing, and the type in force has no 'retiring' state
-        hub.approve_workflow(amara, "dms-review", proposed[("workflow", "dms-review")])
-    assert "record type first" in str(no.value) or any("is not a state of a Document" in p for p in no.value.problems)
+    ref, ended = _document(hub, "Cover rota"), _document(hub, "Sharps")
+    old = open_run(hub, "dms-review", ref)  # the earlier version: started by its own event when a document is made
+    was = open_run(hub, "dms-review", ended)
+    hub.engine.cancel(rana, was["id"], "not written yet")  # nothing walks this one when the upgrade comes
+    proposed = earlier_dms()
+    assert set(proposed) == {("type", "Document"), ("workflow", "dms-review")}  # proposed: not in force yet
+    new = proposed[("workflow", "dms-review")]
+    assert not hub.record_type("Document").workflow and hub.workflow("dms-review")[1]["version"] == old["version"]
+    with pytest.raises(Invalid) as no:  # it would stop starting itself before its type starts it
+        hub.approve_workflow(amara, "dms-review", new)
+    assert "record type first" in str(no.value)
     hub.approve(amara, "type", "Document", proposed[("type", "Document")])
-    # the type now names the workflow, whose new version is not approved yet: the old one goes on alone
-    d2 = hub.create_record(rana, "Document", {"title": "Interim"})
-    assert not hub.db.runs.find_one({"record": f"Document/{d2['id']}"})
-    hub.approve_workflow(amara, "dms-review", proposed[("workflow", "dms-review")])
+    # the type names the workflow, whose new version is not approved yet: the earlier one goes on starting itself
+    between = _document(hub, "Interim")
+    assert _versions(hub, "dms-review", between) == [old["version"]]
+    assert not runs(hub, "dms-review", ended, "running")
+    hub.approve_workflow(amara, "dms-review", new)
+    # the document nothing walked is picked up where it is, at the approval and once; work under way is left alone
+    picked = open_run(hub, "dms-review", ended)
+    assert picked["version"] == new and picked["ctx"]["run"]["previous"] == was["id"]
+    assert step_state(hub, picked, "revise") == "active"
+    assert hub.walk_unwalked() == {}
+    assert _versions(hub, "dms-review", ref) == _versions(hub, "dms-review", between) == [old["version"]]
+    assert _versions(hub, "dms-review", _document(hub, "Rota")) == [new]  # a new one: started by its type, once
     # the run under way keeps its version, and finishes its review as it began
+    hub.update_record(rana, ref, {"status": "in-review"})
     i = item_for(hub, old, "approve")
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "approve")
-    assert hub.records.read("Document", d["id"])["status"] == "approved"
+    assert hub.records.read(*ref.split("/"))["status"] == "approved"
+    assert open_run(hub, "dms-review", ref)["id"] == old["id"] and step_state(hub, old, "in-force") == "waiting"
+    assert hub.engine.run(old["id"])["version"] == old["version"]
+    # revised: the pass the earlier version walked ends there, and the version in force walks the next one
+    hub.update_record(rana, ref, {"status": "draft"})
     assert hub.engine.run(old["id"])["status"] == "completed"
-    new = open_run(hub, "dms-review", ref)  # handed on to the new version, which walks it from in force
-    assert new["version"] > old["version"] and step_state(hub, new, "in-force") == "waiting"
-    # a record filed before is picked up where it is when the workflow is approved, not only at its next write
-    walk = open_run(hub, "dms-review", f"Document/{d2['id']}")
-    assert step_state(hub, walk, "revise") in ("active", "waiting")
-    assert hub.walk_unwalked() == {}  # once
+    nxt = open_run(hub, "dms-review", ref)
+    assert nxt["version"] == new and nxt["ctx"]["run"]["previous"] == old["id"]
 
 
-def test_a_module_upgrade_is_rolled_back_and_records_go_back_to_the_older_workflow(hub, old_modules):
-    """Rolling back an upgrade withdraws what it proposed that is not approved yet and proposes again what was in
-    force before what was approved; once the type in force stops naming the workflow its open runs on the type's
-    records stop, and the older version starts as it did (on its events)."""
-    install(hub, "dms")
-    demo(hub, "dms")
+def test_rolling_back_an_approved_upgrade_proposes_the_earlier_versions_and_stops_the_newer_runs(hub, earlier_dms):
+    """Rule: rolling back a module upgrade whose definitions were approved proposes again what was in force before
+    them (``Hub.roll_back_module``), for another policy owner to approve as any change; nothing stops until then.
+    Once the type in force no longer names the workflow, that workflow's open runs on the type's records are stopped
+    (``Hub._release_runs``: ``run.stopped`` on the track), and the earlier workflow, approved again, starts itself
+    as it did."""
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    proposed = old_modules(hub, "dms")
+    proposed = earlier_dms()
     hub.approve(amara, "type", "Document", proposed[("type", "Document")])
     hub.approve_workflow(amara, "dms-review", proposed[("workflow", "dms-review")])
-    d = hub.create_record(rana, "Document", {"title": "Cover rota", "body": "Name cover."})
-    ref = f"Document/{d['id']}"
-    walk = open_run(hub, "dms-review", ref)
-    with pytest.raises(Denied):
-        hub.roll_back_module(hub.engine.automation_actor(walk), "dms")
+    ref = _document(hub, "Cover rota")
+    walk = open_run(hub, "dms-review", ref)  # walked by the newer version, started by its type
+    for who in (hub.engine.automation_actor(walk), M(hub, "sam")):  # a person who is a policy owner rolls back
+        with pytest.raises(Denied):
+            hub.roll_back_module(who, "dms")
     back = hub.roll_back_module(rana, "dms", "the new review is not ready")
     got = {(p["kind"], p["id"]): p["version"] for p in back["proposed"]}
     assert set(got) == {("type", "Document"), ("workflow", "dms-review")} and not back["withdrawn"]
+    for (kind, did), version in got.items():  # the text in force before the upgrade, as a new version
+        table, col = hub.KINDS[kind]
+        assert hub.db[table].find_one({col: did, "version": version})["source"] == \
+            hub.db[table].find_one({col: did, "version": 1})["source"]
+    said = hub.db.events.find_one({"action": "module.rolled_back", "subject": "module:dms"})
+    assert said["actor"] == "rana" and said["data"]["reason"] == "the new review is not ready"
+    assert hub.engine.run(walk["id"])["status"] == "running"  # proposed only: nothing changes until it is approved
+    with pytest.raises(Denied):  # whoever rolled it back does not also approve
+        hub.approve(rana, "type", "Document", got[("type", "Document")])
     hub.approve(amara, "type", "Document", got[("type", "Document")])
     assert hub.engine.run(walk["id"])["status"] == "cancelled"  # its type no longer names it
-    assert hub.db.events.find({"action": "run.stopped", "run_id": walk["id"]})
+    stopped = hub.db.events.find_one({"action": "run.stopped", "run_id": walk["id"]})
+    assert stopped and "no longer names this workflow" in stopped["data"]["reason"]
+    assert not [i for i in items_of(hub, walk) if i["status"] in ("open", "claimed", "waiting")]
     hub.approve_workflow(amara, "dms-review", got[("workflow", "dms-review")])
-    d2 = hub.create_record(rana, "Document", {"title": "Interim"})
-    assert not hub.db.runs.find_one({"record": f"Document/{d2['id']}"})  # as version 1 was: nothing walks a draft
-    hub.update_record(rana, f"Document/{d2['id']}", {"status": "in-review"})
-    assert open_run(hub, "dms-review", f"Document/{d2['id']}")  # started by its event, as before
+    assert not hub.record_type("Document").workflow  # its type starts nothing: its own event does, as before
+    assert _versions(hub, "dms-review", _document(hub, "Interim")) == [got[("workflow", "dms-review")]]
 
 
-def test_rolling_back_an_upgrade_not_yet_approved_withdraws_what_it_proposed(hub, old_modules):
-    install(hub, "dms")
-    rana = M(hub, "rana")
-    proposed = old_modules(hub, "dms")
+def test_rolling_back_an_upgrade_not_yet_approved_withdraws_what_it_proposed(hub, earlier_dms):
+    """Rule: rolling back a module upgrade none of whose definitions is approved yet withdraws what it proposed and
+    proposes nothing: the versions in force stay in force, and work under way goes on. A module never upgraded has
+    nothing to roll back."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    ref = _document(hub, "Cover rota")
+    old = open_run(hub, "dms-review", ref)
+    with pytest.raises(Invalid):
+        hub.roll_back_module(rana, "dms")
+    proposed = earlier_dms()
     back = hub.roll_back_module(rana, "dms")
-    assert {(w["kind"], w["id"]) for w in back["withdrawn"]} == set(proposed) and not back["proposed"]
-    assert not hub.db.workflow_versions.find_one({"workflow_id": "dms-review", "status": "proposed"})
-
-
-def approve_all(hub, proposed, by):
+    assert {(w["kind"], w["id"]): w["version"] for w in back["withdrawn"]} == proposed and not back["proposed"]
     for (kind, did), version in proposed.items():
-        if kind == "workflow":
-            hub.approve_workflow(by, did, version)
-        else:
-            hub.approve(by, kind, did, version)
+        table, col = hub.KINDS[kind]
+        assert hub.db[table].find_one({col: did, "version": version})["status"] == "withdrawn"
+        assert not hub.db[table].find_one({col: did, "status": "proposed"})
+    with pytest.raises(Invalid):  # withdrawn: no longer there to approve
+        hub.approve(amara, "type", "Document", proposed[("type", "Document")])
+    assert not hub.record_type("Document").workflow and hub.workflow("dms-review")[1]["version"] == old["version"]
+    assert open_run(hub, "dms-review", ref)["id"] == old["id"]
+    assert _versions(hub, "dms-review", _document(hub, "Interim")) == [old["version"]]  # started as it was
+
+
+FORM = 'id = "Form"\nlabel = "Form"\ndata_class = "documents"\n[[field]]\nname = "title"\nrequired = true\n'
+FORM_CHECK = ('id = "dms-form-check"\ntitle = "Check a form"\nrecord = "Form"\n[trigger]\n'
+              'starters = ["document-controller"]\n[start]\nto = "checking"\n[[state]]\nid = "checking"\n'
+              '[[state.work]]\nid = "check"\nkind = "task"\nrole = "document-controller"\n'
+              '[[state.work.fields]]\nname = "note"\ntype = "text"\n'
+              '[[edge]]\nid = "checked"\nfrom = "checking"\nto = "checked"\n[[state]]\nid = "checked"\n')
+
+
+def test_an_upgrade_retires_a_type_the_module_no_longer_ships_and_the_workflow_about_it(hub, tmp_path, monkeypatch):
+    """Rule: what a module no longer ships is retired by the upgrade itself, not proposed: a record type too, after
+    the workflows about it (a type an active workflow is about is never retired)."""
+    from practicehub import pack as packmod
+    from practicehub.hub import NotFound
+    mods = tmp_path / "modules"
+    shutil.copytree(packmod.MODULES_DIR / "dms", mods / "dms", ignore=shutil.ignore_patterns("__pycache__"))
+    monkeypatch.setattr(packmod, "MODULES_DIR", mods)
+    gone = {"types/Form.toml": FORM, "workflows/dms-form-check.toml": FORM_CHECK}
+    for name, source in gone.items():  # the earlier version: today's, with a type and a workflow about it besides
+        (mods / "dms" / name).write_text(source)
+    install(hub, "dms")
+    assert hub.record_type("Form") and hub.workflow("dms-form-check")
+    for name in gone:  # today's module no longer ships them
+        (mods / "dms" / name).unlink()
+    assert sorted(hub.module_plan("dms")["removed"]) == ["type Form", "workflow dms-form-check"]
+    hub.approve_module_code(M(hub, "dr-amara"), "dms")
+    out = hub.upgrade_module(M(hub, "rana"), "dms")
+    assert not out["proposed"] and hub.record_type("Form") is None
+    with pytest.raises(NotFound):
+        hub.workflow("dms-form-check")
 
 
 # ------------------------------------------------------------------------------------------- qms: CAPA
@@ -446,31 +511,6 @@ def test_cancelling_a_capa_on_its_page_stops_its_work_and_actions_under_way_are_
         hub.update_record(rana, f"CAPA/{c2['id']}", {"status": "closed"})
 
 
-def test_upgrading_qms_hands_a_capa_under_way_on_to_the_new_version(hub, old_modules):
-    install(hub, "dms")
-    install(hub, "qms")
-    demo(hub, "dms")
-    demo(hub, "qms")
-    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    capa = hub.create_record(rana, "CAPA", {"title": "Old", "kind": "preventive", "problem": "P"})
-    ref = f"CAPA/{capa['id']}"
-    old = open_run(hub, "qms-capa", ref)  # version 1, started by its event
-    approve_all(hub, old_modules(hub, "dms"), amara)
-    proposed = old_modules(hub, "qms")
-    assert ("type", "CAPA") in proposed and ("workflow", "qms-capa") in proposed
-    approve_all(hub, proposed, amara)
-    i = item_for(hub, old, "investigate")
-    hub.engine.claim(rana, i)
-    hub.engine.complete(rana, i, {"root_cause": "R", "plan": "P"})
-    assert hub.engine.run(old["id"])["version"] == old["version"]  # pinned
-    assert hub.records.read("CAPA", capa["id"])["status"] == "verification"
-    v = item_for(hub, old, "verify")
-    hub.engine.claim(amara, v)
-    hub.engine.decide(amara, v, "not-effective")
-    new = open_run(hub, "qms-capa", ref)  # version 1 ended in actions with nothing to walk it; now handed on
-    assert new["version"] > old["version"] and item_for(hub, new, "act")
-
-
 # ------------------------------------------------------------------------------------------- plm: ChangeOrder
 @pytest.fixture
 def products(hub):
@@ -552,28 +592,6 @@ def test_a_change_order_under_review_moves_only_by_its_workflow_and_cancelled_wo
     hub.update_record(rana, ref, {"status": "cancelled", "cancel_reason": "Duplicate"})
     assert hub.engine.run(nxt["id"])["status"] != "running"
     assert not runs(hub, "plm-change", ref, "running")
-
-
-def test_upgrading_plm_hands_a_change_under_review_on_to_the_new_version(hub, old_modules):
-    for name in ("dms", "qms", "plm"):
-        install(hub, name)
-    for name in ("dms", "qms", "plm"):
-        demo(hub, name)
-    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    co = hub.records.search("ChangeOrder", limit=None)[0]
-    cref = f"ChangeOrder/{co['id']}"
-    assert not runs(hub, "plm-change", cref)  # version 1: a draft is not walked
-    hub.update_record(rana, cref, {"status": "review"})
-    old = open_run(hub, "plm-change", cref)
-    approve_all(hub, old_modules(hub, "dms"), amara)
-    approve_all(hub, old_modules(hub, "qms"), amara)
-    proposed = old_modules(hub, "plm")
-    assert ("type", "ChangeOrder") in proposed and ("workflow", "plm-change") in proposed
-    approve_all(hub, proposed, amara)
-    _board(hub, old, "review", amara, "reject")
-    assert hub.engine.run(old["id"])["status"] == "completed"
-    new = open_run(hub, "plm-change", cref)  # version 1 left it rejected; version 2 holds it with its author
-    assert new["version"] > old["version"] and step_state(hub, new, "revise") == "waiting"
 
 
 # ------------------------------------------------------------------------------------------- wiki: WikiPage; wiki-sop
@@ -678,22 +696,6 @@ def test_a_controlled_documents_periodic_review_confirms_it_or_asks_for_a_revisi
     assert moved["run_id"] == first["id"]  # moved by its own run, never by the review
     second = open_run(hub, "dms-review", ref)
     assert second["ctx"]["run"]["previous"] == first["id"]
-
-
-def test_upgrading_the_wiki_takes_its_sops_out_and_a_page_check_under_way_goes_on(hub, old_modules):
-    for name in ("dms", "wiki"):
-        install(hub, name)
-    for name in ("dms", "wiki"):
-        demo(hub, name)
-    amara = M(hub, "dr-amara")
-    approve_all(hub, old_modules(hub, "dms"), amara)
-    proposed = old_modules(hub, "wiki")
-    assert ("type", "WikiPage") in proposed and ("workflow", "wiki-check") in proposed
-    assert not any(did in ("Procedure", "wiki-sop-release", "wiki-sop-review") for _, did in proposed)
-    approve_all(hub, proposed, amara)
-    assert hub.record_type("Procedure") is None  # controlled documents live in document control
-    page = _named(hub, "WikiPage", "Booking rules")  # flagged under version 1: its check goes on as it was
-    assert runs(hub, "wiki-check", f"WikiPage/{page['id']}", "running")[0]["version"] == 1
 
 
 # ------------------------------------------------------------------------------------------- inventory: StockMove, Part
@@ -833,23 +835,3 @@ def test_an_interaction_is_walked_by_its_follow_up_and_the_daily_sweep_never_mov
     hub.update_record(rana, now, {"status": "follow-up"})
     assert step_state(hub, waiting, "due") == "done" and step_state(hub, waiting, "taken") == "done"
     assert open_run(hub, "crm-follow-up", now)["id"] == waiting["id"]
-
-
-def test_upgrading_crm_retires_the_logged_note_and_picks_up_interactions_filed_before(hub, old_modules):
-    install(hub, "crm")
-    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    ref = _interaction(hub, rana)
-    rec = hub.records.read(*ref.split("/", 1))
-    assert rec["logged_by"] == "rana" and "status" not in rec  # version 1: no lifecycle, no one's work
-    proposed = old_modules(hub, "crm")
-    for key in (("type", "Interaction"), ("workflow", "crm-follow-up")):
-        assert key in proposed
-    approve_all(hub, proposed, amara)
-    assert not runs(hub, "crm-follow-up", ref, "running")
-    hub.update_record(rana, ref, {"summary": "Delivery dates, and a new price list."})  # its next write
-    rec = hub.records.read(*ref.split("/", 1))
-    assert rec["status"] == "logged"  # filed before its type had a lifecycle: in its first state
-    picked = open_run(hub, "crm-follow-up", ref)
-    assert step_state(hub, picked, "due") == "waiting"
-    hub.update_record(rana, ref, {"summary": "Delivery dates and prices."})
-    assert len(runs(hub, "crm-follow-up", ref)) == 1  # picked up once
