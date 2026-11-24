@@ -7,6 +7,11 @@ closed once the call is asked for. A nurse calls; reached, the follow-up is done
 what happens instead: they reach the patient themselves, write to them, call their emergency contact, book them in
 (a visit request is started), or decide nothing more is needed. An urgent follow-up (a critical result) is called
 within the hour.
+
+A visit a clinician asked for that was not held (missed, or cancelled by the patient or the practice) comes back the
+same way, as a follow-up about the same result: it goes first to the clinician who asked for the visit (any physician,
+if nobody is named or they are no longer here), who has the patient called, books them in again, reaches or writes to
+them, or decides nothing more is needed.
 """
 
 [trigger]
@@ -22,6 +27,7 @@ priority = "{{input.urgency}}"
 note_text = "{{input.note}}"
 asked_by = "Practitioner/{{run.started_by}}"
 authoredOn = "{{run.today}}"
+visit = "{{input.visit}}"
 stage = "to-call"
 
 [[input]]
@@ -39,15 +45,145 @@ required = true
 name = "because_of"
 label = "Because of"
 type = "reference"
-target = ["Observation"]
+target = ["Observation", "Condition", "MedicationRequest"]
 [[input]]
 name = "note"
 label = "What the physician said"
 type = "text"
+# Set by a visit's own workflow when a visit a clinician asked for is not held, never typed.
+[[input]]
+name = "visit"
+label = "Visit not held"
+type = "reference"
+target = ["Encounter"]
+hidden = true
+help = "the visit, booked to follow this up, that was missed or cancelled"
+[[input]]
+name = "visit_reason"
+label = "What the visit was for"
+type = "string"
+hidden = true
+[[input]]
+name = "asked_by"
+label = "Asked for by"
+type = "member"
+hidden = true
+help = "the clinician who asked (for the visit that was not held): the follow-up is theirs first"
 
+# A follow-up is a call, to a nurse, unless it is about a visit that was not held: that one goes first to the clinician
+# who asked for the visit, who decides before anyone calls.
+# The call is written as the diversion and the visit not held as the start's own way on, though the call is the
+# usual one: when a decision starts a follow-up, the hub asks who does the work of the first state the start can
+# send it to (Engine.assignments_needed takes the first, whatever its when), and that must stay the nurse's call,
+# so "Call the patient" still asks which nurse.
 [start]
-to = "to-call"
+to = "visit-missed"
 label = "Asked for"
+
+# Asked for by a workflow on a clinician's decision, the follow-up names that clinician, not the workflow.
+[[start.do]]
+id = "asked-by"
+title = "Note who asked for it"
+when = "input.asked_by != null and input.asked_by != ''"
+action = "record.update"
+[start.do.params.set]
+requester = { reference = "Practitioner/{{input.asked_by}}" }
+
+[[start.do]]
+id = "a-call"
+title = "A call: a nurse calls the patient"
+when = "input.visit == null or input.visit == ''"
+to = "to-call"
+
+# --- a visit booked to follow something up was not held: the clinician who asked for it decides -------------------
+
+[[state]]
+id = "visit-missed"
+label = "Visit not held"
+tone = "attention"
+
+[[state.work]]
+id = "visit-missed"
+title = "A visit you asked for was not held"
+kind = "task"
+role = "physician"
+assign_to = "{{input.asked_by}}"
+persons_only = true
+due = "1d"
+escalate_to = "medical-director"
+when = "input.urgency != 'urgent'"
+context = ["input", "record:demographics", "record:clinical"]
+instructions = """A visit booked to follow this up was missed or cancelled (see what the follow-up says, and the visit
+itself). What it was booked for still stands. Decide what happens now: have the patient called, book them in again
+(a visit request is started), reach or write to them yourself, or decide nothing more is needed, and say why."""
+[[state.work.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[state.work]]
+id = "visit-missed-now"
+title = "An urgent visit you asked for was not held"
+kind = "task"
+role = "physician"
+assign_to = "{{input.asked_by}}"
+persons_only = true
+priority = "urgent"
+due = "1h"
+escalate_to = "medical-director"
+when = "input.urgency == 'urgent'"
+context = ["input", "record:demographics", "record:clinical"]
+instructions = """An urgent visit booked to follow this up was missed or cancelled (see what the follow-up says, and the
+visit itself). Decide now what happens: have the patient called, book them in again (a visit request is started),
+reach or write to them yourself, or decide nothing more is needed, and say why."""
+[[state.work.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[edge]]
+id = "call-the-patient"
+label = "Have the patient called"
+from = "visit-missed"
+to = "to-call"
+
+[[edge]]
+id = "book-again"
+label = "Book again"
+from = "visit-missed"
+to = "done"
+[[edge.do]]
+id = "rebook"
+title = "Ask for a visit again"
+action = "workflow.start"
+[edge.do.params]
+workflow = "appointment-request"
+record = "{{run.subject}}"
+[edge.do.params.input]
+reason = "{{input.visit_reason}}"
+urgency = "{{input.urgency}}"
+because_of = "{{input.because_of}}"
+asked_by = "{{visit-missed.by}}{{visit-missed-now.by}}"
+
+[[edge]]
+id = "spoke-to-the-patient"
+label = "I reached the patient"
+from = "visit-missed"
+to = "done"
+
+[[edge]]
+id = "wrote-to-the-patient"
+label = "Letter sent"
+from = "visit-missed"
+to = "done"
+
+[[edge]]
+id = "nothing-more-needed"
+label = "Nothing more needed"
+from = "visit-missed"
+to = "done"
+
+# --- a call: a nurse calls ------------------------------------------------------------------------------------------
 
 [[state]]
 id = "to-call"
@@ -155,6 +291,7 @@ record = "{{run.subject}}"
 reason = "{{input.what}}"
 urgency = "{{input.urgency}}"
 because_of = "{{input.because_of}}"
+asked_by = "{{not-reached.by}}"    # not held, the visit goes back to the physician who asked for it
 
 [[edge]]
 id = "no-further-action"

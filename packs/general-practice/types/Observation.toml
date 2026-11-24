@@ -144,7 +144,7 @@ name = "flag_text"
 label = "Flag"
 path = "interpretation.0.text"
 type = "string"
-help = "normal, abnormal or critical"
+help = "as the lab sent it: normal, abnormal or critical, or its code (N, H, L, A, AA, HH, LL); its review reads it"
 
 [[field]]
 name = "referenceRange"

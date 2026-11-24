@@ -115,6 +115,8 @@ record = "{{run.subject}}"
 [edge.do.params.input]
 reason = "Medication review ({{input.medication}})"
 urgency = "soon"
+because_of = "{{run.record}}"    # the request: not held, the visit goes back to the physician who asked for it
+asked_by = "{{decide.by}}"
 
 [[edge.do]]
 id = "tell-patient"

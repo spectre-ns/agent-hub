@@ -313,6 +313,41 @@ def test_a_follow_up_nobody_reached_is_done_by_the_physicians_choice(hub, action
     assert hub.engine.run(fu["id"])["status"] == "completed"
 
 
+def _visit_asked_about(hub, ref):
+    """The appointment request asked for because of ``ref``: its run."""
+    (run,) = [r for r in hub.engine.runs(limit=1000) if r["workflow_id"] == "appointment-request"
+              and r["ctx"]["input"].get("because_of") == ref]
+    return run
+
+
+def test_every_visit_a_clinician_asks_for_says_who_asked_and_what_for(hub, worked):
+    """A visit asked for by a physician's decision (reviewing a result, after a call that reached nobody, instead of
+    a renewal) carries what it is about and who asked: what its workflow needs to give the work back to that
+    physician if the visit is not held (tests/test_record_workflow.py walks that)."""
+    # reviewing a result
+    _, result = _flagged_review(hub, "book-visit")
+    asked = _visit_asked_about(hub, result)["ctx"]["input"]
+    assert asked["asked_by"] == "dr-amara" and asked["because_of"] == result
+    # after a call that reached nobody: the physician who decided to book, about the same result
+    _, other = _flagged_review(hub, "call-patient")
+    (call,) = _follow_ups(hub, other)
+    (fu,) = hub.engine.runs(record=f"Task/{call['id']}", status="running")
+    hub.engine.complete(M(hub, "noor"), item_for(hub, fu, "call"), {"outcome": "could-not-reach", "notes": "no answer"})
+    run_all_local(hub, log=quiet)
+    hub.engine.complete(M(hub, "dr-liam"), item_for(hub, fu, "not-reached"), {"outcome": "book-a-visit", "notes": "book"})
+    run_all_local(hub, log=quiet)
+    asked = _visit_asked_about(hub, other)["ctx"]["input"]
+    assert asked["asked_by"] == "dr-liam"
+    # instead of a renewal: about the renewal request, which the visit names
+    renewal = run_of(hub, "prescription-renewal")
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, renewal, "decide"), "book-visit", "due for a review")
+    run_all_local(hub, log=quiet)
+    visit = _visit_asked_about(hub, renewal["record"])
+    assert visit["ctx"]["input"]["asked_by"] == "dr-amara"
+    assert _read(hub, visit["record"])["reasonReference"][0]["reference"] == renewal["record"]
+    assert _read(hub, renewal["record"])["status"] == "cancelled"  # the request closes on the visit asked for
+
+
 def test_a_result_in_review_is_its_own_work_and_a_visit_booked_from_it_names_it(hub):
     """A result's review is the result's work: it reads "To sort", its work is named for the result (the test and
     its value), not for the workflow. The physician asking to see the patient asks for a visit that names the result

@@ -373,6 +373,139 @@ def test_the_policy_counts_the_patients_earlier_missed_appointments(hub):
     assert hub.engine.run(other["id"])["ctx"]["missed-before"]["count"] == 0
 
 
+# ------------------------------------------------- a visit a clinician asked for, not held, goes back to a clinician
+def _follow_ups(hub, about):
+    """The follow-ups (Task) about ``about``: the result, or the visit that was not held."""
+    return [t for t in hub.records.search("Task", limit=None)
+            if about in ((t.get("focus") or {}).get("reference"), (t.get("encounter") or {}).get("reference"))]
+
+
+def _visit_asked_for_after_a_result(hub, by="dr-liam"):
+    """A low haemoglobin that ``by`` reviews with "Book a visit": the result closes, and the scheduling agent books
+    the visit it asked for. Returns (the result, the visit's run)."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub, "MacLeod"), inputs={
+        "test": "Haemoglobin", "value": "88", "unit": "g/L", "range": "120-160", "flag": "abnormal"})
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(M(hub, by), item_for(hub, run, "review"), "book-visit", "needs an iron workup")
+    run_all_local(hub, log=quiet)
+    result = hub.engine.run(run["id"])["record"]
+    assert hub.records.read(*result.split("/", 1))["review"] == "closed"
+    (visit,) = [r for r in hub.engine.runs(limit=1000) if r["workflow_id"] == "appointment-request"
+                and r["ctx"]["input"].get("because_of") == result]
+    assert _status(hub, visit["record"]) == "planned" and not _follow_ups(hub, result)
+    return result, hub.engine.run(visit["id"])
+
+
+@pytest.mark.parametrize("status,who,how", [
+    ("noshow", None, "the patient did not come"),
+    ("cancelled", "patient", "the patient cancelled"),
+    ("cancelled", "practice", "the practice cancelled"),   # no fee, and still an abnormal result nobody has seen to
+])
+def test_a_visit_a_clinician_asked_for_that_is_not_held_goes_back_to_them(hub, status, who, how):
+    """A physician reviews an abnormal result with "Book a visit": the result closes on the visit asked for. If that
+    visit is missed, or cancelled by the patient or by the practice, the visit still closes, and a follow-up of its
+    own, about the same result and naming the visit, goes to the physician who asked (by name, not to the
+    physicians' group), who decides what happens now. Booked again, the new visit is asked for the same way."""
+    result, vrun = _visit_asked_for_after_a_result(hub, by="dr-liam")
+    ref = vrun["record"]
+    assert vrun["ctx"]["input"]["asked_by"] == "dr-liam"  # the visit's request says who asked for it
+    _at_the_visit(hub, ref, 5 if status == "noshow" else -60)
+    hub.update_record(M(hub, "jo"), ref, {"status": status, **({"cancelled_by": who} if who else {})})
+    run_all_local(hub, log=quiet)
+    vrun = hub.engine.run(vrun["id"])
+    assert vrun["status"] == "completed" and _status(hub, ref) == status  # the visit closes all the same
+    assert vrun["steps"]["not-held-follow-up"]["state"] == "done"
+    (call,) = _follow_ups(hub, result)
+    assert call["encounter"]["reference"] == ref and call["businessStatus"]["text"] == "visit-missed"
+    assert call["description"] == f"Visit not held ({how}): Follow-up on Haemoglobin result"
+    assert call["requester"]["reference"] == "Practitioner/dr-liam" and call["priority"] == "routine"
+    assert hub.record_type("Task").state_label("visit-missed") == "Visit not held"
+    (fu,) = hub.engine.runs(record=f"Task/{call['id']}", status="running")
+    item = hub.engine.item(item_for(hub, fu, "visit-missed"))
+    assert (item["assignee"], item["role"]) == ("dr-liam", "physician") and item["due_at"]
+    assert hub.engine.eligibility(M(hub, "dr-amara"), item) == (False, "it is assigned to someone else")
+    hub.engine.complete(M(hub, "dr-liam"), item["id"], {"outcome": "book-again", "notes": "still needs the workup"})
+    run_all_local(hub, log=quiet)
+    assert hub.engine.run(fu["id"])["status"] == "completed"
+    assert hub.records.read("Task", call["id"])["businessStatus"]["text"] == "done"
+    (again,) = [r for r in hub.engine.runs(limit=1000) if r["workflow_id"] == "appointment-request"
+                and r["id"] != vrun["id"] and r["ctx"]["input"].get("because_of") == result]
+    assert again["ctx"]["input"]["asked_by"] == "dr-liam"
+    assert again["ctx"]["input"]["reason"] == "Follow-up on Haemoglobin result"  # what it was for, not "not held: ..."
+
+
+@pytest.mark.parametrize("asked_by", [None, "jo"])
+def test_a_visit_not_held_with_no_clinician_named_goes_to_the_physicians_and_an_ordinary_one_to_nobody(hub, asked_by):
+    """A visit booked because of a result whose request names no clinician (or someone who is not a physician) still
+    comes back when it is missed: to the physicians, for one of them to take. They may have the patient called, and
+    choose the nurse. A visit nobody asked for clinically (a form for work) starts no follow-up when it is missed."""
+    pat = _pat(hub, "MacLeod")
+    result = next(f"Observation/{o['id']}" for o in hub.records.search("Observation", limit=None)
+                  if o["subject"]["reference"] == pat)
+    jo, noor = M(hub, "jo"), M(hub, "noor")
+    plain = hub.engine.start(jo, "appointment-request", record=pat, inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    asked = hub.engine.start(M(hub, "dr-amara"), "appointment-request", record=pat, inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-10T11:00|dr-amara", "because_of": result,
+        **({"asked_by": asked_by} if asked_by else {})})
+    for run in (plain, asked):
+        ref = hub.engine.run(run["id"])["record"]
+        _at_the_visit(hub, ref, 5)
+        hub.update_record(jo, ref, {"status": "noshow"})
+        run_all_local(hub, log=quiet)
+    plain, asked = hub.engine.run(plain["id"]), hub.engine.run(asked["id"])
+    assert plain["steps"]["not-held-follow-up"]["state"] == "skipped" and not _follow_ups(hub, plain["record"])
+    (call,) = _follow_ups(hub, asked["record"])
+    assert call["focus"]["reference"] == result
+    (fu,) = hub.engine.runs(record=f"Task/{call['id']}", status="running")
+    item = hub.engine.item(item_for(hub, fu, "visit-missed"))
+    assert item["assignee"] is None and item["role"] == "physician" and item["due_at"]  # timed, and escalated if late
+    assert hub.workflow("patient-follow-up")[0].step("visit-missed").escalate_to == "medical-director"
+    step = hub.workflow("patient-follow-up")[0].step("visit-missed")
+    (need,) = hub.engine.assignments_needed(fu, step, "call-the-patient")  # the call is a named nurse's
+    assert need["key"] == "patient-follow-up/call" and [m["id"] for m in need["people"]] == ["noor"]
+    hub.engine.complete(M(hub, "dr-amara"), item["id"], {"outcome": "call-the-patient", "notes": "please call"},
+                        assign={"patient-follow-up/call": "noor"})
+    run_all_local(hub, log=quiet)
+    assert hub.records.read("Task", call["id"])["businessStatus"]["text"] == "to-call"
+    assert hub.engine.item(item_for(hub, fu, "call"))["assignee"] == "noor"
+    hub.engine.complete(noor, item_for(hub, fu, "call"), {"outcome": "patient-reached", "notes": "rebooked by phone"})
+    run_all_local(hub, log=quiet)
+    assert hub.engine.run(fu["id"])["status"] == "completed"
+
+
+def test_an_urgent_visit_not_held_is_urgent_for_the_clinician_who_asked(hub):
+    """How soon the visit was wanted carries over: an urgent visit that is not held is the asking physician's urgent
+    work, due within the hour; a visit wanted soon or routinely is ordinary work, due within a day."""
+    pat = _pat(hub, "MacLeod")
+    booked = hub.engine.start(M(hub, "jo"), "appointment-request", record=pat, inputs={
+        "reason": "a form for work", "kind": "forms", "slot": "2027-03-09T11:00|dr-amara"})
+    ref = hub.engine.run(booked["id"])["record"]
+    how = hub.pack.actions["visit.not_held"]
+    assert how(hub.engine, booked, None, {"visit": ref, "urgency": "urgent"}, None)["urgency"] == "urgent"
+    assert how(hub.engine, booked, None, {"visit": ref, "urgency": "soon"}, None)["urgency"] == "routine"
+    fu = hub.engine.start(M(hub, "dr-amara"), "patient-follow-up", record=pat, inputs={
+        "what": "Visit not held (the patient did not come): Follow-up on Potassium result", "urgency": "urgent",
+        "visit": ref, "asked_by": "dr-liam"})
+    item = hub.engine.item(item_for(hub, fu, "visit-missed-now"))
+    assert (item["assignee"], item["priority"]) == ("dr-liam", "urgent")
+    assert hub.workflow("patient-follow-up")[0].step("visit-missed-now").due == "1h"
+    assert hub.workflow("patient-follow-up")[0].step("visit-missed").due == "1d"
+
+
+def test_a_visit_a_clinician_asked_for_whose_request_is_cancelled_goes_back_to_them(hub):
+    """The visit's work cancelled before the visit was held (the practice manager drops the booking's run): the visit
+    is cancelled, and the physician who asked for it gets the follow-up, as for a missed visit."""
+    result, vrun = _visit_asked_for_after_a_result(hub, by="dr-liam")
+    hub.engine.cancel(M(hub, "rana"), vrun["id"], "booked twice by mistake")
+    assert _status(hub, vrun["record"]) == "cancelled" and hub.engine.run(vrun["id"])["status"] == "cancelled"
+    (call,) = _follow_ups(hub, result)
+    assert call["description"] == "Visit not held (its request was cancelled): Follow-up on Haemoglobin result"
+    assert "booked twice by mistake" in call["note"][0]["text"]
+    (fu,) = hub.engine.runs(record=f"Task/{call['id']}", status="running")
+    assert hub.engine.item(item_for(hub, fu, "visit-missed"))["assignee"] == "dr-liam"
+
+
 def test_a_visit_booked_on_the_calendar_starts_its_workflow_booked(hub):
     jo = M(hub, "jo")
     pat = _pat(hub, "MacLeod")

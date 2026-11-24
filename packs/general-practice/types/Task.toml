@@ -1,5 +1,7 @@
 # Something to do for a patient that a review set going: calling them about a lab result. Its own record, so the
 # result it came from is closed once the call is asked for, and the call is worked, and found, on its own.
+# A visit a clinician asked for that was not held (missed or cancelled) comes back as one too, naming the visit: it
+# waits first on the clinician who asked for the visit (visit-missed), who decides what happens now.
 id = "Task"
 label = "Follow-up"
 plural = "Follow-ups"
@@ -48,9 +50,18 @@ name = "because_of"
 label = "Because of"
 path = "focus"
 type = "reference"
-target = ["Observation"]
+target = ["Observation", "Condition", "MedicationRequest"]
 rel = "reason"
-help = "the result whose review asked for it"
+help = "the result whose review asked for it (or the problem or prescription a visit was asked for)"
+
+[[field]]
+name = "visit"
+label = "Visit not held"
+path = "encounter"
+type = "reference"
+target = ["Encounter"]
+rel = "encounter"
+help = "the visit, booked to follow this up, that was missed or cancelled: the follow-up is about that"
 
 [[field]]
 name = "priority"
@@ -81,11 +92,11 @@ name = "stage"
 label = "Stage"
 path = "businessStatus.text"
 type = "choice"
-choices = ["to-call", "not-reached", "done"]
+choices = ["to-call", "not-reached", "visit-missed", "done"]
 
 # Its stages and the moves between them are the patient-follow-up workflow's (written as states and edges).
 [lifecycle]
 field = "stage"
 initial = "to-call"
 # its work cancelled, a follow-up stays where it is: the call is still to make
-abandoned = { to-call = "to-call", not-reached = "not-reached" }
+abandoned = { to-call = "to-call", not-reached = "not-reached", visit-missed = "visit-missed" }

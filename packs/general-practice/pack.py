@@ -23,6 +23,32 @@ STATUS_WORDS = {"planned": "booked", "arrived": "checked in", "in-progress": "in
 SETTING_WORDS = {"AMB": "in clinic", "VR": "virtual", "HH": "home visit"}   # the visit's class (v3-ActCode)
 FEES = {"minor-assessment": 35, "complete-assessment": 65, "counselling": 55, "renewal-no-visit": 15}
 SEVERITY = {"normal": 0, "abnormal": 1, "critical": 2}
+# A lab's flag as feeds really write it: HL7 codes (v2 table 0078, v3 ObservationInterpretation) or words, in any
+# case. Whatever is not here is "unknown": never normal.
+FLAG_CRITICAL = {"hh", "ll", "aa", "critical", "crit", "panic"}
+FLAG_ABNORMAL = {"h", "l", "a", "hu", "lu", "<", ">", "high", "low", "abnormal", "abn"}
+FLAG_NORMAL = {"n", "normal"}
+
+
+def lab_band(*flags) -> str:
+    """What a lab's flag says, however it was sent: ``critical``, ``abnormal``, ``normal`` or ``unknown``. Several
+    (the flag's words and its codes) read as the worst of them. A flag that is missing, or one this does not know,
+    is ``unknown``, and one unknown among them keeps it from being ``normal``: nothing is called normal on a guess."""
+    bands = []
+    for flag in flags:
+        t = " ".join(str(flag if flag is not None else "").lower().split())
+        if not t:
+            continue
+        if t in FLAG_CRITICAL or "critical" in t or "panic" in t:
+            bands.append("critical")
+        elif t in FLAG_ABNORMAL or "abnormal" in t:
+            bands.append("abnormal")
+        else:
+            bands.append("normal" if t in FLAG_NORMAL else "unknown")
+    for band in ("critical", "abnormal", "unknown"):
+        if band in bands:
+            return band
+    return "normal" if bands else "unknown"
 
 
 # --------------------------------------------------------------------------------------------------- summaries
@@ -343,9 +369,52 @@ def act_visits_missed(engine, run, step, params, actor):
     return {"count": count}
 
 
+def act_visit_not_held(engine, run, step, params, actor):
+    """How a booked visit ended without being held, in words, for the follow-up that goes back to the clinician who
+    asked for it: ``how`` (the patient did not come, the patient cancelled, the practice cancelled), ``words`` (a
+    sentence with when it was booked for) and ``urgency`` as a follow-up takes it (urgent, else routine)."""
+    ref = str(params.get("visit") or run.get("record") or "")
+    if not ref.startswith("Encounter/"):
+        raise ValueError(f"visit.not_held: {ref!r} is not a visit")
+    visit = engine.hub.records.read(*ref.split("/", 1))
+    if not visit:
+        raise ValueError(f"visit.not_held: there is no {ref}")
+    if visit.get("status") == "noshow":
+        how = "the patient did not come"
+    elif visit.get("cancelled_by") == "practice":
+        how = "the practice cancelled"
+    else:
+        how = "the patient cancelled"
+    when = _date_words(visit.get("plannedStartDate"))
+    return {"how": how, "urgency": "urgent" if params.get("urgency") == "urgent" else "routine",
+            "words": f"The visit booked for {when} was not held: {how}." if when else
+                     f"The visit was not held: {how}."}
+
+
+def act_lab_flag(engine, run, step, params, actor):
+    """What the lab's flag says about a result, read in code so that no result is refused, or passed as routine,
+    over how its flag is written: ``band`` (critical, abnormal, normal or unknown: see ``lab_band``) and ``as_sent``.
+    It reads ``flag`` (what the feed sent with the result) and, on the result the run walks, each interpretation's
+    words and codes (a lab that files the result itself may give only a code: HH)."""
+    said = [params.get("flag")]
+    ref = str(run.get("record") or "")
+    if ref.startswith("Observation/"):
+        ob = engine.hub.records.read(*ref.split("/", 1)) or {}
+        for cc in ob.get("interpretation") or []:
+            if isinstance(cc, dict):
+                said.append(cc.get("text"))
+                for c in cc.get("coding") or []:
+                    if isinstance(c, dict):
+                        said += [c.get("code"), c.get("display")]
+    said = list(dict.fromkeys(" ".join(str(s).split()) for s in said if s is not None and str(s).strip()))
+    return {"band": lab_band(*said), "as_sent": ", ".join(said)}
+
+
 ACTIONS = {"clock.now": act_clock_now,
+           "lab.flag": act_lab_flag,
            "notice.send": act_notice_send,
            "patient.details": act_patient_details,
+           "visit.not_held": act_visit_not_held,
            "visits.missed": act_visits_missed}
 PROVIDERS: dict = {}
 
@@ -362,8 +431,14 @@ def guard_visit_coding(values, ctxview):
     return problems
 
 
+def _lab_said(context: dict) -> str:
+    """What the lab's flag says, for the sort: as the review read it (``flag.band``), else read from the flag sent."""
+    read = (context.get("flag") or {}).get("band") if isinstance(context.get("flag"), dict) else None
+    return read or lab_band((context.get("input") or {}).get("flag"))
+
+
 def guard_lab_triage(values, ctxview):
-    lab = ((ctxview.get("context") or {}).get("input") or {}).get("flag")
+    lab = _lab_said(ctxview.get("context") or {})
     if lab in SEVERITY and SEVERITY[values["category"]] < SEVERITY[lab]:
         return [f"the lab flagged this result {lab}; it may be raised, never lowered to {values['category']}"]
     return []
@@ -626,8 +701,9 @@ def standin_lab_triage(ctx):
     prev.sort(key=lambda o: o.get("effectiveDateTime", ""))
     previous = "; ".join(f"{(o.get('valueQuantity') or {}).get('value')} on {o.get('effectiveDateTime', '')[:10]}"
                          for o in prev) or "no earlier results"
-    return {"category": inp.get("flag", "abnormal"), "previous": previous,
-            "rationale": f"Lab flag {inp.get('flag')} for {inp.get('test')} {inp.get('value')} {inp.get('unit') or ''}"
+    said = _lab_said(ctx["context"])  # a flag nobody can read is sorted as abnormal: a person looks at it
+    return {"category": said if said in SEVERITY else "abnormal", "previous": previous,
+            "rationale": f"Lab flag {inp.get('flag') or 'not given'} for {inp.get('test')} {inp.get('value')} {inp.get('unit') or ''}"
                          f" (range {inp.get('range') or 'not given'}). Earlier: {previous}."}
 
 

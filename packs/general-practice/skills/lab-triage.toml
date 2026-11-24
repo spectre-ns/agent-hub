@@ -5,6 +5,9 @@ Sort the incoming result so it reaches the physician in the right queue. Use the
 normal, abnormal, or critical. You may raise the category (e.g. a value just inside the range that is far from the
 patient's previous results is worth calling abnormal), never lower it below the lab's flag. Give the comparison with
 earlier results of the same test, if any. You do not interpret the result clinically.
+The flag is kept as the lab sent it (a word, or a code such as H or LL); what it says is in flag.band. When that is
+unknown (no flag, or one that could not be read), sort from the reference range and the earlier results: a physician
+reviews the result whatever you say, and it cannot be filed as normal.
 """
 
 [[output]]

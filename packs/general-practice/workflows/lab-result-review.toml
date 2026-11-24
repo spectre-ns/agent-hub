@@ -7,10 +7,13 @@ stops in two places: to sort, and in review. A physician's decision closes it, w
 way out: the patient told it is normal or that it was reviewed, a call asked for (a follow-up of its own), or a visit
 asked for. The result does not stay open while the call or the visit is worked.
 
-A result arrives from the lab. Code checks the value against its range and the practice's critical limits, whatever
-the lab's flag says; a result the lab or the check calls critical pages the physicians at once and goes straight to an
-urgent physician review, without waiting for the sort. Other results are sorted first. Only a result that the lab,
-the sort and the range check all call normal can be filed as normal, and only then is the patient told it is normal.
+A result arrives from the lab. No result is refused over its flag: the flag is kept on the result as the lab sent
+it (N, H, L, A, AA, HH, LL, words, or nothing) and read by code as critical, abnormal, normal or unknown. Code also
+checks the value against its range and the practice's critical limits, whatever the lab's flag says; a result the lab
+or the check calls critical pages the physicians at once and goes straight to an urgent physician review, without
+waiting for the sort. Other results are sorted first. Only a result that the lab, the sort and the range check all
+call normal can be filed as normal, and only then is the patient told it is normal: a result whose flag is missing, or
+is one the code does not know, is never filed as normal, and a physician reviews it like any other.
 The reviewing physician and the date are written back to the result. Agents sort; they never sign off a result.
 
 A result the lab files starts its review; a result the lab sends for a patient (the lab.result event) is filed as
@@ -53,12 +56,12 @@ type = "string"
 name = "range"
 label = "Reference range"
 type = "string"
+# As the lab sent it, whatever it sent: never a reason to refuse a result. The check reads it (flag.band).
 [[input]]
 name = "flag"
 label = "Lab flag"
-type = "choice"
-choices = ["normal", "abnormal", "critical"]
-required = true
+type = "string"
+help = "as the lab sent it: normal, abnormal, critical, a code (N, H, L, A, AA, HH, LL) or nothing"
 [[input]]
 name = "observation"
 label = "Result record"
@@ -81,6 +84,16 @@ id = "checking"
 label = "Checking"
 tone = "active"
 
+# What the flag says, in code: critical (HH, LL, AA, critical, panic), abnormal (H, L, A), normal (N), or unknown (no
+# flag, or one this does not know). It reads the flag sent and the codes on the result the lab filed.
+[[state.work]]
+id = "flag"
+title = "Read the lab's flag"
+kind = "automation"
+action = "lab.flag"
+[state.work.params]
+flag = "{{input.flag}}"
+
 [[state.work]]
 id = "check"
 title = "Check the value against its range"
@@ -97,7 +110,7 @@ id = "critical"
 label = "Critical"
 from = "checking"
 to = "received"
-when = "(input.flag == 'critical' or check.band == 'critical')"
+when = "(flag.band == 'critical' or check.band == 'critical')"
 
 [[edge.do]]
 id = "page"
@@ -142,7 +155,7 @@ due = "1d"
 escalate_to = "physician"
 skill = "lab-triage"
 risk = "medium"
-context = ["record:clinical", "input"]
+context = ["record:clinical", "input", "flag"]
 
 [[edge]]
 id = "sorted"
@@ -162,13 +175,14 @@ kind = "gate"
 role = "physician"
 due = "2d"
 escalate_to = "medical-director"
-when = "not (input.flag == 'critical' or check.band == 'critical')"
+when = "not (flag.band == 'critical' or check.band == 'critical')"
 signer = "person"
 meaning = "I have reviewed this result"
-context = ["record:clinical", "input", "check", "sort"]
+context = ["record:clinical", "input", "flag", "check", "sort"]
 instructions = """File it as normal only when the lab, the range check and the sort all call it normal and you agree: the
-patient is then told it is normal. Otherwise choose no action needed (the patient is told it was reviewed, not that it
-is normal), or have the patient called or booked in."""
+patient is then told it is normal. A result the lab sent with no flag, or with one that could not be read, cannot be
+filed as normal. Otherwise choose no action needed (the patient is told it was reviewed, not that it is normal), or
+have the patient called or booked in."""
 
 [[state.work]]
 id = "review-critical"
@@ -178,10 +192,10 @@ role = "physician"
 priority = "urgent"
 due = "1h"
 escalate_to = "medical-director"
-when = "(input.flag == 'critical' or check.band == 'critical')"
+when = "(flag.band == 'critical' or check.band == 'critical')"
 signer = "person"
 meaning = "I have reviewed this critical result"
-context = ["input", "check", "record:clinical"]
+context = ["input", "flag", "check", "record:clinical"]
 instructions = """The lab or the range check calls this result critical. Act on it now: have the patient called, or
 send them to emergency care. It has not been sorted by an agent."""
 
@@ -190,7 +204,7 @@ id = "file-normal"
 label = "File as normal"
 from = "received"
 to = "closed"
-when = "input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal'"
+when = "flag.band == 'normal' and sort.category == 'normal' and check.band == 'normal'"
 [[edge.do]]
 id = "file-normal-noted"
 title = "Note who reviewed the result, and when"
@@ -225,7 +239,7 @@ id = "no-action-needed"
 label = "No action needed"
 from = "received"
 to = "closed"
-when = "not (input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal')"
+when = "not (flag.band == 'normal' and sort.category == 'normal' and check.band == 'normal')"
 [[edge.do]]
 id = "no-action-needed-noted"
 title = "Note who reviewed the result, and when"
@@ -343,6 +357,7 @@ record = "{{run.subject}}"
 reason = "Follow-up on {{input.test}} result"
 urgency = "soon"
 because_of = "{{run.record}}"
+asked_by = "{{review.by}}"       # not held, the visit goes back to the physician who asked for it
 
 [[edge.do]]
 id = "book-critical"
@@ -356,6 +371,7 @@ record = "{{run.subject}}"
 reason = "Follow-up on {{input.test}} result"
 urgency = "urgent"
 because_of = "{{run.record}}"
+asked_by = "{{review-critical.by}}"
 
 [[state]]
 id = "closed"

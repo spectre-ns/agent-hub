@@ -30,6 +30,11 @@ claims are submitted by the billing agent; anything else waits for billing staff
 practice's missed-appointment policy, and so is a booking cancelled with less than a day's notice: a visit missed or
 cancelled late is the visit's own work, not a workflow of its own.
 
+A visit a clinician asked for (because of a result, a call that reached nobody, a renewal) that is not held goes back
+to a clinician: missed, cancelled by the patient or by the practice, or its request cancelled before it was booked,
+a follow-up of its own is started about the same result for the one who asked, who decides what happens now. The
+visit still closes; what it was booked for is not lost with it.
+
 A visit filed after the fact (a call, a visit at home) is a visit made under way (in progress): it is documented,
 signed, completed and billed like any other.
 
@@ -89,9 +94,16 @@ required = true
 name = "because_of"
 label = "Because of"
 type = "reference"
-target = ["Observation", "Condition"]
-hidden = true   # set by the workflow that asks for the visit (a reviewed result), never typed
-help = "the result or problem the visit was asked for"
+target = ["Observation", "Condition", "MedicationRequest"]
+hidden = true   # set by the workflow that asks for the visit (a reviewed result, a renewal), never typed
+help = "the result, problem or prescription the visit was asked for"
+
+[[input]]
+name = "asked_by"
+label = "Asked for by"
+type = "member"
+hidden = true   # set by the workflow that asks for the visit: who decided the patient should be seen, never typed
+help = "the clinician who asked for the visit: if it is not held, what happens now is theirs to decide"
 
 [[input]]
 name = "preferences"
@@ -563,6 +575,35 @@ to = "{{run.subject}}"
 subject = "Your appointment is cancelled"
 body = "We are sorry: we had to cancel your appointment on {{record.plannedStartDate}}. There is no charge. Reply to rebook."
 
+# A visit a clinician asked for (to follow up a result, a call that reached nobody, a renewal) goes back to a clinician
+# when it is not held, whoever cancelled it and whether or not the policy applies: a follow-up of its own, about the
+# same result, for the one who asked (any physician, if the request does not say who or they are no longer here).
+[[edge.do]]
+id = "not-held-how"
+title = "Note how the visit ended"
+when = "(input.because_of != null and input.because_of != '') or (input.asked_by != null and input.asked_by != '')"
+action = "visit.not_held"
+[edge.do.params]
+visit = "{{run.record}}"
+urgency = "{{input.urgency}}"
+
+[[edge.do]]
+id = "not-held-follow-up"
+title = "Ask the clinician who asked for the visit what happens now"
+when = "(input.because_of != null and input.because_of != '') or (input.asked_by != null and input.asked_by != '')"
+action = "workflow.start"
+[edge.do.params]
+workflow = "patient-follow-up"
+record = "{{run.subject}}"
+[edge.do.params.input]
+what = "Visit not held ({{not-held-how.how}}): {{input.reason}}"
+urgency = "{{not-held-how.urgency}}"
+because_of = "{{input.because_of}}"
+visit = "{{run.record}}"
+visit_reason = "{{input.reason}}"
+asked_by = "{{input.asked_by}}"
+note = "{{not-held-how.words}}"
+
 # a no-show stays a no-show
 [[edge.do]]
 id = "missed"
@@ -962,3 +1003,39 @@ tone = "ended"
 id = "entered-in-error"
 label = "Entered in error"
 tone = "ended"
+
+# Its work cancelled before the visit was held (the request never booked, or the booking dropped with its run): a visit
+# a clinician asked for goes back to them all the same, as when it is missed. A visit that took place is not chased.
+[[on_cancel]]
+id = "cancelled-follow-up"
+title = "Ask the clinician who asked for the visit what happens now"
+when = "((input.because_of != null and input.because_of != '') or (input.asked_by != null and input.asked_by != '')) and record.status in ['requested', 'reading', 'callback', 'not-reached', 'planned'] and input.urgency != 'urgent'"
+action = "workflow.start"
+[on_cancel.params]
+workflow = "patient-follow-up"
+record = "{{run.subject}}"
+[on_cancel.params.input]
+what = "Visit not held (its request was cancelled): {{input.reason}}"
+urgency = "routine"
+because_of = "{{input.because_of}}"
+visit = "{{run.record}}"
+visit_reason = "{{input.reason}}"
+asked_by = "{{input.asked_by}}"
+note = "The visit was not held: its request was cancelled by {{cancel.by}} ({{cancel.reason}})."
+
+[[on_cancel]]
+id = "cancelled-follow-up-now"
+title = "Ask the clinician who asked for the visit what happens now (urgent)"
+when = "((input.because_of != null and input.because_of != '') or (input.asked_by != null and input.asked_by != '')) and record.status in ['requested', 'reading', 'callback', 'not-reached', 'planned'] and input.urgency == 'urgent'"
+action = "workflow.start"
+[on_cancel.params]
+workflow = "patient-follow-up"
+record = "{{run.subject}}"
+[on_cancel.params.input]
+what = "Visit not held (its request was cancelled): {{input.reason}}"
+urgency = "urgent"
+because_of = "{{input.because_of}}"
+visit = "{{run.record}}"
+visit_reason = "{{input.reason}}"
+asked_by = "{{input.asked_by}}"
+note = "The visit was not held: its request was cancelled by {{cancel.by}} ({{cancel.reason}})."

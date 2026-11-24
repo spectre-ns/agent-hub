@@ -207,6 +207,97 @@ def test_a_critical_result_reaches_every_physician_on_the_board_at_once(hub):
     assert calm["steps"]["tell-physicians"]["state"] == "skipped"
 
 
+CREATININE = {"test": "Creatinine", "value": "90", "unit": "umol/L", "range": "50-110"}  # no critical limit of its own
+
+
+@pytest.mark.parametrize("flag,band", [
+    ("N", "normal"), ("n", "normal"), ("Normal", "normal"),
+    ("H", "abnormal"), ("L", "abnormal"), ("A", "abnormal"), ("abnormal", "abnormal"), ("Abnormal high", "abnormal"),
+    ("HH", "critical"), ("LL", "critical"), ("AA", "critical"), ("hh", "critical"), ("Critical", "critical"),
+    ("CRITICAL HIGH", "critical"), ("Panic", "critical"), (" panic low ", "critical"),
+    (None, "unknown"), ("", "unknown"), ("  ", "unknown"), ("see comment", "unknown"), ("?", "unknown"),
+])
+def test_no_lab_result_is_refused_over_its_flag_and_the_flag_is_read_in_code(hub, flag, band):
+    """Whatever a feed sends as a result's flag (an HL7 code, a word in any case, nothing, something else), the
+    result is filed and its review starts: the flag is kept on the result as sent, and read by code as critical,
+    abnormal, normal or unknown. A critical one, however spelled, pages the physicians and goes straight to an urgent
+    review; a missing or unrecognised one is unknown, never normal."""
+    pat = _pat(hub)
+    data = {**CREATININE, **({} if flag is None else {"flag": flag})}
+    (run,) = hub.engine.emit(M(hub, "lab-feed"), "lab.result", record=pat, data=data)
+    run = hub.engine.run(run["id"])
+    assert run["workflow_id"] == "lab-result-review" and run["status"] == "running"
+    ob = read(hub, run["record"])
+    assert ob["subject"]["reference"] == pat and ob["valueQuantity"]["value"] == 90
+    sent = (flag or "").strip()
+    assert ((ob.get("interpretation") or [{}])[0].get("text") or "") == sent  # as the lab sent it, not rewritten
+    assert run["ctx"]["flag"]["band"] == band and run["ctx"]["check"]["band"] == "normal"
+    if band == "critical":
+        assert run["steps"]["page"]["state"] == "done" and run["steps"]["sort"]["state"] == "skipped"
+        item = hub.engine.item(item_for(hub, run, "review-critical"))
+        assert item["priority"] == "urgent" and item["role"] == "physician"
+    else:
+        assert run["steps"]["page"]["state"] == "skipped" and ob["review"] == "sorting"
+
+
+@pytest.mark.parametrize("flag", [None, "see comment"])
+def test_a_result_with_no_flag_or_one_nobody_can_read_is_never_filed_as_normal(hub, flag):
+    """A value inside its range that the sort calls normal is still not offered as "File as normal" when the lab's
+    flag is missing or unrecognised: it goes to a physician's review like any other, and choosing it is refused."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**CREATININE, **({"flag": flag} if flag else {})})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "normal", "rationale": "inside the range"})
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    assert run["ctx"]["flag"]["band"] == "unknown" and read_review(hub, run) == "received"
+    step = hub.workflow("lab-result-review")[0].step("review")
+    assert hub.engine.open_outcomes(run, step) == ["no-action-needed", "call-patient", "book-visit"]
+    with pytest.raises(Exception):
+        hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review"), "file-normal", "")
+    # the same value flagged N is offered it: the three still have to agree
+    ok = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub), inputs={**CREATININE, "flag": "N"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, ok, "sort"),
+                        {"category": "normal", "rationale": "inside the range"})
+    run_all_local(hub, log=quiet)
+    assert "file-normal" in hub.engine.open_outcomes(hub.engine.run(ok["id"]), step)
+
+
+@pytest.mark.parametrize("interpretation,band", [
+    ([{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation", "code": "HH"}]}],
+     "critical"),                                                        # a code and no words
+    ([{"text": "HH"}], "critical"),                                      # the code as its words
+    ([{"coding": [{"code": "AA"}], "text": "Panic"}], "critical"),
+    ([{"coding": [{"code": "N"}], "text": "Normal"}], "normal"),
+    ([{"coding": [{"code": "HH"}], "text": "normal"}], "critical"),      # they disagree: the worse one
+    ([{"coding": [{"code": "N"}], "text": "see comment"}], "unknown"),   # one of them unreadable: not normal
+    (None, "unknown"),
+])
+def test_a_result_the_lab_files_itself_is_read_from_its_codes_too(hub, interpretation, band):
+    """A lab that files the result (not the event) may flag it with a code alone: the result is filed whatever its
+    interpretation says, and its review reads the words and the codes; a coded critical takes the critical edge."""
+    rec = hub.create_record(M(hub, "lab-feed"), "Observation", {
+        "status": "final", "category": [{"text": "laboratory"}], "subject": {"reference": _pat(hub)},
+        "code": {"text": "Creatinine"}, "valueQuantity": {"value": 900, "unit": "umol/L"},
+        "referenceRange": [{"text": "50-110"}], **({"interpretation": interpretation} if interpretation else {})})
+    (run,) = hub.engine.runs(record=f"Observation/{rec['id']}", status="running")
+    assert run["ctx"]["flag"]["band"] == band and run["ctx"]["check"]["band"] == "abnormal"
+    assert run["steps"]["page"]["state"] == ("done" if band == "critical" else "skipped")
+    assert (hub.db.items.find_one({"run_id": run["id"], "step_id": "review-critical"}) is not None) is (band == "critical")
+
+
+def test_the_sort_may_not_lower_a_flag_the_lab_sent_as_a_code(hub):
+    """The sort may raise what the lab said, never lower it, and that holds for a flag sent as a code: H is abnormal."""
+    from practicehub.hub import Invalid
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub), inputs={**CREATININE, "flag": "H"})
+    with pytest.raises(Invalid) as refused:
+        hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                            {"category": "normal", "rationale": "inside the range"})
+    assert any("the lab flagged this result abnormal" in p and "never lowered" in p for p in refused.value.problems)
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "the lab flagged it high"})
+
+
 def test_a_patient_nobody_could_reach_goes_to_a_physician(hub):
     pat = _pat(hub)
     run = hub.engine.start(M(hub, "jo"), "appointment-request", record=pat,
