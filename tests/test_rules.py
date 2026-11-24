@@ -4535,6 +4535,7 @@ to = "done"
 [[state]]
 id = "done"
 """
+ERRAND_OWN = 'workflow = { id = "errand-flow", when = "record.status == \'asked\'" }'
 # A type alone, for what a lifecycle may say: {life} goes under [lifecycle], {rows} after its one move by hand.
 WIDGET = ('id = "Widget"\ndata_class = "clinical"\n[[field]]\nname = "status"\ntype = "choice"\n'
           'choices = ["a", "b", "c"]\n[[field]]\nname = "note"\n[[signature]]\nmeaning = "Checked"\n'
@@ -4563,13 +4564,7 @@ def test_abandoned_is_a_move_of_its_own_that_no_transition_is_written_for(hub):
     alone = schema.parse(ERRAND.format(top="")).lifecycle["transition"]
     assert [(t["from"], t["to"], t["by"], t["label"], t.get("abandon")) for t in alone] == [
         (["asked"], "dropped", "workflow", "Dropped", True), (["checking"], "done", "workflow", "Done", True)]
-    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    for top in ("", 'workflow = { id = "errand-flow", when = "record.status == \'asked\'" }'):
-        p = hub.propose("type", rana, ERRAND.format(top=top), "errands")
-        hub.approve(amara, "type", "Errand", p["version"])
-        if not top:
-            w = hub.propose_workflow(rana, ERRAND_FLOW, "errands")
-            hub.approve_workflow(amara, "errand-flow", w["version"])
+    rana, amara = _errands(hub)
     rt = hub.record_type("Errand")
     assert rt.transition("asked", "dropped")["abandon"] and rt.transition("asked", "dropped")["by"] == "workflow"
     checked = rt.transition("checking", "done")  # its workflow's edge makes this move: the edge's own row
@@ -4637,6 +4632,77 @@ def test_a_move_by_the_workflow_that_only_repeats_abandoned_is_refused():
     for bad in ('{ b = "gone" }', '{ nowhere = "a" }'):
         with pytest.raises(DefinitionError, match="both must be its states"):
             schema.parse(WIDGET.format(life=f"abandoned = {bad}\n", rows=""))
+
+
+# ----------------------------------------- a type and its own workflow: what the two may not both say (lifecycle_fit)
+def _errands(hub, type_more="", flow_more=""):
+    """The errand type and its workflow, in force (the type first without naming it, as a practice builds them)."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    for top in ("", ERRAND_OWN):
+        p = hub.propose("type", rana, ERRAND.format(top=top) + (type_more if top else ""), "errands")
+        hub.approve(amara, "type", "Errand", p["version"])
+        if not top:
+            w = hub.propose_workflow(rana, ERRAND_FLOW + flow_more, "errands")
+            hub.approve_workflow(amara, "errand-flow", w["version"])
+    return rana, amara
+
+
+def _errand_module(mods, type_more="", flow_more=""):
+    """The same two as a module on disk (``mods``): installed together, where neither one's own check sees the pair."""
+    m = mods / "errand"
+    for d in ("types", "workflows"):
+        (m / d).mkdir(parents=True)
+    (m / "module.toml").write_text('[module]\nid = "errand"\nname = "Errands"\nversion = "1"\n')
+    (m / "types" / "Errand.toml").write_text(ERRAND.format(top=ERRAND_OWN) + type_more)
+    (m / "workflows" / "errand-flow.toml").write_text(ERRAND_FLOW + flow_more)
+
+
+def test_a_state_s_words_and_tone_are_said_once(hub):
+    """Rule: a lifecycle state is named, and given its tone, in one place. The field that holds the state says no
+    ``labels`` of its own (nothing that shows a state reads them). A state the type's own workflow has is named and
+    toned by that workflow: the type's ``lifecycle.labels`` and ``tones`` are for a value the workflow has no state
+    for. Both are refused whichever side is changed: the type, or the workflow gaining the state."""
+    from practicehub import schema
+    from practicehub.catalog import lifecycle_fit
+    from practicehub.workflows import DefinitionError, parse
+    with pytest.raises(DefinitionError) as exc:
+        schema.parse(WIDGET.format(life="", rows="").replace('choices = ["a", "b", "c"]\n',
+                                                             'choices = ["a", "b", "c"]\nlabels = { a = "Ay" }\n'))
+    assert exc.value.problems == ["field status: a state's words are lifecycle.labels (its workflow names its own "
+                                  "states), not the field's labels"]
+    said = ('[lifecycle.labels]\nasked = "Asked for"\ndropped = "Given up"\n'
+            '[lifecycle.tones]\nasked = "waiting"\ndropped = "ended"\n')
+    twice = ["lifecycle.labels: 'asked' is a state of the errand-flow workflow, which names it; leave it out",
+             "lifecycle.tones: 'asked' is a state of the errand-flow workflow, which says how it reads; leave it out"]
+    flow = parse(ERRAND_FLOW)
+    assert lifecycle_fit(schema.parse(ERRAND.format(top=ERRAND_OWN) + said), flow) == twice
+    own = '[lifecycle.labels]\ndropped = "Given up"\n[lifecycle.tones]\ndropped = "ended"\n'
+    assert lifecycle_fit(schema.parse(ERRAND.format(top=ERRAND_OWN) + own), flow) == []  # a value it has no state for
+    rana, amara = _errands(hub, own)
+    rt = hub.record_type("Errand")
+    assert (rt.state_label("dropped"), rt.lifecycle["tones"]["dropped"]) == ("Given up", "ended")
+    # from the type's side: it may not name a state its workflow has
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", rana, ERRAND.format(top=ERRAND_OWN) + said)
+    assert e.value.problems == twice
+    # from the workflow's side: it may not gain a state the type in force names
+    drops = ('[[edge]]\nid = "drop"\nfrom = "checking"\nto = "dropped"\n[[state]]\nid = "dropped"\n'
+             'label = "Dropped"\ntone = "ended"\n')
+    with pytest.raises(Invalid) as e:
+        hub.propose_workflow(rana, ERRAND_FLOW + drops)
+    assert e.value.problems == [p.replace("'asked'", "'dropped'") for p in twice]
+
+
+def test_a_type_and_its_workflow_brought_in_together_are_checked_as_a_pair(hub, mods):
+    """Rule: a pack or module installs its types before its workflows, so neither one's own check sees the other.
+    Once both are in, each type is checked against its own workflow (``lifecycle_fit``), and what the two may not
+    both say refuses the install, naming the type."""
+    _errand_module(mods, '[lifecycle.labels]\nasked = "Asked for"\n')
+    with pytest.raises(Invalid, match="the record type Errand in errand has problems") as e:
+        install(hub, "errand")
+    assert e.value.problems == ["lifecycle.labels: 'asked' is a state of the errand-flow workflow, which names it; "
+                                "leave it out"]
+    assert hub.record_type("Errand") is None and "errand" not in hub.installed_modules()
 
 
 # ------------------------------------------------------------------------------------------- the calendar

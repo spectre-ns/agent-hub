@@ -145,7 +145,6 @@ by = "workflow"
 name = "status"
 type = "choice"
 choices = ["draft", "submitted", "posted", "rejected"]
-labels = { draft = "Draft", submitted = "Submitted", posted = "Posted", rejected = "Sent back" }
 
 [lifecycle]
 field = "status"

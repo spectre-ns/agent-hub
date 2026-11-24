@@ -184,7 +184,6 @@ name = "review"
 label = "Review"
 type = "choice"
 choices = ["received", "checking", "sorting", "reviewed", "told", "closed", "not-told"]
-labels = { received = "In review", checking = "Checking", sorting = "To sort", reviewed = "Reviewed", told = "Patient told", closed = "Closed", not-told = "Patient not told" }
 help = "where the physician's review of the result is"
 
 [[screen]]

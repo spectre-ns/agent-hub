@@ -91,7 +91,6 @@ name = "handling"
 label = "Handling"
 type = "choice"
 choices = ["received", "to-call", "not-reached", "drafting", "to-check", "with-nurse", "triaged", "answered", "closed"]
-labels = { received = "Waiting to be read", to-call = "To call now", not-reached = "Could not reach", drafting = "Reply being drafted", to-check = "Reply to check", with-nurse = "With a nurse", triaged = "Triaged", answered = "Answered", closed = "Closed" }
 help = "where the practice's handling of a patient's message is"
 
 # The handling: its states and the moves between them are the patient-question workflow's (written as states and
@@ -102,7 +101,7 @@ help = "where the practice's handling of a patient's message is"
 field = "handling"
 initial = "received"
 starts = ["closed"]
-labels = { received = "Waiting to be read", to-call = "To call now", not-reached = "Could not reach", drafting = "Reply being drafted", to-check = "Reply to check", with-nurse = "With a nurse", triaged = "Triaged", answered = "Answered", closed = "Closed" }
+labels = { received = "Waiting to be read" }
 abandoned = { to-call = "closed", not-reached = "closed", drafting = "closed", to-check = "closed", with-nurse = "closed", triaged = "closed", answered = "closed" }
 # the moves a run of pack 4.5 or before still makes: screened (triaged), then answered
 [[lifecycle.transition]]

@@ -199,8 +199,6 @@ states = ["client-signed"]
 [lifecycle]
 field = "status"
 initial = "gathering"
-labels = { organizer = "Writing the organizer", gathering = "Gathering slips", chasing = "Chasing slips", reminded = "Gathering slips (reminded)", slips-missing = "Slips missing", comparing = "Comparing with last year", preparing = "Preparing", in-review = "In review", client-approval = "Summary for the client", with-client = "With the client", t183-overdue = "T183 not signed yet", client-signed = "Client authorised (T183)", filing = "Filing", filed = "Filed", assessment-differs = "Assessed: it differs", assessed = "Assessed", withdrawn = "Withdrawn" }
-tones = { organizer = "active", gathering = "waiting", chasing = "active", reminded = "waiting", slips-missing = "attention", comparing = "active", preparing = "active", in-review = "attention", client-approval = "active", with-client = "waiting", t183-overdue = "attention", client-signed = "attention", filing = "active", filed = "done", assessment-differs = "attention", assessed = "done", withdrawn = "ended" }
 abandoned = { filing = "client-signed" }   # its work cancelled mid-transmission, it waits for a partner again
 
 [[lifecycle.transition]]

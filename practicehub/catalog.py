@@ -28,6 +28,25 @@ def _plain(v) -> str:
     text = unicodedata.normalize("NFKD", schema.words(v)).casefold()
     return " ".join("".join(c for c in text if not unicodedata.combining(c)).split())
 
+
+def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
+    """What a record type as written (not merged with its workflow's moves) and its own workflow, written as states
+    and edges, may not both say, in words; empty when they fit. The type lists the values its state field takes and
+    the moves people make by hand; the workflow says the rest, once:
+
+    - a state the workflow has is named and given its tone there, not in the type's ``lifecycle.labels`` or
+      ``tones`` (those are for a value the workflow has no state for)."""
+    lc, shape = rt.lifecycle, getattr(wf, "shape", None) or {}
+    if not lc or not shape.get("states"):
+        return []
+    problems = []
+    has = {s["id"] for s in shape["states"]}
+    for key, says in (("labels", "names it"), ("tones", "says how it reads")):
+        problems += [f"lifecycle.{key}: {st!r} is a state of the {wf.id} workflow, which {says}; leave it out"
+                     for st in lc.get(key) or {} if st in has]
+    return problems
+
+
 # kind -> (collection, id field, noun). Workflows and blocks are in the same table of kinds (Hub.KINDS).
 DEFINITIONS = {
     "type": ("type_versions", "type_id", "record type"),
@@ -110,29 +129,37 @@ class CatalogMixin:
             self._defs[key] = schema.permissive(tid, dc, (self.pack.record_labels or {}).get(tid))
         return self._defs[key]
 
+    def _own_workflow(self, rt):
+        """The workflow a type names (``workflow``), as its version in force reads, when that workflow is about this
+        type; else None (the type names none, none is in force, it cannot be read, or it is about another type)."""
+        if not rt.workflow:
+            return None
+        wrow = self.db.workflow_versions.find_one({"workflow_id": rt.workflow["id"], "status": "active"},
+                                                  fields=["_id", "version", "source"])
+        if not wrow:
+            return None
+        key = ("own workflow", wrow["_id"], hashlib.sha256(wrow["source"].encode()).hexdigest())
+        if key not in self._defs:
+            try:
+                from . import workflows as wfmod
+                self._defs[key] = wfmod.parse(wrow["source"])
+            except Exception:  # noqa: BLE001 - an unreadable workflow is named on its own page; the type stands
+                self._defs[key] = None
+        wf = self._defs[key]
+        return wf if wf is not None and wf.record == rt.id else None
+
     def _with_workflow_moves(self, rt, row: dict):
         """A type whose workflow is written as states and edges (``practicehub/states.py``) moves as that workflow
         says: its active version's edges are the type's moves by the workflow (each from the state it leaves to
         every state it can land in; the entry from any state), and its states' labels and tones are the type's.
         The type says which values its state field takes, the moves people make by hand and where a record goes
         when its work is cancelled (``abandoned``); the workflow, the rest."""
-        wrow = self.db.workflow_versions.find_one({"workflow_id": rt.workflow["id"], "status": "active"},
-                                                  fields=["_id", "version", "source"])
-        if not wrow:
+        wf = self._own_workflow(rt)
+        if wf is None:
             return rt
-        key = ("type+moves", row["_id"] if row else rt.id, wrow["_id"],
-               hashlib.sha256(wrow["source"].encode()).hexdigest())
+        key = ("type+moves", row["_id"] if row else rt.id, wf.id, hashlib.sha256(wf.source.encode()).hexdigest())
         if key in self._defs:
             return self._defs[key]
-        try:
-            from . import workflows as wfmod
-            wf = wfmod.parse(wrow["source"])
-        except Exception:  # noqa: BLE001 - an unreadable workflow is named on its own page; the type stands as written
-            self._defs[key] = rt
-            return rt
-        if wf.record != rt.id:
-            self._defs[key] = rt
-            return rt
         import copy
         merged = copy.copy(rt)
         lc = copy.deepcopy(rt.lifecycle)
@@ -417,6 +444,9 @@ class CatalogMixin:
                             (rt.is_a(x) if t == rt.id else self.is_a(t, x)) for x in bf["target"]):
                         problems.append(f"base.{bname}: {base.id}'s {bname} is a {' or '.join(bf['target'])}; "
                                         f"{t} does not extend it")
+        wf = self._own_workflow(rt)  # its own workflow, as in force: what the two may not both say
+        if wf is not None:
+            problems += lifecycle_fit(rt, wf)
         return problems
 
     # ------------------------------------------------------------------ views

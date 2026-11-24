@@ -113,7 +113,6 @@ by = "workflow"
 name = "status"
 type = "choice"
 choices = ["draft", "in-review", "active", "obsolete"]
-labels = { draft = "Draft", in-review = "In review", active = "In use", obsolete = "Obsolete" }
 
 [lifecycle]
 field = "status"

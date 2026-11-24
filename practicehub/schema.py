@@ -512,6 +512,9 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         elif fd["by"] == "workflow":
             problems.append(f"lifecycle.field: {lf} says by = \"workflow\", which would stop every move, even those "
                             f"the transitions give to anyone; say by on each transition instead")
+        if fd and fd.get("labels"):  # nothing that shows a state reads them: its words are said once
+            problems.append(f"field {lf}: a state's words are lifecycle.labels (its workflow names its own states), "
+                            f"not the field's labels")
         states = lc.get("states") or (fd or {}).get("choices") or []
         if not _strings(states):
             problems.append("lifecycle.states: a list of words")
@@ -526,7 +529,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         for st in labels:
             if st not in states:
                 problems.append(f"lifecycle.labels: {st!r} is not one of its states")
-        labels = {st: labels.get(st) or state_words(st) for st in states}
+        labels = {st: words for st, words in labels.items() if st in states and words}  # only what the type says
         initial = lc.get("initial")
         if initial is None:
             problems.append("lifecycle.initial: say which state a new record starts in")
@@ -611,7 +614,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         for st, to in abandoned.items():  # the move itself, for each pair no transition of the type's makes
             if st != to and st in states and to in states \
                     and not any(x["to"] == to and (st in x["from"] or "*" in x["from"]) for x in trans):
-                trans.append(move_row([st], to, by="workflow", label=labels[to], abandon=True))
+                trans.append(move_row([st], to, by="workflow", label=labels.get(to) or state_words(to), abandon=True))
         in_use = lc.get("in_use")  # the state people work from; while revised, the last such version stays shown
         if in_use is not None and in_use not in states:
             problems.append(f"lifecycle.in_use: {in_use!r} is not one of its states")

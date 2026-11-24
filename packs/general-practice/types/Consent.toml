@@ -41,7 +41,6 @@ required = true
 name = "status"
 type = "choice"
 choices = ["requested", "reviewed", "active", "refused", "withdrawn"]
-labels = { requested = "Requested", reviewed = "Reviewed", active = "In force", refused = "Refused", withdrawn = "Withdrawn" }
 required = true
 help = "requested: asked for, not yet in force; withdrawn: the patient lifted it; what it withheld is seen again as the roles allow"
 
@@ -116,7 +115,6 @@ fields = ["patient", "status", "received", "request", "withhold_classes", "withh
 field = "status"
 initial = "requested"
 starts = ["active"]   # the privacy officer records one the patient signed on paper straight in force
-labels = { requested = "Requested", reviewed = "Reviewed", active = "In force", refused = "Refused", withdrawn = "Withdrawn" }
 abandoned = { requested = "withdrawn", reviewed = "withdrawn" }
 [[lifecycle.transition]]
 from = ["requested"]

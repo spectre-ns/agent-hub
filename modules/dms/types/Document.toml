@@ -35,7 +35,6 @@ help = "its workflow adds one when it is revised after approval"
 name = "status"
 type = "choice"
 choices = ["draft", "in-review", "approved", "retiring", "obsolete"]
-labels = { draft = "Draft", in-review = "In review", approved = "Approved", retiring = "Proposed obsolete", obsolete = "Obsolete" }
 
 [[field]]
 name = "owner"

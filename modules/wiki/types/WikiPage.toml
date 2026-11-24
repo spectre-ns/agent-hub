@@ -50,7 +50,6 @@ help = "who keeps the page current"
 name = "status"
 type = "choice"
 choices = ["draft", "published", "needs-check", "archived"]
-labels = { draft = "Draft", published = "Published", needs-check = "Needs a check", archived = "Archived" }
 
 [[field]]
 name = "checked"

@@ -126,8 +126,6 @@ type = "text"
 [lifecycle]
 field = "status"
 initial = "proposed"
-labels = { planned = "Next season", drafting = "Writing the letter", proposed = "Sent to the client", overdue = "Not signed yet", signed = "Signed", active = "In progress", closed = "Done", declined = "Declined" }
-tones = { planned = "waiting", drafting = "active", proposed = "waiting", overdue = "attention", signed = "active", active = "active", closed = "done", declined = "ended" }
 
 [[lifecycle.transition]]
 from = ["proposed", "overdue"]

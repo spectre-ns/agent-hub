@@ -26,7 +26,7 @@ from . import workflows as wfmod
 from .authz import Authorizer, LocalAuthorizer
 from .db import Database, open_database, utcnow
 from .store import ASC, DESC
-from .catalog import CatalogMixin
+from .catalog import CatalogMixin, lifecycle_fit
 from .credentials import CredentialsMixin
 from .outbox import OutboxMixin
 from .moves import MovesMixin
@@ -1360,6 +1360,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             except wfmod.DefinitionError as exc:
                 raise problems_of("block", bid, exc) from None
             put("block", bid, src, b.title, {"runtime": b.runtime, "code_sha256": b.code_sha256})
+        walked = []  # the record types this part's workflows are about
         for wid, src in p.workflow_sources.items():
             try:
                 wf = wfmod.parse(src, self.pack)
@@ -1367,6 +1368,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 raise problems_of("workflow", wid, exc) from None
             put("workflow", wid, src, wf.title)
             self._sync_starters(wf)
+            walked += [wf.record] if wf.record else []
         for vid, src in p.view_sources.items():
             try:
                 v = self._def_parse("view", src, self)
@@ -1374,6 +1376,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 raise problems_of("view", vid, exc) from None
             put("view", vid, src, v.title)
         self._defs_reset()
+        # a type and its own workflow, now that both are in: neither one's own check above saw the pair
+        for tid in dict.fromkeys([*p.type_sources, *walked]):
+            rt = self._def_get("type", tid)
+            wf = self._own_workflow(rt) if rt is not None else None
+            problems = lifecycle_fit(rt, wf) if wf is not None else []
+            if problems:
+                raise Invalid(f"the record type {tid} in {p.id} has problems", problems)
 
     @property
     def practice(self) -> dict:
@@ -4387,11 +4396,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         return out
 
     def _state_problems(self, wf: wfmod.Workflow) -> list[str]:
-        """A step's ``state`` is a state of its record's lifecycle; a ``[new_record]`` state is one too."""
+        """A step's ``state`` is a state of its record's lifecycle; a ``[new_record]`` state is one too. And the
+        type whose own workflow this is, as in force and as written, fits it (``catalog.lifecycle_fit``)."""
         rt = self.record_type(wf.record) if wf.record else None
         if rt is None:
             return []
         states = rt.states()
+        written = self._def_get("type", wf.record)  # the type as written, without its workflow's moves
+        fit = lifecycle_fit(written, wf) if written and (written.workflow or {}).get("id") == wf.id else []
         if not states:
             # written as states and edges, the run keeps where it is (``run["at"]``, Engine._move_record)
             return [f"step {s.id}: state: a {wf.record} has no lifecycle to move" for s in wf.steps
@@ -4403,7 +4415,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         made = (wf.new_record or {}).get(field) if field else None
         if isinstance(made, str) and "{{" not in made and made not in states:
             problems.append(f"new_record: {field} {made!r} is not a state of a {wf.record} ({', '.join(states)})")
-        return problems
+        return problems + fit
 
     def _block_problems(self, wf: wfmod.Workflow, *, approving: bool) -> list[str]:
         problems = []

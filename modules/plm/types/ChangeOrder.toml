@@ -41,7 +41,6 @@ by = "workflow"
 name = "status"
 type = "choice"
 choices = ["draft", "review", "approved", "releasing", "implemented", "rejected", "cancelled"]
-labels = { draft = "Draft", review = "Review", approved = "Approved", releasing = "To release", implemented = "Implemented", rejected = "Rejected", cancelled = "Cancelled" }
 
 [[field]]
 name = "products"

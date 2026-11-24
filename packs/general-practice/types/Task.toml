@@ -82,7 +82,6 @@ label = "Stage"
 path = "businessStatus.text"
 type = "choice"
 choices = ["to-call", "not-reached", "done"]
-labels = { to-call = "To call", not-reached = "Could not reach", done = "Done" }
 
 # Its stages and the moves between them are the patient-follow-up workflow's (written as states and edges).
 [lifecycle]

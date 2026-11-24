@@ -47,7 +47,6 @@ name = "stage"
 label = "Stage"
 type = "choice"
 choices = ["filed", "drafting", "finalizing", "signing", "sent", "booked", "declined", "report-received", "cancelled"]
-labels = { filed = "Filed", drafting = "Being written", finalizing = "Letter to finalize", signing = "To sign", sent = "Sent", booked = "Booked with the specialist", declined = "Declined by the specialist", report-received = "Report received", cancelled = "Cancelled" }
 help = "where the referral's work is"
 
 [[field]]
@@ -178,6 +177,5 @@ fields = ["subject", "status", "referral_to", "specialist", "priority", "intent"
 [lifecycle]
 field = "stage"
 initial = "filed"
-labels = { filed = "Filed", drafting = "Being written", finalizing = "Letter to finalize", signing = "To sign", sent = "Sent", booked = "Booked with the specialist", declined = "Declined by the specialist", report-received = "Report received", cancelled = "Cancelled" }
 abandoned = { drafting = "cancelled", finalizing = "cancelled", signing = "cancelled" }
-tones = { filed = "waiting", drafting = "active", finalizing = "active", signing = "attention", sent = "waiting", booked = "waiting", declined = "attention", report-received = "done", cancelled = "ended" }
+tones = { filed = "waiting" }

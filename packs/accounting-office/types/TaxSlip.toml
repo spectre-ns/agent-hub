@@ -97,8 +97,7 @@ type = "text"
 [lifecycle]
 field = "status"
 initial = "received"
-labels = { received = "Received", extracted = "Read", rejected = "Rejected" }
-tones = { received = "waiting", extracted = "done", rejected = "ended" }
+tones = { rejected = "ended" }
 abandoned = { received = "rejected" }
 
 [[lifecycle.transition]]

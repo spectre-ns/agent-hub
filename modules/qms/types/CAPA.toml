@@ -39,7 +39,6 @@ type = "member"
 name = "status"
 type = "choice"
 choices = ["open", "investigating", "further-action", "actions", "verification", "closed", "cancelled"]
-labels = { open = "Open", investigating = "Investigating", further-action = "Further action", actions = "Actions", verification = "Verification", closed = "Closed", cancelled = "Cancelled" }
 
 [[field]]
 name = "documents"

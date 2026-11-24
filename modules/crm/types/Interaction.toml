@@ -87,7 +87,6 @@ advanced = true
 field = "status"
 initial = "logged"
 abandoned = { "follow-up" = "logged", "to-send" = "logged" }   # a follow-up cancelled: it waits for its next date
-labels = { "logged" = "Logged", "follow-up" = "Being followed up", "to-send" = "To send" }
 
 [[lifecycle.transition]]
 from = ["logged"]
