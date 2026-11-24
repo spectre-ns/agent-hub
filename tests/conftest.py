@@ -116,7 +116,7 @@ def _databases():
 
 
 @pytest.fixture(autouse=True)
-def _database(monkeypatch):
+def _database(monkeypatch, request):
     _TEST.update(names={}, used=[])
     monkeypatch.setenv("PRACTICEHUB_DATABASE", TEST_URI)
     monkeypatch.setenv("PRACTICEHUB_DATABASE_NAME", _scratch())  # the name itself: a subprocess opens it too
@@ -132,6 +132,8 @@ def _database(monkeypatch):
         yield
         for name in dict.fromkeys(_TEST["used"]):  # every workflow any test walked: one item from start to finish
             one_item_per_run(_db(name))
+            if not request.node.get_closest_marker("own_shapes"):  # and nothing stored that db.py does not name
+                stored_as_written_down(name)
     finally:
         used, _ = _TEST.pop("used"), _TEST.clear()
         for name in dict.fromkeys(used):
@@ -148,6 +150,26 @@ def one_item_per_run(db) -> None:
         assert top == [run["item"]], f"run {run['_id']}: top items {top}, not its one item {run['item']}"
         stray = db.items.count_documents({"run_id": run["_id"], "parent_id": {"$nin": [None, run["item"]]}})
         assert not stray, f"run {run['_id']}: {stray} child item(s) of another item"
+
+
+_KEYS = [{"$project": {"k": {"$objectToArray": "$$ROOT"}}}, {"$unwind": "$k"}, {"$group": {"_id": "$k.k"}}]
+_READ: set = set()  # (collection, dbHash of its documents): documents already read, by any test of this process
+
+
+def stored_as_written_down(name: str) -> None:
+    """Every collection in the database ``name``, and every field of its documents, is one ``practicehub/db.py``
+    names (``SHAPES``): the data model is what is written down there, and a field added in passing fails here.
+    Only what a test changed is read (one dbHash says what); the same documents are not read twice.
+    A test that stores documents of its own making, not the hub's, says so: ``@pytest.mark.own_shapes``."""
+    from practicehub import db as model
+    database = _db(name)
+    for coll, md5 in _hashes(name).items():
+        if coll.startswith(("system.", "files.")) or md5 == _EMPTY_MD5 or (coll, md5) in _READ:
+            continue
+        assert coll in model.SHAPES, f"the collection {coll} is not written down in practicehub/db.py (SHAPES)"
+        extra = sorted({r["_id"] for r in database[coll].aggregate(_KEYS)} - model.fields(coll))
+        assert not extra, f"{coll}: {', '.join(extra)} is not written down in practicehub/db.py (SHAPES)"
+        _READ.add((coll, md5))
 
 
 @pytest.fixture

@@ -4390,6 +4390,7 @@ def _converted_as_version_2_says(state, made):
     return hub
 
 
+@pytest.mark.own_shapes  # its version 1 reminder is a message as no hub writes one now
 def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, monkeypatch):
     """A practice on version 1 (Appointment and Visit apart) upgrades: each appointment becomes a visit (the visit
     filed for it, or a new one with its id), whatever pointed at it points at the visit (open runs, items and queued
@@ -4402,6 +4403,7 @@ def test_old_appointments_become_visits_when_version_2_is_approved(tmp_path, mon
     assert done["data"]["appointments_now_visits"] == 2 and done["data"]["appointments_merged_into_their_visit"] == 1
 
 
+@pytest.mark.own_shapes  # its version 1 reminder is a message as no hub writes one now
 def test_the_appointment_upgrade_runs_in_batches_and_a_stopped_one_goes_on_where_it_stopped(tmp_path, monkeypatch):
     """Each batch is a transaction of its own, written with the upgrade's place. An upgrade that stops part way (here
     the third conversion fails, as a crash would) leaves what it did whole, and what it did not do as it was (no

@@ -22,3 +22,4 @@ include = ["practicehub*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["own_shapes: the test stores documents of its own making, which practicehub/db.py does not name"]

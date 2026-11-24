@@ -4,6 +4,8 @@ import pytest
 
 from practicehub.store import DuplicateKey
 
+pytestmark = pytest.mark.own_shapes  # the store is tried with documents made for the trial, not the hub's
+
 
 def test_an_inner_block_that_fails_is_undone_and_the_work_around_it_stands(store):
     store.items.insert({"_id": "keep", "n": 1})
