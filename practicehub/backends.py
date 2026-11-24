@@ -11,6 +11,8 @@ checked inputs and returns outputs, which the hub then checks against the block'
   ``KESTRA_TOKEN`` or ``KESTRA_USER``/``KESTRA_PASSWORD``). Written against Kestra's REST API; not yet run against a
   live server.
 
+To try the webhook path on one machine, ``scripts/dev-engine.py`` is an engine that answers with a local model.
+
 To add an engine, write a class with ``name``, ``configured()``, ``describe()`` and ``run(block, inputs, meta)``,
 add it to ``backend_for`` and ``ENGINES``. An engine sees only the block's declared inputs, never the whole run: the
 inputs are what the approver saw. Data residency applies: point engines only at servers the practice controls.

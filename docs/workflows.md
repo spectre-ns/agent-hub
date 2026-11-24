@@ -674,6 +674,12 @@ tone = "warm"
   it; everything else goes on. A command or a test has no worker, and runs a block where it becomes ready
   (`--job-workers 0` does the same in a served hub). The portal always runs a block in place, since it answers the
   patient from what the screen found (`Engine.jobs_inline`).
+- **To try an engine block on one machine**, `scripts/dev-engine.py` is a real engine for the webhook path: a small
+  HTTP service that does a block's work with a local model through Ollama (`--model`, default `granite4.2:3b`).
+  Start it, then serve the hub with `PRACTICEHUB_ENGINE_WEBHOOK_URL=http://127.0.0.1:8215/hook`. A block's
+  `target` names a flow there (what the model is asked, and the shape of its answer); the pack's
+  `post-claim-to-erp` has one built in, and `--flows` adds more. It posts nothing anywhere: it is for seeing an
+  engine block queued, under way and done with a call that really takes time, not a back office.
 - A job cut short (its worker stopped, or it ran past twice its engine's time limit) fails saying so when it was
   on an engine: whether it finished there is not known, so it is never run again by itself; a policy owner checks
   the engine and retries the step. Python in the sandbox does nothing outside itself, so it goes back in the queue
