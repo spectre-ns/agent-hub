@@ -65,7 +65,7 @@ class Track:
         return bool(row["mac"]) and hmac.compare_digest(row["mac"], self.seal(row["hash"]))
 
     def authentic(self, row) -> bool:
-        """True if this full event row is the one this hub wrote: its hash is recomputed from every column (so its
+        """True if this full event row is the one this hub wrote: its hash is recomputed from every field (so its
         data, actor or action were not rewritten beside a kept hash) and that hash carries this hub's seal."""
         if not self.sealed(row):
             return False

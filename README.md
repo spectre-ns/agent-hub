@@ -20,7 +20,9 @@ It uses the ideas of hub-erp:
 
 ## Quick start
 
-Python 3.12+ and nothing else.
+Python 3.12+ with pymongo, and a MongoDB replica set to keep its data in. One node will do: `PRACTICEHUB_DATABASE` is its
+URI (by default `mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true`), and `deploy/docker-compose.yml`
+runs one beside the hub.
 
 ```sh
 python3 -m practicehub.cli init --demo          # Harbourview Family Medicine, in ./state, with demo patients
@@ -491,7 +493,7 @@ owner switch servers on and off, which is tracked. For clients that start a comm
 practicehub/          the core: hub, engine, workflows, blocks, sandbox, backends, track, authz, records, models, web, cli
   agents/runner.py    an agent's loop: inbox → context → model → answer (or escalate)
   integrations/       Keycloak; Collabora (discovery, proof keys, blank documents) and its WOPI host
-packs/general-practice/  roles, data classes, grants, members, 8 workflows, 8 skills, 3 blocks, stand-in answers
+packs/general-practice/  roles, data classes, grants, members, 9 workflows, 8 skills, 5 blocks, stand-in answers
 modules/              dms (document control), qms (quality), plm, wiki, wiki-sop, inventory, crm
 tests/                rules, web (real HTTP), another practice (accounting)
 deploy/               docker compose, LiteLLM config, env example

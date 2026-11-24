@@ -5,8 +5,8 @@
 # An overlay module: it adds to whatever practice it is installed in, and it knows nothing about any one practice.
 
 # 3: A page flagged as out of date is archived only through its check, a wiki owner's signed decision.
-# 4: The page check and the procedure review and release are written as states and edges; an obsolete procedure is no
-#  longer brought back into use by hand. Versions approved before keep running as they were.
+# 4: Procedures (their type, review and release) leave the wiki: a controlled document is document control's, and the
+#  wiki-sop module files a page as one. The page check is written as states and edges.
 
 [module]
 requires_core = "1.0"

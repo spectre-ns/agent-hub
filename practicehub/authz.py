@@ -1,8 +1,8 @@
 """Membership and permissions as relationship tuples, the OpenFGA way.
 
 The authorization model (``AUTHZ_MODEL_DSL``) is the one the hub writes to OpenFGA when OpenFGA is configured. The
-``LocalAuthorizer`` evaluates the same model over tuples in SQLite, so a hub without OpenFGA behaves identically and
-the two can be swapped without changing a single tuple.
+``LocalAuthorizer`` evaluates the same model over the hub's own ``tuples`` collection, so a hub without OpenFGA
+behaves identically and the two can be swapped without changing a single tuple.
 
 People and agents are both ``member:<id>`` principals. Nothing in the model distinguishes them: an agent gets exactly
 the authority its roles give it, and the rules that do treat agents differently (who may sign, risk tiers) are guards
