@@ -30,6 +30,7 @@ from .catalog import CatalogMixin
 from .credentials import CredentialsMixin
 from .outbox import OutboxMixin
 from .moves import MovesMixin
+from .activity import ActivityMixin
 from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
 
@@ -151,7 +152,7 @@ def _how(data: dict) -> str:
     return f"{how} ({data['format']})" if how == "export" and data.get("format") else how
 
 
-class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
+class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin):
     def __init__(self, state_dir: Path | str | None, *, pack: str | packmod.Pack | None = None,
                  authorizer: Authorizer | None = None, records: RecordStore | None = None, models=None):
         self.state_dir = Path(state_dir) if state_dir else None
@@ -991,6 +992,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             row = self._active_row(kind, did)
             if not row:
                 raise Invalid(f"the module {m.id} adds to the {kind} {did}, which this practice does not have")
+            if kind == "workflow":
+                import tomllib
+                from .states import extension_problems
+                redefined = extension_problems(tomllib.loads(self._extended_source(row["source"], m.id, None)),
+                                               tomllib.loads(fragment))
+                if redefined:
+                    raise Invalid(f"the module {m.id} would change the workflow {did}, not only add to it", redefined)
             src = self._extended_source(row["source"], m.id, fragment)
             self._check_source(kind, did, src)
             self._put_version(actor, kind, did, src, f"Extended by the {m.id} module", m.id, root, f"{kind}.extended")
@@ -2797,9 +2805,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
     def add_file(self, member: dict, rtype: str, data: bytes, name: str = "", content_type: str = "") -> dict:
         """Keep a file for a record of ``rtype`` and return the attachment that names it, for the record's
         attachment field: ``{blob: <sha256>, name, contentType, size}``. Whoever may write that type's records
-        may add one. Files are content-addressed: the same bytes added twice are one file."""
+        may add one, and so may a workflow step (an automation), as it may make the record. Files are
+        content-addressed: the same bytes added twice are one file."""
         rt = self._type(rtype)
-        self.require(member, "writer", f"data_class:{rt.data_class}", f"attach files to {rtype} records")
+        if member.get("kind") != "automation":
+            self.require(member, "writer", f"data_class:{rt.data_class}", f"attach files to {rtype} records")
         if not data:
             raise Invalid("the file is empty")
         if len(data) > self.MAX_FILE:
@@ -3273,6 +3283,39 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
 
+    def _check_unique(self, rt: schema.RecordType, rec: dict, before: dict | None = None) -> None:
+        """No two records of a type share one of its ``unique`` keys (a part's code; a serial within its part). Called
+        inside the write's transaction, so the check and the write are one step (the store has one writer at a time).
+        A key is checked when every field of it is filled in and, on a change, when one of them changed: two records
+        that already shared one before the type said unique are not stopped from being edited otherwise. Text is
+        compared as a search compares it (no case, no accents, no surrounding spaces). Records carried over by a pack
+        upgrade are taken as they were."""
+        if not rt.unique or getattr(self, "_upgrading", False):
+            return
+        from .records import fold
+        same = lambda a, b: (fold(a).strip() == fold(b).strip()) if isinstance(a, str) and isinstance(b, str) \
+            else a == b  # noqa: E731
+        problems = []
+        for key in rt.unique:
+            paths = [rt.field(n)["path"] for n in key]
+            values = [schema.first(rec, p) for p in paths]
+            if any(v in (None, "", [], {}) for v in values):
+                continue
+            if before is not None and all(same(schema.first(before, p), v) for p, v in zip(paths, values)):
+                continue
+            text = " ".join(str(v) for v in values if isinstance(v, (str, int, float)) and not isinstance(v, bool))
+            for other in self.records.search(rt.id, text=text or None, limit=None):
+                if other.get("id") == rec.get("id"):
+                    continue
+                if all(same(schema.first(other, p), v) for p, v in zip(paths, values)):
+                    labels = " and ".join(rt.field(n)["label"] for n in key)
+                    shown = ", ".join(str(v) for v in values)
+                    problems.append(f"{labels}: another {rt.label.lower()} already has {shown} "
+                                    f"({self.title(other) or rt.id + '/' + str(other.get('id'))})")
+                    break
+        if problems:
+            raise Invalid(f"the {rt.label.lower()} is not unique", problems)
+
     # ------------------------------------------------------------------ the calendar: no member booked twice
     def may_overbook(self, member: dict, rt: schema.RecordType) -> bool:
         """Whether this member may book over another booking (an urgent squeeze-in): a person holding a role the
@@ -3515,7 +3558,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             if run and run["workflow_id"] == owner and run.get("record") == ref and run["status"] == "running":
                 return  # its own run moved it; a run cancelled part way (its abandoned move) is walked on below
         how = self.state_move_waited_on(rt, ref, rec, t["to"])
-        closing = not any(t["to"] in x["from"] for x in rt.lifecycle["transition"] if "*" not in x["from"])
+        closing = not any(t["to"] in x["from"] for x in rt.lifecycle["transition"]
+                          if "*" not in x["from"] and not x.get("entry"))  # a workflow starting again is no way on
         runs = [r["id"] for r in self.db.runs.find({"workflow_id": owner, "record": ref, "status": "running"},
                                                    fields=["id"])]
         walked = bool(runs)
@@ -3700,14 +3744,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
 
     def create_record(self, member: dict, rtype: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, overbook: str | None = None, start_workflow: bool = True,
-                      inputs: dict | None = None) -> dict:
+                      inputs: dict | None = None, origin: dict | None = None) -> dict:
         """``overbook``: for a booking, why it is booked over another one (a member the type lets do so); it is kept
         on the booking and on the track.
 
         A type that names its ``workflow`` has that workflow start about the new record, in the same step (whoever
         creates it, however: a form, the calendar, the API, another workflow), with ``inputs`` as its start form;
         its record's lifecycle state is then where that work is. ``start_workflow=False``: the run making it is that
-        workflow's own."""
+        workflow's own. Made by a run's step (``run_id``), the workflow started on it is that run's child, and
+        ``origin`` (``{step, edge}``) says which step, on which edge, made it."""
         rt = self._type(rtype)
         if member.get("kind") != "automation":
             self.require(member, "writer", f"data_class:{rt.data_class}", f"write {rtype} records")
@@ -3733,6 +3778,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             data = self._overbooked(rt, data, over)
         self._check_record(rt, {"resourceType": rtype, **data})
         with self.db:  # the clash check and the write are one step: two people booking one time are never both told yes
+            self._check_unique(rt, {"resourceType": rtype, **data})
             clashes = self._check_clashes(rt, {"resourceType": rtype, **data}, member, over)
             rec = self.records.create(rtype, data)
             self._write_version(rt, rec, member, run_id)
@@ -3743,13 +3789,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
                 ev = self._note_overbook(member, rt, f"{rtype}/{rec['id']}", clashes, over, cause=ev, run_id=run_id)
             self.engine.on_record("created", rt, rec, None, member, ev)
             if start_workflow and not getattr(self, "_upgrading", False):
-                self._start_record_workflow(member, rt, rec, ev, inputs)
+                self._start_record_workflow(member, rt, rec, ev, inputs, parent=run_id, origin=origin)
         if rt.is_a("Restriction"):
             self.restrictions.reset()  # in force at once, in this process
             self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)  # what they wrote, as they may read it
 
-    def _start_record_workflow(self, member: dict, rt, rec: dict, cause: int, inputs: dict | None) -> None:
+    def _start_record_workflow(self, member: dict, rt, rec: dict, cause: int, inputs: dict | None, *,
+                               parent: str | None = None, origin: dict | None = None) -> None:
         """The workflow a new record's type names starts about it. Creating the record was the permission (no starter
         role is asked again); a workflow that is not installed yet (a pack still installing) is noted, not fatal."""
         wid = schema.starts_workflow(rt, rec)
@@ -3766,7 +3813,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         starter = member if member.get("kind") in ("person", "agent", "service") else \
             {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
         self.engine.start(starter, wid, record=f"{rt.id}/{rec['id']}", inputs=inputs or {}, cause=cause,
-                          via_automation=True, on_create=True)
+                          via_automation=True, on_create=True, parent=parent, origin=origin)
 
     def update_record(self, member: dict, ref: str, data: dict, *, cause: int | None = None,
                       run_id: str | None = None, _signature: int | None = None,
@@ -3815,7 +3862,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
                                       + (f"{' or '.join(moves)} first" if moves else "its open work moves it on first"))
                 if old != new:
                     t = rt.transition(old, new)
-                    if t is None:
+                    # a workflow's entry (where a run starting on the record again puts it) is no move of a person's
+                    if t is None or t.get("entry") and not self._by_workflow(member, run_id) and _signature is None:
                         raise Invalid(f"a {rt.label.lower()} does not move from {old!r} to {new!r}")
                     if t["by"] == "workflow" and not self._by_workflow(member, run_id) and _signature is None:
                         raise Denied(f"only a workflow moves a {rt.label.lower()} to {new!r}")
@@ -3844,6 +3892,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
                     after = self._overbooked(rt, after, over)
                     now_held = self._held_time(rt, after)
             self._check_record(rt, after, before)
+            self._check_unique(rt, after, before)
             if rt.is_a("Booking") and held != now_held:  # only a change of time, members or state can make a clash
                 clashes = self._check_clashes(rt, after, member, over)
             if authors:
@@ -4059,30 +4108,19 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
 
     # ------------------------------------------------------------------ workflows and change control
     def workflow(self, wid: str, version: int | None = None) -> tuple[wfmod.Workflow, dict]:
-        from .engine import UNHANDLED_SOURCE, UNHANDLED_WORKFLOW
-        if wid == UNHANDLED_WORKFLOW and version == 0:  # the home of a notice about an event no workflow took
-            return wfmod.parse(UNHANDLED_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
-                                                          "source": UNHANDLED_SOURCE, "author": "hub", "note": "",
-                                                          "module": "", "approved_by": None, "approved_at": None}
-        from .restrictions import OVERRIDE_SOURCE, OVERRIDE_WORKFLOW
-        if wid == OVERRIDE_WORKFLOW and version == 0:  # the home of the privacy officer's notice of an emergency access
-            return wfmod.parse(OVERRIDE_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
-                                                         "source": OVERRIDE_SOURCE, "author": "hub", "note": "",
-                                                         "module": "", "approved_by": None, "approved_at": None}
-        from .credentials import ACCOUNT_SOURCE, ACCOUNT_WORKFLOW
-        if wid == ACCOUNT_WORKFLOW and version == 0:  # the home of a notice to a member about their own account
-            return wfmod.parse(ACCOUNT_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
-                                                        "source": ACCOUNT_SOURCE, "author": "hub", "note": "",
-                                                        "module": "", "approved_by": None, "approved_at": None}
-        if wid == APPROVAL_WORKFLOW and version == 0:  # the home of a notice that a change waits for approval
-            return wfmod.parse(APPROVAL_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
-                                                         "source": APPROVAL_SOURCE, "author": "hub", "note": "",
-                                                         "module": "", "approved_by": None, "approved_at": None}
-        from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
-        if wid == MENTION_WORKFLOW and version == 0:  # the home of a notice that someone mentioned a member
-            return wfmod.parse(MENTION_SOURCE, None), {"workflow_id": wid, "version": 0, "status": "active",
-                                                        "source": MENTION_SOURCE, "author": "hub", "note": "",
-                                                        "module": "", "approved_by": None, "approved_at": None}
+        if version == 0:
+            # the homes of the hub's own notices (an event no workflow took, an emergency access, a member's account,
+            # a change waiting for approval, a mention): written by the hub, kept as steps, never proposed
+            from .credentials import ACCOUNT_SOURCE, ACCOUNT_WORKFLOW
+            from .engine import UNHANDLED_SOURCE, UNHANDLED_WORKFLOW
+            from .mentions import MENTION_SOURCE, MENTION_WORKFLOW
+            from .restrictions import OVERRIDE_SOURCE, OVERRIDE_WORKFLOW
+            homes = {UNHANDLED_WORKFLOW: UNHANDLED_SOURCE, OVERRIDE_WORKFLOW: OVERRIDE_SOURCE,
+                     ACCOUNT_WORKFLOW: ACCOUNT_SOURCE, APPROVAL_WORKFLOW: APPROVAL_SOURCE, MENTION_WORKFLOW: MENTION_SOURCE}
+            if wid in homes:
+                return wfmod.parse(homes[wid], None, stored=True), {
+                    "workflow_id": wid, "version": 0, "status": "active", "source": homes[wid], "author": "hub",
+                    "note": "", "module": "", "approved_by": None, "approved_at": None}
         if version is None:
             row = self.db.workflow_versions.find_one({"workflow_id": wid, "status": "active"})
         else:
@@ -4365,9 +4403,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
             return []
         states = rt.states()
         if not states:
-            return [f"step {s.id}: state: a {wf.record} has no lifecycle to move" for s in wf.steps if s.state]
+            # written as states and edges, the run keeps where it is (``run["at"]``, Engine._move_record)
+            return [f"step {s.id}: state: a {wf.record} has no lifecycle to move" for s in wf.steps
+                    if s.state and not s.on_edge]
+        # written as states and edges, a stop the state field has no value for is the run's own (``run["at"]``)
         problems = [f"step {s.id}: state {s.state!r} is not a state of a {wf.record} ({', '.join(states)})"
-                    for s in wf.steps if s.state and s.state not in states]
+                    for s in wf.steps if s.state and s.state not in states and not s.on_edge]
         field = (rt.lifecycle or {}).get("field")
         made = (wf.new_record or {}).get(field) if field else None
         if isinstance(made, str) and "{{" not in made and made not in states:
@@ -4428,15 +4469,21 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin):
         if actor.get("status") != "active":
             raise Denied("an inactive member cannot propose changes")
         try:
-            wf = self.check_workflow(source)
+            wf = self.check_workflow(source, stored=self._approved_before(source))
         except wfmod.DefinitionError as exc:
             raise Invalid("the workflow has problems", exc.problems) from None
         return self._propose("workflow", actor, wf.id, source, note)
 
+    def _approved_before(self, source: str) -> bool:
+        """Whether this very text was approved before (going back to it: a roll back): it is checked by the rules it
+        was approved under, as the version kept is, so a hub never loses the way back to what it ran."""
+        table, _ = self.KINDS["workflow"]
+        return bool(self.db[table].find_one({"source": source, "approved_at": {"$nin": [None]}}))
+
     def approve_workflow(self, actor: dict, wid: str, version: int, meaning: str = "") -> dict:
         row = self._approvable("workflow", actor, wid, version)
         try:
-            wf = self.check_workflow(row["source"], approving=True)
+            wf = self.check_workflow(row["source"], approving=True, stored=self._approved_before(row["source"]))
         except wfmod.DefinitionError as exc:
             raise Invalid("the workflow no longer validates", exc.problems) from None
         meaning = meaning or f"I approve version {version} of the {wf.title} workflow"

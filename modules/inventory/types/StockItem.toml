@@ -1,37 +1,59 @@
-# Something the practice keeps in stock. On hand is set only by posted stock moves (by = "workflow"), never typed in.
+# A lot: one quantity of one part in one place (InvenTree's stock item). A serial-tracked part has one per serial
+# number. Nobody writes one by hand, not even a manager: only a posted stock move makes or changes it, and the move
+# keeps what it changed. So every number here has its history in the moves.
 id = "StockItem"
 label = "Stock item"
 plural = "Stock items"
-data_class = "inventory"
-title = "{sku} {name}"
+data_class = "stock-ledger"
+title = "{part_code}[ lot {lot}][ serial {serial}]"
 flag = "status"
 order = 40
-# Its status (stocked, low, on order) is the reorder cycle, walked by the inventory-reorder workflow: one pass watches
-# on hand fall to the reorder point, asks a purchaser to order, and waits for the delivery. A posted delivery moves it
-# back to stocked only through a move that pass waits on.
-workflow = { id = "inventory-reorder", when = "record.status in ['stocked', 'low', 'on-order']" }
-summary = "A supply kept in stock, how many are on hand, and when to order more."
+unique = [["part", "serial"]]
+summary = "One lot or serial of a part: how many, where, its expiry and whether it may be used."
 
 [[field]]
-name = "sku"
-label = "Item code"
-required = true
-max_length = 40
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "lot-of"
+by = "workflow"
 
 [[field]]
-name = "name"
-required = true
-max_length = 200
+name = "part_code"
+label = "Part code"
+max_length = 60
+by = "workflow"
+help = "the part's code when the lot was made, so the lot is named without looking the part up"
 
 [[field]]
-name = "category"
+name = "lot"
+label = "Lot number"
+max_length = 60
+by = "workflow"
+
+[[field]]
+name = "serial"
+label = "Serial number"
+max_length = 60
+by = "workflow"
+
+[[field]]
+name = "supplier_lot"
+label = "Supplier's lot"
+max_length = 60
+by = "workflow"
+
+[[field]]
+name = "quantity"
+type = "number"
+by = "workflow"
+
+[[field]]
+name = "status"
 type = "choice"
-choices = ["clinical-supply", "vaccine", "medication", "office", "cleaning", "equipment"]
-
-[[field]]
-name = "unit"
-help = "what one counts as: box of 100, vial, each"
-max_length = 40
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned"]
+by = "workflow"
+help = "available: may be used; quarantined: held, used only once released; inspection: received, not yet released"
 
 [[field]]
 name = "location"
@@ -39,74 +61,35 @@ label = "Kept in"
 type = "reference"
 target = ["Location"]
 rel = "kept-in"
+by = "workflow"
 
 [[field]]
-name = "on_hand"
-label = "On hand"
+name = "expiry"
+type = "date"
+by = "workflow"
+
+[[field]]
+name = "received"
+type = "date"
+by = "workflow"
+
+[[field]]
+name = "part_revision"
+label = "Part revision"
 type = "number"
 by = "workflow"
-help = "set by posted stock moves: receive, issue, write-off, found or count"
 
 [[field]]
-name = "reorder_point"
-label = "Reorder at"
+name = "parent"
+label = "Split from"
+type = "reference"
+target = ["StockItem"]
+rel = "split-from"
+by = "workflow"
+
+[[field]]
+name = "count_baseline"
+label = "Count baseline"
 type = "number"
-help = "when on hand falls to this, a purchaser is asked to order more"
-
-[[field]]
-name = "reorder_quantity"
-label = "Order quantity"
-type = "number"
-
-[[field]]
-name = "supplier"
-max_length = 200
-
-[[field]]
-name = "status"
-type = "choice"
-choices = ["stocked", "low", "on-order", "discontinued"]
-
-[[field]]
-name = "notes"
-type = "text"
-
-[[field]]
-name = "discontinue_reason"
-label = "Why it is discontinued"
-type = "text"
-
-[lifecycle]
-field = "status"
-initial = "stocked"
-abandoned = { "low" = "stocked" }   # a reorder that is cancelled leaves the item as it was
-
-[[lifecycle.transition]]
-from = ["stocked"]
-to = "low"
-by = "workflow"            # it reached its reorder point
-label = "Low"
-
-[[lifecycle.transition]]
-from = ["low"]
-to = "on-order"
-by = "workflow"            # a purchaser ordered it
-label = "Ordered"
-
-[[lifecycle.transition]]
-from = ["low", "on-order"]
-to = "stocked"
-label = "Clear reorder"    # a posted delivery does this on its own; a person may, when nothing is coming
-comment = true
-
-[[lifecycle.transition]]
-from = ["stocked", "low", "on-order"]
-to = "discontinued"
-label = "Discontinue"
-fields = ["discontinue_reason"]
-require = ["discontinue_reason"]
-
-[[lifecycle.transition]]
-from = ["discontinued"]
-to = "stocked"
-label = "Stock it again"
+by = "workflow"
+help = "what counts are measured against: set when it was received or last signed for, so small counts cannot add up to a write-off nobody signed"

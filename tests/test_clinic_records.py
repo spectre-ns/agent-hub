@@ -6,7 +6,7 @@ privacy directive."""
 import pytest
 
 from practicehub.hub import Denied, Invalid
-from tests.conftest import M, item_for, quiet, run_all_local, run_of
+from tests.conftest import M, item_for, quiet, run_all_local, run_of, stored_workflow
 
 
 def _pat(hub, family="MacLeod"):
@@ -86,7 +86,7 @@ def test_a_renewal_not_on_the_chart_is_written_signed_as_written_sent_and_the_pa
     run_all_local(hub, log=quiet)
     hub.engine.decide(amara, item_for(hub, run, "decide"), "renew", "")
     run_all_local(hub, log=quiet)
-    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"decision": "written", "notes": "new start"})
+    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"outcome": "write-it", "notes": "new start"})
     hub.engine.complete(amara, item_for(hub, run, "write-rx"), {
         "medication": "Levothyroxine 50 mcg tablet", "directions": "1 tablet by mouth every morning",
         "quantity": 90, "unit": "tablet", "repeats": 3, "days_supply": 90})
@@ -110,7 +110,7 @@ def test_a_renewal_not_on_the_chart_not_written_closes_and_tells_the_patient(hub
     run_all_local(hub, log=quiet)
     hub.engine.decide(amara, item_for(hub, run, "decide"), "renew", "")
     run_all_local(hub, log=quiet)
-    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"decision": "not-written", "notes": "see me"})
+    hub.engine.complete(amara, item_for(hub, run, "not-on-chart"), {"outcome": "not-writing", "notes": "see me"})
     run_all_local(hub, log=quiet)
     assert _read(hub, run["record"])["status"] == "cancelled"
     assert hub.engine.run(run["id"])["status"] == "completed"
@@ -122,12 +122,13 @@ def test_a_renewal_not_on_the_chart_not_written_closes_and_tells_the_patient(hub
 def test_a_renewal_not_given_closes_its_request(hub, worked, outcome):
     pat = _pat(hub)
     run = run_of(hub, "prescription-renewal")
-    visits = len([v for v in hub.records.search("Encounter", limit=None) if v["status"] == "requested"])
+    asked_for = ("requested", "reading", "callback")  # asked for, not booked yet (read by a nurse, or called back)
+    visits = len([v for v in hub.records.search("Encounter", limit=None) if v["status"] in asked_for])
     hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "decide"), outcome, "see me first")
     run_all_local(hub, log=quiet)
     assert _read(hub, run["record"])["status"] == "cancelled"
     assert hub.engine.run(run["id"])["status"] == "completed"
-    asked = [v for v in hub.records.search("Encounter", limit=None) if v["status"] == "requested"]
+    asked = [v for v in hub.records.search("Encounter", limit=None) if v["status"] in asked_for]
     if outcome == "book-visit":  # the visit asked for is about the patient, not the prescription
         assert len(asked) == visits + 1 and any(v["subject"]["reference"] == pat for v in asked)
     else:
@@ -179,6 +180,8 @@ def test_a_new_renewal_request_made_by_hand_starts_its_workflow(hub):
     assert run["workflow_id"] == "prescription-renewal" and run["ctx"]["input"]["medication"] == "Metformin 500 mg"
 
 
+# A version stored before (about the patient, moving nothing, in the old step form), which runs from then still walk:
+# put in force as stored (``stored_workflow``), since a proposal in the old form is refused now.
 OLD_RENEWAL = """id = "prescription-renewal"
 title = "Prescription renewal"
 record = "Patient"
@@ -219,8 +222,7 @@ def test_a_renewal_from_before_the_request_had_its_own_workflow_moves_onto_a_req
     jo, rana, amara = M(hub, "jo"), M(hub, "rana"), M(hub, "dr-amara")
     pat = _pat(hub)
     cur = hub.workflow("prescription-renewal")[1]["source"]
-    old = hub.propose_workflow(jo, OLD_RENEWAL, "the shape before")
-    hub.approve_workflow(rana, "prescription-renewal", old["version"])
+    stored_workflow(hub, OLD_RENEWAL, "the shape before")
     run = hub.engine.start(jo, "prescription-renewal", record=pat, inputs={"medication": "Atorvastatin 20 mg"})
     before = hub.engine.run(run["id"])
     assert before["record"] == pat
@@ -255,18 +257,20 @@ def _lab_obs(hub, pat, **extra):
     return f"Observation/{rec['id']}"
 
 
-def test_a_result_sent_for_the_patient_is_filed_and_walked_from_received_to_closed(hub):
-    """The lab sends a result for the patient: the run files it (waiting for review) and walks it: reviewed, the
-    patient told, closed, with one item. The review is the result's own lifecycle; the lab's status is the lab's."""
+def test_a_result_sent_for_the_patient_is_filed_and_walked_from_to_sort_to_closed(hub):
+    """The lab sends a result for the patient: the run files it and walks it: to sort, in review, closed by the
+    physician's decision, with one item. The review is the result's own state; the lab's status is the lab's."""
     pat = _pat(hub)
     run = hub.engine.run(hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=pat, inputs=LAB)["id"])
     ref = run["record"]
     assert ref.startswith("Observation/") and run["subject"] == pat
     ob = _read(hub, ref)
-    assert ob["review"] == "received" and ob["subject"]["reference"] == pat
+    assert ob["review"] == "sorting" and ob["subject"]["reference"] == pat
     assert ob["code"]["text"] == "Sodium" and ob["valueQuantity"]["value"] == 139
     hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
                         {"category": "normal", "rationale": "in range"})
+    run_all_local(hub, log=quiet)
+    assert _read(hub, ref)["review"] == "received"
     hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review"), "file-normal", "")
     run_all_local(hub, log=quiet)
     ob = _read(hub, ref)
@@ -277,7 +281,7 @@ def test_a_result_sent_for_the_patient_is_filed_and_walked_from_received_to_clos
 
 def test_a_result_the_lab_files_starts_its_review_and_the_lab_still_corrects_it(hub):
     """Filing a lab result starts its review on that result; the same result sent again walks the same run; the lab
-    may still move its own status while a physician reviews it; a vital sign starts no review."""
+    may still move its own status while it is reviewed; a vital sign starts no review."""
     pat = _pat(hub)
     ref = _lab_obs(hub, pat)
     (run,) = hub.engine.runs(record=ref, status="running")
@@ -286,8 +290,8 @@ def test_a_result_the_lab_files_starts_its_review_and_the_lab_still_corrects_it(
     hub.engine.emit(M(hub, "lab-feed"), "lab.result", record=pat, data=same)
     assert len(hub.engine.runs(record=ref)) == 1
     hub.update_record(M(hub, "lab-feed"), ref, {"status": "final"})  # the lab's final report, mid-review
-    assert _read(hub, ref)["review"] == "received"
-    with pytest.raises(Denied):
+    assert _read(hub, ref)["review"] == "sorting"
+    with pytest.raises((Denied, Invalid)):
         hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})  # its review closes it, not a hand move
     vital = hub.create_record(M(hub, "noor"), "Observation", {
         "status": "final", "category": [{"text": "vital-signs"}], "subject": {"reference": pat},
@@ -304,53 +308,84 @@ def test_a_result_named_for_another_patient_is_refused(hub):
     assert any("someone else" in p for p in refused.value.problems)
 
 
-def _flagged_review(hub, outcome):
+def _flagged_review(hub, outcome, comment=""):
     """An abnormal sodium the physician has reviewed with ``outcome``: (run, result ref)."""
     run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
                            inputs={**LAB, "value": "131", "flag": "abnormal"})
     hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
                         {"category": "abnormal", "rationale": "low"})
-    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), outcome, "")
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review"), outcome, comment)
     run_all_local(hub, log=quiet)
     return run, hub.engine.run(run["id"])["record"]
 
 
-@pytest.mark.parametrize("action,want", [("reached-the-patient", "closed"), ("letter-sent", "not-told"),
-                                         ("booked-a-visit", "not-told"), ("no-further-action", "not-told")])
-def test_a_result_is_closed_only_when_the_patient_was_told(hub, action, want):
-    """The nurse could not reach the patient: only the physician reaching them closes the result. Any other way the
-    review ends leaves it "Patient not told"."""
-    run, ref = _flagged_review(hub, "call-patient")
-    hub.engine.complete(M(hub, "noor"), item_for(hub, run, "call"), {"reached": False, "notes": "no answer"})
-    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"action": action, "notes": "done"})
+def _follow_ups(hub, ref):
+    return [t for t in hub.records.search("Task", limit=None) if (t.get("focus") or {}).get("reference") == ref]
+
+
+def test_an_abnormal_result_is_never_offered_as_normal(hub):
+    """Filing as normal is an edge offered only when the lab, the sort and the range check all call it normal: for
+    an abnormal result the physician is not offered it, and choosing it anyway is refused."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
     run_all_local(hub, log=quiet)
-    assert _read(hub, ref)["review"] == want
+    run = hub.engine.run(run["id"])
+    wf, _ = hub.workflow("lab-result-review")
+    step = wf.step("review")
+    assert hub.engine.open_outcomes(run, step) == ["no-action-needed", "call-patient", "book-visit"]
+    with pytest.raises(Exception):
+        hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review"), "file-normal", "")
+
+
+@pytest.mark.parametrize("outcome,told", [("no-action-needed", True), ("call-patient", False), ("book-visit", False)])
+def test_a_reviewed_result_closes_once_what_follows_is_set_going(hub, outcome, told):
+    """The physician's decision closes the result on the way out: the patient told it was reviewed, or a call (a
+    follow-up of its own, naming the result) or a visit asked for. The result does not wait on the call or visit."""
+    run, ref = _flagged_review(hub, outcome, "please call about the sodium")
+    ob = _read(hub, ref)
+    assert ob["review"] == "closed" and ob["status"] == "final"
     assert hub.engine.run(run["id"])["status"] == "completed"
+    assert any(x.get("valueString") == outcome for x in ob.get("extension", []))
+    calls = _follow_ups(hub, ref)
+    assert len(calls) == (1 if outcome == "call-patient" else 0)
+    if calls:
+        (call,) = calls
+        assert call["businessStatus"]["text"] == "to-call" and call["priority"] == "routine"
+        assert call["note"][0]["text"] == "please call about the sodium"
+        (fu,) = hub.engine.runs(record=f"Task/{call['id']}", status="running")
+        assert fu["workflow_id"] == "patient-follow-up"
 
 
-def test_a_result_with_a_visit_booked_is_not_told_until_a_physician_signs_it_closed(hub):
-    """A visit booked to talk a result over has not told the patient: the result is "Patient not told" until a
-    physician signs that they were told. Nobody else closes it, by hand or by signature."""
-    run, ref = _flagged_review(hub, "book-visit")
-    assert _read(hub, ref)["review"] == "not-told"
-    assert hub.record_type("Observation").state_label("not-told") == "Patient not told"
-    with pytest.raises(Denied):
-        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})  # not a hand move
-    with pytest.raises(Denied):
-        hub.sign_record(M(hub, "noor"), ref, "Patient told")  # a nurse does not close it
-    hub.sign_record(M(hub, "dr-amara"), ref, "Patient told", "Told at the visit")
-    assert _read(hub, ref)["review"] == "closed"
+@pytest.mark.parametrize("action", ["reached-the-patient", "letter-sent", "called-emergency-contact",
+                                    "no-further-action"])
+def test_a_follow_up_nobody_reached_is_done_by_the_physicians_choice(hub, action):
+    """The nurse could not reach the patient: the follow-up waits on a physician, whose choice ends it."""
+    _, ref = _flagged_review(hub, "call-patient")
+    (call,) = _follow_ups(hub, ref)
+    task = f"Task/{call['id']}"
+    (fu,) = hub.engine.runs(record=task, status="running")
+    hub.engine.complete(M(hub, "noor"), item_for(hub, fu, "call"), {"outcome": "could-not-reach", "notes": "no answer"})
+    run_all_local(hub, log=quiet)
+    assert _read(hub, task)["businessStatus"]["text"] == "not-reached"
+    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, fu, "not-reached"), {"outcome": action, "notes": "done"})
+    run_all_local(hub, log=quiet)
+    assert _read(hub, task)["businessStatus"]["text"] == "done"
+    assert hub.engine.run(fu["id"])["status"] == "completed"
 
 
 def test_a_result_in_review_is_its_own_work_and_a_visit_booked_from_it_names_it(hub):
-    """A result's review is the result's work: it reads "In review", its work is named for the result (the test and
+    """A result's review is the result's work: it reads "To sort", its work is named for the result (the test and
     its value), not for the workflow. The physician asking to see the patient asks for a visit that names the result
     it was asked for, and the result's page lists it."""
     run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
                            inputs={**LAB, "value": "131", "flag": "abnormal"})
     ref = hub.engine.run(run["id"])["record"]
     rt = hub.record_type("Observation")
-    assert _read(hub, ref)["review"] == "received" and rt.state_label("received") == "In review"
+    assert _read(hub, ref)["review"] == "sorting" and rt.state_label("sorting") == "To sort"
+    assert rt.state_label("received") == "In review"
     title = hub.run_title(M(hub, "dr-amara"), hub.engine.run(run["id"]))
     assert title.startswith(f"Lab result {LAB['test']} 131") and "MacLeod" in title and "review" not in title
     assert hub.run_title(M(hub, "scheduling-agent"), hub.engine.run(run["id"])).startswith("Lab result · ")  # no value
@@ -362,31 +397,42 @@ def test_a_result_in_review_is_its_own_work_and_a_visit_booked_from_it_names_it(
                for x in hub.linked(M(hub, "dr-amara"), ref))
 
 
-def test_a_review_cancelled_after_the_physician_reviewed_leaves_the_patient_not_told(hub):
-    """Cancelled before anyone told the patient, a reviewed result is "Patient not told", never closed."""
-    run, ref = _flagged_review(hub, "call-patient")
-    assert _read(hub, ref)["review"] == "reviewed"
-    hub.engine.cancel(M(hub, "rana"), run["id"], "the patient moved away")
-    assert _read(hub, ref)["review"] == "not-told"
-
-
-@pytest.mark.parametrize("outcome,before", [("no-action-needed", "closed"), ("book-visit", "not-told")])
-def test_a_reviewed_result_the_lab_corrects_is_reviewed_again(hub, outcome, before):
-    """The lab corrects a result already reviewed (closed, or the patient not told) and sends it again naming it: a
-    new review walks it from waiting for review, and the physician reviews the corrected value."""
+@pytest.mark.parametrize("outcome", ["no-action-needed", "book-visit"])
+def test_a_reviewed_result_the_lab_corrects_is_reviewed_again(hub, outcome):
+    """The lab corrects a result already reviewed and sends it again naming it: a new review walks it from the
+    start, and the physician reviews the corrected value."""
     run, ref = _flagged_review(hub, outcome)
-    assert _read(hub, ref)["review"] == before and hub.engine.run(run["id"])["status"] == "completed"
+    assert _read(hub, ref)["review"] == "closed" and hub.engine.run(run["id"])["status"] == "completed"
     hub.update_record(M(hub, "lab-feed"), ref, {"status": "corrected", "valueQuantity": {"value": 128, "unit": "mmol/L"}})
     pat = _read(hub, ref)["subject"]["reference"]
     (again,) = hub.engine.emit(M(hub, "lab-feed"), "lab.result", record=pat,
                                data={**LAB, "value": "128", "flag": "abnormal", "observation": ref})
     assert again["id"] != run["id"] and hub.engine.run(again["id"])["record"] == ref
-    assert _read(hub, ref)["review"] == "received"
+    assert _read(hub, ref)["review"] == "sorting"
     hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, again, "sort"),
                         {"category": "abnormal", "rationale": "lower still"})
-    hub.engine.decide(M(hub, "dr-liam"), item_for(hub, again, "review-flagged"), "no-action-needed", "")
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(M(hub, "dr-liam"), item_for(hub, again, "review"), "no-action-needed", "")
     run_all_local(hub, log=quiet)
     assert _read(hub, ref)["review"] == "closed" and hub.engine.run(again["id"])["status"] == "completed"
+
+
+def test_a_critical_result_skips_the_sort_and_its_call_is_urgent(hub):
+    """A critical potassium pages the physicians and goes straight to an urgent review; asked to call, the result
+    closes and the follow-up is urgent."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={"test": "Potassium", "value": "6.9", "unit": "mmol/L", "range": "3.5-5.0",
+                                   "flag": "critical"})
+    ref = hub.engine.run(run["id"])["record"]
+    assert _read(hub, ref)["review"] == "received"
+    assert hub.engine.run(run["id"])["steps"]["sort"]["state"] == "skipped"
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-critical"), "call-patient", "call now")
+    run_all_local(hub, log=quiet)
+    assert _read(hub, ref)["review"] == "closed"
+    (call,) = _follow_ups(hub, ref)
+    assert call["priority"] == "urgent"
+    (fu,) = hub.engine.runs(record=f"Task/{call['id']}", status="running")
+    assert hub.engine.item(item_for(hub, fu, "call-now"))["priority"] == "urgent"
 
 
 def test_a_late_critical_review_reaches_the_medical_director_by_name_and_a_chaser(hub):
@@ -426,7 +472,9 @@ def test_a_physician_takes_over_a_late_critical_call_from_its_notice(hub):
                                    "flag": "critical"})
     hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-critical"), "call-patient", "call now")
     run_all_local(hub, log=quiet)
-    call = item_for(hub, run, "call-critical")
+    (task,) = _follow_ups(hub, hub.engine.run(run["id"])["record"])
+    (fu,) = hub.engine.runs(record=f"Task/{task['id']}", status="running")
+    call = item_for(hub, fu, "call-now")
     hub.engine.claim(M(hub, "noor"), call)
     hub.engine.release(M(hub, "noor"), call, "Going on break; please take this one")
     hub.db.items.set(call, {"due_at": "2000-01-01T01:00:00Z", "created_at": "2000-01-01T00:00:00Z"})
@@ -450,8 +498,9 @@ def _handling(hub, ref):
 
 
 def test_a_patients_message_is_filed_and_walked_from_received_to_closed(hub):
-    """The patient writes in: the run files the message on their chart and walks it: triaged once screened,
-    answered when the reply goes, closed. One run, one item; the patient is the message's subject."""
+    """The patient writes in: the run files the message on their chart and walks it: screened as it arrives (a
+    paperwork question goes to an agent's draft), the reply checked, answered when it goes, closed. One run, one item;
+    the patient is the message's subject."""
     pat = _pat(hub)
     run = hub.engine.run(hub.engine.start(M(hub, "jo"), "patient-question", record=pat,
                                           inputs={"question": "What are your hours on Saturday?"})["id"])
@@ -459,7 +508,7 @@ def test_a_patients_message_is_filed_and_walked_from_received_to_closed(hub):
     assert ref.startswith("Communication/") and run["subject"] == pat
     msg = _read(hub, ref)
     assert msg["payload"][0]["contentString"] == "What are your hours on Saturday?"
-    assert msg["subject"]["reference"] == pat and _handling(hub, ref) == "triaged"
+    assert msg["subject"]["reference"] == pat and _handling(hub, ref) == "drafting"
     hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "draft"),
                         {"reply": "We are open 9 to 12 on Saturdays.", "needs_clinician": False})
     hub.engine.decide(M(hub, "jo"), item_for(hub, run, "review"), "send", "")
@@ -468,7 +517,7 @@ def test_a_patients_message_is_filed_and_walked_from_received_to_closed(hub):
     assert hub.engine.run(run["id"])["status"] == "completed"
     assert len([i for i in _items(hub, run) if i["parent_id"] is None]) == 1
     moves = [e["data"]["to"] for e in hub.db.events.find({"subject": ref, "action": "record.transitioned"}, sort="seq")]
-    assert moves == ["triaged", "answered", "closed"]
+    assert moves == ["drafting", "to-check", "answered", "closed"]
 
 
 def test_a_new_question_is_its_own_message_but_the_same_one_twice_is_one(hub):
@@ -492,17 +541,18 @@ def test_a_new_question_is_its_own_message_but_the_same_one_twice_is_one(hub):
     assert "Urgent" in panel and panel.count('class="wcard"') >= 2
 
 
-@pytest.mark.parametrize("action,want", [("reached-the-patient", ["triaged", "answered", "closed"]),
-                                         ("welfare-check", ["triaged", "closed"])])
+@pytest.mark.parametrize("action,want", [("reached-the-patient", ["to-call", "not-reached", "answered", "closed"]),
+                                         ("welfare-check", ["to-call", "not-reached", "closed"])])
 def test_a_red_flag_nobody_reached_is_answered_only_if_the_physician_reaches_them(hub, action, want):
     run = hub.engine.start(M(hub, "jo"), "patient-question", record=_pat(hub),
                            inputs={"question": "I have had crushing chest pain since this morning"})
     ref = hub.engine.run(run["id"])["record"]
     hub.engine.complete(M(hub, "noor"), item_for(hub, run, "urgent"),
-                        {"reached": False, "action": "could-not-reach", "notes": "no answer"})
-    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"action": action, "notes": "done"})
+                        {"outcome": "could-not-reach", "notes": "no answer"})
+    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"outcome": action, "notes": "done"})
     moves = [e["data"]["to"] for e in hub.db.events.find({"subject": ref, "action": "record.transitioned"}, sort="seq")]
     assert moves == want and hub.engine.run(run["id"])["status"] == "completed"
+    assert _read(hub, ref)["status"] == "completed"
 
 
 def test_a_message_filed_by_hand_for_handling_starts_its_workflow_and_a_letter_does_not(hub):
@@ -542,7 +592,7 @@ def test_a_privacy_request_is_a_directive_walked_from_requested_to_in_force(hub)
     with pytest.raises((Denied, Invalid)):
         hub.update_record(M(hub, "rana"), ref, {"status": "active"})  # its review puts it in force
     hub.engine.complete(M(hub, "rana"), item_for(hub, run, "directive"), {
-        "decision": "put-in-force", "withhold": ["clinical"], "allow_roles": ["physician"],
+        "outcome": "put-in-force", "withhold": ["clinical"], "allow_roles": ["physician"],
         "told": "Nurses will not see your results; your physician still does."})
     run_all_local(hub, log=quiet)
     c = _read(hub, ref)
@@ -551,7 +601,7 @@ def test_a_privacy_request_is_a_directive_walked_from_requested_to_in_force(hub)
     assert hub.engine.run(run["id"])["status"] == "completed"
     assert len([i for i in _items(hub, run) if i["parent_id"] is None]) == 1
     moves = [e["data"]["to"] for e in hub.db.events.find({"subject": ref, "action": "record.transitioned"}, sort="seq")]
-    assert moves == ["reviewed", "active"]
+    assert moves == ["active"]  # put in force straight from requested: the edge is the move
     assert len(hub.records.search("Consent", subject=pat)) == 1  # the request is the directive, not a second one
 
 
@@ -560,7 +610,7 @@ def test_a_privacy_request_the_officer_refuses_is_refused_and_the_patient_told(h
     run = hub.engine.start(M(hub, "jo"), "privacy-request", record=pat, inputs=REQUEST)
     ref = hub.engine.run(run["id"])["record"]
     hub.engine.complete(M(hub, "rana"), item_for(hub, run, "directive"), {
-        "decision": "refuse", "told": "The request came from someone who is not you or your decision-maker."})
+        "outcome": "refuse", "told": "The request came from someone who is not you or your decision-maker."})
     run_all_local(hub, log=quiet)
     assert _read(hub, ref)["status"] == "refused" and hub.engine.run(run["id"])["status"] == "completed"
     sent = hub.db.outbox.find_one({"run_id": run["id"]}, sort="id")
@@ -582,17 +632,19 @@ def _referral_signed(hub, outcome="send"):
 
 
 def test_a_referral_is_its_own_record_walked_from_draft_to_report_received(hub):
-    """Started on the patient, the run writes the referral (a draft order about them) and walks it: sent once
-    signed, report received once the specialist's report is in. One run, one item; the patient is its subject."""
+    """Started on the patient, the run writes the referral (a draft order about them) and walks it through its
+    stages: written, finalized, signed and sent (status active), booked, report received once the specialist's report
+    is in (status completed). One run, one item; the patient is its subject."""
     pat = _pat(hub)
     run = _referral_signed(hub)
     ref = run["record"]
     assert ref.startswith("ServiceRequest/") and run["subject"] == pat
     rec = _read(hub, ref)
     assert rec["subject"]["reference"] == pat and rec["status"] == "active" and rec["intent"] == "order"
+    assert rec["stage"] == "sent"
     with pytest.raises(Denied):  # its workflow moves it
-        hub.update_record(M(hub, "dr-amara"), ref, {**rec, "status": "completed"})
-    hub.engine.complete(M(hub, "jo"), item_for(hub, run, "booked"), {"seen": "booked", "appointment": "2027-01-12T10:00"})
+        hub.update_record(M(hub, "dr-amara"), ref, {**rec, "stage": "booked"})
+    hub.engine.complete(M(hub, "jo"), item_for(hub, run, "booked"), {"outcome": "booked", "appointment": "2027-01-12T10:00"})
     noor = M(hub, "noor")
     assert hub.engine.context(noor, item_for(hub, run, "report"))["step"]["needs"] == ["specialist's report"]
     with pytest.raises(Invalid, match="specialist's report"):  # closed only with the report linked to it
@@ -605,15 +657,79 @@ def test_a_referral_is_its_own_record_walked_from_draft_to_report_received(hub):
     assert _read(hub, ref)["status"] == "completed" and hub.engine.run(run["id"])["status"] == "completed"
     assert hub.hand_links(noor, ref) == {"report": [f"DiagnosticReport/{report['id']}"]}  # kept through its saves
     moves = [e["data"]["to"] for e in hub.db.events.find({"subject": ref, "action": "record.transitioned"}, sort="seq")]
-    assert moves == ["active", "completed"]
+    assert moves == ["drafting", "finalizing", "signing", "sent", "booked", "report-received"]
     assert len([i for i in _items(hub, run) if i["parent_id"] is None]) == 1
 
 
 def test_a_referral_not_sent_or_declined_by_the_specialist_is_cancelled(hub):
     run = _referral_signed(hub, "cancel")
     assert _read(hub, run["record"])["status"] == "revoked" and run["status"] == "completed"
+    assert _read(hub, run["record"])["stage"] == "cancelled"
     run = _referral_signed(hub)
-    hub.engine.complete(M(hub, "jo"), item_for(hub, run, "booked"), {"seen": "declined", "notes": "not accepting"})
+    hub.engine.complete(M(hub, "jo"), item_for(hub, run, "booked"), {"outcome": "declined", "notes": "not accepting"})
     hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "declined"), {"notes": "will refer elsewhere"})
     run_all_local(hub, log=quiet)
-    assert _read(hub, run["record"])["status"] == "revoked"
+    assert _read(hub, run["record"])["status"] == "revoked" and _read(hub, run["record"])["stage"] == "cancelled"
+
+
+def test_a_referral_whose_work_is_cancelled_before_it_is_sent_is_cancelled_and_a_sent_one_stays_sent(hub):
+    """Its stage is where the work is; its FHIR status follows: cancelled unsent, it is revoked (the workflow's
+    on_cancel); cancelled once sent, the specialist has it, so it stays sent (active)."""
+    amara = M(hub, "dr-amara")
+    run = hub.engine.run(hub.engine.start(amara, "referral", record=_pat(hub), inputs=REFERRAL)["id"])
+    hub.engine.cancel(amara, run["id"], "asked for by mistake")
+    rec = _read(hub, run["record"])
+    assert rec["stage"] == "cancelled" and rec["status"] == "revoked"
+    run = _referral_signed(hub)
+    hub.engine.cancel(amara, run["id"], "the patient moved away")
+    rec = _read(hub, run["record"])
+    assert rec["stage"] == "sent" and rec["status"] == "active"
+
+
+def test_the_call_a_decision_starts_goes_to_the_nurse_chosen_in_it(hub):
+    """Work goes to a person, chosen where the move is made: "Call the patient" asks the physician which nurse
+    calls, offering only active people who hold the role. A page refuses the decision without that choice, and
+    the call is then that nurse's, not the whole nurses' group."""
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    run_all_local(hub, log=quiet)
+    run = hub.engine.run(run["id"])
+    step = hub.workflow("lab-result-review")[0].step("review")
+    (need,) = hub.engine.assignments_needed(run, step, "call-patient")
+    assert need["key"] == "patient-follow-up/call" and need["role"] == "nurse"
+    nurses = {m["id"] for m in need["people"]}
+    assert "noor" in nurses and all(M(hub, n)["kind"] == "person" for n in nurses)
+    assert hub.engine.assignments_needed(run, step, "no-action-needed") == []
+    iid = item_for(hub, run, "review")
+    with pytest.raises(Invalid, match="choose who does"):
+        hub.engine.decide(M(hub, "dr-amara"), iid, "call-patient", "", assign_required=True)
+    with pytest.raises(Invalid, match="holds nurse"):
+        hub.engine.decide(M(hub, "dr-amara"), iid, "call-patient", "", assign={"patient-follow-up/call": "dr-amara"})
+    hub.engine.decide(M(hub, "dr-amara"), iid, "call-patient", "", assign={"patient-follow-up/call": "noor"},
+                      assign_required=True)
+    run_all_local(hub, log=quiet)
+    (call,) = _follow_ups(hub, hub.engine.run(run["id"])["record"])
+    (fu,) = hub.engine.runs(record=f"Task/{call['id']}", status="running")
+    item = hub.engine.item(item_for(hub, fu, "call"))
+    assert item["assignee"] == "noor" and item["role"] == "nurse"
+
+
+def test_reviewing_a_result_again_asks_which_physician(hub):
+    """A move that sets people's work going asks for its person too: "Review again" sends the result back to a
+    physician chosen on the move's screen, never to the physicians' group."""
+    _, ref = _flagged_review(hub, "no-action-needed")
+    needs = hub.move_assignments(ref, "received")
+    assert [n["key"] for n in needs] == ["lab-result-review/review"]
+    assert {m["id"] for m in needs[0]["people"]} >= {"dr-amara"}
+    with pytest.raises(Invalid, match="choose who does"):
+        hub.move_record(M(hub, "dr-amara"), ref, "received", assign={}, assign_required=True)
+    (move,) = [m for m in hub.transition_screen(M(hub, "dr-amara"), ref)["may"] if m["to"] == "received"]
+    assert move["assign"] == needs
+    hub.move_record(M(hub, "dr-amara"), ref, "received", assign={"lab-result-review/review": "dr-amara"},
+                    assign_required=True)
+    run_all_local(hub, log=quiet)
+    (again,) = hub.engine.runs(record=ref, status="running")
+    item = hub.engine.item(item_for(hub, again, "review"))
+    assert item["assignee"] == "dr-amara"

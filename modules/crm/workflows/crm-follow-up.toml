@@ -6,22 +6,31 @@ message goes only to a contact whose consent to it holds (CASL): the hub refuses
 record = "Interaction"
 
 # The Interaction type names this workflow: logging an interaction starts it, and its status is this work's position.
-# One run is one follow-up: it notes who logged it, waits for its follow-up date (marked by the daily
-# crm-follow-up-due sweep, which never moves the status), and follows it up; followed up, the next run waits for the
-# next date. It replaces crm-interaction-logged, which only noted who logged it.
+# Written as the interaction's states and the edges between them (practicehub/states.py). One run is one follow-up:
+# it notes who logged it, waits for its follow-up date (marked by the daily crm-follow-up-due sweep, which never moves
+# the status), and follows it up; followed up, it is back where it began, which ends the run, and the next run waits
+# for the next date. It replaces crm-interaction-logged, which only noted who logged it.
 
-[[steps]]
+[start]
+to = "logged"
+label = "Logged"
+
+[[start.do]]
 id = "logged"
 title = "Note who logged it"
-kind = "automation"
 when = "record.logged_by == null"
 action = "record.update"
-[steps.params]
+[start.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[start.do.params.set]
 logged_by = "{{run.started_by}}"
 
-[[steps]]
+[[state]]
+id = "logged"
+label = "Logged"
+tone = "done"
+
+[[state.work]]
 id = "due"
 title = "Wait for the follow-up date"
 kind = "wait"
@@ -30,53 +39,60 @@ and record.follow_up_done != record.follow_up)"""
 instructions = """Nothing to do until its follow-up date: set one on the interaction, and on that day it goes to its
 owner."""
 
-[[steps]]
+# its date came, or a person followed it up now (a move by hand its wait takes)
+[[edge]]
 id = "asked"
-title = "The follow-up date came"
-kind = "automation"
-after = ["due"]
-when = "record.status == 'logged'"
-state = "follow-up"
+label = "Follow up"
+from = "logged"
+to = "follow-up"
 
-[[steps]]
+[[edge.do]]
 id = "taken"
 title = "Note the date it is followed up for"
-kind = "automation"
-after = ["due", "asked"]   # its date came, or a person followed it up now
-when = "record.status == 'follow-up'"
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 follow_up_done = "{{record.follow_up}}"   # so a follow-up cancelled part way waits for the next date, as Not needed does
 
-[[steps]]
+[[edge.do]]
 id = "who"
 title = "Find the owner and whom to write to"
-kind = "automation"
-after = ["taken"]
-when = "record.status == 'follow-up'"
 action = "crm.follow-up-who"
 
-[[steps]]
+[[state]]
+id = "follow-up"
+label = "Being followed up"
+tone = "attention"
+
+[[state.work]]
 id = "draft"
 title = "Draft the follow-up"
 kind = "task"
 role = "follow-up-drafter"
-after = ["who"]
 skill = "crm-follow-up-draft"
 risk = "low"
 due = "1d"
 escalate_to = "relationship-manager"
 context = ["record:relationships", "who"]
 
-[[steps]]
+[[edge]]
+id = "drafted"
+label = "Drafted"
+from = "follow-up"
+to = "to-send"
+
+[[state]]
+id = "to-send"
+label = "To send"
+tone = "attention"
+
+[[state.work]]
 id = "send"
 title = "Send the follow-up"
 kind = "task"
 role = "relationship-manager"
 assign_to = "{{who.owner}}"
-after = ["draft"]
 review_of = "draft"
 persons_only = true
 due = "2d"
@@ -85,41 +101,43 @@ context = ["record:relationships", "who", "draft"]
 instructions = """Read the draft, change what needs changing, and choose how it went: send it by email (only to a
 contact whose consent to commercial messages holds: the hub checks), or say you followed up another way (a call, a
 visit), or that no follow-up is needed."""
-[[steps.fields]]
+# how it went is said, not an edge: every answer ends the follow-up the same way, only sending it emails the contact
+[[state.work.fields]]
 name = "how"
 label = "How"
 type = "choice"
 choices = ["send", "another-way", "not-needed"]
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "subject"
 type = "string"
-[[steps.fields]]
+[[state.work.fields]]
 name = "body"
 type = "text"
 
-[[steps]]
+[[edge]]
+id = "followed-up"
+label = "Followed up"
+from = "to-send"
+to = "logged"                 # back where it began: the next run waits for its next date
+
+[[edge.do]]
 id = "email"
 title = "Email the contact"
-kind = "automation"
-after = ["send"]
 when = "send.how == 'send'"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "email"
 purpose = "commercial"
 to = "{{who.to}}"
 subject = "{{send.subject}}"
 body = "{{send.body}}"
 
-[[steps]]
+[[edge.do]]
 id = "done"
 title = "Mark it followed up"
-kind = "automation"
-after = ["send", "email"]
 action = "record.update"
-state = "logged"   # the next run waits for its next date
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 follow_up_done = "{{record.follow_up}}"

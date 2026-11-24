@@ -31,6 +31,7 @@ import xml.parsers.expat
 from dataclasses import dataclass, field
 
 from . import workflows as wfmod
+from .states import compile_states
 
 BPMN = "http://www.omg.org/spec/BPMN/20100524/MODEL"
 BPMNDI = "http://www.omg.org/spec/BPMN/20100524/DI"
@@ -239,7 +240,7 @@ def dumps_toml(doc: dict) -> str:
 # ================================================================================================ export
 def _raw(workflow) -> tuple[dict, wfmod.Workflow]:
     source = workflow.source if isinstance(workflow, wfmod.Workflow) else str(workflow)
-    wf = workflow if isinstance(workflow, wfmod.Workflow) else wfmod.parse(source)
+    wf = workflow if isinstance(workflow, wfmod.Workflow) else wfmod.parse(source, stored=True)  # read, as kept
     return tomllib.loads(source), wf
 
 
@@ -265,7 +266,12 @@ def _expr(parent, tag: str, text: str):
 def export_bpmn(workflow) -> str:
     """A workflow (a parsed Workflow, or its TOML) as BPMN 2.0 XML with a diagram."""
     raw, wf = _raw(workflow)
-    steps = [dict(s) for s in raw.get("steps", []) or []]
+    if wfmod.is_states_form(raw):
+        # written as states and edges: drawn as the steps it runs as; the states and edges travel in the
+        # workflow's own extension, and come back from it on import
+        steps = [dict(s) for s in compile_states(raw, [])[0]]
+    else:
+        steps = [dict(s) for s in raw.get("steps", []) or []]
     by_id = {s["id"]: s for s in steps}
     trig = dict(raw.get("trigger", {}) or {})
     wid = wf.id
@@ -1001,7 +1007,12 @@ def import_bpmn(data, catalog=None) -> Imported:
     order = ("id", "title", "record", "summary", "trigger", "input")
     out = {**{k: wdoc[k] for k in order if k in wdoc}, **{k: v for k, v in wdoc.items() if k not in order}}
     out.pop("steps", None)
-    out["steps"] = steps
+    if wfmod.is_states_form(out):
+        if [s.get("id") for s in steps] != [s.get("id") for s in compile_states(out, [])[0]]:
+            problems.append("This workflow is written as states and edges: its steps come from them, so steps added "
+                            "or removed in the diagram are not imported. Change its states and edges instead.")
+    else:
+        out["steps"] = steps
     source = dumps_toml(out)
     try:
         wfmod.parse(source, catalog)

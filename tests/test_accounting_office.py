@@ -133,7 +133,9 @@ def test_the_demo_has_every_t1_state_and_work_in_each_person_s_inbox(monkeypatch
     monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
     hub = snapshot_hub("accounting_office_demo", PACK, lambda h: h.install(PACK, demo=True))
     states = {r["status"] for r in hub.records.search("T1Return", limit=None) if r["year"] == hub.engine.now().year - 1}
-    assert {"gathering", "preparing", "in-review", "client-approval", "client-signed", "filed", "assessed"} <= states
+    # Kevin's slips are still missing after the reminder; Mei has the summary; Fatima's assessment differs
+    assert {"slips-missing", "preparing", "in-review", "with-client", "client-signed", "filed",
+            "assessment-differs"} <= states, states
     open_items = list(hub.db.items.find({"status": {"$in": ["open", "claimed"]}}))
     for who in ("anne", "rob", "priya", "ethan", "sophie"):
         assert any(i.get("assignee") == who or i.get("role") in hub.member(who)["roles"] and not i.get("assignee")

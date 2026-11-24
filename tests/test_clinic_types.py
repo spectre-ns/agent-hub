@@ -1,3 +1,4 @@
+import re
 """The clinic's create forms: plain inputs for what a person types, and a new record lands where its lifecycle starts."""
 
 import urllib.parse
@@ -7,6 +8,7 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from conftest import snapshot_hub
+from practicehub import workflows as wfmod
 from practicehub import schema
 from practicehub.web.server import App, make_handler
 from test_web import call, token
@@ -32,8 +34,8 @@ FORMS = {
     "Composition": ("dr-amara", {"subject": "{patient}", "title": "Phone call", "author": "Practitioner/dr-amara",
                                  "encounter": "{visit}",
                                  "section.0.text": "Called about the result."}),
-    "ServiceRequest": ("dr-amara", {"subject": "{patient}", "code.text": "Cardiology consult", "intent": "order",
-                                    "priority": "routine", "reasonCode.0.text": "Palpitations"}),
+    "ServiceRequest": ("dr-amara", {"subject": "{patient}", "status": "draft", "code.text": "Cardiology consult",
+                                    "intent": "order", "priority": "routine", "reasonCode.0.text": "Palpitations"}),
     "Immunization": ("noor", {"patient": "{patient}", "vaccineCode.text": "Influenza vaccine", "status": "completed",
                               "occurrenceDateTime": WHEN}),
 }
@@ -62,7 +64,8 @@ OWNED = {"AllergyIntolerance": "Patient", "Consent": "Patient", "Condition": "Pa
          "MedicationStatement": "Patient", "Coverage": "Patient", "RelatedPerson": "Patient",
          "QuestionnaireResponse": "Patient", "Encounter": "Patient", "Observation": "Patient", "Composition": "Encounter",
          "ChargeItem": "Encounter", "MedicationRequest": "Patient", "DiagnosticReport": "Patient",
-         "ServiceRequest": "Patient", "Claim": "Patient", "Communication": "Patient"}
+         "ServiceRequest": "Patient", "Claim": "Patient", "Communication": "Patient",
+         "Task": "Patient"}
 
 
 @pytest.fixture
@@ -98,7 +101,14 @@ def test_every_clinic_type_says_what_it_is():
         if rt.lifecycle:
             lc = rt.lifecycle
             assert lc["initial"] in lc["states"], f"{rt.id}: no initial state"
-            assert any(lc["initial"] in t["from"] for t in lc["transition"]), f"{rt.id}: nothing leaves the start"
+            flow = p.parent.parent / "workflows" / f"{(rt.workflow or {}).get('id')}.toml"
+            wf = wfmod.parse(flow.read_text()) if rt.workflow and flow.exists() else None
+            if wf is not None and wf.shape:  # written as states and edges: its edges move the record
+                # a state the record's field has no value for is a stop kept on the run (a renewal being prepared)
+                assert wf.record == rt.id and {st["id"] for st in wf.shape["states"]} & set(lc["states"]), \
+                    f"{rt.id}: its workflow walks none of its states"
+            else:
+                assert any(lc["initial"] in t["from"] for t in lc["transition"]), f"{rt.id}: nothing leaves the start"
 
 
 def _nested_ref(f) -> bool:
@@ -179,17 +189,18 @@ def test_no_one_finishes_a_visit_in_progress_by_hand(clinic):
     """A visit in progress ends when its note is signed (visit documentation), not by a person setting the status:
     the lifecycle move is the workflow's, for every person, a physician as much as a nurse."""
     hub, base, patient, visit = clinic
-    from practicehub.hub import Denied
+    from practicehub.hub import Invalid
     noor = hub.member("noor")
     visit = hub.create_record(noor, "Encounter", {"subject": {"reference": patient}, "plannedStartDate": WHEN})
     ref = f"Encounter/{visit['id']}"
     for st in ("arrived", "in-progress"):
         hub.update_record(noor, ref, {"status": st})
+    # finished is only where signing the note leads: from in progress (or stepped out) it is no move at all
     for who in ("noor", "dr-amara"):
-        with pytest.raises(Denied, match="only a workflow"):
+        with pytest.raises(Invalid, match="does not move from 'in-progress' to 'finished'"):
             hub.update_record(hub.member(who), ref, {"status": "finished"})
     hub.update_record(noor, ref, {"status": "onleave"})
-    with pytest.raises(Denied, match="only a workflow"):
+    with pytest.raises(Invalid, match="does not move from 'onleave' to 'finished'"):
         hub.update_record(noor, ref, {"status": "finished"})
     assert hub.records.read("Encounter", visit["id"])["status"] == "onleave"
 
@@ -244,6 +255,18 @@ def test_a_nested_picker_past_the_list_is_typed_and_found_when_saved(clinic, mon
     assert new["priorPrescription"] == {"reference": f"MedicationRequest/{old['id']}"}
     page = call(base, "GET", f"/records/MedicationRequest/{new['id']}", amara)[1]
     assert f'href="/patients/{patient.split("/")[1]}/prescriptions/{old["id"]}"' in page
+
+
+def test_a_note_from_a_visit_starts_with_its_patient_and_the_writer_as_author(clinic):
+    """A link named in the address brings what that record already says: the visit's patient is the note's patient,
+    and the person writing it is its author; neither is typed again, and a link typed in is never replaced."""
+    hub, base, patient, visit = clinic
+    amara = token(hub, "dr-amara")
+    form = call(base, "GET", f"/records/Composition/new?encounter={visit}", amara)[1].split('id="new"', 1)[1]
+    subj = form.split('name="subject"', 1)[1].split("</select>", 1)[0]
+    assert re.search(r'<option value="%s"[^>]*selected' % re.escape(patient), subj), subj
+    assert re.search(r'name="author" value="Practitioner/dr-amara" checked', form)
+    assert not re.search(r'name="author" value="Practitioner/(?!dr-amara)[^"]*" checked', form)
 
 
 def test_a_part_page_lights_its_owner_in_the_sidebar(clinic):

@@ -1,0 +1,156 @@
+# A part: something kept in stock, as the catalogue names it (InvenTree's part). Its stock is held as lots (stock
+# items), one quantity of it in one place. What it has on hand, available and held is summed from its lots whenever a
+# stock move posts, never typed in.
+id = "Part"
+label = "Part"
+plural = "Parts"
+data_class = "inventory"
+title = "{code} {name}"
+flag = "status"
+order = 39
+unique = ["code"]
+# A new part is in use at once, unless the policy in force asks for each part to be approved first (regulated): then
+# it waits in draft, is submitted, and quality signs it. A part being revised keeps being used as last approved.
+workflow = { id = "inventory-part", when = "record.status in ['draft', 'in-review']" }
+summary = "Something kept in stock: what it is, how it is tracked, and how much of it there is."
+
+[[field]]
+name = "code"
+label = "Part code"
+required = true
+max_length = 40
+help = "the practice's own code for it; no two parts share one"
+
+[[field]]
+name = "name"
+required = true
+max_length = 200
+
+[[field]]
+name = "category"
+type = "choice"
+choices = ["clinical-supply", "vaccine", "medication", "device", "office", "cleaning", "equipment", "retail"]
+
+[[field]]
+name = "unit"
+help = "what one counts as: box of 100, vial, each"
+max_length = 40
+
+[[field]]
+name = "tracking"
+type = "choice"
+choices = ["none", "lot", "serial"]
+help = "none: only how many; lot: each delivery keeps its lot number; serial: each one has its own serial number"
+
+[[field]]
+name = "shelf_life_days"
+label = "Shelf life (days)"
+type = "number"
+min = 0
+help = "set it and every delivery must give its expiry date; expired stock is never issued"
+
+[[field]]
+name = "minimum_stock"
+label = "Reorder at"
+type = "number"
+min = 0
+help = "when what is available falls to this, more is ordered"
+
+[[field]]
+name = "reorder_quantity"
+label = "Order quantity"
+type = "number"
+min = 0
+
+[[field]]
+name = "default_location"
+label = "Usually kept in"
+type = "reference"
+target = ["Location"]
+rel = "usually-in"
+
+[[field]]
+name = "on_hand"
+label = "On hand"
+type = "number"
+by = "workflow"
+help = "every lot with stock in it, held or not: summed when a stock move posts"
+
+[[field]]
+name = "available"
+type = "number"
+by = "workflow"
+help = "what may be used: not held, not waiting for inspection, not expired"
+
+[[field]]
+name = "quarantined"
+label = "Held"
+type = "number"
+by = "workflow"
+
+[[field]]
+name = "revision"
+type = "number"
+by = "workflow"
+help = "goes up each time the part is approved again"
+
+[[field]]
+name = "notes"
+type = "text"
+
+[[field]]
+name = "obsolete_reason"
+label = "Why it is obsolete"
+type = "text"
+
+[[field]]
+name = "return_reason"
+label = "Why it was sent back"
+type = "text"
+by = "workflow"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "in-review", "active", "obsolete"]
+labels = { draft = "Draft", in-review = "In review", active = "In use", obsolete = "Obsolete" }
+
+[lifecycle]
+field = "status"
+initial = "draft"
+in_use = "active"
+locked = ["in-review"]
+abandoned = { "in-review" = "draft" }
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "in-review"
+label = "Submit for approval"
+
+# The moves its workflow makes (in use at once, approve, send back) are the inventory-part workflow's edges; only the
+# moves people make by hand, and where cancelled work leaves it, are listed here.
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "draft"
+by = "workflow"            # only when its approval is cancelled part way
+label = "Back to its author"
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "active"
+by = "workflow"            # the approve edge; said here too so the type knows a revision goes back in use (in_use)
+label = "Approve"
+
+[[lifecycle.transition]]
+from = ["active"]
+to = "draft"
+label = "Revise"
+comment = true
+
+[[lifecycle.transition]]
+from = ["active"]
+to = "obsolete"
+label = "Make obsolete"
+fields = ["obsolete_reason"]
+require = ["obsolete_reason"]

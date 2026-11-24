@@ -1,16 +1,24 @@
 # Wiki: pages of formatted text in a tree, for what a practice knows and how it works. A page that sits at the top of
 # the tree is a space's home page. Pages link to each other by title ([[On-call guide]]) and to any record or piece of
-# work ([[Document/<id>]], [[work:<id>]]); the record links back to the page on its Linked tab.
+# work ([[Document/<id>]], [[work:<id>]]); the record links back to the page on its Linked tab. Nothing in the wiki is
+# controlled: a procedure that must be approved, released and signed is a controlled document (the dms module).
 # An overlay module: it adds to whatever practice it is installed in, and it knows nothing about any one practice.
+
+# 3: A page flagged as out of date is archived only through its check, a wiki owner's signed decision.
+# 4: The page check and the procedure review and release are written as states and edges; an obsolete procedure is no
+#  longer brought back into use by hand. Versions approved before keep running as they were.
 
 [module]
 requires_core = "1.0"
 id = "wiki"
 name = "Wiki"
-version = "3"
-changes = """A page flagged as out of date is archived only through its check, a wiki owner's signed decision."""
+version = "4"
+changes = """The wiki is for what the practice knows, not what it controls: SOPs (the Procedure type, its release and
+periodic review, and the SOP approver role) leave the wiki. Controlled documents live in document control (the dms
+module); a page becomes one through the wiki-sop module, which files a PDF of it as a new controlled document.
+Its check is written as the page's states and the edges between them."""
 summary = "Pages of formatted text in spaces and trees, linked to records and work, checked for being out of date."
-shortcuts = ["WikiPage", "Procedure"]
+shortcuts = ["WikiPage"]
 
 [[roles]]
 id = "wiki-owner"
@@ -26,11 +34,6 @@ description = "Writes and changes wiki pages. Give it to everyone who should wri
 id = "wiki-reader"
 name = "Wiki reader"
 description = "Reads the wiki. People read it already; give it to an agent that should answer when mentioned in it."
-
-[[roles]]
-id = "sop-approver"
-name = "SOP approver"
-description = "Releases SOPs for use: reads a revision someone else wrote, and releases it or returns it with why."
 
 [[data_classes]]
 id = "wiki"
@@ -48,9 +51,5 @@ read = ["wiki"]
 write = ["wiki"]
 
 [grants.wiki-owner]
-read = ["wiki"]
-write = ["wiki"]
-
-[grants.sop-approver]
 read = ["wiki"]
 write = ["wiki"]

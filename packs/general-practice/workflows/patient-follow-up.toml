@@ -1,0 +1,168 @@
+id = "patient-follow-up"
+title = "Patient follow-up"
+record = "Task"
+summary = """
+A call to a patient that a physician asked for when reviewing a result: its own record (a follow-up), so the result is
+closed once the call is asked for. A nurse calls; reached, the follow-up is done. Not reached, a physician decides
+what happens instead: they reach the patient themselves, write to them, call their emergency contact, book them in
+(a visit request is started), or decide nothing more is needed. An urgent follow-up (a critical result) is called
+within the hour.
+"""
+
+[trigger]
+starters = ["physician", "nurse"]
+
+# Started on the patient (by a review, or a physician), the run makes the follow-up first.
+[new_record]
+status = "requested"
+intent = "order"
+what = "{{input.what}}"
+because_of = "{{input.because_of}}"
+priority = "{{input.urgency}}"
+note_text = "{{input.note}}"
+asked_by = "Practitioner/{{run.started_by}}"
+authoredOn = "{{run.today}}"
+stage = "to-call"
+
+[[input]]
+name = "what"
+label = "What to do"
+type = "string"
+required = true
+[[input]]
+name = "urgency"
+label = "How soon"
+type = "choice"
+choices = ["routine", "urgent"]
+required = true
+[[input]]
+name = "because_of"
+label = "Because of"
+type = "reference"
+target = ["Observation"]
+[[input]]
+name = "note"
+label = "What the physician said"
+type = "text"
+
+[start]
+to = "to-call"
+label = "Asked for"
+
+[[state]]
+id = "to-call"
+label = "To call"
+tone = "active"
+
+[[state.work]]
+id = "call"
+title = "Call the patient"
+kind = "task"
+role = "nurse"
+due = "1d"
+escalate_to = "physician"
+when = "input.urgency != 'urgent'"
+persons_only = true
+context = ["record:demographics", "record:clinical", "input"]
+instructions = "Call the patient about this. If you cannot reach them, say so: a physician decides what to do next."
+[[state.work.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[state.work]]
+id = "call-now"
+title = "Call the patient now (urgent)"
+kind = "task"
+role = "nurse"
+priority = "urgent"
+due = "1h"
+escalate_to = "physician"
+when = "input.urgency == 'urgent'"
+persons_only = true
+context = ["record:demographics", "record:clinical", "input"]
+instructions = "This is urgent: call the patient now, and send them to the emergency department if the physician asked. If you cannot reach them, say so: a physician decides what to do next."
+[[state.work.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[edge]]
+id = "patient-reached"
+label = "Patient reached"
+from = "to-call"
+to = "done"
+
+[[edge]]
+id = "could-not-reach"
+label = "Could not reach"
+from = "to-call"
+to = "not-reached"
+
+[[state]]
+id = "not-reached"
+label = "Could not reach"
+tone = "attention"
+
+[[state.work]]
+id = "not-reached"
+title = "The patient could not be reached"
+kind = "task"
+role = "physician"
+persons_only = true
+priority = "urgent"
+due = "1h"
+escalate_to = "medical-director"
+context = ["input", "call", "call-now", "record:demographics", "record:clinical"]
+instructions = """A nurse could not reach this patient. Decide what happens now: reach them yourself, write to them,
+call their emergency contact, book them in, or decide nothing more is needed."""
+[[state.work.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[edge]]
+id = "reached-the-patient"
+label = "Reached the patient"
+from = "not-reached"
+to = "done"
+
+[[edge]]
+id = "letter-sent"
+label = "Letter sent"
+from = "not-reached"
+to = "done"
+
+[[edge]]
+id = "called-emergency-contact"
+label = "Called their emergency contact"
+from = "not-reached"
+to = "done"
+
+[[edge]]
+id = "book-a-visit"
+label = "Book a visit"
+from = "not-reached"
+to = "done"
+[[edge.do]]
+id = "book"
+title = "Ask for a visit"
+action = "workflow.start"
+[edge.do.params]
+workflow = "appointment-request"
+record = "{{run.subject}}"
+[edge.do.params.input]
+reason = "{{input.what}}"
+urgency = "{{input.urgency}}"
+because_of = "{{input.because_of}}"
+
+[[edge]]
+id = "no-further-action"
+label = "Nothing more needed"
+from = "not-reached"
+to = "done"
+
+[[state]]
+id = "done"
+label = "Done"
+tone = "done"

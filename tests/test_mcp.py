@@ -383,6 +383,7 @@ def test_an_agent_cannot_sign_or_approve(hub):
 
 GATE = '''id = "mcp-check"
 title = "MCP check"
+record = "Patient"
 summary = "A low-risk check an agent may decide within its criteria."
 [trigger]
 starters = ["intake-coordinator"]
@@ -390,7 +391,11 @@ starters = ["intake-coordinator"]
 name = "kind"
 type = "string"
 required = true
-[[steps]]
+[start]
+to = "checking"
+[[state]]
+id = "checking"
+[[state.work]]
 id = "check"
 title = "Check it"
 kind = "gate"
@@ -399,9 +404,18 @@ signer = "any"
 agent_criteria = "input.kind == 'routine'"
 skill = "%s"
 risk = "low"
-outcomes = ["ok", "not-ok"]
 meaning = "I confirm the check"
 context = ["input.kind"]
+[[edge]]
+id = "ok"
+from = "checking"
+to = "checked"
+[[edge]]
+id = "not-ok"
+from = "checking"
+to = "checked"
+[[state]]
+id = "checked"
 '''
 
 
@@ -410,7 +424,8 @@ def test_an_agents_decision_is_only_a_proposal_its_sponsor_signs(hub):
     role, skill = agent["roles"][0], agent["profile"]["skills"][0]
     p = hub.propose_workflow(M(hub, "jo"), GATE % (role, skill), "a check")
     hub.approve_workflow(M(hub, "rana"), "mcp-check", p["version"])
-    run = hub.engine.start(M(hub, "jo"), "mcp-check", inputs={"kind": "routine"})
+    pat = "Patient/" + hub.records.search("Patient", limit=1)[0]["id"]
+    run = hub.engine.start(M(hub, "jo"), "mcp-check", record=pat, inputs={"kind": "routine"})
     iid = hub.db.items.find_one({"run_id": run["id"], "step_id": "check"})["id"]
     ctx = call(hub, "core", "intake-agent", "read_item", {"item": iid})
     assert not ctx["isError"], ctx

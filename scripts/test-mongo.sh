@@ -12,7 +12,11 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
   # every test makes its own database (dozens of collections and index files): raise the open-file limit,
   # and keep the data in memory, since it is thrown away
   bind="127.0.0.1:$PORT:27017"; [ "$PORT" = auto ] && bind="127.0.0.1::27017"
-  docker run -d --name "$NAME" -p "$bind" --ulimit nofile=1048576:1048576 --rm \
+  # PH_TEST_MONGO_TMPFS=1: the data in memory instead. Commits then wait on no disk (under WSL the disk is what keeps
+  # the shards idle), at the cost of memory the kernel cannot drop. Applies when the container is (re)created.
+  mem=""; [ -n "${PH_TEST_MONGO_TMPFS:-}" ] && mem="--tmpfs /data/db"
+  # shellcheck disable=SC2086
+  docker run -d --name "$NAME" -p "$bind" --ulimit nofile=1048576:1048576 --rm $mem \
     mongo:7.0 --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB "$CACHE" >/dev/null
 fi
 PORT=$(docker port "$NAME" 27017/tcp | head -n 1 | sed 's/.*://')

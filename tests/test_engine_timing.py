@@ -15,8 +15,10 @@ def _utc(*a):
     return datetime(*a, tzinfo=timezone.utc)
 
 
-TOP = 'id = "t"\ntitle = "T"\n'
-STEP = '[[steps]]\nid = "w"\ntitle = "W"\nkind = "wait"\n'
+TOP = 'id = "t"\ntitle = "T"\nrecord = "Patient"\n'
+# a wait as the work of a state of its own (its keys follow), with the edge out of it written first
+STEP = ('[start]\nto = "waiting"\n[[state]]\nid = "done"\n[[edge]]\nid = "waited"\nfrom = "waiting"\nto = "done"\n'
+        '[[state]]\nid = "waiting"\n[[state.work]]\nid = "w"\ntitle = "W"\nkind = "wait"\n')
 HEAD = TOP + STEP
 
 
@@ -34,15 +36,26 @@ def _install(hub, src):
 
 
 def _wf(wid, steps, *, extra="", inputs=""):
-    return (f'id = "{wid}"\ntitle = "Timing check"\n[trigger]\nstarters = ["front-desk"]\n{extra}{inputs}{steps}')
+    return (f'id = "{wid}"\ntitle = "Timing check"\nrecord = "Patient"\n[trigger]\nstarters = ["front-desk"]\n'
+            f'{extra}{inputs}{steps}')
 
 
-TASK = '[[steps]]\nid = "{id}"\ntitle = "{title}"\nkind = "task"\nrole = "front-desk"\nafter = ["{after}"]\n{when}' \
-       '[[steps.fields]]\nname = "done"\ntype = "boolean"\n'
+def _walk(*works):
+    """Each work on a state of its own, in order (the record goes on from one to the next), then done."""
+    out = f'[start]\nto = "at-{works[0][0]}"\n'
+    for i, (wid, body) in enumerate(works):
+        nxt = f"at-{works[i + 1][0]}" if i + 1 < len(works) else "done"
+        out += (f'[[state]]\nid = "at-{wid}"\n[[state.work]]\nid = "{wid}"\ntitle = "{wid.title()}"\n{body}'
+                f'[[edge]]\nid = "{wid}-done"\nfrom = "at-{wid}"\nto = "{nxt}"\n')
+    return out + '[[state]]\nid = "done"\n'
 
 
-def _task(sid, after, when=""):
-    return TASK.format(id=sid, title=sid.title(), after=after, when=f'when = "{when}"\n' if when else "")
+TASK = 'kind = "task"\nrole = "front-desk"\n[[state.work.fields]]\nname = "done"\ntype = "boolean"\n'
+
+
+def _pat(hub):
+    """The patient a run is about: a Patient has no lifecycle, so the run keeps where it is itself."""
+    return "Patient/" + hub.records.search("Patient", limit=1)[0]["id"]
 
 
 def _state(hub, run, sid):
@@ -60,8 +73,7 @@ def test_a_wait_waits_for_one_thing_and_says_how():
     assert any("at is one placeholder" in p for p in _problems(HEAD + 'at = "{{input.x}} - 1 day"\n'))
     assert any("timeout ends a wait on until" in p for p in _problems(HEAD + 'for = "1d"\ntimeout = "2d"\n'))
     assert any("timeout is how long" in p for p in _problems(HEAD + 'until = "false"\ntimeout = "a while"\n'))
-    task = 'id = "t"\ntitle = "T"\n[[steps]]\nid = "a"\ntitle = "A"\nkind = "task"\nrole = "r"\nfor = "1d"\n' \
-           '[[steps.fields]]\nname = "x"\ntype = "string"\n'
+    task = TOP + _walk(("a", 'kind = "task"\nrole = "r"\nfor = "1d"\n[[state.work.fields]]\nname = "x"\ntype = "string"\n'))
     assert any("for is for wait steps" in p for p in _problems(task))
 
 
@@ -109,8 +121,10 @@ def test_each_schedule_fires_once_per_slot():
 
 
 def test_a_schedule_every_15_minutes_starts_one_run_per_stretch(hub):
-    wid = _install(hub, 'id = "pulse"\ntitle = "Pulse"\n[trigger]\nschedule = "every 15m"\n'
-                        '[[steps]]\nid = "w"\ntitle = "Pause"\nkind = "wait"\nfor = "1h"\n')
+    pid = _pat(hub).split("/")[1]
+    wid = _install(hub, 'id = "pulse"\ntitle = "Pulse"\nrecord = "Patient"\n[trigger]\nschedule = "every 15m"\n'
+                        f'for_each = "Patient"\nwhere = "record.id == \'{pid}\'"\n'
+                        + _walk(("w", 'kind = "wait"\nfor = "1h"\n')))
     runs = lambda: hub.db.runs.count({"workflow_id": wid})
     hub.engine.tick(datetime(2026, 11, 23, 10, 1))
     assert runs() == 1
@@ -124,9 +138,8 @@ def test_a_schedule_every_15_minutes_starts_one_run_per_stretch(hub):
 def test_a_wait_for_a_duration_ends_on_the_tick_after_it(hub):
     """A wait for 3 days started at 20:30 in Halifax (00:30 UTC) ends at 00:30 UTC three days on, by the tick."""
     hub.engine._now = _utc(2026, 11, 23, 0, 30)
-    wid = _install(hub, _wf("cool-off", '[[steps]]\nid = "w"\ntitle = "Cool off"\nkind = "wait"\nfor = "3d"\n'
-                            + _task("call", "w")))
-    run = hub.engine.start(M(hub, "jo"), wid)
+    wid = _install(hub, _wf("cool-off", _walk(("w", 'kind = "wait"\nfor = "3d"\n'), ("call", TASK))))
+    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub))
     st = hub.engine.run(run["id"])["steps"]["w"]
     assert st["state"] == "waiting" and st["wake_at"] == "2026-11-26T00:30:00Z"
     hub.engine.tick(_utc(2026, 11, 26, 0, 29))
@@ -140,10 +153,10 @@ def test_a_wait_at_a_moment_reads_the_run_and_the_practices_zone(hub):
     """``at = "{{input.appointment}} - 1d"``: the day before the appointment, at the appointment's wall time in
     Halifax (an appointment at 09:30 on 1 Dec is 13:30 UTC; the wait ends at 13:30 UTC on 30 Nov)."""
     hub.engine._now = _utc(2026, 11, 23, 12, 0)
-    wid = _install(hub, _wf("remind", '[[steps]]\nid = "w"\ntitle = "Until the day before"\nkind = "wait"\n'
-                            'at = "{{input.appointment}} - 1d"\n' + _task("remind", "w"),
+    wid = _install(hub, _wf("remind", _walk(("w", 'kind = "wait"\nat = "{{input.appointment}} - 1d"\n'),
+                                              ("remind", TASK)),
                             inputs='[[input]]\nname = "appointment"\ntype = "datetime"\nrequired = true\n'))
-    run = hub.engine.start(M(hub, "jo"), wid, inputs={"appointment": "2026-12-01T09:30"})
+    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub), inputs={"appointment": "2026-12-01T09:30"})
     assert hub.engine.run(run["id"])["steps"]["w"]["wake_at"] == "2026-11-30T13:30:00Z"
     hub.engine.tick(_utc(2026, 11, 30, 13, 29))
     assert _state(hub, run, "w") == "waiting"
@@ -153,32 +166,37 @@ def test_a_wait_at_a_moment_reads_the_run_and_the_practices_zone(hub):
 
 def test_a_wait_at_a_date_ends_at_its_midnight_in_the_practice(hub):
     hub.engine._now = _utc(2026, 11, 23, 12, 0)
-    wid = _install(hub, _wf("on-day", '[[steps]]\nid = "w"\ntitle = "Until the day"\nkind = "wait"\n'
-                            'at = "{{input.day}} + 2h"\n',
+    wid = _install(hub, _wf("on-day", _walk(("w", 'kind = "wait"\nat = "{{input.day}} + 2h"\n')),
                             inputs='[[input]]\nname = "day"\ntype = "date"\nrequired = true\n'))
-    run = hub.engine.start(M(hub, "jo"), wid, inputs={"day": "2026-12-01"})
+    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub), inputs={"day": "2026-12-01"})
     assert hub.engine.run(run["id"])["steps"]["w"]["wake_at"] == "2026-12-01T06:00:00Z"  # 02:00 AST
 
 
 def test_a_wait_at_a_moment_that_is_not_a_time_fails_and_asks_a_person(hub):
     hub.engine._now = _utc(2026, 11, 23, 12, 0)
-    wid = _install(hub, _wf("bad-at", '[[steps]]\nid = "w"\ntitle = "Until then"\nkind = "wait"\n'
-                            'at = "{{input.note}}"\n', inputs='[[input]]\nname = "note"\ntype = "string"\n'))
-    run = hub.engine.start(M(hub, "jo"), wid, inputs={"note": "after lunch"})
+    wid = _install(hub, _wf("bad-at", _walk(("w", 'kind = "wait"\nat = "{{input.note}}"\n')), inputs='[[input]]\nname = "note"\ntype = "string"\n'))
+    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub), inputs={"note": "after lunch"})
     st = hub.engine.run(run["id"])["steps"]["w"]
     assert st["state"] == "failed" and "not a date or a time" in st["error"]
 
 
 # ------------------------------------------------------------------------------------------------ timeouts
-CHASE = ('[[steps]]\nid = "chase"\ntitle = "Wait for the form"\nkind = "wait"\nuntil = "input.ready == true"\n'
-         'timeout = "2d"\n' + _task("call", "chase", "chase.timed_out") + _task("file", "chase", "not chase.timed_out"))
+# an automated state: the wait, then the record leaves by the first edge whose condition holds
+CHASE = ('[start]\nto = "chasing"\n[[state]]\nid = "chasing"\n[[state.work]]\nid = "chase"\ntitle = "Wait for the form"\n'
+         'kind = "wait"\nuntil = "input.ready == true"\ntimeout = "2d"\n'
+         '[[edge]]\nid = "no-form"\nfrom = "chasing"\nto = "calling"\nwhen = "chase.timed_out"\n'
+         '[[edge]]\nid = "form-in"\nfrom = "chasing"\nto = "filing"\n'
+         '[[state]]\nid = "calling"\n[[state.work]]\nid = "call"\ntitle = "Call"\n' + TASK +
+         '[[edge]]\nid = "called"\nfrom = "calling"\nto = "done"\n'
+         '[[state]]\nid = "filing"\n[[state.work]]\nid = "file"\ntitle = "File"\n' + TASK +
+         '[[edge]]\nid = "filed"\nfrom = "filing"\nto = "done"\n[[state]]\nid = "done"\n')
 READY = '[[input]]\nname = "ready"\ntype = "boolean"\n'
 
 
 def test_a_wait_that_times_out_ends_as_timed_out_and_later_steps_branch_on_it(hub):
     hub.engine._now = _utc(2026, 11, 23, 12, 0)
     wid = _install(hub, _wf("chase", CHASE, inputs=READY))
-    run = hub.engine.start(M(hub, "jo"), wid, inputs={"ready": False})
+    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub), inputs={"ready": False})
     st = hub.engine.run(run["id"])["steps"]["chase"]
     assert st["state"] == "waiting" and st["timeout_at"] == "2026-11-25T12:00:00Z"
     hub.engine.tick(_utc(2026, 11, 25, 11, 59))
@@ -192,7 +210,7 @@ def test_a_wait_that_times_out_ends_as_timed_out_and_later_steps_branch_on_it(hu
 
 def test_a_wait_that_ends_in_time_has_not_timed_out(hub):
     wid = _install(hub, _wf("chase", CHASE, inputs=READY))
-    run = hub.engine.start(M(hub, "jo"), wid, inputs={"ready": True})
+    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub), inputs={"ready": True})
     after = hub.engine.run(run["id"])
     assert after["ctx"]["chase"]["timed_out"] is False
     assert (after["steps"]["call"]["state"], after["steps"]["file"]["state"]) == ("skipped", "active")
@@ -200,14 +218,13 @@ def test_a_wait_that_ends_in_time_has_not_timed_out(hub):
 
 # ------------------------------------------------------------------------------------------------ run deadlines
 DEADLINE = '[deadline]\nwithin = "1d"\nescalate_to = "practice-manager"\n'
-ONE_TASK = ('[[steps]]\nid = "do"\ntitle = "Do it"\nkind = "task"\nrole = "front-desk"\n'
-            '[[steps.fields]]\nname = "done"\ntype = "boolean"\n')
+ONE_TASK = _walk(("do", TASK))
 
 
 def test_a_run_past_its_deadline_is_flagged_once_and_counted(hub):
     hub.engine._now = _utc(2026, 11, 23, 12, 0)
     wid = _install(hub, _wf("sla", ONE_TASK, extra=DEADLINE))
-    run = hub.engine.start(M(hub, "jo"), wid)
+    run = hub.engine.start(M(hub, "jo"), wid, record=_pat(hub))
     row = hub.db.runs.get(run["id"])
     assert row["deadline_at"] == "2026-11-24T12:00:00Z" and row["deadline_missed_at"] is None
     assert run["id"] not in hub.engine.tick(_utc(2026, 11, 24, 11, 59))["deadlines_missed"]
@@ -224,7 +241,7 @@ def test_a_run_finished_late_before_a_tick_still_counts_as_late(hub):
     hub.engine._now = _utc(2026, 11, 23, 12, 0)
     wid = _install(hub, _wf("sla", ONE_TASK, extra=DEADLINE))
     jo = M(hub, "jo")
-    run = hub.engine.start(jo, wid)
+    run = hub.engine.start(jo, wid, record=_pat(hub))
     hub.engine._now = _utc(2026, 11, 25, 12, 0)
     iid = item_for(hub, run, "do")
     hub.engine.claim(jo, iid)
@@ -237,7 +254,7 @@ def test_a_run_done_in_time_is_not_late(hub):
     hub.engine._now = _utc(2026, 11, 23, 12, 0)
     wid = _install(hub, _wf("sla", ONE_TASK, extra=DEADLINE))
     jo = M(hub, "jo")
-    run = hub.engine.start(jo, wid)
+    run = hub.engine.start(jo, wid, record=_pat(hub))
     iid = item_for(hub, run, "do")
     hub.engine.claim(jo, iid)
     hub.engine.complete(jo, iid, {"done": True})
@@ -258,9 +275,9 @@ def test_the_workflow_page_shows_its_schedule_deadline_and_timers_in_words(hub):
     from http.server import ThreadingHTTPServer
     from test_web import call, token
     from practicehub.web.server import App, make_handler
-    src = ('id = "timed"\ntitle = "Timed"\n[trigger]\nstarters = ["front-desk"]\nschedule = "weekly mon,wed,fri 08:00"\n'
-           + DEADLINE + '[[steps]]\nid = "chase"\ntitle = "Wait for the form"\nkind = "wait"\nuntil = "false"\n'
-           'timeout = "2d"\n[[steps]]\nid = "pause"\ntitle = "Pause"\nkind = "wait"\nfor = "3d"\nafter = ["chase"]\n')
+    src = ('id = "timed"\ntitle = "Timed"\nrecord = "Patient"\n[trigger]\nstarters = ["front-desk"]\nschedule = "weekly mon,wed,fri 08:00"\n'
+           + DEADLINE + _walk(("chase", 'kind = "wait"\nuntil = "false"\ntimeout = "2d"\n'),
+                             ("pause", 'kind = "wait"\nfor = "3d"\n')))
     wid = _install(hub, src)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(App(hub, dev=False)))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

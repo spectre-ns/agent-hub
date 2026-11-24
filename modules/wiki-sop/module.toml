@@ -1,0 +1,13 @@
+# Wiki to SOP: a wiki page made a controlled document, when the practice wants what a page says to be approved,
+# released and signed. The page itself stays in the wiki, uncontrolled, and may go on changing; what is controlled is
+# a fixed copy of it (a PDF) filed in document control as a new draft, which document control's own workflow then
+# reviews, approves and keeps in force. The new document links back to the page, so the page's Linked tab names it.
+# An overlay module that builds on the wiki and on document control; it knows nothing about any one practice.
+
+[module]
+requires_core = "1.0"
+id = "wiki-sop"
+name = "Wiki to SOP"
+version = "1"
+summary = "Make a wiki page a controlled document: a PDF of the page, filed in document control as a draft for review."
+requires = ["dms", "wiki"]

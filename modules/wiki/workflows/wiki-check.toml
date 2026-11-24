@@ -5,37 +5,56 @@ record = "WikiPage"
 
 # The WikiPage type names this workflow: a page flagged as out of date is walked by it until it is checked, and its
 # status is this work's position. Each flag is one run; while it is flagged, its check confirms or archives it.
+# Written as the page's states and the edges between them (practicehub/states.py).
 
-[[steps]]
+[start]
+to = "needs-check"
+label = "Flagged as out of date"
+
+[[state]]
+id = "needs-check"
+label = "Needs a check"
+tone = "attention"
+
+[[state.work]]
 id = "check"
 title = "Check the page is current"
 kind = "gate"
 role = "wiki-owner"
 signer = "person"
 meaning = "I have checked this page is current"
-outcomes = ["confirm", "archive"]
 context = ["record:wiki"]
 due = "7d"
 instructions = """Read the page. If something in it is wrong, edit the page first, then confirm it. Archive a page
 that is no longer true and that nobody should follow."""
 
-[[steps]]
+[[edge]]
 id = "confirm"
-title = "Put the page back"
-kind = "automation"
-after = ["check"]
-when = "check.outcome == 'confirm'"
+label = "Confirm it is current"
+from = "needs-check"
+to = "published"
+
+[[edge.do]]
+id = "checked"
+title = "Note when it was checked"
 action = "record.update"
-state = "published"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 checked = "{{run.today}}"
 
-[[steps]]
+[[edge]]
 id = "archive"
-title = "Archive the page"
-kind = "automation"
-after = ["check"]
-when = "check.outcome == 'archive'"
-state = "archived"
+label = "Archive"
+from = "needs-check"
+to = "archived"
+
+[[state]]
+id = "published"
+label = "Published"
+tone = "done"
+
+[[state]]
+id = "archived"
+label = "Archived"
+tone = "done"

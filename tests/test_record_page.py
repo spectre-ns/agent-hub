@@ -8,7 +8,7 @@ import json
 import re
 import urllib.parse
 
-from conftest import M, item_for, visit_run
+from conftest import M, follow_up_run, item_for, visit_run
 from test_rules import _jobs
 from test_web import _ellen, addr, call, follow, passphrase, server, token  # noqa: F401 - server is a fixture
 
@@ -201,6 +201,10 @@ def test_on_the_record_a_decision_leads_its_step_before_the_request_it_is_about(
     step = page.split('class="rw-step"', 1)[1]
     assert "<h2>Decide</h2>" in step and "<h2>The request</h2>" in step
     assert step.index("<h2>Decide</h2>") < step.index("<h2>The request</h2>") < step.index("What this step reads")
+    # the request is a draft throughout; its status says the stop its run keeps, in the workflow's words and tone
+    assert hub.records.read(*run["record"].split("/", 1))["status"] == "draft" and run["at"] == "deciding"
+    head = page.split('class="rw-step"', 1)[0]
+    assert '<span class="loz moved">To decide</span>' in head and ">Draft</span>" not in head
 
 
 def test_a_long_parts_section_shows_the_latest_fifty_and_lists_every_one(hub, server):
@@ -234,7 +238,8 @@ def test_a_decision_on_the_record_is_a_button_per_outcome_each_opening_its_own_d
     page = call(server, "GET", f"/records/{ref}", tok)[1]
     step = page.split('class="rw-step"', 1)[1]
     assert 'name="outcome"' not in step  # no radios on the record: a button each
-    iid = item_for(hub, run, "review-flagged")
+    iid = item_for(hub, run, "review")
+    assert f'href="/items/{iid}/decide?outcome=file-normal' not in step  # an edge not offered: it is abnormal
     for o in ("no-action-needed", "call-patient", "book-visit"):
         assert f'href="/items/{iid}/decide?outcome={o}' in step
     code, book = call(server, "GET", f"/items/{iid}/decide?outcome=book-visit", tok)
@@ -252,6 +257,47 @@ def test_a_decision_on_the_record_is_a_button_per_outcome_each_opening_its_own_d
     words = passphrase(hub, "dr-amara")
     code, _ = call(server, "POST", f"/items/{iid}/decide", tok, form={**form, "passphrase": words})
     assert code in (200, 303) and hub.engine.item(iid)["status"] == "done"
+
+
+def test_a_call_to_the_patient_ends_with_a_button_per_outcome_each_opening_its_dialog(hub, server):
+    """A task leads its step as a decision does: on the record's page, a button for each way it can end (a call:
+    the patient reached, or not), each opening a dialog with the step's fields and what that ending sets going; no
+    answer form trails under what the step reads. Not reached goes to a physician; refused, the dialog comes back
+    with what was typed."""
+    from tests.test_clinic_records import LAB, _pat
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    amara = M(hub, "dr-amara")
+    flagged = item_for(hub, run, "review")
+    hub.engine.decide(amara, flagged, "call-patient", "", seen=hub.engine.shown_digest(amara, flagged))
+    run = follow_up_run(hub, run)  # the call is the follow-up's: a record of its own
+    ref = run["record"]
+    iid = item_for(hub, run, "call")
+    tok = token(hub, "noor")
+    page = call(server, "GET", f"/records/{ref}", tok)[1]
+    step = page.split('class="rw-step"', 1)[1]
+    assert "Your answer" not in page and 'name="notes"' not in step  # the fields are in the dialogs
+    buttons = step.split('class="rw-moves"', 1)[1].split("</div>", 1)[0]
+    assert f'href="/items/{iid}/answer?outcome=patient-reached' in buttons and ">Patient reached…<" in buttons
+    assert f'href="/items/{iid}/answer?outcome=could-not-reach' in buttons and ">Could not reach…<" in buttons
+    assert step.index('class="rw-moves"') < step.index("What this step reads")  # the buttons lead the step
+    code, dlg = call(server, "GET", f"/items/{iid}/answer?outcome=could-not-reach", tok)
+    assert code == 200 and "data-modal-body" in dlg and 'name="notes"' in dlg
+    assert 'name="outcome" value="could-not-reach"' in dlg and "could not be reached" in dlg  # what follows
+    assert call(server, "GET", f"/items/{iid}/answer?outcome=gone-fishing", tok)[0] == 422
+    form = {"outcome": "could-not-reach", "_dialog": "1", "_back": f"/records/{ref}#work"}
+    code, again = call(server, "POST", f"/items/{iid}/complete", tok, form=form)  # notes are required
+    assert code == 422 and "data-modal-body" in again and 'name="outcome" value="could-not-reach"' in again
+    # who does the work it sets going is chosen in the dialog, one person each (here: the physician's follow-up)
+    needs = hub.engine.assignments_needed(hub.engine.run(run["id"]), hub.engine.step_of(hub.engine.item(iid))[2],
+                                          "could-not-reach")
+    assert needs and all(f'name="assign:{n["key"]}"' in dlg for n in needs)
+    form = {**form, **{f"assign:{n['key']}": n["people"][0]["id"] for n in needs}}
+    code, _ = call(server, "POST", f"/items/{iid}/complete", tok, form={**form, "notes": "no answer, voicemail"})
+    assert code == 303 and hub.engine.item(iid)["output"]["outcome"] == "could-not-reach"
+    assert hub.engine.run(run["id"])["steps"]["not-reached"]["state"] == "active"
 
 
 def test_a_part_is_addressed_under_its_owner_layer_by_layer(hub, server):
@@ -366,3 +412,123 @@ def test_moving_a_type_under_another_proposes_a_required_reference_to_its_new_ow
                       form={"type": "Immunization", "op": "owner", "owner": ""})
     assert code == 303, page
     assert "part_of" not in tomllib.loads(hub.definition_versions("type", "Immunization")[0]["source"])
+
+
+def _called_back(hub):
+    """A lab result a physician sent on by "Call the patient": (its ref, the run that walked it)."""
+    from tests.test_clinic_records import LAB, _pat
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    amara = M(hub, "dr-amara")
+    iid = item_for(hub, run, "review")
+    hub.engine.decide(amara, iid, "call-patient", "", seen=hub.engine.shown_digest(amara, iid))
+    return hub.engine.run(run["id"])["record"], run
+
+
+def test_the_history_tells_a_move_once_with_what_it_ran_and_nothing_of_the_edges_not_taken(hub, server):
+    """History tells a move in the record's own "Moved from … to …" row, with what the move ran and started folded
+    under it (``tl-ran``). The automations of edges the record did not take are not lines ("skipped"), nor is the
+    step that moves the record ("Move to Closed" done); an automated state's own work keeps its line."""
+    ref, _ = _called_back(hub)
+    rows = hub.record_timeline(M(hub, "dr-amara"), ref)
+    (moved,) = [r for r in rows if r["text"].startswith("Moved from in review to closed")]
+    titles = [a["title"] for a in moved["ran"] if not a.get("hidden")]
+    assert "Ask a nurse to call the patient" in titles and "Note who reviewed the result, and when" in titles
+    assert "Ask a nurse to call the patient now (critical result)" not in titles  # its own when did not hold
+    assert all(a["state"] == "done" for a in moved["ran"])
+    assert sum(len(a.get("started") or []) for a in moved["ran"]) == 1  # the follow-up Task
+    said = " | ".join(r["text"] for r in rows)
+    assert "'Check the value against its range' done" in said  # the checking state's own automation
+    for gone in ("Tell the patient it is normal", "Tell the patient their result was reviewed", "Ask for a visit",
+                 "Move to Closed", "Page the physicians"):
+        assert gone not in said, gone  # edges not taken, and the move itself, are no lines of their own
+    assert sum(1 for r in rows if r.get("ran")) == 1  # the other moves ran nothing
+    page = call(server, "GET", f"/records/{ref}?tab=history", token(hub, "dr-amara"))[1]
+    timeline = page.split('<ol class="timeline">', 1)[1].split("</ol>", 1)[0]
+    # the move's row, up to the end of its folded list (the list has <li>s of its own)
+    li = timeline.split("Moved from in review to closed", 1)[1].split("</details>", 1)[0]
+    assert '<details class="tl-ran">' in li
+    summary = html.unescape(li.split("<summary>", 1)[1].split("</summary>", 1)[0])
+    assert summary == "3 automations ran, 1 record started"
+    assert "Ask a nurse to call the patient" in html.unescape(li.split("</summary>", 1)[1])
+    assert "skipped" not in html.unescape(timeline).split("Moved from in review to closed", 1)[1]
+    assert not re.search(r'href="/runs/run-', timeline)
+
+
+def test_a_move_summary_counts_what_ran_what_did_not_go_through_and_what_it_started():
+    from practicehub.web.records_pages import ran_summary
+    ran = [{"state": "done", "started": [{"ref": "Task/1"}]}, {"state": "done"}, {"state": "failed"},
+           {"state": "held"}, {"state": "done", "hidden": True, "started": [{"ref": "Task/2"}]}]
+    assert ran_summary(ran) == ("3 automations ran, 1 automation did not go through, 1 automation waiting, "
+                                "1 record started")  # a hidden one counts, but names no record it started
+    assert ran_summary([{"state": "done"}]) == "1 automation ran"
+
+
+def _block(page: str) -> str:
+    """The work section's block for the latest move (``rw-activity``), as the page has it."""
+    return page.split('<section id="activity"', 1)[1].split("</section>", 1)[0]
+
+
+def test_a_closed_result_shows_what_its_last_move_set_going_and_keeps_it_live_while_the_follow_up_is_open(
+        hub, server):
+    """The block in the work section: after "Call the patient", every automation on that edge with its outcome and
+    the follow-up Task as it is now (its link, its state, who holds it), and nothing of the edges not taken. The
+    result is closed, yet the section is there while the Task is open, live (``data-live``) with a Refresh link;
+    once the Task is finished it is settled: no ``data-live``, no Refresh."""
+    from test_web import addr
+    ref, run = _called_back(hub)
+    fu = follow_up_run(hub, run)
+    tok = token(hub, "dr-amara")
+    page = call(server, "GET", f"/records/{ref}", tok)[1]
+    assert page.index('id="work"') < page.index('<section id="activity" class="rw-activity"')
+    block = _block(page)
+    said = html.unescape(block)
+    assert "After “Call the patient”" in said
+    for line in ("Note who reviewed the result, and when", "File the review on the result",
+                 "Ask a nurse to call the patient"):
+        assert f"<b>{line}</b>: " in said, line
+    assert block.count('<span class="ra-word">done</span>') == 3
+    assert "did not go through" not in said and "waiting on" not in said
+    for gone in ("now (critical result)", "Tell the patient", "Ask for a visit", "Page the physicians"):
+        assert gone not in said, gone  # skipped by its own when, or on an edge not taken
+    assert f'href="{addr(hub, fu["record"])}"' in block  # the Task, linked to its own page
+    assert "1 record started" in said
+    assert 'data-live="/records/' + ref + '/activity"' in block and ">Refresh</a>" in block
+    assert "<details class=\"ra-fold\" open>" in block  # still going on: open
+    assert not re.search(r'href="/runs/', block)
+    hub.db.runs.update({"_id": fu["id"]}, {"$set": {"status": "completed"}})  # the call made and the Task done
+    block = _block(call(server, "GET", f"/records/{ref}", tok)[1])
+    assert "data-live" not in block and "Refresh" not in block
+    assert ">Done<" in block and "Ask a nurse to call the patient" in html.unescape(block)
+
+
+def test_a_record_started_by_a_move_names_that_move_and_is_listed_on_the_record_that_made_it(hub, server):
+    """``workflow.start`` spawns are family: the lab result lists the follow-up Task under "Started from this…"
+    (beside ``record.child`` sub-records), and the Task says "Started by “Call the patient” on <the result>", the
+    result linked. Neither page links work about a record to a run's own page."""
+    from test_web import addr
+    ref, run = _called_back(hub)
+    fu = follow_up_run(hub, run)
+    tok = token(hub, "noor")
+    lab = call(server, "GET", f"/records/{ref}", tok)[1]
+    kids = lab.split('class="children started-from"', 1)[1].split("</section>", 1)[0]
+    assert f'href="{addr(hub, fu["record"])}"' in kids
+    code, task = call(server, "GET", f"/records/{fu['record']}", tok)
+    assert code == 200
+    by = html.unescape(task.split('class="wp-parent wp-started-by"', 1)[1].split("</p>", 1)[0])
+    assert "Started by" in by and "“Call the patient”" in by and f'href="{addr(hub, ref)}"' in by
+    for page in (lab, task, call(server, "GET", f"/records/{ref}/activity", tok)[1]):
+        assert not re.search(r'href="/runs/run-', page)
+
+
+def test_a_move_that_ran_nothing_shows_no_block(hub, server):
+    """A result still in its sort has moved only by the lab's filing, which ran nothing on its edges: no block, and
+    the work section is as it was."""
+    from tests.test_clinic_records import LAB, _pat
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    ref = hub.engine.run(run["id"])["record"]
+    page = call(server, "GET", f"/records/{ref}", token(hub, "dr-amara"))[1]
+    assert 'class="rw-activity"' not in page

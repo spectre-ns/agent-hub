@@ -93,8 +93,49 @@ class MovesMixin:
         return self.state_move_refusal(rt, ref, t, rec, None)
 
     # ------------------------------------------------------------------ the move
+    def move_assignments(self, ref: str, to: str) -> list[dict]:
+        """The people's work a move of the record to ``to`` sets going, each to be given to one person by whoever moves
+        it (``Engine.assignable``): the work waiting in ``to`` in the record's own workflow and in the workflows of
+        the runs walking it now, whose condition holds of the record as it would be there."""
+        rtype, _, rid = ref.partition("/")
+        rt = self._type(rtype)
+        rec = self.records.read(rtype, rid)
+        if not rt.lifecycle or not rec:
+            return []
+        runs = self.engine.runs(record=ref, limit=20)
+        wids = [w for w in [self.record_workflow(rt), *(r["workflow_id"] for r in runs if r["status"] == "running")] if w]
+        there = schema.put(dict(rec), rt.lifecycle["path"], to)
+        out, seen = [], set()
+        for wid in dict.fromkeys(wids):
+            try:
+                wf, _ = self.workflow(wid)
+            except Exception:  # noqa: BLE001 - a workflow not there (any more): nothing to ask about
+                continue
+            last = next((r for r in runs if r["workflow_id"] == wid), None)
+            ctx = {**((last or {}).get("ctx") or {}), "record": there}
+            for s in wf.steps:
+                if s.at_state != to or (s.when and not self.engine._holds_quietly(s.when, ctx)):
+                    continue
+                n = self.engine.assignable(wf.id, wf.title, s)
+                if n and n["key"] not in seen:
+                    seen.add(n["key"])
+                    out.append(n)
+        return out
+
     def move_record(self, actor: dict, ref: str, to: str, values: dict | None = None, signature=None, *,
-                    comment: str | None = None, expected_version: str | None = None) -> dict:
+                    comment: str | None = None, expected_version: str | None = None, assign: dict | None = None,
+                    assign_required: bool = False) -> dict:
+        """``assign``: who does each piece of people's work the move sets going (``move_assignments``); with
+        ``assign_required`` (a page's move) every one must be chosen. Then ``_move_record``."""
+        picks = {}
+        if assign is not None or assign_required:
+            picks = self.engine.pick_problems(self.move_assignments(ref, to), assign, required=assign_required)
+        with self.engine.holding(picks):
+            return self._move_record(actor, ref, to, values, signature, comment=comment,
+                                     expected_version=expected_version)
+
+    def _move_record(self, actor: dict, ref: str, to: str, values: dict | None = None, signature=None, *,
+                     comment: str | None = None, expected_version: str | None = None) -> dict:
         """Move the record to ``to`` through its lifecycle transition, writing ``values`` (the fields the move asks
         for) and the state in one transaction; refused, in words, unless ``actor`` may make that move now
         (``move_refusal``) and what it requires is filled in. ``signature``: for a transition with ``sign``, the
@@ -114,7 +155,7 @@ class MovesMixin:
                 raise NotFound(f"there is no {ref}")
             old = schema.first(rec, rt.lifecycle["path"])
             t = rt.transition(old, to)
-            if t is None or old == to:
+            if t is None or old == to or t.get("entry"):  # a workflow's entry is where a run puts it, not a person
                 raise Invalid(f"a {rt.label.lower()} does not move from {rt.state_label(old).lower() or 'nowhere'} "
                               f"to {rt.state_label(to).lower()}")
             extra = [k for k in values if k not in t["fields"]]
@@ -183,7 +224,8 @@ class MovesMixin:
         raw = self.records.read(rtype, rid)
         cur = schema.first(raw, rt.lifecycle["path"])
         opened = self.open_step(rt, ref) or False
-        exits = [t for t in rt.lifecycle["transition"] if (cur in t["from"] or "*" in t["from"]) and t["to"] != cur]
+        exits = [t for t in rt.lifecycle["transition"] if (cur in t["from"] or "*" in t["from"]) and t["to"] != cur
+                 and not t.get("entry")]  # a workflow starting on the record again is no way on from here
         made = opened[2].state if opened and opened[2].kind == "task" and opened[2].state else None
         forward = made or next((t["to"] for t in exits if "*" not in t["from"] and t["by"] != "workflow"), None)
         may, may_not = [], []
@@ -201,16 +243,18 @@ class MovesMixin:
                     asks.append({**{k: v for k, v in f.items() if k not in ("path",)}, "value": schema.first(rec, f["path"]),
                                  "required": f.get("required") is True or n in t["require"]})
             may.append({**entry, "asks": asks, "requires": [rt.field(n)["label"] for n in t["require"]],
+                        "assign": self.move_assignments(ref, t["to"]),
                         "sign": t.get("sign"), "comment": t.get("comment", False), "forward": t["to"] == forward,
                         **({"does": opened[2].title} if opened and self.step_makes_move(opened[2], t["to"]) else {})})
         return {"state": cur, "state_label": rt.state_label(cur), "may": may, "may_not": may_not}
 
     # ------------------------------------------------------------------ the record's history in words
-    def record_timeline(self, viewer: dict, ref: str) -> list[dict]:
+    def record_timeline(self, viewer: dict, ref: str, *, activity: list[dict] | None = None) -> list[dict]:
         """The record's history as one list in words, oldest first: its edits (which fields changed), its moves (who,
         when, the values the move wrote, the signature it carried) and the steps of the runs about it (started, done
         by whom, decided, skipped, waiting). What the viewer may not read is folded, one line per hidden stretch
-        ("3 clinical steps"). Each entry is ``{"at", "who", "text"}`` (``hidden``: the count it folds)."""
+        ("3 clinical steps"). Each entry is ``{"at", "who", "text"}`` (``hidden``: the count it folds; ``ran``: what a
+        move ran). ``activity``: ``record_activity(viewer, ref)`` when the caller has it already."""
         from .export import _item_words
         rtype, _, rid = ref.partition("/")
         rt = self._type(rtype)
@@ -286,6 +330,8 @@ class MovesMixin:
             if v.get("comment") and hide is None:
                 text += f": {v['comment']}"
             row = {"at": v["at"], "who": who(v["actor"]), "text": text}
+            if mv:  # a move a run made merges with the run's own account of it (``_move_rows``)
+                row["_move"] = (mv.get("run_id"), mv["data"].get("to"))
             if hide:
                 row = {"at": v["at"], "who": "", "text": "", "fold": ("change", hide)}
             rows.append((e["seq"], row))
@@ -295,12 +341,45 @@ class MovesMixin:
                                     "text": f"Signed {(e['data'].get('signed') or {}).get('meaning')!r} by "
                                             f"{who(e['actor'])}"}))
         rows += self._run_rows(viewer, view, ref, who)
+        rows += self._move_rows(viewer, rt, ref, rows, who, activity)
         rows.sort(key=lambda r: r[0])
+        for _, r in rows:
+            r.pop("_move", None)
         return _fold([r for _, r in rows])
 
     def _classes_of(self, rt, fields) -> str:
         classes = sorted({f.get("data_class") or rt.data_class for f in fields})
         return " and ".join(classes)
+
+    def _move_rows(self, viewer, rt, ref: str, rows: list, who, activity: list[dict] | None = None
+                   ) -> list[tuple[int, dict]]:
+        """Each move along a workflow's edge (``Hub.record_activity``) as a row carrying ``ran``, what it ran and
+        started. A move is told in the record's own "Moved from X to Y" row when that row is the same run's move to the
+        same state (or a person's move by hand, which the run then follows); otherwise, a move to a stop the record's
+        state field has no value for, or one that ran something, is a row of its own: "Moved on by “<edge>”"."""
+        out: list[tuple[int, dict]] = []
+        moved = [(seq, r) for seq, r in rows if r.get("_move")]
+        states = set(rt.states()) if rt.lifecycle else set()
+        for m in (self.record_activity(viewer, ref) if activity is None else activity):
+            ran = m.get("ran") or []
+            run_id, to, seq = m.get("run"), m.get("to"), m.get("seq") or 0
+            same = [(s, r) for s, r in moved if r["_move"][1] == to and r["_move"][0] in (run_id, None)
+                    and "ran" not in r]
+            if same:
+                _, row = min(same, key=lambda x: abs(x[0] - seq))
+                if ran:
+                    row["ran"] = ran
+                continue
+            if not ran and to in states:
+                continue  # the record was already there (its first state): nothing to tell
+            label = m.get("label") or rt.state_label(to)
+            if any(a.get("state") in ("failed", "held") for a in ran):
+                text = f"Moving on by “{label}” did not go through"
+            else:
+                text = f"Moved on by “{label}”"
+            out.append((seq, {"at": m.get("at"), "who": who(m.get("who")) if m.get("after_person", True) else "",
+                              "text": text, **({"ran": ran} if ran else {})}))
+        return out
 
     def _run_rows(self, viewer, view, ref: str, who) -> list[tuple[int, dict]]:
         runs = {r["id"]: r for r in self.db.runs.find({"record": ref})}
@@ -331,7 +410,9 @@ class MovesMixin:
                     step = None
             if step is None:
                 continue
-            if act == "action.ran" and not step.state:
+            if step.on_edge and not step.at_state:
+                continue  # an edge's automation: the move it belongs to tells it (``_move_rows``)
+            if act == "action.ran" and not step.state and not step.at_state:
                 continue  # an automation's inner workings: its move shows as the record's own
             ok, missing = view.step_visible(wf, sid)
             if not ok:

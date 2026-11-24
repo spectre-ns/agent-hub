@@ -23,6 +23,20 @@ SIMPLE, NESTED, SCALAR = schema.FORM_SIMPLE, schema.FORM_NESTED, schema.SCALAR  
 INLINE = {"application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain"}
 
 
+def ran_summary(ran: list[dict]) -> str:
+    """What a move ran, in one line: "3 automations ran, 1 record started" (and what did not go through or waits)."""
+    n = lambda k, one, many: f"{k} {one if k == 1 else many}"
+    done = sum(1 for a in ran if a.get("state") == "done")
+    failed = sum(1 for a in ran if a.get("state") == "failed")
+    held = sum(1 for a in ran if a.get("state") == "held")
+    started = sum(len(a.get("started") or []) for a in ran if not a.get("hidden"))
+    parts = ([n(done, "automation", "automations") + " ran"] if done else []) \
+        + ([n(failed, "automation", "automations") + " did not go through"] if failed else []) \
+        + ([n(held, "automation", "automations") + " waiting"] if held else []) \
+        + ([n(started, "record", "records") + " started"] if started else [])
+    return ", ".join(parts) or "Nothing ran"
+
+
 class Download(tuple):
     """(headers, body): bytes a route returns as they are, on a page or on the API."""
 
@@ -101,6 +115,7 @@ class RecordPages:
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/export", self.page_export_list)  # before a record's own page
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/export", self.page_export_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)", self.page_record)
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/activity", self.page_record_activity)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>edit|move|sign)", self.post_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/move", self.page_move)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/attach", self.post_attach)
@@ -928,6 +943,7 @@ class RecordPages:
                    f'<p class="part-of">Part of <a href="{e(href)}">{e(self.hub.short_title(o))}</a></p>')
             cancel, back = e(href), ""
             crumbs = [(href, self.hub.short_title(o)), (f"{href}#part-{rtype}", rt.plural), (None, "Add")]
+        seed = self._seed_from_links(me, rt, seed, kept)
         start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
         inputs = self._inputs(rt, seed, me, "create", skip=skip)
         verb = "Add" if rt.part_of else "Create"
@@ -936,6 +952,45 @@ class RecordPages:
                 f'<div class="filters"><button class="primary">{verb}</button>'
                 f'<a class="btn secondary" href="{cancel}" data-modal-close>Cancel</a>{back}</div></form></div>')
         return self.layout(req, f"{verb} {a_an(self._lower(rt.label))}", body, crumbs=crumbs)
+
+    def _seed_from_links(self, me, rt, seed: dict | None, kept: dict | None) -> dict | None:
+        """What a new record's links already say, filled in: a link left empty (the note's patient) takes what a record
+        it already links to (its visit) holds in the field of the same name, when that is a record the field takes.
+        Only what the member may read; nothing typed is replaced."""
+        # its author (a link with rel = "author" to the practice's members): whoever is writing it, when a person
+        members = self.hub.member_types()
+        for f in rt.fields:
+            if (f["type"] != "reference" or f.get("rel") != "author" or me.get("kind") != "person"
+                    or (kept or {}).get(f["path"])):
+                continue
+            kinds = [t for t in self.hub.concrete(f["target"]) if t in members]
+            path = f["path"].removesuffix(".*")
+            if not kinds or (seed and schema.first(seed, path)) or not SIMPLE.fullmatch(path):
+                continue
+            mine = {"reference": f"{kinds[0]}/{me['id']}"}
+            seed = schema.put({"resourceType": rt.id, **(seed or {})}, path,
+                              [mine] if f["path"].endswith(".*") else mine)
+        if not seed:
+            return seed
+        refs = [f for f in rt.fields if f["type"] == "reference" and not f["path"].endswith(".*")]
+        linked = [str((schema.first(seed, f["path"]) or {}).get("reference") or "") for f in refs
+                  if isinstance(schema.first(seed, f["path"]), dict)]
+        for f in refs:
+            if schema.first(seed, f["path"]) or (kept or {}).get(f["path"]):
+                continue
+            for ref in linked:
+                if "/" not in ref:
+                    continue
+                try:
+                    other = self.hub.read_record(me, ref)
+                except HubError:
+                    continue
+                got = schema.first(other, f["path"])
+                got = got.get("reference") if isinstance(got, dict) else None
+                if isinstance(got, str) and got.split("/", 1)[0] in self.hub.concrete(f["target"]):
+                    seed = schema.put(seed, f["path"], {"reference": got})
+                    break
+        return seed
 
     def _owner_pick(self, req, rt, of, problem=None) -> str:
         """Adding a part with no owner named: which one, found as a reference picker finds it, then the form."""
@@ -1433,6 +1488,27 @@ class RecordPages:
                              else self.record_href(got["subject"]))
 
     # ------------------------------------------------------------------------------------------ one record
+    def page_record_activity(self, req, rtype, rid):
+        """The work section's block alone (``RecordWork._activity_html``), for the page's script to fetch while
+        something its latest move set going is still open: read as the page is (the same check, and a view on the
+        track as opening it is, once per visit), with an ETag of its content and 304 when it has not changed. A
+        record with no such block answers an empty ``#activity``, which stops the script."""
+        import hashlib
+        from .server import Rendered
+        me, hub = req["me"], self.hub
+        ref = f"{rtype}/{rid}"
+        rt = hub.record_type(rtype)
+        if not rt or rtype in hub.member_types():
+            raise Invalid(f"there is no record type {rtype}")
+        hub.read_record(me, ref)  # refuses as the page does
+        url = e(self.record_href(ref)) if rt.part_of else f"/records/{e(rtype)}/{e(rid)}"
+        body = self._activity_html(me, ref, url) or '<div id="activity"></div>'
+        tag = '"' + hashlib.sha256(body.encode()).hexdigest()[:32] + '"'
+        asked = (req["headers"].get("if-none-match") or "").strip()
+        if asked and tag in [t.strip().removeprefix("W/") for t in asked.split(",")]:
+            raise Rendered(304, "", headers={"ETag": tag})  # a 304 names the version it confirms
+        return ({"Content-Type": "text/html; charset=utf-8", "ETag": tag}, body.encode())  # the script sends it back
+
     def page_record(self, req, rtype, rid, kept: dict | None = None, error: Exception | None = None):
         me, hub = req["me"], self.hub
         if rtype in hub.member_types():
@@ -1955,12 +2031,15 @@ class RecordPages:
         quiet line. Each version, in detail, is folded below."""
         versions = self.hub.record_history(me, ref)
         rows = []
-        for t in self.hub.record_timeline(me, ref):
+        for t in self.hub.record_timeline(me, ref, activity=self.activity_of(me, ref)):
             if t.get("hidden"):
                 rows.append(f'<li class="tl-hidden muted">{e(t["text"])}, not shown to you</li>')
                 continue
+            ran = t.get("ran") or []  # a move: what it ran and started, the started records as they are now
             rows.append(f'<li><span class="tl-at muted">{self._at(t["at"])}</span> {e(t["text"])}'
                         + (f' <span class="muted">— {e(t["who"])}</span>' if t.get("who") and t["who"] not in t["text"] else "")
+                        + (f'<details class="tl-ran"><summary>{e(ran_summary(ran))}</summary>'
+                           f'{self._ran_list_html(me, ran)}</details>' if ran else "")
                         + "</li>")
         out = (f'<ol class="timeline">{"".join(rows)}</ol>' if rows else "<p class='muted'>Nothing yet.</p>")
         out += (f'<details class="tl-versions"><summary>Each version, in detail</summary>'
@@ -2046,7 +2125,7 @@ class RecordPages:
                 f'<input type="hidden" name="to" value="{e(to)}"><input type="hidden" name="_version" '
                 f'value="{ver}"><input type="hidden" name="_screen" value="1">'
                 + (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "")
-                + f'{self._req_note(inputs)}{need}{inputs}{comment}{sign}<div class="filters">'
+                + f'{self._req_note(inputs)}{need}{inputs}{self._assign_selects(m.get("assign") or [], form or {})}{comment}{sign}<div class="filters">'
                 f'<button class="primary">{e(m["label"])}</button>'
                 f'<a class="btn secondary" href="{e(back or url)}" data-modal-close>Cancel</a></div>'
                 f'</form></div>')
@@ -2098,7 +2177,8 @@ class RecordPages:
         st, to = schema.first(rec, rt.lifecycle["path"]), f.get("to", "")
         t = rt.transition(st, to)
         asked = t["fields"] if t else []
-        screened = bool(t and (asked or t["comment"] or t.get("sign") or t["require"]))
+        needed = hub.move_assignments(ref, to) if t else []  # who does the work it sets going: chosen on its screen
+        screened = bool(t and (asked or t["comment"] or t.get("sign") or t["require"] or needed))
         back = self.safe_back(f.get("_back"))  # from a board: back to it
         if f.get("_ask") and screened and t["by"] != "workflow":
             # a board's Move to…: a move that asks for something shows its screen first
@@ -2120,9 +2200,11 @@ class RecordPages:
                 self._confirm_signer(req, f)
                 signature = {"meaning": t["sign"], "comment": str(f.get("_comment") or ""),
                              "seen": f.get("_seen") or None}
+            assign = {k[len("assign:"):]: (v[-1] if isinstance(v, list) else v) for k, v in f.items()
+                      if k.startswith("assign:")}
             hub.move_record(me, ref, to, values, signature,
                             comment=(f.get("_comment") or None) if t and t["comment"] else None,
-                            expected_version=f.get("_version") or None)
+                            expected_version=f.get("_version") or None, assign=assign, assign_required=True)
         except (Denied, Invalid) as exc:
             code = 409 if isinstance(exc, Conflict) else 403 if isinstance(exc, Denied) else 422
             if f.get("_screen") or screened:  # the move's screen again, saying why, typed kept

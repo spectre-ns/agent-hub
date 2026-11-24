@@ -3,9 +3,9 @@ title = "Appointment request"
 record = "Encounter"
 summary = """
 One visit, from open to closed: the visit record is this workflow's, and its status is where the work is. Asked for
-(requested), it is booked (planned), checked in (arrived), seen (in progress), documented and signed, and completed
-(finished); or it is cancelled, or the patient does not come (noshow). A visit booked straight on the calendar starts
-here already booked; a walk-in starts checked in.
+(requested), it is read by a nurse or called back, booked (planned), checked in (arrived), seen (in progress), its
+note drafted, edited and signed, and completed (finished); or it is cancelled, or the patient does not come (noshow).
+A visit booked straight on the calendar starts here already booked; a walk-in starts checked in.
 
 A patient asks for an appointment. A slot is proposed from the calendar and booked, and the patient is told.
 Code screens the patient's reason for red flags first, as it does every patient message: a red flag, a warning sign
@@ -24,13 +24,17 @@ patient back: no reason goes unread because the screen failed.
 
 Once the patient is checked in and the visit started on the visit's own page, the physician ends it with the
 transcript. The scribe agent drafts the note; the physician edits it and signs it, and only then is the visit completed
-and the note filed in the chart. The visit is coded for billing from the physician's diagnosis codes, and routine
-claims are submitted; anything else waits for billing staff. A patient marked as a no-show is told, under the
+and the note filed in the chart. Signing also makes the visit's charge, a record of its own that billing codes from
+the physician's diagnosis codes and submits (the visit-claim workflow): the visit does not wait for it. Routine
+claims are submitted by the billing agent; anything else waits for billing staff. A patient marked as a no-show is told, under the
 practice's missed-appointment policy, and so is a booking cancelled with less than a day's notice: a visit missed or
 cancelled late is the visit's own work, not a workflow of its own.
 
 A visit filed after the fact (a call, a visit at home) is a visit made under way (in progress): it is documented,
 signed, completed and billed like any other.
+
+Written as the visit's states (where it waits, and the work done there) and the edges between them (what the person
+working it chose, with the automations that run on the way): see practicehub/states.py.
 """
 
 [trigger]
@@ -39,7 +43,7 @@ event = "appointment.requested"
 one_open_per = "subject"   # the same submission twice (a double press, two people taking one call) starts one:
 one_open_same = ["input.reason"]   # ...the same reason...
 one_open_within = "10m"   # ...a moment ago. Any other request is a new concern: its own visit, always screened
-one_open_while = "record.status == 'requested'"   # ...and not booked yet
+one_open_while = "record.status in ['requested', 'reading', 'callback', 'not-reached']"   # ...and not booked yet
 
 # Started on the patient (the portal, the front desk taking a call), the run asks for the visit: it is made at once,
 # requested, on the patient's chart, and this run works it from then on.
@@ -94,180 +98,139 @@ name = "preferences"
 type = "string"
 help = "days, times or physician the patient prefers"
 
-# Asked for: screened, read and booked. A visit that starts booked (the calendar) or checked in (a walk-in) skips these.
-[[steps]]
+
+# ---------------------------------------------------------------------------------------------------------------
+# Asked for: screened by code for red flags, and the patient told at once what to do in an emergency. A request marked
+# urgent, a red flag or a reason the screen is unsure of goes to a nurse to call back; one plainly about paperwork or a
+# check-up goes to the scheduler (or, from a slot the front desk picked, is booked in it at once); anything else is
+# read by a nurse first. If the screen cannot run, a nurse calls back: no reason goes unread because the screen failed.
+# A visit that starts booked (the calendar), checked in (a walk-in) or under way (filed after the fact) is not screened.
+[start]
+to = "reading"
+label = "Asked for"
+
+[[start.do]]
+id = "booked-already"
+title = "Booked on the calendar: wait for the visit"
+when = "run.start_state == 'planned'"
+to = "planned"
+
+[[start.do]]
+id = "walked-in"
+title = "A walk-in: wait for the visit to start"
+when = "run.start_state == 'arrived'"
+to = "arrived"
+
+[[start.do]]
+id = "under-way"
+title = "Filed under way: end and document it"
+when = "run.start_state == 'in-progress'"
+to = "in-progress"
+
+[[start.do]]
 id = "screen"
 title = "Screen the reason for red flags"
-kind = "automation"
 when = "run.start_state == 'requested'"
 block = "patient-message-screen"
-[steps.params]
+on_fail = "callback"   # fail closed: a nurse calls the patient back
+[start.do.params]
 question = "{{input.reason}}"
 
-[[steps]]
+[[start.do]]
 id = "safety-net"
 title = "Tell the patient what to do in an emergency"
-kind = "automation"
-after = ["screen"]
-when = "input.slot == null or screen.red_flag == true or screen.unsure == true"
+when = "run.start_state == 'requested' and (input.slot == null or screen.red_flag == true or screen.unsure == true)"
 action = "message.send"
-[steps.params]
+[start.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "We have your request"
 body = "{{screen.advice}}"
 
-[[steps]]
-id = "nurse-call"
-title = "Call the patient back (urgent request)"
-kind = "task"
-role = "nurse"
-priority = "urgent"
-due = "1h"
-escalate_to = "physician"
-# not after the screen, so that a screen that fails (screen is empty) still reaches a nurse; the screen, the first
-# step, has always run or failed by the time this is reached
-when = "run.start_state == 'requested' and (screen == null or input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true)"
-persons_only = true
-context = ["input.reason", "input.kind", "input.slot", "screen", "record:demographics", "record:clinical"]
-instructions = """The patient's request was marked urgent, or their words may describe an emergency (see the screen),
-or the red-flag screen could not run (no screen is shown): read the reason yourself.
-Call them now. Advise 911 or the emergency department if needed, or tick book to book them in yourself (you pick the
-slot next): no slot is proposed automatically for a request that comes to you, and a slot the front desk picked
-(input.slot) was not booked. Left unbooked, the request is closed. If you cannot reach them,
-leave reached unticked: a physician decides what to do next."""
-[[steps.fields]]
-name = "reached"
-type = "boolean"
-[[steps.fields]]
-name = "book"
-label = "Book a visit"
-type = "boolean"
-help = "you pick the slot next; unticked, the request is closed without a visit"
-[[steps.fields]]
-name = "advice"
-type = "text"
-required = true
-
-[[steps]]
-id = "not-reached"
-title = "The nurse could not reach the patient"
-kind = "task"
-role = "physician"
-after = ["nurse-call"]
-when = "nurse-call.advice != null and nurse-call.reached != true"
-persons_only = true
-priority = "urgent"
-due = "1h"
-escalate_to = "medical-director"
-context = ["input.reason", "screen", "nurse-call", "record:demographics", "record:clinical"]
-instructions = """A nurse tried to call this patient about an urgent request and could not reach them. Decide what
-happens now: try again, call their emergency contact, or ask for a welfare check. Write down what you did."""
-[[steps.fields]]
-name = "action"
-type = "choice"
-choices = ["reached-the-patient", "called-emergency-contact", "welfare-check", "no-further-action"]
-required = true
-[[steps.fields]]
-name = "notes"
-type = "text"
-required = true
-
-[[steps]]
-id = "triage"
-title = "Read the reason before a slot is booked"
-kind = "task"
-role = "nurse"
-due = "4h"
-escalate_to = "physician"
-after = ["screen"]
-when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine != true"
-persons_only = true
-context = ["input.reason", "input.urgency", "input.slot", "screen", "record:demographics", "record:clinical"]
-instructions = """The patient's reason is not plainly paperwork or a check-up, so no slot is booked until a nurse has
-read it. Decide: an ordinary slot is fine (the slot the front desk picked, if it picked one, is booked; otherwise one
-is proposed and booked), or they need to be seen sooner (the scheduler proposes a sooner slot), or spoken to first,
-in which case call them and book them yourself."""
-[[steps.fields]]
-name = "decision"
-type = "choice"
-choices = ["book-a-slot", "book-it-soon", "i-will-call-and-book"]
-required = true
-[[steps.fields]]
-name = "note_for_scheduler"
-type = "string"
-help = "what the scheduler needs to know (length of visit, which physician); no clinical details"
-
-[[steps]]
-id = "propose"
-title = "Propose a slot"
-kind = "task"
-role = "scheduler"
-due = "1d"
-escalate_to = "front-desk"
-skill = "slot-proposal"
-after = ["screen", "triage"]
-when = "input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and ((input.slot == null and (screen.routine == true or triage.decision == 'book-a-slot')) or triage.decision == 'book-it-soon')"
-context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "screen.admin_reason",
-           "triage.decision", "triage.note_for_scheduler"]
-
-# A request a nurse called about, or said she would call and book: she picks the slot herself.
-[[steps]]
-id = "nurse-book"
-title = "Book the visit"
-kind = "task"
-role = "nurse"
-due = "1d"
-escalate_to = "physician"
-skill = "slot-proposal"
-after = ["nurse-call", "triage"]
-when = "nurse-call.book == true or triage.decision == 'i-will-call-and-book'"
-persons_only = true
-context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "input.reason"]
-
-# A request the nurse dealt with by phone and did not book (or the physician, for a patient nobody reached) is closed.
-# Not booked, the request closes. Handled on the phone (the nurse, or the physician after her, reached the patient),
-# it is a contact that took place: completed, not cancelled. Nobody reached, it is cancelled.
-[[steps]]
-id = "handled-by-phone"
-title = "Close the request: handled on the phone"
-kind = "automation"
-after = ["nurse-call", "not-reached"]
-when = "nurse-call.book != true and (nurse-call.reached == true or not-reached.action == 'reached-the-patient')"
-state = "finished"
-
-[[steps]]
-id = "not-booked"
-title = "Close the request without a visit"
-kind = "automation"
-after = ["nurse-call", "not-reached"]
-when = "nurse-call.book != true and nurse-call.reached != true and not-reached.action != 'reached-the-patient'"
-state = "cancelled"
-
-[[steps]]
-id = "book"
-title = "Book the visit"
-kind = "automation"
-after = ["propose", "nurse-book"]
+# from a slot the front desk picked: booked at once only for a plainly routine reason
+[[start.do]]
+id = "book-chosen"
+title = "Book the slot the front desk picked"
+when = "run.start_state == 'requested' and input.slot != null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine == true"
 action = "booking.book"          # the core's: written through the Booking fields a visit keeps
-[steps.params]
+[start.do.params]
 ref = "{{run.record}}"           # the visit asked for: it is booked, the same record
-slot = "{{propose.slot}}{{nurse-book.slot}}"
+slot = "{{input.slot}}"
 subject = "{{run.subject}}"
 reason = "{{input.reason}}"
 kind = "{{input.kind}}"
 priority = "{{input.urgency}}"
 defaults = { status = "planned", class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" } }   # a booked visit
 
-[[steps]]
-id = "book-chosen"
+[[start.do]]
+id = "confirm-chosen"
+title = "Confirm the booking with the patient"
+when = "book-chosen != null"
+action = "message.send"
+[start.do.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your appointment"
+body = "You are booked on {{book-chosen.when}} with {{book-chosen.member_name}} at Harbourview Family Medicine. Reply to change or cancel."
+
+[[start.do]]
+id = "booked-at-once"
+title = "Booked: wait for the visit"
+when = "book-chosen.reference != null"
+to = "planned"
+
+[[start.do]]
+id = "to-book"
+title = "Have a slot proposed (paperwork or a check-up)"
+when = "run.start_state == 'requested' and input.slot == null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and screen.routine == true"
+to = "requested"
+
+# last, so an urgent request or a red flag wins over anything else the screen said
+[[start.do]]
+id = "call-back"
+title = "Have a nurse call back (urgent, a red flag, or unsure)"
+when = "run.start_state == 'requested' and (input.urgency == 'urgent' or screen.red_flag == true or screen.unsure == true)"
+to = "callback"
+
+# --- any other reason: a nurse reads it before a slot is booked -------------------------------------------------
+
+[[state]]
+id = "reading"
+label = "Being read"
+tone = "waiting"
+help = "a nurse reads the reason before a slot is booked"
+
+[[state.work]]
+id = "triage"
+title = "Read the reason before a slot is booked"
+kind = "task"
+role = "nurse"
+due = "4h"
+escalate_to = "physician"
+persons_only = true
+context = ["input.reason", "input.urgency", "input.slot", "screen", "record:demographics", "record:clinical"]
+instructions = """The patient's reason is not plainly paperwork or a check-up, so no slot is booked until a nurse has
+read it. Decide: an ordinary slot is fine (the slot the front desk picked, if it picked one, is booked; otherwise one
+is proposed and booked), or they need to be seen sooner (the scheduler proposes a sooner slot), or spoken to first,
+in which case call them and book them yourself."""
+[[state.work.fields]]
+name = "note_for_scheduler"
+type = "string"
+help = "what the scheduler needs to know (length of visit, which physician); no clinical details"
+
+[[edge]]
+id = "book-a-slot"
+label = "An ordinary slot is fine"
+from = "reading"
+to = "requested"
+help = "the slot the front desk picked is booked; otherwise the scheduler proposes one"
+
+[[edge.do]]
+id = "book-slot"
 title = "Book the slot the front desk picked"
-kind = "automation"
-after = ["screen", "triage"]
-# at once only for a plainly routine reason; any other reason once a nurse has read it and said an ordinary slot is fine
-when = "input.slot != null and input.urgency != 'urgent' and screen.red_flag == false and screen.unsure == false and (screen.routine == true or triage.decision == 'book-a-slot')"
+when = "input.slot != null"
 action = "booking.book"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
 slot = "{{input.slot}}"
 subject = "{{run.subject}}"
@@ -276,13 +239,191 @@ kind = "{{input.kind}}"
 priority = "{{input.urgency}}"
 defaults = { status = "planned", class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" } }
 
-[[steps]]
+[[edge.do]]
+id = "confirm-slot"
+title = "Confirm the booking with the patient"
+when = "book-slot != null"
+action = "message.send"
+[edge.do.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your appointment"
+body = "You are booked on {{book-slot.when}} with {{book-slot.member_name}} at Harbourview Family Medicine. Reply to change or cancel."
+
+[[edge.do]]
+id = "slot-booked"
+title = "Booked: wait for the visit"
+when = "book-slot.reference != null"
+to = "planned"
+
+[[edge]]
+id = "book-it-soon"
+label = "Book it soon"
+from = "reading"
+to = "requested"
+help = "the scheduler proposes a sooner slot"
+
+[[edge]]
+id = "i-will-call-and-book"
+label = "I will call and book"
+from = "reading"
+to = "requested"
+help = "you call the patient and pick the slot yourself next"
+
+# --- urgent, a red flag, or the screen could not run: a nurse calls back within the hour --------------------------
+
+[[state]]
+id = "callback"
+label = "To call back"
+tone = "attention"
+help = "a nurse calls the patient back within the hour"
+
+[[state.work]]
+id = "nurse-call"
+title = "Call the patient back (urgent request)"
+kind = "task"
+role = "nurse"
+priority = "urgent"
+due = "1h"
+escalate_to = "physician"
+persons_only = true
+context = ["input.reason", "input.kind", "input.slot", "screen", "record:demographics", "record:clinical"]
+instructions = """The patient's request was marked urgent, or their words may describe an emergency (see the screen),
+or the red-flag screen could not run (no screen is shown): read the reason yourself.
+Call them now. Advise 911 or the emergency department if needed, or book them in yourself (you pick the slot next):
+no slot is proposed automatically for a request that comes to you, and a slot the front desk picked (input.slot) was
+not booked. Handled on the phone, the request is closed without a visit. If you cannot reach them, say so: a
+physician decides what to do next."""
+[[state.work.fields]]
+name = "advice"
+type = "text"
+required = true
+
+[[edge]]
+id = "book-a-visit"
+label = "Reached: book a visit"
+from = "callback"
+to = "requested"
+help = "you pick the slot next"
+
+# Handled on the phone: a contact that took place, so the request is completed, not cancelled.
+[[edge]]
+id = "patient-reached"
+label = "Reached: handled on the phone"
+from = "callback"
+to = "finished"
+
+[[edge]]
+id = "could-not-reach"
+label = "Could not reach"
+from = "callback"
+to = "not-reached"
+
+# Nobody reached: a physician decides. Reaching the patient completes the request; otherwise it is closed (cancelled).
+[[state]]
+id = "not-reached"
+label = "Not reached"
+tone = "attention"
+help = "the nurse could not reach the patient: a physician decides what happens now"
+
+[[state.work]]
+id = "not-reached"
+title = "The nurse could not reach the patient"
+kind = "task"
+role = "physician"
+persons_only = true
+priority = "urgent"
+due = "1h"
+escalate_to = "medical-director"
+context = ["input.reason", "screen", "nurse-call", "record:demographics", "record:clinical"]
+instructions = """A nurse tried to call this patient about an urgent request and could not reach them. Decide what
+happens now: try again, call their emergency contact, or ask for a welfare check. Write down what you did."""
+[[state.work.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[edge]]
+id = "reached-the-patient"
+label = "I reached the patient"
+from = "not-reached"
+to = "finished"
+
+[[edge]]
+id = "called-emergency-contact"
+label = "Called their emergency contact"
+from = "not-reached"
+to = "cancelled"
+
+[[edge]]
+id = "welfare-check"
+label = "Asked for a welfare check"
+from = "not-reached"
+to = "cancelled"
+
+[[edge]]
+id = "no-further-action"
+label = "No further action"
+from = "not-reached"
+to = "cancelled"
+
+# --- to book: the scheduler proposes a slot, or the nurse who called (or said she would) picks one -----------------
+
+[[state]]
+id = "requested"
+label = "Requested"
+tone = "waiting"
+help = "asked for, no time yet: a slot is picked and booked"
+
+[[state.work]]
+id = "propose"
+title = "Propose a slot"
+kind = "task"
+role = "scheduler"
+due = "1d"
+escalate_to = "front-desk"
+skill = "slot-proposal"
+when = "nurse-call.outcome != 'book-a-visit' and triage.outcome != 'i-will-call-and-book'"
+context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "screen.admin_reason",
+           "triage.outcome", "triage.note_for_scheduler"]
+
+# A request a nurse called about, or said she would call and book: she picks the slot herself.
+[[state.work]]
+id = "nurse-book"
+title = "Book the visit"
+kind = "task"
+role = "nurse"
+due = "1d"
+escalate_to = "physician"
+skill = "slot-proposal"
+when = "nurse-call.outcome == 'book-a-visit' or triage.outcome == 'i-will-call-and-book'"
+persons_only = true
+context = ["record:demographics", "provider:free-slots", "input.urgency", "input.preferences", "input.reason"]
+
+[[edge]]
+id = "booked"
+label = "Booked"
+from = "requested"
+to = "planned"
+
+[[edge.do]]
+id = "book"
+title = "Book the visit"
+action = "booking.book"
+[edge.do.params]
+ref = "{{run.record}}"
+slot = "{{propose.slot}}{{nurse-book.slot}}"
+subject = "{{run.subject}}"
+reason = "{{input.reason}}"
+kind = "{{input.kind}}"
+priority = "{{input.urgency}}"
+defaults = { status = "planned", class = { system = "http://terminology.hl7.org/CodeSystem/v3-ActCode", code = "AMB", display = "ambulatory" } }   # a booked visit
+
+[[edge.do]]
 id = "confirm"
 title = "Confirm with the patient"
-kind = "automation"
-after = ["book"]
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your appointment"
@@ -290,174 +431,239 @@ body = "You are booked on {{book.when}} with {{book.member_name}} at Harbourview
 
 # A slot proposed later (not the one picked on the calendar, which is said back at once): whoever took the request is
 # told on the board, with the visit to open. No reason, nothing clinical: the time and the physician.
-[[steps]]
+[[edge.do]]
 id = "tell-booked"
 title = "Tell whoever took the request that it is booked"
-kind = "automation"
-after = ["book"]
 action = "notice.send"
-[steps.params]
+[edge.do.params]
 to = "{{run.started_by}}"
 text = "Booked for {{book.when}} with {{book.member_name}}"
 link = "{{book.reference}}"
 
-[[steps]]
-id = "confirm-chosen"
-title = "Confirm the booking with the patient"
-kind = "automation"
-after = ["book-chosen"]
-action = "message.send"
-[steps.params]
-channel = "patient-portal"
-to = "{{run.subject}}"
-subject = "Your appointment"
-body = "You are booked on {{book-chosen.when}} with {{book-chosen.member_name}} at Harbourview Family Medicine. Reply to change or cancel."
+# the record moves on once the slot is booked (the booking gives it its time); a slot taken in the meantime leaves it
+# here, with the failure told to the practice
+[[edge.do]]
+id = "on-the-calendar"
+title = "Booked: wait for the visit"
+when = "book.reference != null"
+to = "planned"
 
-# Booked: the visit's own page checks the patient in and starts the visit (its transitions); the run waits on them.
-[[steps]]
+# --- booked: the visit's own page checks the patient in and starts the visit; the run waits on them -----------------
+
+[[state]]
+id = "planned"
+label = "Booked"
+tone = "waiting"
+help = "waiting for the patient to be checked in and the visit started on this page"
+
+[[state.work]]
 id = "checked-in"
 title = "Wait for the patient to be checked in"
 kind = "wait"
 until = "record.status in ['arrived', 'triaged', 'in-progress', 'onleave', 'finished', 'cancelled', 'noshow', 'entered-in-error']"
 
-# Missed (a no-show) or cancelled by the patient, before the visit started or after checking in: the policy counts the
-# patient's earlier missed appointments in the year before this one (no-shows and late cancellations).
-[[steps]]
+[[state.work]]
+id = "seen"
+title = "Wait for the visit to start"
+kind = "wait"
+until = "record.status in ['in-progress', 'onleave', 'finished', 'cancelled', 'noshow', 'entered-in-error']"
+moves = ["triaged"]  # a nurse takes the vitals first: still waiting for the visit to start
+
+[[edge]]
+id = "booked-in-error"
+label = "Entered in error"
+from = "planned"
+to = "entered-in-error"
+when = "record.status == 'entered-in-error'"
+
+# Missed (a no-show) or cancelled, before the visit started or after checking in: the policy counts the patient's
+# earlier missed appointments in the year before this one (no-shows and late cancellations).
+#
+# Cancelled by the patient: late (less than the policy's notice before the time it was booked for), the patient is
+# told under the missed-appointment policy; with notice, nothing is due and nothing is sent. The notice is worked out
+# from when it was cancelled (the check-in wait's end) to the time it was booked for. One cancelled after checking in
+# (the patient left before being seen) is late: the wait ended at the check-in, two hours before at most.
+# Cancelled by the practice, no policy applies: the patient is told and asked to rebook.
+[[edge]]
+id = "not-held"
+label = "Missed or cancelled"
+from = "planned"
+to = "cancelled"
+when = "record.status in ['cancelled', 'noshow']"
+
+[[edge.do]]
 id = "missed-before"
 title = "Count the patient's missed appointments this year"
-kind = "automation"
-after = ["checked-in", "seen"]
 when = "record.status == 'noshow' or (record.status == 'cancelled' and record.cancelled_by != 'practice')"
 action = "visits.missed"
-[steps.params]
+[edge.do.params]
 visit = "{{run.record}}"
 
-[[steps]]
+[[edge.do]]
 id = "no-show"
 title = "Apply the missed-appointment policy"
-kind = "automation"
-after = ["missed-before"]
 when = "record.status == 'noshow'"
 block = "missed-appointment-fee"
-[steps.params]
+[edge.do.params]
 notice_hours = 0
 missed_this_year = "{{missed-before.count}}"
 fee = 50
 
-[[steps]]
+[[edge.do]]
 id = "tell-missed"
 title = "Tell the patient"
-kind = "automation"
-after = ["no-show"]
+when = "record.status == 'noshow'"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your missed appointment"
 body = "We missed you at your appointment. {{no-show.reason}}. Amount due: ${{no-show.amount}}. Reply to rebook."
 
-# Cancelled by the patient: late (less than the policy's notice before the time it was booked for), the patient is
-# told under the missed-appointment policy; with notice, nothing is due and nothing is sent. The notice is worked out
-# from when it was cancelled (the first wait's end) to the time it was booked for. One cancelled after checking in
-# (the patient left before being seen) is late: the first wait ended at the check-in, two hours before at most.
-# Cancelled by the practice, no policy applies: the patient is told and asked to rebook.
-[[steps]]
+[[edge.do]]
 id = "late-cancel"
 title = "Apply the missed-appointment policy to a cancellation"
-kind = "automation"
-after = ["missed-before"]
-when = "record.status == 'cancelled'"
+when = "record.status == 'cancelled' and record.cancelled_by != 'practice'"
 block = "missed-appointment-fee"
-[steps.params]
+[edge.do.params]
 starts = "{{record.plannedStartDate}}"
 cancelled_at = "{{checked-in.ended_at}}"
 missed_this_year = "{{missed-before.count}}"
 fee = 50
 
-[[steps]]
+[[edge.do]]
 id = "mark-late-cancel"
 title = "Mark the visit cancelled late"
-kind = "automation"
-after = ["late-cancel"]
 when = "late-cancel.late == true"
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 cancelled_late = true
 
-[[steps]]
+[[edge.do]]
 id = "tell-late-cancel"
 title = "Tell the patient about the late cancellation"
-kind = "automation"
-after = ["late-cancel"]
 when = "late-cancel.late == true"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your cancelled appointment"
 body = "Your appointment was cancelled with less than 24 hours' notice. {{late-cancel.reason}}. Amount due: ${{late-cancel.amount}}. Reply to rebook."
 
-[[steps]]
+[[edge.do]]
 id = "tell-practice-cancelled"
 title = "Tell the patient the practice cancelled"
-kind = "automation"
-after = ["checked-in", "seen"]
 when = "record.status == 'cancelled' and record.cancelled_by == 'practice'"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your appointment is cancelled"
 body = "We are sorry: we had to cancel your appointment on {{record.plannedStartDate}}. There is no charge. Reply to rebook."
 
-[[steps]]
-id = "seen"
+# a no-show stays a no-show
+[[edge.do]]
+id = "missed"
+title = "Keep it a no-show"
+when = "record.status == 'noshow'"
+to = "noshow"
+
+[[edge]]
+id = "started"
+label = "Visit started"
+from = "planned"
+to = "in-progress"
+
+# A walk-in: checked in already, with no booking to miss; the run waits for the visit to start.
+[[state]]
+id = "arrived"
+label = "Checked in"
+tone = "active"
+help = "a walk-in: waiting for the visit to start on this page"
+
+[[state.work]]
+id = "walk-in-seen"
 title = "Wait for the visit to start"
 kind = "wait"
-after = ["checked-in"]
-when = "record.status in ['arrived', 'triaged', 'in-progress', 'onleave']"
-until = "record.status in ['in-progress', 'onleave', 'finished', 'cancelled', 'noshow', 'entered-in-error']"
-moves = ["triaged"]  # a nurse takes the vitals first: still waiting for the visit to start
+until = "record.status in ['in-progress', 'onleave', 'finished', 'cancelled', 'entered-in-error']"
+moves = ["triaged"]
 
-[[steps]]
+[[edge]]
+id = "walk-in-in-error"
+label = "Entered in error"
+from = "arrived"
+to = "entered-in-error"
+when = "record.status == 'entered-in-error'"
+
+[[edge]]
+id = "walk-in-left"
+label = "Left before being seen"
+from = "arrived"
+to = "cancelled"
+when = "record.status == 'cancelled'"
+
+[[edge]]
+id = "walk-in-started"
+label = "Visit started"
+from = "arrived"
+to = "in-progress"
+
+# --- seen: the physician ends the visit with the transcript ------------------------------------------------------
+
+[[state]]
+id = "in-progress"
+label = "In progress"
+tone = "active"
+help = "the visit is under way: the physician ends it with the transcript"
+
+[[state.work]]
 id = "end"
 title = "End the visit"
 kind = "task"
 role = "physician"
 due = "1d"
 escalate_to = "medical-director"
-after = ["seen"]
-when = "record.status in ['in-progress', 'onleave']"
 persons_only = true
 moves = ["onleave", "in-progress"]  # the physician steps out and back while the visit is open
 context = ["record:clinical", "input.reason"]
 instructions = """The visit is under way. When it ends, give the transcript (or your notes of it), what kind of visit it
 was and how long it took: the scribe agent drafts the note from it, for you to edit and sign."""
-[[steps.fields]]
+[[state.work.fields]]
 name = "transcript"
 type = "text"
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "visit_type"
 type = "choice"
 choices = ["minor", "complete", "counselling"]
 default = "minor"
-[[steps.fields]]
+[[state.work.fields]]
 name = "minutes"
 type = "number"
 default = 15
-[[steps.fields]]
+[[state.work.fields]]
 name = "start"
 type = "datetime"
 help = "when the visit started (default: its length before it was signed)"
-[[steps.fields]]
+[[state.work.fields]]
 name = "end"
 type = "datetime"
 help = "when the visit ended"
 
-[[steps]]
+[[edge]]
+id = "ended"
+label = "Visit ended"
+from = "in-progress"
+to = "drafting"
+
+[[state]]
+id = "drafting"
+label = "Note being drafted"
+tone = "active"
+
+[[state.work]]
 id = "draft"
 title = "Draft the note"
 kind = "task"
@@ -467,172 +673,132 @@ escalate_to = "practice-manager"
 people_role = "physician"
 skill = "visit-note-draft"
 risk = "medium"
-after = ["end"]
 context = ["record:clinical", "record:intake", "end.transcript"]
 
-[[steps]]
+[[edge]]
+id = "drafted"
+label = "Drafted"
+from = "drafting"
+to = "editing"
+
+[[state]]
+id = "editing"
+label = "Note being edited"
+tone = "active"
+
+[[state.work]]
 id = "edit"
 title = "Edit the note"
 kind = "task"
 role = "physician"
 due = "3d"
 escalate_to = "medical-director"
-after = ["draft"]
 review_of = "draft"
 persons_only = true
 context = ["record:clinical", "end.transcript"]
 instructions = "Correct the draft. You are its author once you sign."
-[[steps.fields]]
+[[state.work.fields]]
 name = "subjective"
 type = "text"
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "objective"
 type = "text"
-[[steps.fields]]
+[[state.work.fields]]
 name = "assessment"
 type = "text"
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "plan"
 type = "text"
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "follow_up"
 type = "string"
 help = "when the patient should come back, as you told them"
-[[steps.fields]]
+[[state.work.fields]]
 name = "diagnosis_codes"
 type = "list"
 required = true
 help = "ICD-9 codes for billing, e.g. 401"
-[[steps.fields]]
+[[state.work.fields]]
 name = "referrals"
 label = "Refer to"
 type = "list"
 help = "specialties to refer the patient to, one per line: once you sign, each is a referral of its own"
-[[steps.fields]]
+[[state.work.fields]]
 name = "prescriptions"
 label = "Prescribe"
 type = "list"
 help = "one medication per line, with its dose and directions: once you sign, each is a prescription of its own, written for you to check and issue"
-[[steps.fields]]
+[[state.work.fields]]
 name = "lab_orders"
 label = "Order lab tests"
 type = "list"
 help = "one test per line (e.g. CBC, HbA1c): once you sign, each is a lab order of its own, sent with the signed note"
 
-[[steps]]
+[[edge]]
+id = "edited"
+label = "Edited"
+from = "editing"
+to = "signing"
+
+[[state]]
+id = "signing"
+label = "Note to sign"
+tone = "active"
+
+[[state.work]]
 id = "sign"
 title = "Sign the note"
 kind = "gate"
 role = "physician"
 due = "3d"
 escalate_to = "medical-director"
-after = ["edit"]
 signer = "person"
-outcomes = ["sign", "discard"]
 meaning = "I reviewed this note and it is accurate"
 meanings_if_did = { edit = "I am the author of this note and it is accurate" }
 meanings = { discard = "I discard this draft note" }
 context = ["edit"]
 
-[[steps]]
+# Signed: the visit is completed, with when it took place; the note is filed, what it orders is made, and its charge is
+# made for billing to code and submit (a record of its own: the visit does not wait for it).
+[[edge]]
+id = "sign"
+label = "Sign"
+from = "signing"
+to = "finished"
+
+[[edge.do]]
 id = "timing"
 title = "Note the time of the visit"
-kind = "automation"
-after = ["sign"]
-when = "sign.outcome == 'sign'"
 action = "clock.now"
-[steps.params]
+[edge.do.params]
 start = "{{end.start}}"
 end = "{{end.end}}"
 minutes = "{{end.minutes}}"
 
-# Discarded: the visit still took place, so it is never left in progress (and there is no going back a step: a
-# workflow has no loops), but it is not plain Completed either: it is Completed: no note, flagged for the physician,
-# who is asked to write the note on the visit (a task on their work, due like the edit). No note is filed and the
-# visit is not billed from the discarded draft. Once the physician has written it, the visit is completed; a visit
-# that needs none (the wrong patient's transcript) stays Completed: no note, with their reason on the track.
-[[steps]]
-id = "discarded"
-title = "Mark the visit completed without a note"
-kind = "automation"
-after = ["sign"]
-when = "sign.outcome == 'discard'"
-state = "undocumented"
-
-[[steps]]
-id = "tell-discarded"
-title = "Tell the physician the visit has no note"
-kind = "automation"
-after = ["discarded"]
-action = "notice.send"
-[steps.params]
-to = "{{sign.by}}"
-text = "You discarded the draft note: this visit has no note (Completed: no note). Write one on the visit."
-link = "{{run.record}}"
-
-[[steps]]
-id = "write-note"
-title = "Write the note for this visit"
-kind = "task"
-role = "physician"
-assign_to = "{{sign.by}}"
-due = "3d"
-escalate_to = "medical-director"
-after = ["discarded"]
-persons_only = true
-context = ["record:clinical", "end.transcript", "sign"]
-instructions = """You discarded the draft note, so this visit has no note. Write the visit note on the patient's chart
-(a new visit note, linked to this visit), then say so here. If the visit needs no note (the transcript was another
-patient's, the visit did not take place as booked), say why: the visit stays Completed: no note."""
-[[steps.fields]]
-name = "done"
-label = "The note"
-type = "choice"
-choices = ["i-wrote-it-on-the-visit", "no-note-needed"]
-required = true
-[[steps.fields]]
-name = "why"
-type = "string"
-help = "why the visit needs no note (only then)"
-
-[[steps]]
-id = "documented"
-title = "Complete the visit now its note is written"
-kind = "automation"
-after = ["write-note"]
-when = "write-note.done == 'i-wrote-it-on-the-visit'"
-state = "finished"
-
-# Signed: the visit is completed, with when it took place.
-[[steps]]
+[[edge.do]]
 id = "finish"
 title = "Complete the visit"
-kind = "automation"
-after = ["timing"]
 action = "record.update"
-state = "finished"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 participant = [{ individual = { reference = "Practitioner/{{end.by}}" } }]   # who ran the visit, not the reviewer
 type = [{ text = "{{end.visit_type}}" }]
 period = { start = "{{timing.start}}", end = "{{timing.end}}" }
 length = { value = "{{end.minutes}}", unit = "min" }
 diagnosis = [{ condition = [{ concept = { text = "ICD-9 {{edit.diagnosis_codes}}" } }] }]
 
-[[steps]]
+[[edge.do]]
 id = "file-note"
 title = "File the note in the chart"
-kind = "automation"
-after = ["finish"]
 action = "record.create"
-[steps.params]
+[edge.do.params]
 type = "Composition"
 attest = "sign"   # the note filed is the one the physician signed: its signature shows on the note
-[steps.params.data]
+[edge.do.params.data]
 status = "final"
 type = { text = "Visit note" }
 title = "Visit note"
@@ -652,39 +818,35 @@ section = [
 
 # Each referral written in the note is a record of its own (a sub-record of the visit, about the same patient), walked
 # by the referral workflow from draft to the specialist's report. The visit does not wait for them.
-[[steps]]
+[[edge.do]]
 id = "refer"
 title = "Make the referrals in the note"
-kind = "automation"
-after = ["finish"]
 for_each = "{{edit.referrals}}"
 action = "record.child"
-[steps.params]
+[edge.do.params]
 type = "ServiceRequest"
-[steps.params.data]
+[edge.do.params.data]
 status = "draft"
 intent = "order"
 priority = "routine"
 kind = "referral"
 referral_to = "{{each}}"
 reason_text = "{{edit.assessment}}"
-[steps.params.input]
+[edge.do.params.input]
 specialty = "{{each}}"
 reason = "{{edit.assessment}}"
 urgency = "routine"
 
 # Each prescription written in the note is a prescription of its own (a sub-record of the visit), written (draft) for
 # the physician to check and issue on its page: the note's signature does not issue a prescription.
-[[steps]]
+[[edge.do]]
 id = "prescribe"
 title = "Write the prescriptions in the note"
-kind = "automation"
-after = ["finish"]
 for_each = "{{edit.prescriptions}}"
 action = "record.child"
-[steps.params]
+[edge.do.params]
 type = "MedicationRequest"
-[steps.params.data]
+[edge.do.params.data]
 status = "draft"
 intent = "order"
 medication = "{{each}}"
@@ -693,16 +855,14 @@ reason_text = "{{edit.assessment}}"
 
 # Each lab test ordered in the signed note is a lab order of its own (a sub-record of the visit), sent: the note it is
 # ordered in is signed.
-[[steps]]
+[[edge.do]]
 id = "order-labs"
 title = "Order the lab tests in the note"
-kind = "automation"
-after = ["finish"]
 for_each = "{{edit.lab_orders}}"
 action = "record.child"
-[steps.params]
+[edge.do.params]
 type = "ServiceRequest"
-[steps.params.data]
+[edge.do.params.data]
 status = "active"
 intent = "order"
 priority = "routine"
@@ -711,48 +871,94 @@ referral_to = "{{each}}"
 requester = "Practitioner/{{edit.by}}"
 reason_text = "{{edit.assessment}}"
 
-[[steps]]
-id = "code"
-title = "Code the visit"
-kind = "task"
-role = "billing"
-due = "5d"
-escalate_to = "practice-manager"
-after = ["finish"]
-skill = "visit-coding"
-risk = "medium"
-context = ["record:visits", "end.visit_type", "end.minutes", "edit.diagnosis_codes"]
-
-[[steps]]
-id = "submit"
-title = "Submit the claim"
-kind = "gate"
-role = "billing"
-due = "5d"
-escalate_to = "practice-manager"
-after = ["code"]
-skill = "claim-submit"
-signer = "any"
-outcomes = ["submit", "hold"]
-meaning = "This claim matches the service documented"
-agent_criteria = "code.amount <= 80 and code.fee_code in ['minor-assessment', 'complete-assessment']"
-not_by = ["code"]
-context = ["record:visits", "code"]
-
-[[steps]]
-id = "charge"
-title = "Record the charge"
-kind = "automation"
-after = ["submit"]
-when = "submit.outcome == 'submit'"
-action = "record.create"
-[steps.params]
+# The visit's charge: a sub-record of the visit, planned until billing codes it and submits the claim (the
+# visit-claim workflow walks it). Billing is given what the visit summary says, never the note.
+[[edge.do]]
+id = "bill"
+title = "Make the visit's charge for billing"
+action = "record.child"
+[edge.do.params]
 type = "ChargeItem"
-[steps.params.data]
-status = "billable"
-subject = { reference = "{{run.subject}}" }
-code = { text = "{{code.fee_code}}" }
+[edge.do.params.data]
+status = "planned"
+code = { text = "{{end.visit_type}} visit" }
 occurrenceDateTime = "{{timing.now}}"
-context = { reference = "{{run.record}}" }
-quantity = { value = "{{code.units}}" }
-priceOverride = { value = "{{code.amount}}", currency = "CAD" }
+[edge.do.params.input]
+visit_type = "{{end.visit_type}}"
+minutes = "{{end.minutes}}"
+diagnosis_codes = "{{edit.diagnosis_codes}}"
+
+# Discarded: the visit still took place, so it is never left in progress, but it is not plain Completed either: it is
+# Completed: no note, flagged for the physician, who is asked to write the note on the visit (a task on their work, due
+# like the edit). No note is filed and the visit is not billed from the discarded draft.
+[[edge]]
+id = "discard"
+label = "Discard"
+from = "signing"
+to = "undocumented"
+
+[[edge.do]]
+id = "tell-discarded"
+title = "Tell the physician the visit has no note"
+action = "notice.send"
+[edge.do.params]
+to = "{{sign.by}}"
+text = "You discarded the draft note: this visit has no note (Completed: no note). Write one on the visit."
+link = "{{run.record}}"
+
+# Once the physician has written it, the visit is completed; a visit that needs none (the wrong patient's transcript)
+# stays Completed: no note, with their reason on the track.
+[[state]]
+id = "undocumented"
+label = "Completed: no note"
+tone = "attention"
+
+[[state.work]]
+id = "write-note"
+title = "Write the note for this visit"
+kind = "task"
+role = "physician"
+assign_to = "{{sign.by}}"
+due = "3d"
+escalate_to = "medical-director"
+persons_only = true
+context = ["record:clinical", "end.transcript", "sign"]
+instructions = """You discarded the draft note, so this visit has no note. Write the visit note on the patient's chart
+(a new visit note, linked to this visit), then say so here. If the visit needs no note (the transcript was another
+patient's, the visit did not take place as booked), say why: the visit stays Completed: no note."""
+[[state.work.fields]]
+name = "why"
+type = "string"
+help = "why the visit needs no note (only then)"
+
+[[edge]]
+id = "i-wrote-it-on-the-visit"
+label = "I wrote it on the visit"
+from = "undocumented"
+to = "finished"
+
+[[edge]]
+id = "no-note-needed"
+label = "No note needed"
+from = "undocumented"
+to = "undocumented"
+
+[[state]]
+id = "finished"
+label = "Completed"
+tone = "done"
+
+[[state]]
+id = "cancelled"
+label = "Cancelled"
+tone = "ended"
+
+[[state]]
+id = "noshow"
+label = "No-show"
+tone = "ended"
+
+[[state]]
+id = "entered-in-error"
+label = "Entered in error"
+tone = "ended"

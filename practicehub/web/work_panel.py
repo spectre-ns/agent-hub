@@ -44,7 +44,8 @@ class WorkPanel:
         not from state names: never a move that undoes or ends the record (cancel, entered in error), one into a
         state no move leaves (a no-show), or a side move that leads back here (the patient stepping out and back).
         Ties go to the lifecycle's own order. None when no move goes forward: then every button is secondary."""
-        trans = [t for t in lc.get("transition", []) if "*" not in t["from"]]
+        # a workflow starting on the record again (its entry, from any state) leads back to nothing
+        trans = [t for t in lc.get("transition", []) if "*" not in t["from"] and not t.get("entry")]
 
         def reach(s):
             seen, todo = set(), [s]
@@ -136,19 +137,49 @@ class WorkPanel:
     def family_panel(self, me, ref: str) -> str:
         """The record a sub-record was made for (a link back), in the side panel. The sub-records made from this one
         are in the page's main column (``started_from``)."""
-        parent = self.hub.engine.parent_record(ref)
-        if parent and self.hub.may_read(me, parent.split("/", 1)[0]):
-            return f'<p class="wp-parent"><span class="muted">Made for</span> {self._family_link(parent)}</p>'
-        return ""
+        hub = self.hub
+        out = []
+        parent = hub.engine.parent_record(ref)
+        if parent and hub.may_read(me, parent.split("/", 1)[0]):
+            out.append(f'<p class="wp-parent"><span class="muted">Made for</span> {self._family_link(parent)}</p>')
+        # the move of another record whose automation started the work walking this one (``workflow.start``,
+        # ``record.create``): "Started by “Needs a call” on <the lab result>"; one from before moves were noted on
+        # their spawns names the record only
+        runs = sorted(hub.db.runs.find({"record": ref}), key=lambda r: str(r.get("created_at") or ""))
+        by = hub.engine.started_by(runs[-1]) if runs else None
+        src = str((by or {}).get("ref") or "")
+        if "/" in src and src != parent and src != ref and hub.may_read(me, src.split("/", 1)[0]):
+            label = (by or {}).get("label")
+            out.append(f'<p class="wp-parent wp-started-by"><span class="muted">Started by</span> '
+                       + (f"“{e(label)}” <span class=\"muted\">on</span> " if label else "")
+                       + f"{self._family_link(src)}</p>")
+        return "".join(out)
 
     def started_from(self, me, ref: str, rt=None) -> str:
-        """The sub-records made from this record (``record.child``: a visit's referrals, prescriptions and lab
-        orders), for the main column: each with its state and, in words, where its own work is (Done, Stopped,
-        Stuck: <step> failed, or who holds it and when it is due), stuck, urgent and overdue first. One of a type the
-        member may not read keeps its kind, its state and who holds it, but neither its title nor a link."""
+        """The records made from this record, for the main column: its sub-records (``record.child``: a visit's
+        referrals, prescriptions and lab orders) and every record a move of it started (``Hub.record_activity``: the
+        lab result's follow-up call), once each. Each with its state and, in words, where its own work is (Done,
+        Stopped, Stuck: <step> failed, or who holds it and when it is due), stuck, urgent and overdue first. One of a
+        type the member may not read keeps its kind, its state and who holds it, but neither its title nor a link."""
         hub, rows = self.hub, []
         viewer = Viewer(hub, me)
-        for n, kid in enumerate(hub.engine.children_of(ref)):
+        kids, seen = [], set()
+        for kid in hub.engine.children_of(ref):
+            if kid["ref"] not in seen:
+                seen.add(kid["ref"])
+                kids.append(kid)
+        for move in self.activity_of(me, ref):
+            for r in move.get("ran") or []:
+                for s in r.get("started") or []:
+                    run = s.get("run")
+                    if isinstance(run, str):
+                        row = hub.db.runs.get(run) if run else None
+                        run = {**row, "id": row.get("id") or row.get("_id") or run} if row else None
+                    kref = str(s.get("ref") or (run or {}).get("record") or "")
+                    if "/" in kref and kref != ref and kref not in seen:
+                        seen.add(kref)
+                        kids.append({"ref": kref, "run": run})
+        for n, kid in enumerate(kids):
             rtype = kid["ref"].split("/", 1)[0]
             krt = hub.record_type(rtype)
             rec = hub.records.read(*kid["ref"].split("/", 1))

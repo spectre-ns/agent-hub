@@ -5,7 +5,8 @@ summary = """
 One service for one client for one year. The documents agent writes the engagement letter from the firm's terms and
 last year's engagement and sends it; the client signs it on the portal (or the office records a signature on paper).
 Once signed the hub opens the work (for a T1, the year's T1 return, which its own workflow walks). When the work is
-done the engagement closes, and when the next season comes the hub proposes next year's.
+done the engagement closes, and next year's is planned: it waits for its season on its own, then its letter goes
+out. A letter not signed in two weeks goes to the office to chase; a client may decline on the engagement's page.
 
 Each service opens its own work: pack.py's ENGAGEMENT_STARTERS, one entry per service.
 """
@@ -13,7 +14,42 @@ Each service opens its own work: pack.py's ENGAGEMENT_STARTERS, one entry per se
 [trigger]
 starters = ["partner", "manager", "admin"]
 
-[[steps]]
+# Written as the engagement's states and the edges between them (see practicehub/states.py). A new engagement has its
+# letter written and sent; a planned one (next year's, made when this year's closes) first waits for its season.
+[start]
+to = "drafting"
+label = "Proposed"
+
+[[start.do]]
+id = "renewal-date"
+title = "Work out when to propose it"
+action = "engagement.renewal_date"
+when = "record.status == 'planned'"
+to = "planned"
+
+[[state]]
+id = "planned"
+label = "Next season"
+tone = "waiting"
+
+[[state.work]]
+id = "await-season"
+title = "Wait for its season"
+kind = "wait"
+at = "{{renewal-date.on}}"
+
+[[edge]]
+id = "season"
+label = "Its season came"
+from = "planned"
+to = "drafting"
+
+[[state]]
+id = "drafting"
+label = "Writing the letter"
+tone = "active"
+
+[[state.work]]
 id = "letter"
 title = "Write the engagement letter"
 kind = "task"
@@ -24,100 +60,134 @@ due = "2d"
 people_role = "admin"
 context = ["record:engagement", "record:profile"]
 
-[[steps]]
+[[edge]]
+id = "letter-sent"
+label = "Letter sent"
+from = "drafting"
+to = "proposed"
+
+[[edge.do]]
 id = "send-letter"
 title = "Send the letter to the client"
-kind = "automation"
-after = ["letter"]
 action = "engagement.send"
-[steps.params]
+[edge.do.params]
 letter = "{{letter.letter}}"
 subject = "{{letter.subject}}"
 body = "{{letter.body}}"
 drafted_by = "{{letter.by}}"
 
-[[steps]]
+[[state]]
+id = "proposed"
+label = "Sent to the client"
+tone = "waiting"
+
+[[state.work]]
 id = "await-signature"
 title = "Wait for the client to sign"
 kind = "wait"
-after = ["send-letter"]
 until = "record.client_signed_on != null or record.status in ['signed', 'declined']"
 timeout = "14d"
 
-[[steps]]
-id = "record-signature"
-title = "Record the client's signature"
-kind = "automation"
-after = ["await-signature"]
-when = "record.status == 'proposed' and record.client_signed_on != null"
-state = "signed"
+[[edge]]
+id = "client-signed"
+label = "Signed"
+from = "proposed"
+to = "signed"
+when = "record.client_signed_on != null"
 
-[[steps]]
+[[edge]]
+id = "client-declined"
+label = "Declined"
+from = "proposed"
+to = "declined"
+when = "record.status == 'declined'"
+
+[[edge]]
+id = "not-signed"
+label = "Not signed in two weeks"
+from = "proposed"
+to = "overdue"
+
+[[state]]
+id = "overdue"
+label = "Not signed yet"
+tone = "attention"
+
+[[state.work]]
 id = "chase-signature"
 title = "Get the engagement letter signed"
 kind = "task"
 role = "admin"
 persons_only = true
-after = ["await-signature"]
-when = "await-signature.timed_out == true and record.status == 'proposed' and record.client_signed_on == null"
-state = "signed"
-moves = ["declined"]
 due = "5d"
 escalate_to = "partner"
 context = ["record:engagement", "letter"]
 instructions = """The client has not signed the engagement letter. Call them, and record their signature on the
 engagement's page (or that they declined)."""
-[[steps.fields]]
+[[state.work.fields]]
 name = "client_signed_on"
 label = "Signed on"
 type = "date"
-[[steps.fields]]
+[[state.work.fields]]
 name = "client_signed_how"
 label = "How"
 type = "choice"
 choices = ["paper", "email", "portal"]
 
-[[steps]]
+[[edge]]
+id = "signature-recorded"
+label = "Signature recorded"
+from = "overdue"
+to = "signed"
+
+[[state]]
+id = "signed"
+label = "Signed"
+tone = "active"
+
+[[state.work]]
 id = "activate"
 title = "Open the work"
 kind = "automation"
-after = ["record-signature", "chase-signature"]
-when = "record.status == 'signed'"
 action = "engagement.activate"
-state = "active"
 
-[[steps]]
+[[edge]]
+id = "work-opened"
+label = "Work opened"
+from = "signed"
+to = "active"
+
+[[state]]
+id = "active"
+label = "In progress"
+tone = "active"
+
+[[state.work]]
 id = "await-close"
 title = "Wait for the work to be done"
 kind = "wait"
-after = ["activate"]
 until = "record.completed_on != null or record.status == 'closed'"
 
-[[steps]]
-id = "close"
-title = "Close the engagement"
-kind = "automation"
-after = ["await-close"]
-when = "record.status == 'active'"
-state = "closed"
+# Next year's engagement is its own record, planned now: this one closes.
+[[edge]]
+id = "work-done"
+label = "Work done"
+from = "active"
+to = "closed"
 
-[[steps]]
-id = "renewal-date"
-title = "Work out when to propose next year's"
-kind = "automation"
-after = ["await-close", "close"]
-action = "engagement.renewal_date"
-
-[[steps]]
-id = "await-season"
-title = "Wait for next season"
-kind = "wait"
-after = ["renewal-date"]
-at = "{{renewal-date.on}}"
-
-[[steps]]
+[[edge.do]]
 id = "renew"
-title = "Propose next year's engagement"
-kind = "automation"
-after = ["await-season"]
+title = "Plan next year's engagement"
 action = "engagement.renew"
+[edge.do.params]
+status = "planned"
+
+[[state]]
+id = "closed"
+label = "Done"
+tone = "done"
+
+[[state]]
+id = "declined"
+label = "Declined"
+tone = "ended"

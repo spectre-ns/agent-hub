@@ -1,6 +1,7 @@
 # A change order: why a product changes, which products and documents it changes, and (when it came from one) the
 # CAPA it answers. It names the plm-change workflow, which walks its status from draft to implemented: making one starts
-# it, and a change order returned or rejected and revised is walked again from draft.
+# it, and a change order returned or rejected and revised is walked again from draft. Approved, its documents are
+# revised; once they are all approved again it waits to be released (releasing).
 id = "ChangeOrder"
 label = "Change order"
 plural = "Change orders"
@@ -8,7 +9,7 @@ data_class = "products"
 date = "raised"
 flag = "status"
 order = 31
-workflow = { id = "plm-change", when = "record.status in ['draft', 'review', 'approved', 'rejected']" }
+workflow = { id = "plm-change", when = "record.status in ['draft', 'review', 'approved', 'releasing', 'rejected']" }
 summary = "A change to released products and their documents: reviewed, implemented at new revisions, released."
 
 [[field]]
@@ -39,7 +40,8 @@ by = "workflow"
 [[field]]
 name = "status"
 type = "choice"
-choices = ["draft", "review", "approved", "implemented", "rejected", "cancelled"]
+choices = ["draft", "review", "approved", "releasing", "implemented", "rejected", "cancelled"]
+labels = { draft = "Draft", review = "Review", approved = "Approved", releasing = "To release", implemented = "Implemented", rejected = "Rejected", cancelled = "Cancelled" }
 
 [[field]]
 name = "products"
@@ -95,8 +97,8 @@ type = "text"
 [lifecycle]
 field = "status"
 initial = "draft"
-abandoned = { "review" = "draft", "approved" = "draft" }   # work cancelled part way: back to its author
-locked = ["review", "approved", "implemented", "cancelled"]   # what was reviewed is what is released
+abandoned = { "review" = "draft", "approved" = "draft", "releasing" = "draft" }   # work cancelled part way: back to its author
+locked = ["review", "approved", "releasing", "implemented", "cancelled"]   # what was reviewed is what is released
 
 [[lifecycle.transition]]
 from = ["draft"]
@@ -104,23 +106,8 @@ to = "review"
 label = "Send for review"
 require = ["reason"]
 
-[[lifecycle.transition]]
-from = ["review"]
-to = "approved"
-by = "workflow"
-label = "Approved"
-
-[[lifecycle.transition]]
-from = ["review"]
-to = "rejected"
-by = "workflow"
-label = "Rejected"
-
-[[lifecycle.transition]]
-from = ["approved"]
-to = "implemented"
-by = "workflow"
-label = "Released"
+# Approving, rejecting, releasing and returning it are the plm-change workflow's edges; only the moves people make by
+# hand, and where cancelled work leaves it, are listed here.
 
 [[lifecycle.transition]]
 from = ["rejected"]
@@ -128,9 +115,9 @@ to = "draft"
 label = "Revise"
 
 [[lifecycle.transition]]
-from = ["review", "approved"]
+from = ["review", "approved", "releasing"]
 to = "draft"
-by = "workflow"            # only when its review or release is cancelled part way
+by = "workflow"            # only when its review, its documents' revision or its release is cancelled part way
 label = "Back to its author"
 
 [[lifecycle.transition]]

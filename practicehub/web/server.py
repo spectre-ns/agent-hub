@@ -60,6 +60,7 @@ from .definitions_pages import DefinitionPages
 from .structure_pages import StructurePages
 from .calendar_pages import CalendarPages
 from .work_panel import WorkPanel
+from .workflow_editor import condition_words, editor_toml, is_old_form, source_of
 from .mcp_pages import McpPages
 from .passes import PassPages
 from .office_pages import OfficePages
@@ -90,8 +91,8 @@ class Unauthenticated(HubError):
 
 class Rendered(Exception):
     """A page shown with an error status: a form re-rendered with what went wrong and what was typed, kept."""
-    def __init__(self, code: int, page: str, cookie: str | None = None):
-        self.code, self.page, self.cookie = code, page, cookie
+    def __init__(self, code: int, page: str, cookie: str | None = None, headers: dict | None = None):
+        self.code, self.page, self.cookie, self.headers = code, page, cookie, headers or {}
 
 
 def _json(obj) -> bytes:
@@ -172,6 +173,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         R("POST", r"/board/move", self.post_board_move)
         R("GET", r"/items/(?P<iid>[\w-]+)", self.page_item)
         R("GET", r"/items/(?P<iid>[\w-]+)/decide", self.page_decide)
+        R("GET", r"/items/(?P<iid>[\w-]+)/answer", self.page_answer)
         R("POST", r"/items/(?P<iid>[\w-]+)/(?P<verb>claim|complete|decide|release|ack|take-over)", self.post_item)
         R("POST", r"/notices/ack", self.post_notices_ack)
         R("GET", rf"/{sp}", self.page_subjects)
@@ -234,6 +236,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         is_api = path.startswith("/api/")
         req = {"method": method, "path": path, "query": query, "headers": headers, "body": body, "me": None}
         self._local.me = None
+        self._local.activity = {}  # Hub.record_activity per (member, record), once a request (RecordWork.activity_of)
         try:
             if path not in self.STATIC:
                 self.hub.sync_modules()  # a module the command line installed, upgraded or removed: loaded, or taken out
@@ -304,7 +307,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                 h = {"Content-Type": "text/html; charset=utf-8"}
                 if r.cookie:
                     h["Set-Cookie"] = r.cookie
-                return r.code, h, r.page.encode()
+                return r.code, {**h, **r.headers}, r.page.encode()
             except Unauthenticated as exc:
                 if is_api:
                     return 401, {"Content-Type": "application/json"}, _json({"error": str(exc)})
@@ -416,10 +419,11 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         if verb == "claim":
             return eng.claim(me, iid)
         if verb == "complete":
-            return eng.complete(me, iid, b.get("output") or {})
+            return eng.complete(me, iid, b.get("output") or {}, assign=b.get("assign") or None)
         if verb == "decide":
             self._confirm_signer(req, b)
-            return eng.decide(me, iid, b.get("outcome", ""), b.get("comment", ""), seen=b.get("seen") or "-")
+            return eng.decide(me, iid, b.get("outcome", ""), b.get("comment", ""), seen=b.get("seen") or "-",
+                              assign=b.get("assign") or None)
         if verb == "release":
             return eng.release(me, iid, b.get("note", ""), escalate=bool(b.get("escalate")))
         if verb == "take-over":
@@ -940,7 +944,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             return ('<span class="av empty" role="img" title="Nobody has taken this yet" '
                     'aria-label="Nobody has taken this yet">?</span>')
         if isinstance(m, str):
-            if m.startswith(("workflow:", "pack:")):
+            if m.startswith(("workflow:", "pack:", "type:")):
                 return '<span class="av automation" title="automation">⚙</span>'
             try:
                 m = self.hub.member(m)
@@ -1020,7 +1024,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
     def who(self, mid) -> str:
         if not mid:
             return '<span class="muted">Unassigned</span>'
-        if str(mid).startswith(("workflow:", "pack:")):
+        if str(mid).startswith(("workflow:", "pack:", "type:")):
             return f'<span class="who">{self._av(mid)}<span class="badge automation">automation</span></span>'
         try:
             m = self.hub.member(mid)
@@ -1929,7 +1933,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             # only on a shared queue, where it tells the others it is taken; Done takes it anyway
             actions = (f'<form method="post" action="/items/{iid}/claim" class="inline">{hidden}<button class="secondary" '
                        f'aria-describedby="claim-hint-{iid}">Assign to me</button> <span class="muted" '
-                       f'id="claim-hint-{iid}">Optional: tells the others you are on it. Done assigns it to you '
+                       f'id="claim-hint-{iid}">Optional: tells the others you are on it. Finishing it assigns it to you '
                        f'anyway.</span></form>')
         elif ok:
             actions = (f'<form method="post" action="/items/{iid}/release" class="inline">{hidden}<label>Why you give it '
@@ -2027,35 +2031,68 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             by = ctx["draft"].get("by")
             parts.append(f'<div class="section"><h2>Draft by {self.who(by)}</h2><div class="card">'
                          f'{self._values(ctx["draft"], me)}</div></div>')
+        q = urllib.parse.quote(back, safe="") if back else ""
+        tail = f'&amp;_back={e(q)}' if q else ""
         if st["kind"] == "gate":
             if not on_record:  # on the record's page, the record is the page above
                 parts.append(self._signed_record_view(me, run, step))
             # the decision leads, on the record's page and the step's own: a button for each outcome, as a record's
             # moves are, each opening a dialog for that outcome alone (what it signs, what it sets going, a comment,
             # the signature)
-            q = urllib.parse.quote(back, safe="") if back else ""
             last = len(st["outcomes"]) - 1
             btns = "".join(
                 f'<a class="btn {"primary" if i == 0 else "danger-subtle" if i == last and self._ends(o) else "secondary"}" '
-                f'href="/items/{e(iid)}/decide?outcome={e(urllib.parse.quote(o, safe=""))}'
-                + (f'&amp;_back={e(q)}' if q else "") + f'" data-modal>{e(self.human(o))}…</a>'
+                f'href="/items/{e(iid)}/decide?outcome={e(urllib.parse.quote(o, safe=""))}{tail}" '
+                f'data-modal>{e(self.outcome_word(step, o))}…</a>'
                 for i, o in enumerate(st["outcomes"]))
-            decide = (f'<div class="section rw-decide"><h2>Decide</h2>'
-                      f'<div class="rw-moves" role="group" aria-label="Your decision">{btns}</div>'
-                      f'<p class="muted">Each opens what that decision signs and what follows it.</p></div>')
-            parts.insert(0, decide)
+            parts.insert(0, f'<div class="section rw-decide"><h2>Decide</h2>'
+                            f'<div class="rw-moves" role="group" aria-label="Your decision">{btns}</div>'
+                            f'<p class="muted">Each opens what that decision signs and what follows it.</p></div>')
         else:
-            prefill = {k: v for k, v in (ctx.get("draft") or {}).items()}
-            prefill.update(self._form_output(kept))  # what the person typed, sent back with an error: theirs
-            fields = "".join(self._field(f, ctx["choices"].get(f["name"]), prefill.get(f["name"])) for f in ctx["fields"])
-            parts.append(f'<div class="section"><h2>Your answer</h2><form method="post" action="/items/{iid}/complete" '
-                         f'class="card">{hidden}{fields}<button>Done</button></form></div>')
+            # a task leads the same way: a button for each way it can end (its outcomes), or one Done, each opening
+            # a dialog with the step's fields; an answer refused comes back in its dialog, as typed
+            outs = list(st["outcomes"]) if step else []
+            btns = "".join(
+                f'<a class="btn {"primary" if i == 0 else "secondary"}" '
+                f'href="/items/{e(iid)}/answer?outcome={e(urllib.parse.quote(o, safe=""))}{tail}" '
+                f'data-modal>{e(self.outcome_word(step, o))}…</a>' for i, o in enumerate(outs)) or (
+                f'<a class="btn primary" href="/items/{e(iid)}/answer?{tail[5:]}" data-modal>Done…</a>')
+            said = ("Each opens what to note for it and what follows it." if outs
+                    else "Opens what this step asks you to fill in.")
+            parts.insert(0, f'<div class="section rw-decide"><h2>Do it</h2>'
+                            f'<div class="rw-moves" role="group" aria-label="How it went">{btns}</div>'
+                            f'<p class="muted">{said}</p></div>')
         return "".join(parts)
+
+    def outcome_word(self, step, outcome: str) -> str:
+        """An outcome in words: on a workflow written as states and edges, its edge's label."""
+        return (getattr(step, "outcome_labels", None) or {}).get(outcome) or self.human(outcome)
 
     @staticmethod
     def _ends(outcome: str) -> bool:
         """An outcome that turns the request down, shown as the quiet red button (decline, reject, cancel)."""
         return any(w in outcome for w in ("decline", "reject", "refuse", "cancel", "deny"))
+
+    def _assign_fields(self, run: dict, step, outcome: str, kept: dict) -> str:
+        """Who does each piece of people's work this transition sets going (``Engine.assignments_needed``): one person
+        each, chosen here and required. A role's group is who may be chosen, not who it goes to."""
+        return self._assign_selects(self.hub.engine.assignments_needed(run, step, outcome), kept,
+                                    here=run["workflow_id"])
+
+    def _assign_selects(self, needed: list[dict], kept: dict, *, here: str = "") -> str:
+        """A required choice of one person for each piece of work in ``needed`` (``Engine.assignable``)."""
+        out = []
+        for n in needed:
+            name = f"assign:{n['key']}"
+            chosen = str(kept.get(name) or "")
+            opts = "".join(f'<option value="{e(m["id"])}"{" selected" if m["id"] == chosen else ""}>{e(m["name"])}</option>'
+                           for m in sorted(n["people"], key=lambda m: m["name"]))
+            where = ("" if here and n["key"].startswith(f"{here}/")  # in a record it starts: which
+                     else f' <span class="muted">({e(n["workflow"])})</span>')
+            out.append(f'<label>Who does “{e(n["title"])}”{where} *<select name="{e(name)}" required>'
+                       f'<option value="">Choose a person…</option>{opts}</select>'
+                       f'<small>It goes to this person, not to everyone who holds {e(self.human(n["role"]))}.</small></label>')
+        return "".join(out)
 
     def page_decide(self, req, iid, *, kept: dict | None = None, error=None):
         """One outcome of a decision, as its own dialog: what is decided about, the sentence this decision signs for
@@ -2069,14 +2106,14 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         run = eng.run(item["run_id"])
         wf = self.hub.workflow(run["workflow_id"], run["version"])[0]
         step = wf.step(item["step_id"])
-        if step.kind != "gate" or outcome not in step.outcomes:
+        if step.kind != "gate" or outcome not in eng.open_outcomes(run, step):
             raise Invalid(f"“{self.human(outcome)}” is not a decision of “{step.title}”")
         ok, why = eng.eligibility(me, item)
         if not ok:
             raise Denied(self.holder_refusal(me, item, why))
         if item.get("status") not in ("open", "claimed"):
             raise Invalid("this decision has already been made")
-        label = self.human(outcome)
+        label = self.outcome_word(step, outcome)
         meaning = eng.meaning_for(me, run, step, outcome)
         about = self.hub.run_title(me, run)
         follows = eng.outcome_follows(run, step, outcome)  # steps of the workflow they are deciding in: theirs to see
@@ -2090,7 +2127,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                    if then else '<p class="muted">Nothing else follows from it in this workflow.</p>')
                 + f'<form method="post" action="/items/{e(iid)}/decide" class="card stack">{hidden}'
                 f'<input type="hidden" name="outcome" value="{e(outcome)}"><input type="hidden" name="_dialog" value="1">'
-                f'<label>Comment<textarea name="comment" rows="3">{e(str(kept.get("comment", "")))}</textarea>'
+                f'{self._assign_fields(run, step, outcome, kept)}<label>Comment<textarea name="comment" rows="3">{e(str(kept.get("comment", "")))}</textarea>'
                 f'<small>Kept with your decision in the record\'s history.</small></label>'
                 f'<p class="sign">Deciding is your electronic signature: <b>“{e(meaning)}”</b>, over exactly what '
                 f'this step shows you. If it changes before you decide, you are asked to read it again.</p>'
@@ -2099,6 +2136,53 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                 f'<a class="btn secondary" href="{e(cancel)}" data-modal-close>Cancel</a></div></form></div>')
         crumbs = [(cancel, about), (None, label)]
         return self.layout(req, label, body, crumbs=crumbs)
+
+    def page_answer(self, req, iid, *, kept: dict | None = None, error=None):
+        """A task's answer, as its own dialog: for one of its outcomes (``?outcome=``), what that sets going; the
+        step's fields, with a draft or what was typed before filled in; Done. Sent from the step's buttons
+        (``data-modal``) on the record's page or the step's own; posts to the item's complete."""
+        me, eng = req["me"], self.hub.engine
+        item = eng.item(iid)
+        kept = kept or {}
+        outcome = kept.get("outcome") or req["query"].get("outcome", "")
+        back = self.safe_back(kept.get("_back") or req["query"].get("_back"))
+        run = eng.run(item["run_id"])
+        wf = self.hub.workflow(run["workflow_id"], run["version"])[0]
+        step = wf.step(item["step_id"])
+        if item["kind"] != "task":
+            raise Invalid(f"“{step.title}” is not a task")
+        if step.outcomes and outcome not in eng.open_outcomes(run, step):
+            raise Invalid(f"“{self.human(outcome)}” is not a way “{step.title}” can end")
+        ok, why = eng.eligibility(me, item)
+        if not ok:
+            raise Denied(self.holder_refusal(me, item, why))
+        if item.get("status") not in ("open", "claimed"):
+            raise Invalid("this step has already been done")
+        ctx = eng.context(me, iid)
+        prefill = dict(ctx.get("draft") or {})
+        prefill.update(self._form_output(kept))
+        fields = "".join(self._field(f, ctx["choices"].get(f["name"]), prefill.get(f["name"]))
+                         for f in ctx["fields"] if f["name"] != "outcome" or not step.outcomes)
+        label = self.outcome_word(step, outcome) if outcome else "Done"
+        about = self.hub.run_title(me, run)
+        follows = eng.outcome_follows(run, step, outcome) if outcome else []
+        then = (f'<div class="card"><p class="muted">What follows</p><ul class="plain then">'
+                + "".join(f"<li>{e(s.title)}</li>" for s in follows) + "</ul></div>" if follows else "")
+        hidden = (f'<input type="hidden" name="_back" value="{e(back)}">' if back else "") + \
+            (f'<input type="hidden" name="outcome" value="{e(outcome)}">' if outcome else "")
+        cancel = back or f"/items/{iid}"
+        err = ""
+        if error is not None:
+            problems = [p for p in (getattr(error, "problems", None) or []) if str(p) != str(error)]
+            err = (f'<div class="flash error" role="alert"><p>That did not go through: {e(str(error))}</p>'
+                   + ("<ul>" + "".join(f"<li>{e(str(p))}</li>" for p in problems) + "</ul>" if problems else "")
+                   + '<p>Nothing was saved. What you typed is kept below.</p></div>')
+        body = (f'<div data-modal-body>{err}<p><b>{e(step.title)}</b> <span class="muted">·</span> {e(about)}</p>'
+                f'{then}<form method="post" action="/items/{e(iid)}/complete" class="card stack">{hidden}'
+                f'<input type="hidden" name="_dialog" value="1">{fields}{self._assign_fields(run, step, outcome, kept)}'
+                f'<div class="filters"><button class="primary">{e(label)}{": done" if outcome else ""}</button>'
+                f'<a class="btn secondary" href="{e(cancel)}" data-modal-close>Cancel</a></div></form></div>')
+        return self.layout(req, label, body, crumbs=[(cancel, about), (None, label)])
 
     def _signed_badge(self, ev) -> str:
         """A person's signature, or an agent's attested decision, which is never a signature."""
@@ -2290,6 +2374,81 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                '<span>- - - only when needed</span></div>') if legend else ""
         return (f'<div class="flowwrap"><svg data-flow="{fid}"></svg></div>{leg}'
                 f'<script type="application/json" id="{fid}">{self._flow_json(wf, run, links, viewer)}</script>')
+
+    def _states_view(self, wf) -> str:
+        """A workflow written as states and edges (practicehub/states.py), as its page shows it: where the record
+        enters, then each state it stops in with the work done there, and each edge out of it: what the person
+        chooses (or, on an automated state, when the record leaves that way), the automations that run on the way,
+        and where it lands."""
+        shape = wf.shape
+        tones = {st["id"]: st.get("tone") for st in shape["states"]}
+        names = {st["id"]: st.get("label") or self.human(st["id"]) for st in shape["states"]}
+
+        def loz(sid):
+            return f'<span class="loz {self.TONE_CLASS.get(tones.get(sid) or "", "default")}">{e(names.get(sid, sid))}</span>'
+
+        def step_line(sid):
+            st = wf.step(sid)
+            bits = []
+            if st.kind != "automation":
+                who = self._role_name(st.role) if st.role else ""
+                bits.append(f"by {e(who)}" if who else "")
+                if st.agents_may:
+                    bits.append('<span class="badge agent">AI</span> an assistant may do it')
+                if st.due:
+                    bits.append(f"within {e(duration_text(st.due))}")
+                if getattr(st, "priority", None) == "urgent":
+                    bits.append('<span class="badge urgent">urgent</span>')
+            when = (f' <span class="muted">only when</span> <code>{e(st.when)}</code>'
+                    if st.when and st.kind != "automation" else "")
+            kind = {"task": "task", "gate": "gate"}.get(st.kind, "automation")
+            letter = {"task": "T", "gate": "D"}.get(st.kind, "A")
+            return (f'<li><span class="ki {kind}">{letter}</span> {e(st.title)}'
+                    f'{(" <span class=muted>· " + " · ".join(b for b in bits if b) + "</span>") if any(bits) else ""}'
+                    f'{when}</li>')
+
+        def edge_block(edge, automated=False):
+            cond = ""
+            if edge.get("when"):
+                cond = (f'<div class="wf-cond"><span class="muted">{"when" if automated else "offered only when"}'
+                        f'</span> <code>{e(edge["when"])}</code></div>')
+            elif automated:
+                cond = '<div class="wf-cond muted">otherwise</div>'
+            dos = []
+            for sid in edge.get("steps", []):
+                st = wf.step(sid)
+                line = f'<span class="ki automation">A</span> {e(st.title)}'
+                own = next((a for a in edge["do"] if a.get("id") == sid), {})
+                if own.get("when"):
+                    line += f' <span class="muted">only when</span> <code>{e(own["when"])}</code>'
+                if own.get("to"):
+                    line += f' <span class="muted">and sends it to</span> {loz(own["to"])}'
+                dos.append(f"<li>{line}</li>")
+            lands = (f'{loz(edge["to"])}' if edge.get("to") else "")
+            return (f'<li class="wf-edge"><div class="wf-edge-head"><span class="wf-edge-name">{e(edge["label"])}</span>'
+                    f' <span class="wf-arrow" aria-label="goes to">→</span> {lands}</div>{cond}'
+                    + (f'<ul class="wf-do">{"".join(dos)}</ul>' if dos else "") + "</li>")
+
+        edges = {x["id"]: x for x in shape["edges"]}
+        out = [f'<div class="wf-state wf-entry"><div class="wf-state-head"><span class="muted">Enters</span></div>'
+               f'<ul class="wf-edges">{edge_block(shape["start"])}</ul></div>']
+        for st in shape["states"]:
+            work = "".join(step_line(w) for w in st["work"])
+            if st.get("automated"):
+                how = "Automated: it moves on by itself, by the first way out whose condition holds"
+            elif len(st["out"]) > 1:
+                how = "The person who does the work chooses the way out"
+            elif st["out"]:
+                how = "Once the work is done it moves on"
+            else:
+                how = "It ends here"
+            ways = "".join(edge_block(edges[x], st.get("automated")) for x in st["out"])
+            out.append(f'<div class="wf-state" id="state-{e(st["id"])}"><div class="wf-state-head">{loz(st["id"])}'
+                       f' <span class="muted">{e(how)}</span></div>'
+                       + (f'<p class="muted">{e(st["help"])}</p>' if st.get("help") else "")
+                       + (f'<ul class="wf-work">{work}</ul>' if work else "")
+                       + (f'<ul class="wf-edges">{ways}</ul>' if ways else "") + "</div>")
+        return f'<div class="wf-states">{"".join(out)}</div>'
 
     def page_run(self, req, rid):
         """Work about a record is worked on the record's page: there it goes, to its work (303). Work about no
@@ -2510,66 +2669,96 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             data = tomllib.loads(source)
         except tomllib.TOMLDecodeError:
             data = None
-        boot = json.dumps({"data": data, "catalog": self._catalog(), "problems": problems or [],
+        old = is_old_form(data)  # a list of steps: the diagram edits states and edges, so it is never converted
+        visual = data is not None and not old
+        boot = json.dumps({"data": data if visual else None, "catalog": self._catalog(), "problems": problems or [],
+                           "words": condition_words(data) if visual else {}, "old": old,
                            "locked_id": bool(wid)}, default=str).replace("</", "<\\/")
         title = "Create workflow"
         crumbs = [("/workflows", "Workflows")]
+        name = data.get("title", wid) if isinstance(data, dict) else wid
         if wid:
-            title = f"Edit: {data.get('title', wid) if data else wid}"
-            crumbs.append((f"/workflows/{wid}", data.get("title", wid) if data else wid))
-        text_tab = "" if data is not None else " on"
+            title = f"Edit: {name}"
+            crumbs.append((f"/workflows/{wid}", name))
+        old_note = ('<div class="section-msg warning" id="wf-old" role="note"><p><strong>This workflow is written in the old form, '
+                    'as a list of steps.</strong> The diagram edits a workflow written as states and the ways out of '
+                    'them, so it does not open this one, and it does not convert it for you. Edit it as text: '
+                    '<a href="?plain=1">open the text editor</a>, or use the Text tab above.</p></div>') if old else ""
         body = (
-            '<p class="muted">Draw how the work flows. Your change is a proposal: a policy owner who did not write it '
-            'approves it before any new run uses it.</p>'
-            '<div id="wf-editor"><div class="ed-tabs" role="tablist">'
-            f'<button type="button" data-tab="visual" class="{"on" if data is not None else ""}">Diagram</button>'
-            f'<button type="button" data-tab="toml" class="{text_tab.strip()}">TOML</button></div>'
-            f'<div id="wf-visual"{" hidden" if data is None else ""}><div class="ed"><div>'
-            '<div class="ed-tools"><button type="button" data-add="task">+ Task</button>'
-            '<button type="button" data-add="gate" class="secondary">+ Decision</button>'
-            '<button type="button" data-add="automation" class="secondary">+ Automation</button>'
-            '<span class="muted" style="font-size:12px">A new step starts after the selected one.</span></div>'
-            '<div class="flowwrap"><svg id="wf-canvas"></svg></div>'
+            '<p class="muted">Lay out the states a record moves through, the work done in each, and the ways out. '
+            'Your change is a proposal: a policy owner who did not write it approves it before any new run uses it.</p>'
+            f'{old_note}<div id="wf-editor"><div class="ed-tabs" role="tablist">'
+            f'<button type="button" data-tab="visual" class="{"on" if visual else ""}">Diagram</button>'
+            f'<button type="button" data-tab="toml" class="{"" if visual else "on"}">Text</button></div>'
+            f'<div id="wf-visual"{"" if visual else " hidden"}><div class="ed"><div>'
+            '<div class="ed-tools"><button type="button" data-add="state">+ State</button>'
+            '<span class="muted" style="font-size:12px">Select a state, its work, an automation or a way out to change '
+            'it. Drag from a state\'s handle onto another state to add a way out.</span></div>'
+            '<div class="flowwrap wf-canvas" id="wf-canvas"></div>'
             '<div class="legend"><span><span class="ki task">T</span> task</span><span><span class="ki gate">D</span> '
-            'decision (signed)</span><span><span class="ki automation">A</span> automation</span><span><span class="badge '
-            'agent">AI</span> an agent may do it</span><span>- - - only under a condition</span></div></div>'
+            'decision (signed)</span><span><span class="ki automation">A</span> automation: a stop of its own on the '
+            'way</span><span><span class="badge agent">AI</span> an agent may do it</span><span>- - - only when its '
+            'condition holds</span></div></div>'
             '<div class="ed-panel" id="wf-panel"></div></div></div>'
-            f'<div id="wf-text"{"" if data is None else " hidden"}><textarea id="wf-toml" class="code" rows="30" '
-            f'spellcheck="false" aria-label="Workflow TOML">{e(source) if data is None else ""}</textarea></div>'
+            f'<div id="wf-text"{" hidden" if visual else ""}><textarea id="wf-toml" class="code" rows="30" '
+            f'spellcheck="false" aria-label="Workflow text">{"" if visual else e(source)}</textarea></div>'
             '<form method="post" action="/workflows/propose" id="wf-propose" class="ed-bar">'
-            '<input type="hidden" name="source"><div class="status" id="wf-status"></div>'
+            '<input type="hidden" name="source"><input type="hidden" name="model"><div class="status" id="wf-status"></div>'
             f'<input name="note" value="{e(note)}" placeholder="What changes, and why" required aria-label="What changes, and why">'
             '<button>Propose change</button></form></div>'
-            f'<noscript><p>The diagram editor needs JavaScript. <a href="?plain=1">Edit the TOML instead.</a></p></noscript>'
+            f'<noscript><p>The diagram editor needs JavaScript. <a href="?plain=1">Edit the text instead.</a></p></noscript>'
             f'<script type="application/json" id="wf-boot">{boot}</script>')
         return self.layout(req, title, body, crumbs=crumbs)
 
     def post_propose(self, req):
         f = self.form(req)
+        source = source_of(f)  # the text editor's text, or the visual editor's model written out
         try:
-            out = self.hub.propose_workflow(req["me"], f.get("source", ""), f.get("note", ""))
+            out = self.hub.propose_workflow(req["me"], source, f.get("note", ""))
         except Invalid as exc:
             try:
-                wid = tomllib.loads(f.get("source", "")).get("id")
+                wid = tomllib.loads(source).get("id")
             except tomllib.TOMLDecodeError:
                 wid = None
             wid = wid if isinstance(wid, str) and self.hub.versions(wid) else None
-            return self.page_workflow_edit(req, wid, source=f.get("source", ""), note=f.get("note", ""),
+            return self.page_workflow_edit(req, wid, source=source, note=f.get("note", ""),
                                            problems=exc.problems)
         raise Redirect(f"/workflows/{out['workflow_id']}#v{out['version']}")
 
     def api_check_workflow(self, req):
-        source = str(self.body_json(req).get("source", ""))
+        """Checks a workflow as it is edited: the text editor sends its ``source``, the visual editor its ``model``
+        (the document, written out here as the text it would propose). The answer carries the text, the document
+        read back from it, whether that is the old form (a list of steps), and its conditions in words."""
+        body = self.body_json(req)
+        if isinstance(body.get("model"), dict):
+            source = editor_toml(body["model"])
+        else:
+            source = str(body.get("source", ""))
         try:
             data = tomllib.loads(source)
         except tomllib.TOMLDecodeError as exc:
-            return {"ok": False, "problems": [f"The workflow is not valid TOML: {exc}"], "data": None}
+            return {"ok": False, "problems": [f"The workflow is not valid TOML: {exc}"], "data": None,
+                    "source": source}
         try:
             self.hub.check_workflow(source)
             problems = []
         except wfmod.DefinitionError as exc:
             problems = exc.problems
-        return {"ok": not problems, "problems": problems, "data": data}
+        return {"ok": not problems, "problems": problems, "data": data, "source": source,
+                "old": is_old_form(data), "words": condition_words(data)}
+
+    def _workflow_graph(self, source: str, fallback: str) -> str:
+        """The workflow drawn as the editor draws it (states, the automations on the way, the ways out), read only;
+        without the script, its states as a list."""
+        data = tomllib.loads(source)
+        boot = json.dumps({"data": data, "catalog": self._catalog(), "problems": [], "words": condition_words(data),
+                           "old": False, "readonly": True}, default=str).replace("</", "<\\/")
+        return ('<div id="wf-editor" class="wf-view"><div class="flowwrap wf-canvas" id="wf-canvas"></div>'
+                '<div class="legend"><span><span class="ki task">T</span> task</span><span><span class="ki gate">D</span> '
+                'decision (signed)</span><span><span class="ki automation">A</span> automation: a stop of its own on the '
+                'way</span><span><span class="badge agent">AI</span> an agent may do it</span><span>- - - only when its '
+                'condition holds</span></div></div>'
+                f'<noscript>{fallback}</noscript><script type="application/json" id="wf-boot">{boot}</script>')
 
     def page_workflow(self, req, wid):
         me, hub = req["me"], self.hub
@@ -2582,7 +2771,11 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             wf, active = None, None
         main, dl = [], []
         if wf:
-            main.append(f'<p>{e(wf.summary)}</p><div class="section"><h2>How it flows</h2>{self._flow(wf)}</div>')
+            if wf.shape:
+                main.append(f'<p>{e(wf.summary)}</p><div class="section"><h2>Where it stops, and how it moves on</h2>'
+                            f'{self._workflow_graph(active["source"], self._states_view(wf) + self._flow(wf))}</div>')
+            else:
+                main.append(f'<p>{e(wf.summary)}</p><div class="section"><h2>How it flows</h2>{self._flow(wf)}</div>')
             agents = [s.title for s in wf.steps if s.agents_may and s.kind != "automation"]
             dl = [("Active", f"v{active['version']}"), ("About", e(wf.record or "nothing in particular")),
                   ("Started by", e(", ".join(wf.starters) or "—")), ("On event", e(wf.event or "—")),
@@ -3063,12 +3256,17 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         if verb == "ack":
             eng.acknowledge(me, iid)
             raise Redirect("/")
+        # who does the work it sets going: one person each, chosen in its dialog (``_assign_fields``)
+        assign = {k[len("assign:"):]: (v[-1] if isinstance(v, list) else v) for k, v in f.items() if k.startswith("assign:")}
         try:
             if verb == "decide":
                 self._confirm_signer(req, f)
-                eng.decide(me, iid, f.get("outcome", ""), f.get("comment", ""), seen=f.get("seen") or "-")
+                eng.decide(me, iid, f.get("outcome", ""), f.get("comment", ""), seen=f.get("seen") or "-",
+                           assign=assign, assign_required=True)
             else:
-                eng.complete(me, iid, self._form_output(f))
+                eng.complete(me, iid, {k: v for k, v in self._form_output(f).items()
+                                       if k != "_dialog" and not k.startswith("assign:")},
+                             assign=assign, assign_required=True)
         except (Denied, Invalid) as exc:  # the page again, saying what went wrong, with what was typed kept
             if isinstance(exc, Denied):
                 exc = Denied(self.holder_refusal(me, eng.item(iid), str(exc)))
@@ -3076,6 +3274,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
             code = 403 if isinstance(exc, Denied) else 422
             if verb == "decide" and f.get("outcome"):  # a decision is made in its outcome's dialog: that again, as typed
                 raise Rendered(code, self.page_decide(req, iid, kept={**kept, "_back": back}, error=exc)) from None
+            if verb == "complete" and f.get("_dialog"):  # an answer is given in its dialog: that again, as typed
+                raise Rendered(code, self.page_answer(req, iid, kept={**kept, "_back": back}, error=exc)) from None
             again = self._record_again(req, back, {"iid": iid, "kept": kept, "error": exc}) if back else None
             raise Rendered(code, again or self.page_item(req, iid, kept=kept, error=exc)) from None
         raise Redirect(back or self.run_href(item["run_id"]))  # where it was done: back to it
@@ -3179,7 +3379,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
         if starts:  # the work a clinician starts about this patient: one button each, its form in the dialog
             parts.insert(2, f"<div id='start-work' class='starts' role='group' aria-label='Start work'>{starts}</div>")
         extra = [("work", f"About this {self.subj['label'].lower()}", len(runs))]
-        # beside the chart, like any record's: the work under way about them (finished work is in the list below)
+        # below the chart, the full width: the work under way about them, as cards (finished work is in the list above)
         panel = self.work_panel(me, ref)
         # urgent work about them goes directly under the banner, at every width: never below the fold of the chart
         about = self.hub.engine.runs(mentions=ref, status="running", limit=200)  # its results' reviews too
@@ -3187,8 +3387,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, DashboardPages, Def
                                  records=self.urgent_records(me, ref))
         body = parts[0] + band + "".join(parts[1:])
         if panel:
-            body = (parts[0] + band + f'<div class="issue side-after"><div>{"".join(parts[1:])}</div>'
-                    f'<aside class="issue-side" aria-label="Open work">{panel}</aside></div>')
+            body += f'<div class="wp-inline wp-below" role="region" aria-label="Open work">{panel}</div>'
+
         return self.layout(req, self.hub.short_title(p), body, heading=False,
                            crumbs=[(f"/{self.subj['path']}", self.subj["plural"]), (None, self.hub.short_title(p))],
                            subnav=self.owner_rail(self.hub.short_title(p), rail, extra, label=self.subj["label"]))
@@ -4396,26 +4596,55 @@ name = "reason"
 type = "string"
 required = true
 
-[[steps]]
+[start]
+to = "doing"
+
+[[state]]
+id = "doing"
+label = "Being done"
+[[state.work]]
 id = "do-it"
 title = "Do the work"
 kind = "task"
 role = "front-desk"
 context = ["record:demographics", "input.reason"]
-[[steps.fields]]
+[[state.work.fields]]
 name = "notes"
 type = "text"
 required = true
 
-[[steps]]
+[[edge]]
+id = "done"
+from = "doing"
+to = "approving"
+label = "Done"
+
+[[state]]
+id = "approving"
+label = "Waiting for approval"
+[[state.work]]
 id = "approve"
 title = "Approve"
 kind = "gate"
 role = "practice-manager"
-after = ["do-it"]
 signer = "person"
-outcomes = ["approve", "reject"]
 meaning = "I approve this"
+
+[[edge]]
+id = "approved"
+from = "approving"
+to = "closed"
+label = "Approve"
+
+[[edge]]
+id = "rejected"
+from = "approving"
+to = "doing"
+label = "Send it back"
+
+[[state]]
+id = "closed"
+label = "Closed"
 '''
 
 

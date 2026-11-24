@@ -1,0 +1,112 @@
+id = "inventory-part"
+title = "Bring a part into use"
+summary = """A new or revised part is in use at once, unless the policy in force asks for parts to be approved first
+(regulated): then its author submits it and quality signs it, never its author, and its revision goes up. While it is
+revised, stock of it is received as it was last approved."""
+record = "Part"
+
+# The Part type names this workflow: a part in draft or in review is walked by it, and its status is this work's
+# position. Written as the part's states and the edges between them (practicehub/states.py), listed in the order a
+# revision goes through them. Sent back, it goes to draft, which ends the pass; the next run walks it again. The
+# policy in force is read as the run starts: with no part approval (basic, tracked) the part goes straight into use.
+
+[start]
+to = "draft"
+label = "Written"
+
+[[start.do]]
+id = "policy"
+title = "Read the inventory policy in force"
+action = "inventory.policy"
+
+[[start.do]]
+id = "open"
+title = "Put the part in use"
+when = "not policy.part_approval"   # the policy, not the part's status: moving it cannot change this
+to = "active"
+
+[[state]]
+id = "draft"
+label = "Draft"
+tone = "active"
+
+[[state.work]]
+id = "submit"
+title = "Describe the part and submit it for approval"
+kind = "wait"
+until = "record.status != 'draft'"
+instructions = """Say what the part is, how it is tracked and its shelf life, then submit it on its page."""
+
+[[edge]]
+id = "submit"
+label = "Submit for approval"
+from = "draft"
+to = "in-review"
+
+[[state]]
+id = "in-review"
+label = "In review"
+tone = "attention"
+
+# Two alternative pieces of work, as the policy's sign-off says: by someone other than its author (second), or by
+# its author too (a one-person shop that still approves its parts). A gate nobody may take would block for good.
+[[state.work]]
+id = "approve"
+title = "Approve the part"
+kind = "gate"
+role = "stock-quality"
+signer = "person"
+when = "policy.signoff == 'second'"
+not_by = ["record.editors"]
+meaning = "I approve this part for use: what it is, how it is tracked and its shelf life are right"
+context = ["record:inventory"]
+due = "5d"
+instructions = """Someone other than its author approves it."""
+
+[[state.work]]
+id = "approve-own"
+title = "Approve the part"
+kind = "gate"
+role = "stock-quality"
+signer = "person"
+when = "policy.signoff != 'second'"
+meaning = "I approve this part for use: what it is, how it is tracked and its shelf life are right"
+context = ["record:inventory"]
+due = "5d"
+
+[[edge]]
+id = "approve"
+label = "Approve"
+from = "in-review"
+to = "active"
+
+[[edge.do]]
+id = "approved"
+title = "Number the approved revision"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.increment]
+revision = 1
+[edge.do.params.set]
+return_reason = ""
+
+[[edge]]
+id = "send-back"
+label = "Send back"
+from = "in-review"
+to = "draft"                    # back with its author: the next pass is the next run's
+
+[[edge.do]]
+id = "sent-back"
+title = "Write why it was sent back on the part"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+return_reason = "{{approve.comment}}{{approve-own.comment}}"
+
+[[state]]
+id = "active"
+label = "In use"
+tone = "done"

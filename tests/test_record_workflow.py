@@ -6,7 +6,7 @@ import re
 import pytest
 
 from practicehub import schema
-from tests.conftest import M, item_for, quiet, run_all_local
+from tests.conftest import M, item_for, quiet, run_all_local, stored_workflow
 
 
 TRANSCRIPT = "\n".join([
@@ -50,7 +50,7 @@ def test_starting_a_request_makes_the_requested_visit_on_the_chart(hub):
     ref = run["record"]
     assert ref.startswith("Encounter/") and run["subject"] == pat and run["ctx"]["run"]["subject"] == pat
     visit = hub.records.read(*ref.split("/", 1))
-    assert visit["status"] == "requested" and visit["subject"]["reference"] == pat
+    assert visit["status"] == "reading" and visit["subject"]["reference"] == pat  # a nurse reads the reason first
     assert visit["reasonCode"][0]["text"] == "my knee hurts when I run" and visit["requested_by"] == "jo"
     assert not visit.get("plannedStartDate")  # asked for: no time yet, and still a valid visit
     rt = hub.record_type("Encounter")
@@ -63,7 +63,7 @@ def test_starting_a_request_makes_the_requested_visit_on_the_chart(hub):
     assert listed and all(i["record"] == ref for i in listed)  # the hand-off is about the visit
     page = App(hub, dev=False).page_record({"me": M(hub, "dr-amara"), "query": {}, "path": "/records/" + pat},
                                            *pat.split("/", 1))
-    assert ref.split("/", 1)[1] in page and "Requested" in page
+    assert ref.split("/", 1)[1] in page and "Being read" in page
 
 
 def test_a_request_another_workflow_starts_makes_its_visit_with_no_one_named_as_asking(hub):
@@ -101,7 +101,7 @@ def test_cancelling_the_request_cancels_the_visit(hub):
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"),
                            inputs={"reason": "my knee hurts when I run", "kind": "new-concern"})
     ref = hub.engine.run(run["id"])["record"]
-    assert _status(hub, ref) == "requested"
+    assert _status(hub, ref) == "reading"
     hub.engine.cancel(jo, run["id"], "the patient called back: no longer needed")
     assert _status(hub, ref) == "cancelled" and hub.engine.run(run["id"])["status"] == "cancelled"
 
@@ -113,10 +113,11 @@ def test_a_request_handled_on_the_phone_is_completed_not_cancelled(hub):
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"),
                            inputs={"reason": "my knee hurts when I run", "urgency": "urgent"})
     ref = hub.engine.run(run["id"])["record"]
-    hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"reached": True, "advice": "ice and rest"})
+    assert _status(hub, ref) == "callback"
+    hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"outcome": "patient-reached", "advice": "ice and rest"})
     run = hub.engine.run(run["id"])
-    assert run["steps"]["handled-by-phone"]["state"] == "done" and _status(hub, ref) == "finished"
-    assert run["steps"]["not-booked"]["state"] == "skipped" and run["status"] == "completed"
+    assert run["steps"]["patient-reached--to"]["state"] == "done" and _status(hub, ref) == "finished"
+    assert run["steps"]["book-a-visit--to"]["state"] == "skipped" and run["status"] == "completed"
 
 
 @pytest.mark.parametrize("action,want", [("reached-the-patient", "finished"), ("no-further-action", "cancelled")])
@@ -127,8 +128,9 @@ def test_a_physicians_call_that_reaches_the_patient_completes_the_request(hub, a
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"),
                            inputs={"reason": "my knee hurts when I run", "urgency": "urgent"})
     ref = hub.engine.run(run["id"])["record"]
-    hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"reached": False, "advice": "no answer"})
-    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"action": action, "notes": "called"})
+    hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"outcome": "could-not-reach", "advice": "no answer"})
+    assert _status(hub, ref) == "not-reached"
+    hub.engine.complete(M(hub, "dr-amara"), item_for(hub, run, "not-reached"), {"outcome": action, "notes": "called"})
     run = hub.engine.run(run["id"])
     assert _status(hub, ref) == want and run["status"] == "completed"
 
@@ -138,14 +140,14 @@ def test_the_nurse_books_an_urgent_request_on_the_same_visit(hub):
     run = hub.engine.start(jo, "appointment-request", record=_pat(hub, "MacLeod"),
                            inputs={"reason": "my knee hurts when I run", "urgency": "urgent"})
     ref = hub.engine.run(run["id"])["record"]
-    hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"reached": True, "advice": "seen today",
-                                                                 "book": True})
+    hub.engine.complete(noor, item_for(hub, run, "nurse-call"), {"outcome": "book-a-visit", "advice": "seen today"})
     item = item_for(hub, run, "nurse-book")
     slot = hub.engine.context(noor, item)["context"]
     free = next(v for k, v in slot.items() if "free" in k)
     choice = free[0]["value"] if isinstance(free[0], dict) else free[0]
     hub.engine.complete(noor, item, {"slot": choice})
-    assert _status(hub, ref) == "planned" and hub.engine.run(run["id"])["steps"]["not-booked"]["state"] == "skipped"
+    run = hub.engine.run(run["id"])
+    assert _status(hub, ref) == "planned" and run["steps"]["propose"]["state"] == "skipped"
 
 
 def test_the_same_request_twice_is_refused_but_a_new_concern_is_its_own_screened_visit(hub):
@@ -164,8 +166,8 @@ def test_the_same_request_twice_is_refused_but_a_new_concern_is_its_own_screened
     chest = hub.engine.run(chest["id"])
     assert chest["record"] != hub.engine.run(first["id"])["record"]
     assert chest["steps"]["screen"]["state"] == "done"
-    assert _status(hub, chest["record"]) == "requested" and _status(hub, hub.engine.run(first["id"])["record"]) == \
-        "requested"
+    assert _status(hub, chest["record"]) == "callback" and _status(hub, hub.engine.run(first["id"])["record"]) == \
+        "reading"
     # the patient's chart keeps both pieces of work, each with its own item
     runs = list(hub.db.runs.find({"workflow_id": "appointment-request", "subject": pat, "status": "running"}))
     assert {r["id"] for r in runs} >= {first["id"], chest["id"]}
@@ -223,7 +225,7 @@ def test_one_visit_walks_from_requested_to_completed_with_one_item(hub):
     draft = hub.engine.context(amara, item)["draft"]
     fields = {k: draft.get(k) or "x" for k in ("subjective", "assessment", "plan")}
     hub.engine.complete(amara, item, {**fields, "diagnosis_codes": ["V68"]})
-    assert _status(hub, ref) == "in-progress"  # documented, not yet signed: the visit is not completed
+    assert _status(hub, ref) == "signing"  # documented, not yet signed: the visit is not completed
     hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
     assert _status(hub, ref) == "finished"
     visit = hub.records.read(*ref.split("/", 1))
@@ -237,7 +239,7 @@ def test_one_visit_walks_from_requested_to_completed_with_one_item(hub):
     assert len(hub.engine.runs(record=ref)) == 1
     transitions = [e["data"].get("to") for e in hub.db.events.find({"subject": ref, "action": "record.transitioned"},
                                                                    sort="seq")]
-    assert transitions == ["planned", "arrived", "in-progress", "finished"]
+    assert transitions == ["planned", "arrived", "in-progress", "drafting", "editing", "signing", "finished"]
 
 
 def test_a_no_show_applies_the_policy_and_closes_the_run(hub):
@@ -444,7 +446,8 @@ def test_the_patient_stepping_out_is_a_side_move_named_as_an_action(hub):
     assert 'class="primary"' not in side
     hub.update_record(amara, ref, {"status": "onleave"})
     side = page().split('class="rw-moves"', 1)[1].split("</div>", 1)[0]
-    assert ">Patient is back</button>" in side and 'class="primary"' not in side
+    # back from it, the visit's work waits again: the move asks who does it, so it opens its screen
+    assert ">Patient is back…</a>" in side and 'class="primary"' not in side
     hub.update_record(amara, ref, {"status": "in-progress"})
 
 
@@ -452,14 +455,14 @@ def test_only_its_workflow_moves_the_visit_and_a_person_only_through_a_move_it_w
     """A type that names its workflow lets that workflow alone move its state: a person's move goes through only when
     the open step waits on it (a wait's until, a step's moves), never another workflow's run, never a move the work
     has gone past. The record's move and the run's step are one transaction."""
-    from practicehub.hub import Denied
+    from practicehub.hub import Invalid
     amara = M(hub, "dr-amara")
     run, ref = _to_the_visit(hub, amara)
     hub.update_record(amara, ref, {"status": "onleave"})  # the end step lists it: the physician steps out
     hub.update_record(amara, ref, {"status": "in-progress"})
     hub.engine.complete(amara, item_for(hub, run, "end"), {"transcript": TRANSCRIPT, "visit_type": "minor",
                                                            "minutes": 10})
-    with pytest.raises(Denied, match="not waiting for"):  # the visit has ended: being documented, not paused
+    with pytest.raises(Invalid, match="does not move from 'drafting'"):  # the visit has ended: being documented
         hub.update_record(amara, ref, {"status": "onleave"})
     # the page offers no move its workflow is not waiting for
     from practicehub.web.server import App
@@ -467,12 +470,12 @@ def test_only_its_workflow_moves_the_visit_and_a_person_only_through_a_move_it_w
     app._local.me = amara
     page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
     assert 'name="to" value="onleave"' not in page
-    # another workflow's run never moves it, whoever runs it
+    # nor does another workflow's run, whoever runs it
     other = hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub, "MacLeod"),
                              inputs={"reason": "another thing"})
-    with pytest.raises(Denied, match="its own workflow"):
+    with pytest.raises(Invalid, match="does not move from 'drafting'"):
         hub.update_record(amara, ref, {"status": "onleave"}, run_id=other["id"])
-    assert _status(hub, ref) == "in-progress"
+    assert _status(hub, ref) == "drafting"
 
 
 def test_a_move_its_workflow_waits_on_and_the_step_it_takes_are_one_transaction(hub, monkeypatch):
@@ -550,6 +553,8 @@ def test_the_record_page_says_who_holds_it_what_is_next_and_when_it_is_due_even_
     assert "tell-missed" not in panel  # step titles, never step ids
 
 
+# A version stored before (about the patient, moving nothing, in the old step form), which runs from then still walk:
+# put in force as stored (``stored_workflow``), since a proposal in the old form is refused now.
 OLD_SHAPE = """id = "appointment-request"
 title = "Appointment request"
 record = "Patient"
@@ -591,8 +596,7 @@ def test_a_run_from_before_is_moved_onto_its_own_record_only_once_its_type_is_re
     once; a run that can never move is noted once and not looked at again."""
     jo, rana = M(hub, "jo"), M(hub, "rana")
     pat = _pat(hub, "MacLeod")
-    old = hub.propose_workflow(jo, OLD_SHAPE, "the shape before")
-    hub.approve_workflow(rana, "appointment-request", old["version"])
+    stored_workflow(hub, OLD_SHAPE, "the shape before")
     rid = hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee"})["id"]
     cur = hub.propose_workflow(jo, hub.pack.workflow_sources["appointment-request"], "its own visit")
     hub.approve_workflow(rana, "appointment-request", cur["version"])
@@ -621,8 +625,7 @@ def test_a_run_from_before_the_visit_had_its_own_workflow_moves_onto_its_own_vis
     jo, rana = M(hub, "jo"), M(hub, "rana")
     noor = jo  # the scheduler
     pat = _pat(hub, "MacLeod")
-    old = hub.propose_workflow(jo, OLD_SHAPE, "the shape before")
-    hub.approve_workflow(rana, "appointment-request", old["version"])
+    stored_workflow(hub, OLD_SHAPE, "the shape before")
     run = hub.engine.start(jo, "appointment-request", record=pat, inputs={"reason": "my knee"})
     rid = run["id"]
     propose = item_for(hub, run, "propose")
@@ -695,7 +698,7 @@ def test_the_front_desk_sees_where_a_visit_is_on_the_chart_but_not_the_clinical_
     assert "At a step you may not see" in now and "Edit the note" not in now and "needs access to" not in now
     assert "Physician" in now  # who holds it (the role, until someone takes it)
     assert "Due" in now or "Overdue" in now
-    assert ">In progress<" in chart  # the visit's state, on its card
+    assert ">Note being edited<" in chart  # the visit's state, on its card
     mine = app.page_record({"me": amara, "query": {}, "path": "/records/" + pat}, *pat.split("/", 1))
     assert "Edit the note" in mine
 
@@ -713,7 +716,8 @@ def test_a_discarded_note_leaves_the_visit_completed_without_a_note_flagged_for_
     run = hub.engine.run(run["id"])
     assert _status(hub, ref) == "undocumented" and run["status"] == "running"
     assert hub.record_type("Encounter").state_label("undocumented") == "Completed: no note"
-    assert run["steps"]["file-note"]["state"] == "skipped" and run["steps"]["code"]["state"] == "skipped"
+    assert run["steps"]["file-note"]["state"] == "skipped" and run["steps"]["bill"]["state"] == "skipped"
+    assert not [k for k in hub.engine.children_of(ref) if k["ref"].startswith("ChargeItem/")]  # nothing billed
     assert not [c for c in hub.records.search("Composition", limit=None)
                 if (c.get("encounter") or {}).get("reference") == ref]
     told = hub.db.items.find({"run_id": run["id"], "kind": "notice", "assignee": "dr-amara"})
@@ -722,7 +726,7 @@ def test_a_discarded_note_leaves_the_visit_completed_without_a_note_flagged_for_
     assert task["assignee"] == "dr-amara" and task.get("due_at")
     page = App(hub, dev=False).page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
     assert "Completed: no note" in page and "Write the note for this visit" in page
-    hub.engine.complete(amara, task["id"], {"done": then, "why": "" if ends == "finished" else "another patient's"})
+    hub.engine.complete(amara, task["id"], {"outcome": then, "why": "" if ends == "finished" else "another patient's"})
     run_all_local(hub, log=quiet)
     assert _status(hub, ref) == ends and hub.engine.run(run["id"])["status"] == "completed"
 
@@ -737,12 +741,13 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
     run_all_local(hub, log=quiet)
     run = hub.engine.run(run["id"])
     pat = run["subject"]
-    kids = hub.engine.children_of(ref)
+    kids = [k for k in hub.engine.children_of(ref) if k["ref"].startswith("ServiceRequest/")]  # its charge apart
     assert [k["ref"].split("/")[0] for k in kids] == ["ServiceRequest", "ServiceRequest"]
     for kid in kids:
         sr = hub.records.read(*kid["ref"].split("/", 1))
         assert sr["subject"]["reference"] == pat and sr["encounter"]["reference"] == ref
         assert sr["status"] == "draft" and sr["reasonCode"][0]["text"]
+        assert sr["stage"] == "finalizing"  # its letter drafted, for the physician to finalize
         child = kid["run"]
         assert child["workflow_id"] == "referral" and child["record"] == kid["ref"] and child["subject"] == pat
         assert child["ctx"]["run"]["parent"] == run["id"]
@@ -758,7 +763,7 @@ def test_referrals_written_in_the_note_are_records_of_their_own_walked_by_the_re
     page = app.page_record({"me": amara, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1))
     # in the page's main column, before the side panel: what was started from the visit, and where each one is
     started = page.index("Started from this visit")
-    assert started < page.index('class="issue-side"') and f'/referrals/{kids[0]["ref"].split("/")[1]}"' in page[started:] and "Being written" in page
+    assert started < page.index('class="issue-side"') and f'/referrals/{kids[0]["ref"].split("/")[1]}"' in page[started:] and "Letter to finalize" in page
     from practicehub.visibility import Viewer
     viewer = Viewer(hub, amara)
     stuck, rank = app._child_work({**kids[0]["run"], "steps": {"draft": {"state": "failed"}}}, viewer)

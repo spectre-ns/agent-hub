@@ -1,4 +1,7 @@
-# A controlled document. Only a signed review approves it; anyone who works on it may sign that they have read it.
+# A controlled document: a policy, a procedure (SOP) or a form. Only a signed review approves it; anyone who works on it
+# may sign that they have read it. Its text is its file: an OpenDocument file is written in the browser, together, with
+# Collabora Online while the document is a draft (read only once it is sent for review); a PDF is kept as it was filed
+# (a wiki page made a controlled document, with the wiki-sop module, is a PDF of that page).
 id = "Document"
 label = "Controlled document"
 plural = "Controlled documents"
@@ -9,7 +12,8 @@ order = 10
 # Every revision is worked from draft to in force by one workflow: written by its owner, sent for review, approved
 # (signed) by a controller who did not write it, or returned with the reason; in force until revised or made obsolete.
 # Its status is where that work is. Making it obsolete is a document controller's signed decision too. An obsolete
-# document is not walked.
+# document is not walked. The periodic review (dms-periodic-review) is a companion started by the clock: it never moves
+# the status, it only asks for a revision (revise_asked), and the document's own workflow opens it.
 workflow = { id = "dms-review", when = "record.status in ['draft', 'in-review', 'approved', 'retiring']" }
 summary = "A policy, procedure or form under document control."
 
@@ -31,6 +35,7 @@ help = "its workflow adds one when it is revised after approval"
 name = "status"
 type = "choice"
 choices = ["draft", "in-review", "approved", "retiring", "obsolete"]
+labels = { draft = "Draft", in-review = "In review", approved = "Approved", retiring = "Proposed obsolete", obsolete = "Obsolete" }
 
 [[field]]
 name = "owner"
@@ -45,11 +50,38 @@ type = "date"
 [[field]]
 name = "file"
 type = "attachment"
-help = "the document itself, by its SHA-256 in the blob store"
+help = """the document itself: an OpenDocument file (.odt, .ods, .odp) is edited together in the browser while it is a
+draft; a PDF is kept as filed"""
 
 [[field]]
 name = "body"
 type = "markdown"
+
+[[field]]
+name = "change_summary"
+label = "What changed"
+type = "text"
+help = "what this revision changes, for the reviewer and for readers"
+
+[[field]]
+name = "review_by"
+label = "Review by"
+type = "date"
+by = "workflow"   # a year after it was approved; its periodic review sets the next
+
+[[field]]
+name = "review_asked"
+label = "Review asked for"
+type = "date"
+by = "workflow"
+show = false
+
+[[field]]
+name = "revise_asked"
+label = "Revision asked for by its review"
+type = "boolean"
+by = "workflow"
+show = false
 
 [[field]]
 name = "returned_because"
@@ -74,28 +106,19 @@ from = ["draft"]
 to = "in-review"
 label = "Send for review"
 
-[[lifecycle.transition]]
-from = ["in-review"]
-to = "approved"
-by = "workflow"         # only a signed review gets here
-label = "Approve"
+# The moves its workflow makes (approve, return, send back for review, make obsolete, keep) are the dms-review
+# workflow's edges; only the moves people make by hand, and where cancelled work leaves it, are listed here.
 
 [[lifecycle.transition]]
-from = ["in-review"]
+from = ["in-review", "retiring"]
 to = "draft"
-by = "workflow"
-label = "Return to the author"
+by = "workflow"         # only when its review or its retiring is cancelled part way
+label = "Hand back as a draft"
 
 [[lifecycle.transition]]
 from = ["approved"]
 to = "draft"
 label = "Revise"        # its workflow numbers the new revision
-
-[[lifecycle.transition]]
-from = ["approved"]
-to = "in-review"
-by = "workflow"         # a CAPA sends an approved document straight back for review
-label = "Send back for review"
 
 # Making a document obsolete takes it out of use: whoever works on it proposes it and says why, and a document
 # controller decides it and signs (the dms-review workflow's retire step). Kept, it goes back to where it was.
@@ -105,24 +128,6 @@ to = "retiring"
 label = "Propose making it obsolete"
 fields = ["obsolete_reason"]
 require = ["obsolete_reason"]
-
-[[lifecycle.transition]]
-from = ["retiring"]
-to = "obsolete"
-by = "workflow"         # only a document controller's signed decision gets here
-label = "Make obsolete"
-
-[[lifecycle.transition]]
-from = ["retiring"]
-to = "approved"
-by = "workflow"
-label = "Keep it in use"
-
-[[lifecycle.transition]]
-from = ["retiring"]
-to = "draft"
-by = "workflow"
-label = "Keep the draft"
 
 [[signature]]
 meaning = "I have read and understood this document"

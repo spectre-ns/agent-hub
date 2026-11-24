@@ -157,16 +157,16 @@ def act_client_sign(engine, run, step, params, actor):
                        body=f"{name} has a question before approving.")
         return {"signed": False, "summary": f"{name} has a question before approving: call them back."}
     if what == "t183":
-        rtype, state, values = "T1Return", "client-approval", {
+        rtype, states, values = "T1Return", ("client-approval", "with-client", "t183-overdue"), {
             "t183_signed_on": today, "t183_how": "portal"}
     elif what == "engagement":
-        rtype, state, values = "Engagement", "proposed", {
+        rtype, states, values = "Engagement", ("drafting", "proposed", "overdue"), {
             "client_signed_on": today, "client_signed_how": "portal", "signed_by_name": name}
     else:
         raise ValueError(f"client.sign: nothing to sign called {what!r}")
     sign_field = "t183_signed_on" if rtype == "T1Return" else "client_signed_on"
     waiting = [r for r in hub.records.search(rtype, subject=client, limit=None)
-               if r.get("status") == state and not r.get(sign_field)]
+               if r.get("status") in states and not r.get(sign_field)]
     if not waiting:
         return {"signed": False, "summary": f"{name} approved on the portal, but nothing of theirs is waiting for it."}
     rec = sorted(waiting, key=lambda r: (r.get("year") or 0))[-1]
@@ -231,7 +231,8 @@ def act_engagement_renewal_date(engine, run, step, params, actor):
 
 
 def act_engagement_renew(engine, run, step, params, actor):
-    """engagement.renew: next year's engagement, as this one was, proposed to the client (its workflow sends it)."""
+    """engagement.renew: next year's engagement, as this one was: proposed to the client (its workflow sends it), or
+    planned (``status``: its workflow waits for its season, then sends it)."""
     hub, ref = engine.hub, run["record"]
     eng = _read(hub, ref)
     year = int(eng["year"]) + 1
@@ -242,7 +243,8 @@ def act_engagement_renew(engine, run, step, params, actor):
     new = hub.create_record(actor, "Engagement", {
         "client": eng["client"], "client_name": eng.get("client_name") or "", "service": eng["service"], "year": year,
         "fee": eng.get("fee", DEFAULT_FEES.get(eng["service"], 0)), "fee_basis": eng.get("fee_basis") or "fixed",
-        "scope": eng.get("scope") or "", "previous": ref, "status": "proposed"}, run_id=run["id"])
+        "scope": eng.get("scope") or "", "previous": ref,
+        "status": "planned" if params.get("status") == "planned" else "proposed"}, run_id=run["id"])
     return {"engagement": f"Engagement/{new['id']}", "new": True}
 
 
@@ -395,6 +397,12 @@ def estimate(slips: list[dict]) -> dict:
             "tax": round(tax, 2), "net_refund": round(deducted - tax, 2)}
 
 
+# The T1's states while its slips are gathered (organizer to the call about what is missing), and before it is drafted.
+T1_GATHERING = ("organizer", "gathering", "chasing", "reminded", "slips-missing")
+T1_BEFORE_DRAFT = (*T1_GATHERING, "comparing", "preparing")
+T1_ASSESSED = ("assessment-differs", "assessed")
+
+
 def _year_slips(slips, year):
     return [s for s in slips if s.get("resourceType") == "TaxSlip" and s.get("year") == year
             and s.get("status") == "extracted" and s.get("slip_type") != "NOA"]
@@ -406,7 +414,7 @@ def _client_records(hub, client_ref, rtype):
 
 def _last_return(returns, year):
     return next((r for r in returns if r.get("resourceType") == "T1Return" and r.get("year") == year - 1
-                 and r.get("status") in ("filed", "assessed")), None)
+                 and r.get("status") in ("filed", *T1_ASSESSED)), None)
 
 
 def compare(ret: dict, slips: list[dict], returns: list[dict]) -> dict:
@@ -518,7 +526,7 @@ def act_t1_slip_filed(engine, run, step, params, actor):
              assessed_taxable_income=float(boxes["26000"]) if boxes.get("26000") is not None else None)
         return {"return": ref, "notice": True, "summary": f"Notice of assessment recorded on {ref}."}
     slips = _year_slips(_client_records(hub, client, "TaxSlip"), year)
-    if ret.get("status") in ("gathering", "preparing"):
+    if ret.get("status") in T1_BEFORE_DRAFT:
         expected = ret.get("expected_slips") or []
         missing = [k for k in expected if not any(_key_matches(k, s) for s in slips)]
         income_in = any(s.get("slip_type") in INCOME_SLIPS for s in slips)
@@ -807,9 +815,9 @@ def _summary_t1(rec):
     if rec.get("net_refund") is not None:
         r = float(rec["net_refund"])
         bits.append(f"refund {_money(r)}" if r >= 0 else f"owing {_money(-r)}")
-    if rec.get("missing_slips") and rec.get("status") == "gathering":
+    if rec.get("missing_slips") and rec.get("status") in T1_GATHERING:
         bits.append(f"{len(rec['missing_slips'])} slip(s) missing")
-    if rec.get("due_date") and rec.get("status") not in ("filed", "assessed", "withdrawn"):
+    if rec.get("due_date") and rec.get("status") not in ("filed", *T1_ASSESSED, "withdrawn"):
         bits.append(f"due {rec['due_date']}")
     if rec.get("efile_confirmation"):
         bits.append(f"EFILE {rec['efile_confirmation']}")

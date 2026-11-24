@@ -7,31 +7,108 @@ released at their new revision. Rejected or returned, it goes back to its author
 record = "ChangeOrder"
 
 # The ChangeOrder type names this workflow: making a change order starts it, and its status is this work's position.
-# One pass is one run (a workflow has no loops): returned or rejected, the next run walks the next pass,
-# and who reviewed it before still does not release it. Nothing else starts it.
+# Written as the change order's states and the edges between them (practicehub/states.py), listed in the order a pass
+# goes through them. One pass is one run: an edge back to an earlier state (rejected, returned) ends the run there,
+# the next run walks the next pass, and who reviewed it before still does not release it. Nothing else starts it.
 
-[[steps]]
+[start]
+to = "draft"
+label = "Raised"
+
+# a pass may start rejected (with its author), under review, approved or to release: it is walked from there
+[[start.do]]
+id = "from-rejected"
+title = "Walk it from rejected"
+when = "record.status == 'rejected'"
+to = "rejected"
+
+[[start.do]]
+id = "from-review"
+title = "Walk it from review"
+when = "record.status == 'review'"
+to = "review"
+
+[[start.do]]
+id = "from-approved"
+title = "Walk it from approved"
+when = "record.status == 'approved'"
+to = "approved"
+
+[[start.do]]
+id = "from-releasing"
+title = "Walk it from to release"
+when = "record.status == 'releasing'"
+to = "releasing"
+
+[[state]]
+id = "rejected"
+label = "Rejected"
+tone = "attention"
+
+[[state.work]]
+id = "revise"
+title = "Revise the change, or cancel it"
+kind = "wait"
+until = "record.status != 'rejected'"   # revised (back to draft), or cancelled
+instructions = """The board rejected it: its note says what is missing. Revise it on its page and send it again, or
+cancel it."""
+
+[[edge]]
+id = "revised"
+label = "Revise"
+from = "rejected"
+to = "draft"
+when = "record.status == 'draft'"
+
+[[edge]]
+id = "cancel-rejected"
+label = "Cancel"
+from = "rejected"
+to = "cancelled"
+when = "record.status == 'cancelled'"
+
+[[state]]
+id = "draft"
+label = "Draft"
+tone = "active"
+
+[[state.work]]
 id = "submit"
 title = "Write the change and send it for review"
 kind = "wait"
-until = "record.status != 'draft' and record.status != 'rejected'"   # sent for review (or cancelled)
-moves = ["draft"]   # revised after the board rejected it: still with its author
+until = "record.status != 'draft'"   # sent for review (or cancelled)
 instructions = """Say why it changes, which products and documents it changes and what else it touches, then send it
 for review on its page. Rejected, the board's note says what is missing: revise it and send it again, or cancel it.
 Whoever writes it does not review it."""
 
-[[steps]]
+[[edge]]
+id = "sent"
+label = "Send for review"
+from = "draft"
+to = "review"
+when = "record.status == 'review'"
+
+[[edge]]
+id = "cancel"
+label = "Cancel"
+from = "draft"
+to = "cancelled"
+when = "record.status == 'cancelled'"
+
+[[state]]
+id = "review"
+label = "Review"
+tone = "attention"
+
+[[state.work]]
 id = "review"
 title = "Review the change"
 kind = "gate"
-after = ["submit"]
-when = "record.status == 'review'"
 role = "change-board"
 signer = "person"
 not_by = ["record.editors"]   # whoever wrote the change does not approve it
 meaning = "I approve this change order"
 meanings = { reject = "I reject this change order and return it to its author" }
-outcomes = ["approve", "reject"]
 context = ["record:products", "record:documents", "record:quality"]
 due = "5d"
 escalate_to = "change-board"
@@ -39,84 +116,98 @@ instructions = """Read why it changes and what else it touches. Approve it, and 
 their next revision; or reject it with what is missing, and it goes back to its author. Your comment is written on the
 change order as the board's note."""
 
-[[steps]]
-id = "reject"
-title = "Return the change to its author"
-kind = "automation"
-after = ["review"]
-when = "review.outcome == 'reject'"
-action = "record.update"
-state = "rejected"   # back with its author: the next pass is the next run's
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-decision = "Rejected: {{review.comment}}"
+[[edge]]
+id = "approve"
+label = "Approve"
+from = "review"
+to = "approved"
 
-[[steps]]
+[[edge.do]]
 id = "approve"
 title = "Record the approval"
-kind = "automation"
-after = ["review"]
-when = "review.outcome == 'approve'"
 action = "record.update"
-state = "approved"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 decision = "Approved: {{review.comment}}"
 
-[[steps]]
+[[edge.do]]
 id = "open-products"
 title = "Open each released product at its next revision"
-kind = "automation"
-after = ["approve"]
 when = "record.opened != true"   # a change returned and sent again does not open its products a second time
 action = "record.update"
 for_each = "{{record.products}}"
 where = "each_record.status == 'released'"   # one still in concept or design is changed as it is
-[steps.params]
+[edge.do.params]
 ref = "{{each}}"
 increment = ["revision"]
-[steps.params.set]
+[edge.do.params.set]
 status = "design"
 
-[[steps]]
+[[edge.do]]
 id = "revise-documents"
 title = "Open each approved document for revision"
-kind = "automation"
-after = ["approve"]
 when = "record.opened != true"   # nor revise its documents again
 action = "record.update"
 for_each = "{{record.documents}}"
 where = "each_record.status == 'approved'"
-[steps.params]
+[edge.do.params]
 ref = "{{each}}"
-[steps.params.set]
+[edge.do.params.set]
 status = "draft"   # a move the document's own workflow waits on: its author revises it and sends it for review
 
-[[steps]]
+[[edge.do]]
 id = "mark-opened"
 title = "Note that the products and documents are open"
-kind = "automation"
-after = ["open-products", "revise-documents"]
+when = "open-products.each != null and revise-documents.each != null"   # once both have opened theirs
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 opened = true
 
-[[steps]]
+[[edge]]
+id = "reject"
+label = "Reject"
+from = "review"
+to = "rejected"               # back with its author: the next pass is the next run's
+
+[[edge.do]]
+id = "reject"
+title = "Return the change to its author"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+decision = "Rejected: {{review.comment}}"
+
+[[state]]
+id = "approved"
+label = "Approved"
+tone = "active"
+
+[[state.work]]
 id = "documents-approved"
 title = "Wait until every changed document is approved"
 kind = "wait"
 role = "document-controller"
-after = ["approve", "mark-opened"]   # on a second pass nothing is opened again, and this still waits
 for_each = "{{record.documents}}"
 until = "each_record.status == 'approved' or each_record.status == 'obsolete'"
 instructions = """Each changed document is listed with where it is and who holds it: its owner revises it and a
 document controller approves it, in its own work."""
 
-[[steps]]
+[[edge]]
+id = "documents-done"
+label = "Documents approved"
+from = "approved"
+to = "releasing"
+
+[[state]]
+id = "releasing"
+label = "To release"
+tone = "attention"
+
+[[state.work]]
 id = "release"
 title = "Release the new revisions"
 kind = "gate"
@@ -125,8 +216,6 @@ signer = "person"
 not_by = ["review"]    # the board member who approved it (in this pass or one before) does not release it
 meaning = "I release these products at their new revision"
 meanings = { return = "I return this change order without releasing it" }
-outcomes = ["release", "return"]
-after = ["documents-approved"]
 context = ["record:products", "record:documents"]
 due = "7d"
 escalate_to = "product-owner"
@@ -134,36 +223,44 @@ instructions = """Check each product's parts and specifications are right at the
 approved again. Releasing makes the new revision the one in use. Return it, and the change order goes back to its author
 with the products still in design."""
 
-[[steps]]
+[[edge]]
+id = "release"
+label = "Release"
+from = "releasing"
+to = "implemented"
+
+[[edge.do]]
 id = "release-products"
 title = "Release the products"
-kind = "automation"
-after = ["release"]
-when = "release.outcome == 'release'"
 action = "record.update"
 for_each = "{{record.products}}"
 where = "each_record.status == 'design'"
-[steps.params]
+[edge.do.params]
 ref = "{{each}}"
-[steps.params.set]
+[edge.do.params.set]
 status = "released"
 
-[[steps]]
+[[edge]]
+id = "return"
+label = "Return to its author"
+from = "releasing"
+to = "draft"                  # the next pass is the next run's
+
+[[edge.do]]
 id = "returned"
 title = "Return the change to its author"
-kind = "automation"
-after = ["release"]
-when = "release.outcome == 'return'"
 action = "record.update"
-state = "draft"   # the next pass is the next run's
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 decision = "Returned at release: {{release.comment}}"
 
-[[steps]]
+[[state]]
 id = "implemented"
-title = "Close the change order"
-kind = "automation"
-after = ["release-products"]
-state = "implemented"
+label = "Implemented"
+tone = "done"
+
+[[state]]
+id = "cancelled"
+label = "Cancelled"
+tone = "done"

@@ -153,6 +153,7 @@ class RecordType:
     consent: dict | None = None  # {"kind", "date", "source", "withdrawn": paths, "lasts": {kind: "2y" or ""}}
     booking: dict = field(default_factory=dict)  # a Booking type's [booking]: see _check_booking
     workflow: dict | None = None  # {"id", "when"}: the workflow a new record of it starts, about it (_check_workflow)
+    unique: list[list[str]] = field(default_factory=list)  # keys (field names) no two of its records share (_check_unique)
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -232,7 +233,7 @@ KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
          "part_of", "slug", "link",
-         "navigator", "layout", "standard", "consent", "booking", "workflow"},
+         "navigator", "layout", "standard", "consent", "booking", "workflow", "unique"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
               "roles", "required_unless"},
@@ -407,6 +408,21 @@ def _resolves(path: str, fields: list[dict]) -> bool:
     """Whether a dotted path is a declared field's, inside one (an object or list it holds), or around some."""
     return any(path == f["path"] or path.startswith(f["path"] + ".") or f["path"].startswith(path + ".")
                for f in fields)
+
+
+def revising_states(states: list, trans: list, in_use) -> list:
+    """The states a revision passes through: those with a way back to ``in_use`` (not 'obsolete')."""
+    if in_use not in states:
+        return []
+    reach, grew = {in_use}, True
+    while grew:
+        grew = False
+        for t in trans:
+            for f in (states if "*" in t["from"] else t["from"]):
+                if t["to"] in reach and f not in reach:
+                    reach.add(f)
+                    grew = True
+    return [x for x in states if x in reach and x != in_use]
 
 
 def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
@@ -595,17 +611,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         in_use = lc.get("in_use")  # the state people work from; while revised, the last such version stays shown
         if in_use is not None and in_use not in states:
             problems.append(f"lifecycle.in_use: {in_use!r} is not one of its states")
-        revising: list = []
-        if in_use in states:  # states a revision passes through: those with a way back to in_use (not 'obsolete')
-            reach, grew = {in_use}, True
-            while grew:
-                grew = False
-                for t in trans:
-                    for f in (states if "*" in t["from"] else t["from"]):
-                        if t["to"] in reach and f not in reach:
-                            reach.add(f)
-                            grew = True
-            revising = [x for x in states if x in reach and x != in_use]
+        revising = revising_states(states, trans, in_use)
         tones = _lifecycle_tones(lc.get("tones"), states, problems)
         lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial, "tones": tones,
               "starts": list(starts), "transition": trans, "locked": locked, "abandoned": abandoned, "ended": ended, "in_use": in_use, "revising": revising,
@@ -721,6 +727,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         problems += _check_booking(rt, doc["booking"])
     if doc.get("workflow") is not None:
         problems += _check_workflow(rt, doc["workflow"])
+    if doc.get("unique") is not None:
+        problems += _check_unique(rt, doc["unique"])
     std = doc.get("standard")
     if std is not None:
         problems += _check_standard(rt, std)
@@ -771,6 +779,48 @@ def _check_workflow(rt: RecordType, w) -> list[str]:
         return ["workflow: a record moved by a workflow has a lifecycle: its state is where the work is"]
     rt.workflow = {"id": w["id"], "when": conds.get("when"), **({"again": conds["again"]} if "again" in conds else {})}
     return []
+
+
+UNIQUE_TYPES = ("string", "number", "date", "datetime", "choice", "member", "reference")
+
+
+def _check_unique(rt: RecordType, raw) -> list[str]:
+    """``unique``: values no two records of the type share. Each key is a field, or a list of fields that together
+    are the key (a serial is unique within its part). Sets ``rt.unique`` when sound.
+
+        unique = ["code"]
+        unique = ["code", ["part", "serial"]]
+
+    A key is checked when a record is written with every one of its fields filled in; a record that leaves one empty
+    (a part with no serials) shares nothing. Text is compared as a search compares it: "GL-M", "gl-m" and " GL-M"
+    are one code."""
+    if not isinstance(raw, list) or not raw:
+        return ['unique: a list of fields, or of lists of fields that together are unique, e.g. ["code"] or '
+                '[["part", "serial"]]']
+    keys, problems = [], []
+    for k in raw:
+        names = [k] if isinstance(k, str) else k
+        if not _strings(names) or not names:
+            problems.append(f"unique: {k!r} is a field name, or a list of field names")
+            continue
+        if len(set(names)) != len(names):
+            problems.append(f"unique: {names!r} names a field twice")
+            continue
+        for n in names:
+            f = rt.field(n)
+            if f is None:
+                near = difflib.get_close_matches(n, [x["name"] for x in rt.fields], n=1)
+                problems.append(f"unique: there is no field {n!r}" + (f' (did you mean "{near[0]}"?)' if near else ""))
+            elif f.get("list") or "*" in f["path"]:
+                problems.append(f"unique: {n} holds several values; a key is one value per record")
+            elif f["type"] not in UNIQUE_TYPES:
+                problems.append(f"unique: {n} is {f['type']}; a key is one of {', '.join(UNIQUE_TYPES)}")
+        if sorted(names) in [sorted(x) for x in keys]:
+            problems.append(f"unique: {names!r} is listed twice")
+        keys.append(list(names))
+    if not problems:
+        rt.unique = keys
+    return problems
 
 
 def starts_workflow(rt: RecordType, rec: dict) -> str | None:

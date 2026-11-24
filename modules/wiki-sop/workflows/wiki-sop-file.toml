@@ -1,0 +1,48 @@
+id = "wiki-sop-file"
+title = "Make a controlled document"
+summary = """A document author makes a wiki page a controlled document: a PDF of the page as it is now is filed in document
+control as a new draft, with the number they give it, owned by them. Document control's own workflow takes it from
+there: its owner sends it for review, and a document controller who did not write it approves it."""
+record = "WikiPage"
+
+# Started by hand on a wiki page (its page offers it to a document author). The page is not changed and stays
+# uncontrolled; the controlled document is the PDF, fixed at the page's version when it was made. To file a later
+# version of the page, revise the controlled document and attach a new copy, or start this again for a new document.
+[trigger]
+starters = ["document-author"]
+one_open_per = "record"
+
+[[input]]
+name = "number"
+label = "Document number"
+type = "string"
+required = true
+help = "e.g. SOP-021: no document in use may have it already"
+
+[[input]]
+name = "title"
+label = "Title"
+type = "string"
+help = "leave it empty to use the page's title"
+
+# Written as states and edges (practicehub/states.py) whose states are none of the page's statuses: they are this
+# run's own stops (the run keeps where it is), and the page stays as it is. The filing is the entry edge's automation.
+
+[start]
+to = "filed"
+label = "Made a controlled document"
+
+[[start.do]]
+id = "file"
+title = "File a PDF of the page in document control"
+action = "wiki-sop.file-page"
+[start.do.params]
+page = "{{run.record}}"
+number = "{{input.number}}"
+title = "{{input.title}}"
+owner = "{{run.started_by}}"
+
+[[state]]
+id = "filed"
+label = "Filed in document control"
+tone = "done"

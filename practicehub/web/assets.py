@@ -667,9 +667,47 @@ color:var(--subtle)}.col>header .col-name{font-size:14px;line-height:20px;color:
 .wp-mine{display:block;text-align:center;margin-top:8px}
 .wp-inline{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin:8px 0 16px}
 .wp-inline section{display:contents}.wp-inline section>h2{grid-column:1/-1;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--subtle);margin:0}
-.issue.side-after .issue-side{order:0}
-@media (max-width:900px){.issue.side-after .issue-side{order:1}}
+.wp-below{margin-top:24px}
+/* ---- the workflow editor's graph: states, the automations on the way, ways out */
+.wf-canvas{padding:8px;min-height:160px}.wf-canvas svg{margin:0}
+.wf-graph .fl-edge.sel{stroke:var(--brand);stroke-width:2.2}.wf-graph .fl-edge.fail{stroke:var(--danger)}
+.wf-graph .fl-arrowhead.sel{fill:var(--brand)}.wf-graph .fl-arrowhead.fail{fill:var(--danger)}
+.wf-node{cursor:pointer}.wf-node .box{fill:var(--raised);stroke:var(--border-bold);stroke-width:1.4}
+.wf-node.k-start .box{fill:var(--neutral);stroke-dasharray:4 3}
+.wf-node.k-do .box{fill:var(--surface);stroke:var(--ki-automation);stroke-dasharray:5 3}
+.wf-node.sel>.box,.wf-node:focus-visible>.box{stroke:var(--brand);stroke-width:2.4;stroke-dasharray:none}
+.wf-node text{fill:var(--fg);font:600 12px system-ui,sans-serif}.wf-node text.s{fill:var(--subtlest);font-size:11px;font-weight:500}
+.wf-node text.name{font-size:13px}.wf-node text.w{font-weight:500}
+.wf-node .tone{fill:var(--loz-default-bg,var(--neutral))}.wf-node .t-inprogress{fill:var(--loz-inprogress-fg)}
+.wf-node .t-moved{fill:var(--loz-moved-fg)}.wf-node .t-success{fill:var(--loz-success-fg)}.wf-node .t-removed{fill:var(--loz-removed-fg)}
+.wf-node .hit{fill:transparent}.wf-head:hover .hit,.wf-row:hover .hit{fill:var(--neutral-hover)}
+.wf-row.sel .hit{fill:var(--selected-bg);stroke:var(--brand)}.wf-head:focus-visible .hit,.wf-row:focus-visible .hit{stroke:var(--brand);stroke-width:2}
+.wf-node :focus,.wf-node:focus{outline:none}
+.wf-node .ki-box{fill:var(--ki-automation)}.wf-node .ki-box.k-task{fill:var(--ki-task)}.wf-node .ki-box.k-gate{fill:var(--ki-gate)}
+.wf-node text.ki-t{fill:#fff;font-size:10px;font-weight:700}.wf-node text.ai-t2{fill:var(--subtle);font-size:10px;font-weight:700}
+.wf-handle{fill:var(--surface);stroke:var(--brand);stroke-width:1.6;cursor:crosshair}.wf-handle:hover{fill:var(--brand)}
+.wf-elabel{cursor:pointer}.wf-elabel rect{fill:var(--surface);stroke:var(--border-bold)}
+.wf-elabel text{fill:var(--fg);font:600 11px system-ui,sans-serif}.wf-elabel.muted text{fill:var(--subtle);font-weight:500}
+.wf-elabel.muted,.wf-elabel.fail{cursor:default}.wf-elabel.fail rect{stroke:var(--danger)}.wf-elabel.fail text{fill:var(--danger)}
+.wf-elabel.sel rect,.wf-elabel:focus-visible rect{stroke:var(--brand);stroke-width:2;fill:var(--selected-bg)}.wf-elabel:focus{outline:none}
+.wf-drag{pointer-events:none}
 /* ---- a lifecycle drawn: states as boxes, moves as arrows */
+.wf-states{display:flex;flex-direction:column;gap:12px;margin:8px 0 16px}
+.wf-state{border:1px solid var(--border);border-radius:3px;padding:10px 12px;background:var(--surface)}
+.wf-state.wf-entry{border-style:dashed;background:transparent}
+.wf-state-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px}
+.wf-work,.wf-do{list-style:none;margin:8px 0 0;padding:0}.wf-work li,.wf-do li{margin:4px 0;font-size:13px}
+.wf-edges{list-style:none;margin:10px 0 0;padding:0 0 0 12px;border-left:2px solid var(--border)}
+.wf-edge{margin:8px 0}.wf-edge-head{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.wf-edge-name{font-weight:600;border:1px solid var(--border-bold);border-radius:3px;padding:1px 8px;background:var(--raised)}
+.wf-arrow{color:var(--subtle)}.wf-cond{font-size:12px;margin-top:4px}.wf-cond code,.wf-state code{font-size:11px;word-break:break-word}
+.wf-edit{margin:0}.wf-edit .wf-state.sel{border-color:var(--brand)}
+.wf-pick{font:inherit;color:inherit;background:none;border:1px solid transparent;border-radius:3px;padding:1px 4px;cursor:pointer;text-align:left;line-height:inherit}
+.wf-pick:hover{border-color:var(--border-bold)}.wf-pick.sel{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand)}
+.wf-pick.wf-edge-name{font-weight:600;border-color:var(--border-bold);background:var(--raised)}
+.wf-work{list-style:none;margin:8px 0 0;padding:0;font-size:13px}.wf-work li,.wf-do li{margin:2px 0}
+.wf-add button{font-size:12px;padding:0 6px}.wf-says{display:block;color:var(--subtle)}
+.wf-do{padding-left:12px}.wf-steps{margin-top:8px}.wf-steps summary{cursor:pointer;color:var(--subtle)}
 .lc-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:3px;background:var(--sunken);padding:8px;margin:8px 0}
 .lc-svg{display:block;margin:0 auto;width:100%;min-width:600px;height:auto}
 .lc-node rect{fill:var(--loz-default-bg);stroke:var(--border);stroke-width:1}
@@ -982,68 +1020,6 @@ function drawFlow(svg, data, opts) {
   }
 }
 window.drawFlow = drawFlow;
-window.toToml = (wf) => toToml(wf);
-
-// ------------------------------------------------------------------ TOML out (the server parses it back)
-const BARE = /^[A-Za-z0-9_-]+$/;
-const key = (k) => (BARE.test(k) ? k : JSON.stringify(k));
-const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
-const Q3 = '"'.repeat(3);
-function str(s) {
-  if (s.includes("\n") && !s.includes(Q3) && !s.endsWith('"') && !/[\x00-\x08\x0b-\x1f\x7f]/.test(s.replace(/\r\n/g, "\n")))
-    return Q3 + "\n" + s.replace(/\r\n/g, "\n").replace(/\\/g, "\\\\") + Q3;
-  return JSON.stringify(s);
-}
-function val(v) {
-  if (typeof v === "string") return str(v);
-  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "0";
-  if (typeof v === "boolean") return v ? "true" : "false";
-  if (Array.isArray(v)) return "[" + v.map(val).join(", ") + "]";
-  if (isObj(v)) return "{ " + Object.entries(v).filter(([, x]) => x !== null && x !== undefined)
-    .map(([k, x]) => key(k) + " = " + val(x)).join(", ") + " }";
-  return '""';
-}
-const DROP_FALSE = new Set(["persons_only", "required"]);
-function clean(obj) {
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (k.startsWith("_") || v === null || v === undefined || v === "") continue;
-    if (Array.isArray(v) && !v.length) continue;
-    if (isObj(v) && !Object.keys(v).length) continue;
-    if (v === false && DROP_FALSE.has(k)) continue;
-    out[k] = v;
-  }
-  return out;
-}
-function scalarLines(obj) {
-  return Object.entries(obj).filter(([, v]) => !(isObj(v) || (Array.isArray(v) && v.length && v.every(isObj))))
-    .map(([k, v]) => `${key(k)} = ${val(v)}`);
-}
-function toToml(wf) {
-  wf = clean(wf);
-  const out = [];
-  const head = ["id", "title", "record", "summary"];
-  const top = {};
-  for (const k of head) if (k in wf) top[k] = wf[k];
-  for (const [k, v] of Object.entries(wf)) if (!head.includes(k)) top[k] = v;
-  out.push(...scalarLines(top));
-  for (const [k, v] of Object.entries(top)) if (isObj(v)) {
-    out.push("", `[${key(k)}]`, ...scalarLines(clean(v)));
-  }
-  for (const [k, v] of Object.entries(top)) if (Array.isArray(v) && v.length && v.every(isObj)) {
-    for (const item of v) {
-      const it = clean(item);
-      out.push("", `[[${key(k)}]]`, ...scalarLines(it));
-      for (const [k2, v2] of Object.entries(it)) if (isObj(v2)) out.push(`[${key(k)}.${key(k2)}]`, ...scalarLines(clean(v2)),
-        ...Object.entries(clean(v2)).filter(([, x]) => isObj(x) || (Array.isArray(x) && x.length && x.every(isObj)))
-          .map(([k3, x]) => `${key(k3)} = ${val(x)}`));
-      for (const [k2, v2] of Object.entries(it)) if (Array.isArray(v2) && v2.length && v2.every(isObj))
-        for (const sub of v2) out.push(`[[${key(k)}.${key(k2)}]]`, ...scalarLines(clean(sub)),
-          ...Object.entries(clean(sub)).filter(([, x]) => isObj(x)).map(([k3, x]) => `${key(k3)} = ${val(x)}`));
-    }
-  }
-  return out.join("\n").replace(/^\n+/, "") + "\n";
-}
 
 // ------------------------------------------------------------------ confirmation dialog (instead of confirm())
 let dlg = null;
@@ -1641,33 +1617,269 @@ function mdEditor(area) {
 }
 
 // ------------------------------------------------------------------ the editor
+// A workflow as its states and the ways out of them (practicehub/states.py). The left side lists where a record
+// enters, each state with its work and its ways out, and the automations on each way; the right side edits the one
+// selected. The hub writes the text (practicehub/web/workflow_editor.py): the model is sent to be checked, shown in
+// the text tab, and proposed. A workflow in the old form (a list of steps) is never opened here, and never converted.
+const TONES = { waiting: "default", active: "inprogress", attention: "moved", done: "success", ended: "removed" };
 function editor(root) {
   const boot = JSON.parse(document.getElementById("wf-boot").textContent);
-  const cat = boot.catalog;
-  let wf = boot.data || { id: "", title: "", steps: [] };
-  wf.steps = wf.steps || [];
-  let selected = null, tab = boot.data ? "visual" : "toml", lastSource = null, timer = null, checking = 0;
+  const cat = boot.catalog, ro = !!boot.readonly;  // read only: the workflow's own page draws the graph, nothing more
+  const list = (v) => (v ? (Array.isArray(v) ? v : [v]) : []);
+  function norm(d) {  // the lists the text may have left out, or written as one table
+    d.start = d.start && typeof d.start === "object" && !Array.isArray(d.start) ? d.start : {};
+    d.start.do = list(d.start.do);
+    d.state = list(d.state);
+    d.edge = list(d.edge);
+    for (const s of d.state) s.work = list(s.work);
+    for (const e of d.edge) e.do = list(e.do);
+    return d;
+  }
+  let wf = boot.data ? norm(boot.data) : null;
+  let words = boot.words || {};  // each condition, in words (the hub says them)
+  let sel = null;  // what the panel edits: { type: "start" | "state" | "work" | "edge" | "do", obj, owner }
+  let tab = wf ? "visual" : "toml", lastSent = null, lastRes = null, timer = null, checking = 0;
+  let sayers = [];  // the panel's "reads as" lines, refreshed when the hub says the conditions
 
-  const svg = root.querySelector("#wf-canvas"), panel = root.querySelector("#wf-panel");
+  const canvas = root.querySelector("#wf-canvas"), panel = root.querySelector("#wf-panel");
   const tomlBox = root.querySelector("#wf-toml"), status = root.querySelector("#wf-status");
-  if (!status.hasAttribute("aria-live")) status.setAttribute("aria-live", "polite");
+  if (status && !status.hasAttribute("aria-live")) status.setAttribute("aria-live", "polite");
   let dirty = false;  // unsaved changes: the page asks before it is left
   window.addEventListener("beforeunload", (ev) => { if (dirty) { ev.preventDefault(); ev.returnValue = ""; } });
-  const form = root.querySelector("#wf-propose"), sourceIn = form.querySelector("input[name=source]");
+  const form = root.querySelector("#wf-propose"), sourceIn = form && form.querySelector("input[name=source]");
+  const modelIn = form && form.querySelector("input[name=model]");
 
-  const agentsMay = (s) => s.kind !== "automation" && !s.persons_only && !(s.kind === "gate" && s.signer === "person");
-  const stepById = (id) => wf.steps.find((s) => s.id === id);
+  const human = (k) => { const t = String(k || "").replace(/[_-]+/g, " ").trim(); return t ? t[0].toUpperCase() + t.slice(1).toLowerCase() : t; };
+  const stateById = (id) => wf.state.find((s) => s.id === id);
+  const stateName = (id) => { const s = stateById(id); return s ? s.label || human(s.id) : id ? "a state that is not there" : "no state chosen"; };
+  const edgeName = (e) => e.label || human(e.id);
+  const roleName = (id) => (cat.roles.find((r) => r.id === id) || {}).name || human(id);
+  const said = (c) => words[c] || "a condition holds";
+  const stepTitle = (o) => o.title || human(o.id);
+  const allSteps = () => [...wf.start.do, ...wf.state.flatMap((s) => s.work), ...wf.edge.flatMap((e) => e.do)];
+  const outOf = (sid) => wf.edge.filter((e) => e.from === sid);
+  const automated = (s) => s.work.length > 0 && s.work.every((w) => w.kind === "automation" || w.kind === "wait");
+  const kindOf = (type, o) => (type === "do" ? "automation" : o.kind || "task");
+  const agentsMay = (o, kind) => (kind === "task" || kind === "gate") && !o.persons_only && !(kind === "gate" && o.signer === "person");
   const dur = (d) => { const m = /^(\d+)([mhdw])$/.exec(String(d || "").trim()); if (!m) return String(d || "");
     return `${m[1]} ${{ m: "minute", h: "hour", d: "day", w: "week" }[m[2]]}${m[1] === "1" ? "" : "s"}`; };
   const timingOf = (s) => [s.for ? "waits " + dur(s.for) : "", s.at ? "waits until a set time" : "",
-    s.timeout ? "gives up after " + dur(s.timeout) : "", s.due ? "due in " + dur(s.due) : ""].filter(Boolean).join("; ");
+    s.until ? "waits until " + said(s.until) : "", s.timeout ? "gives up after " + dur(s.timeout) : "",
+    s.due ? "due in " + dur(s.due) : ""].filter(Boolean).join("; ");
 
-  function redraw() {
-    drawFlow(svg, { steps: wf.steps.map((s) => ({ id: s.id, title: s.title || s.id, kind: s.kind || "task",
-      role: s.role, action: s.block ? "block " + s.block : s.action, after: s.after || [], when: s.when ? "when " + s.when : s.when, agents_may: agentsMay(s),
-      timing: timingOf(s) })) },
-      { selected, onSelect: (id) => { selected = id; redraw(); renderPanel(); } });
+  // ---- the states, as the workflow's page shows them, each part a button that selects it
+  function choose(type, obj, owner) { sel = obj ? { type, obj, owner } : null; redraw(); renderPanel(); }
+  // ---- the workflow as a graph: each state a box with its work, each automation a box of its own on the way (it is
+  // a stop the record passes through), each way out an arrow, named on its first leg. Select anything to change it;
+  // drag from a state's handle onto another state to add a way out between them.
+  const SW = 230, AW = 180, AH = 46, GX = 28, GY = 58, PAD = 20, LINE = 19, LANE = 16;
+  function nodes() {
+    const ns = new Map(), add = (n) => (ns.set(n.id, n), n);
+    add({ id: "@start", kind: "start", obj: wf.start, w: 96, h: 40 });
+    for (const s of wf.state) add({ id: "s:" + s.id, kind: "state", obj: s, w: SW, h: 52 + LINE * Math.max(1, s.work.length) });
+    const chains = [];
+    const chain = (e, type, from) => {
+      const ids = [from];
+      e.do.forEach((a, i) => { add({ id: `a:${type}:${wf.edge.indexOf(e)}:${i}`, kind: "do", obj: a, owner: e, w: AW, h: AH }); ids.push(`a:${type}:${wf.edge.indexOf(e)}:${i}`); });
+      if (e.to && stateById(e.to)) ids.push("s:" + e.to);
+      chains.push({ e, type, ids });
+    };
+    chain(wf.start, "start", "@start");
+    for (const e of wf.edge) if (stateById(e.from)) chain(e, "edge", "s:" + e.from);
+    return { ns, chains };
   }
+  function layout(ns, chains) {
+    const out = new Map([...ns.keys()].map((k) => [k, []]));
+    const link = (a, b) => { if (a !== b && out.has(a) && out.has(b)) out.get(a).push(b); };
+    for (const c of chains) for (let i = 1; i < c.ids.length; i++) link(c.ids[i - 1], c.ids[i]);
+    for (const n of ns.values()) if (n.kind === "do") { if (n.obj.to && stateById(n.obj.to)) link(n.id, "s:" + n.obj.to); if (n.obj.on_fail && stateById(n.obj.on_fail)) link(n.id, "s:" + n.obj.on_fail); }
+    // the ways back (to a state already on the path) are not counted: what is left is drawn left to right
+    const back = new Set(), seen = new Set(), stack = new Set(), order = [];
+    const dfs = (v) => { seen.add(v); stack.add(v); for (const w of out.get(v)) { if (stack.has(w)) back.add(v + ">" + w); else if (!seen.has(w)) dfs(w); } stack.delete(v); order.push(v); };
+    dfs("@start");
+    for (const k of ns.keys()) if (!seen.has(k)) dfs(k);
+    const rank = new Map();
+    for (const v of order.reverse()) { if (!rank.has(v)) rank.set(v, 0); for (const w of out.get(v)) if (!back.has(v + ">" + w)) rank.set(w, Math.max(rank.get(w) || 0, rank.get(v) + 1)); }
+    // top to bottom: each rank a row; a row is ordered by where what leads into it sits, so arrows cross less
+    const rows = [], preds = new Map([...ns.keys()].map((k) => [k, []]));
+    for (const [v, ws] of out) for (const w of ws) if (!back.has(v + ">" + w)) preds.get(w).push(v);
+    for (const v of order) (rows[rank.get(v)] = rows[rank.get(v)] || []).push(v);
+    const at = new Map();
+    rows.forEach((r) => {
+      if (!r) return;
+      const bary = (v) => { const ps = preds.get(v).filter((u) => at.has(u)); return ps.length ? ps.reduce((t, u) => t + at.get(u), 0) / ps.length : 1e9; };
+      r.sort((a, b) => bary(a) - bary(b));
+      const n = r.length; r.forEach((v, i) => at.set(v, (i + 0.5) / n));
+    });
+    const rowW = rows.map((r) => (r || []).reduce((t, v) => t + ns.get(v).w, 0) + Math.max(0, (r || []).length - 1) * GX);
+    const W = Math.max(320, ...rowW);
+    let y = PAD;
+    rows.forEach((r, i) => {
+      if (!r) return;
+      let x = PAD + (W - rowW[i]) / 2;
+      const h = Math.max(...r.map((v) => ns.get(v).h));
+      for (const v of r) { const n = ns.get(v); n.x = x; n.y = y + (h - n.h) / 2; x += n.w + GX; }
+      y += h + GY;
+    });
+    return { back, width: W + 2 * PAD, height: y - GY + PAD };
+  }
+  function redraw() {
+    canvas.textContent = "";
+    if (!wf) return;
+    const { ns, chains } = nodes(), { back, width, height } = layout(ns, chains);
+    let lanes = 0;
+    const backs = chains.reduce((t, c) => t + c.ids.filter((v, i) => i && back.has(c.ids[i - 1] + ">" + v)).length, 0);
+    const Wd = width + backs * LANE + (backs ? 90 : 0), H = height;
+    const svg = sv("svg", { class: "wf-graph", viewBox: `0 0 ${Wd} ${H}`, width: Wd, height: H,
+      role: "group", "aria-label": "The workflow as a graph: its states, the automations on the way, and the ways out" });
+    const mid = "wfa" + (++flowSeq), defs = sv("defs");
+    for (const [k, cls] of [["", "fl-arrowhead"], ["-f", "fl-arrowhead fail"], ["-s", "fl-arrowhead sel"]]) {
+      const m = sv("marker", { id: mid + k, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+      m.append(sv("path", { d: "M0 0L10 5L0 10z", class: cls })); defs.append(m);
+    }
+    svg.append(defs);
+    const edgesG = sv("g"), labelsG = sv("g"), nodesG = sv("g");
+    svg.append(edgesG, nodesG, labelsG);
+    const isSel = (o) => !!sel && sel.obj === o;
+    const act = (g, label, fn) => {
+      if (ro) return;
+      g.setAttribute("tabindex", "0"); g.setAttribute("role", "button"); g.setAttribute("aria-label", label);
+      g.addEventListener("click", (ev) => { ev.stopPropagation(); fn(); });
+      g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); fn(); } });
+    };
+    function arrow(a, b, o) {  // from node a to node b: forward left to right, a way back under everything
+      const A = ns.get(a), B = ns.get(b);
+      let d, lx, ly;
+      if (o.back) {  // up a lane of its own on the right, into the side of the state it goes back to
+        const x = width + 8 + LANE * lanes++, y1 = A.y + A.h / 2, y2 = B.y + B.h / 2 + 8, x1 = A.x + A.w, x2 = B.x + B.w + 2;
+        d = `M${x1} ${y1}H${x - 8}Q${x} ${y1} ${x} ${y1 - 8}V${y2 + 8}Q${x} ${y2} ${x - 8} ${y2}H${x2}`;
+        lx = x; ly = (y1 + y2) / 2;
+      } else {
+        const x1 = A.x + A.w / 2, y1 = A.y + A.h, x2 = B.x + B.w / 2, y2 = B.y - 2, c = Math.max(20, (y2 - y1) / 2);
+        d = `M${x1} ${y1}C${x1} ${y1 + c} ${x2} ${y2 - c} ${x2} ${y2}`;
+        // its name in the gap under where it leaves (a point on the curve), never over a box further down
+        const near = Math.min(0.5, (GY * 0.8) / Math.max(1, y2 - y1)), t = o.atEnd ? 1 - near : near, u = 1 - t;  // or just above where it arrives
+        lx = u * u * u * x1 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x2;
+        ly = u * u * u * y1 + 3 * u * u * t * (y1 + c) + 3 * u * t * t * (y2 - c) + t * t * t * y2;
+      }
+      const p = sv("path", { d, class: "fl-edge" + (o.cond ? " cond" : "") + (o.fail ? " fail" : "") + (o.sel ? " sel" : ""),
+        "marker-end": `url(#${mid}${o.fail ? "-f" : o.sel ? "-s" : ""})` });
+      edgesG.append(p);
+      return [lx, ly];
+    }
+    const placed = [];  // the labels drawn so far: a new one moves down its arrow's side until it is clear of them, and of the boxes
+    const hits = (x, y, w) => placed.some((r) => Math.abs(r[0] - x) < (r[2] + w) / 2 + 4 && Math.abs(r[1] - y) < 22)
+      || [...ns.values()].some((b) => x + w / 2 > b.x - 2 && x - w / 2 < b.x + b.w + 2 && y + 10 > b.y - 2 && y - 10 < b.y + b.h + 2);
+    function label(x, y, text, o) {
+      const t = clip(text, 26), w = 16 + t.length * 6.8;
+      for (let i = 0; i < 12 && hits(x, y, w); i++) x += (i % 2 ? -1 : 1) * (i + 1) * (w / 2 + 6);  // beside, then the other side, wider
+      x = Math.max(w / 2 + 2, Math.min(Wd - w / 2 - 2, x));
+      placed.push([x, y, w]);
+      const g = sv("g", { class: "wf-elabel" + (o.sel ? " sel" : "") + (o.fail ? " fail" : "") + (o.muted ? " muted" : "") });
+      g.append(sv("title", {}, o.title || text));
+      g.append(sv("rect", { x: x - w / 2, y: y - 10, width: w, height: 20, rx: 10 }));
+      g.append(sv("text", { x, y: y + 4, "text-anchor": "middle" }, t));
+      if (o.pick) act(g, o.title || text, o.pick);
+      labelsG.append(g);
+    }
+    for (const c of chains) {
+      const e = c.e, from = c.type === "start" ? null : stateById(e.from), auto = !!from && automated(from);
+      const cond = c.type !== "start" && !!e.when, on = isSel(e);
+      const name = c.type === "start" ? e.label || "Filed" : edgeName(e);
+      const tip = c.type === "start" ? "where a record enters" : name + (e.when ? (auto ? " — when " : " — offered only when ") + said(e.when) : auto ? " — otherwise" : "");
+      const pickE = () => choose(c.type === "start" ? "start" : "edge", e);
+      if (c.ids.length === 1) {  // nowhere to go yet: a stub, still named and selectable
+        const A = ns.get(c.ids[0]), x1 = A.x + A.w / 2, y1 = A.y + A.h;
+        edgesG.append(sv("path", { d: `M${x1} ${y1}v34`, class: "fl-edge cond" + (on ? " sel" : "") }));
+        if (c.type !== "start") label(x1, y1 + 34, name + " → ?", { sel: on, title: tip + " (choose where it goes)", pick: pickE });
+        continue;
+      }
+      for (let i = 1; i < c.ids.length; i++) {
+        const [lx, ly] = arrow(c.ids[i - 1], c.ids[i], { back: back.has(c.ids[i - 1] + ">" + c.ids[i]), cond, sel: on });
+        if (i === 1 && c.type !== "start") label(lx, ly, name, { sel: on, title: tip, pick: pickE });
+      }
+    }
+    for (const n of ns.values()) if (n.kind === "do") {  // an automation that sends the record on, or back when it fails
+      for (const [k, fail] of [["to", false], ["on_fail", true]]) {
+        if (!n.obj[k] || !stateById(n.obj[k])) continue;
+        const b = "s:" + n.obj[k], [lx, ly] = arrow(n.id, b, { back: back.has(n.id + ">" + b), fail, cond: true, atEnd: true });
+        label(lx, ly, fail ? "if it fails" : "sends it on", { fail, muted: !fail, title: (fail ? "if it fails, to " : "and sends it to ") + stateName(n.obj[k]) });
+      }
+    }
+    for (const n of ns.values()) {
+      const g = sv("g", { class: `wf-node k-${n.kind}` + (isSel(n.obj) ? " sel" : ""), transform: `translate(${n.x} ${n.y})` });
+      if (n.kind === "start") {
+        g.append(sv("rect", { width: n.w, height: n.h, rx: n.h / 2, class: "box" }));
+        g.append(sv("text", { x: n.w / 2, y: n.h / 2 + 4, "text-anchor": "middle" }, "Enters"));
+        act(g, "Where a record enters", () => choose("start", wf.start));
+      } else if (n.kind === "do") {
+        const a = n.obj, kind = a.block ? ((cat.blocks || {})[a.block] || {}).title || "a block" : a.action || "automation";
+        g.append(sv("title", {}, `${stepTitle(a)} — done automatically (${kind})${a.when ? ", only when " + said(a.when) : ""}`));
+        g.append(sv("rect", { width: n.w, height: n.h, rx: 8, class: "box" }));
+        g.append(sv("rect", { x: 10, y: 13, width: 20, height: 20, rx: 3, class: "ki-box" }));
+        g.append(sv("text", { x: 20, y: 27, "text-anchor": "middle", class: "ki-t" }, "A"));
+        g.append(sv("text", { x: 38, y: 20 }, clip(stepTitle(a), 21)));
+        g.append(sv("text", { x: 38, y: 36, class: "s" }, clip(a.when ? "only when " + said(a.when) : kind, 24)));
+        act(g, "Automation: " + stepTitle(a), () => choose("do", a, n.owner));
+      } else {
+        const s = n.obj, tone = TONES[s.tone] || "default";
+        g.setAttribute("data-state", s.id);
+        g.append(sv("title", {}, `${stateName(s.id)}${s.help ? " — " + s.help : ""}`));
+        g.append(sv("rect", { width: n.w, height: n.h, rx: 6, class: "box" }));
+        g.append(sv("rect", { width: n.w, height: 6, rx: 3, class: "tone t-" + tone }));
+        const head = sv("g", { class: "wf-head" });
+        head.append(sv("rect", { x: 2, y: 8, width: n.w - 4, height: 26, rx: 3, class: "hit" }));
+        head.append(sv("text", { x: 12, y: 26, class: "name" }, clip(stateName(s.id), 26)));
+        head.append(sv("text", { x: n.w - 10, y: 26, class: "s", "text-anchor": "end" }, automated(s) ? "automated" : outOf(s.id).length ? "" : "ends here"));
+        act(head, "State: " + stateName(s.id), () => choose("state", s));
+        g.append(head);
+        if (!s.work.length) g.append(sv("text", { x: 12, y: 52, class: "s" }, "No work here: it waits"));
+        s.work.forEach((w, i) => {
+          const kind = kindOf("work", w), ki = kind === "gate" ? ["gate", "D"] : kind === "task" ? ["task", "T"] : ["automation", "A"];
+          const row = sv("g", { class: "wf-row" + (isSel(w) ? " sel" : ""), transform: `translate(0 ${38 + LINE * i})` });
+          row.append(sv("title", {}, stepTitle(w) + (timingOf(w) ? " — " + timingOf(w) : "")));
+          row.append(sv("rect", { x: 4, y: 0, width: n.w - 8, height: LINE - 1, rx: 3, class: "hit" }));
+          row.append(sv("rect", { x: 10, y: 3, width: 13, height: 13, rx: 2, class: "ki-box k-" + ki[0] }));
+          row.append(sv("text", { x: 16.5, y: 13, "text-anchor": "middle", class: "ki-t" }, ki[1]));
+          const who = kind === "task" || kind === "gate" ? (w.role ? roleName(w.role) : "") : kind === "wait" ? timingOf(w) || "waits" : "";
+          row.append(sv("text", { x: 29, y: 13, class: "w" }, clip(stepTitle(w) + (who ? " · " + who : ""), 30)));
+          if (agentsMay(w, kind)) row.append(sv("text", { x: n.w - 12, y: 13, class: "ai-t2", "text-anchor": "end" }, "AI"));
+          act(row, `${kind === "gate" ? "Decision" : kind === "task" ? "Task" : "Automation"}: ${stepTitle(w)}`, () => choose("work", w, s));
+          g.append(row);
+        });
+        if (!ro) {
+          const hd = sv("circle", { cx: n.w - 14, cy: n.h, r: 7, class: "wf-handle" });
+          hd.append(sv("title", {}, "Drag onto a state to add a way out to it"));
+          hd.addEventListener("pointerdown", (ev) => connect(ev, s, n, svg));
+          hd.addEventListener("click", (ev) => ev.stopPropagation());
+          g.append(hd);
+        }
+      }
+      nodesG.append(g);
+    }
+    canvas.append(svg);
+  }
+  function connect(ev, s, n, svg) {  // drag from a state's handle: a way out, to the state it is dropped on
+    ev.preventDefault(); ev.stopPropagation();
+    const pt = (e) => { const r = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal; return [(e.clientX - r.left) * vb.width / r.width, (e.clientY - r.top) * vb.height / r.height]; };
+    const x0 = n.x + n.w - 14, y0 = n.y + n.h;
+    const line = sv("path", { class: "fl-edge sel wf-drag", d: `M${x0} ${y0}L${x0} ${y0}` });
+    svg.append(line);
+    const move = (e) => { const [x, y] = pt(e); line.setAttribute("d", `M${x0} ${y0}L${x} ${y}`); };
+    const up = (e) => {
+      document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up);
+      line.remove();
+      const hit = document.elementFromPoint(e.clientX, e.clientY), g = hit && hit.closest && hit.closest("[data-state]");
+      if (!g) return;
+      const to = g.getAttribute("data-state");
+      const edge = { id: fresh("way", new Set(wf.edge.map((x) => x.id))), label: to === s.id ? "Again" : "To " + stateName(to), from: s.id, to, do: [] };
+      const last = wf.edge.map((x) => x.from).lastIndexOf(s.id);
+      wf.edge.splice(last < 0 ? wf.edge.length : last + 1, 0, edge);
+      sel = { type: "edge", obj: edge }; changed(true);
+    };
+    document.addEventListener("pointermove", move); document.addEventListener("pointerup", up);
+  }
+  if (ro) { redraw(); return; }
   function changed(rebuild) {
     dirty = true;
     redraw();
@@ -1675,19 +1887,22 @@ function editor(root) {
     schedule();
   }
   function schedule() { clearTimeout(timer); timer = setTimeout(check, 500); }
-  function currentSource() { return tab === "toml" ? tomlBox.value : toToml(wf); }
 
-  async function check() {
-    const source = currentSource();
-    if (source === lastSource) return;
-    lastSource = source;
+  async function check(force) {
+    const body = JSON.stringify(tab === "toml" || !wf ? { source: tomlBox.value } : { model: wf });
+    if (body === lastSent && !force) return lastRes;
+    lastSent = body;
     const mine = ++checking;
     status.textContent = "Checking…";
     try {
       const r = await fetch("/api/workflows/check", { method: "POST", credentials: "same-origin",
-        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }) });
+        headers: { "Content-Type": "application/json" }, body });
       const res = await r.json();
-      if (mine !== checking) return;
+      if (mine !== checking) return res;
+      lastRes = res;
+      const fresh = Object.keys(res.words || {}).some((c) => words[c] !== res.words[c]);
+      words = Object.assign({}, words, res.words || {});
+      if (fresh) { redraw(); for (const [n, get] of sayers) n.textContent = get(); }
       showProblems(res.problems || [res.error || "could not check"]);
       return res;
     } catch (e) {
@@ -1711,7 +1926,13 @@ function editor(root) {
       oninput: (ev) => { obj[k] = o.number ? (ev.target.value === "" ? undefined : Number(ev.target.value)) : ev.target.value; changed(false); } };
     if (o.onchange) { delete attrs.oninput; attrs.onchange = (ev) => o.onchange(ev.target.value); }
     const ctl = o.area ? el("textarea", Object.assign({ rows: o.rows || 3 }, attrs)) : el("input", Object.assign({ type: o.number ? "number" : "text" }, attrs));
-    return el("label", {}, label, ctl, o.help ? el("small", {}, o.help) : null);
+    return el("label", {}, label, ctl, o.help ? el("small", {}, o.help) : null, o.says ? saysLine(obj, k) : null);
+  }
+  function saysLine(obj, k) {  // a condition, in words, under the box it is typed in
+    const get = () => (obj[k] ? "Reads as: " + said(obj[k]) : "");
+    const n = el("small", { class: "wf-says" }, get());
+    sayers.push([n, get]);
+    return n;
   }
   function select(label, obj, k, options, o) {
     o = o || {};
@@ -1771,7 +1992,7 @@ function editor(root) {
 
   // ---- blocks
   const blocksFor = (kind) => Object.values(cat.blocks || {}).filter((b) => b.kind === kind);
-  function chooseBlock(s, bid) {
+  function chooseBlock(s, kind, bid) {
     if (bid) {
       const b = cat.blocks[bid];
       s.block = bid;
@@ -1782,7 +2003,7 @@ function editor(root) {
       s.params = params;
     } else {
       delete s.block;
-      if (s.kind === "automation") { s.action = "message.send"; s.params = {}; }
+      if (kind === "automation") { s.action = "message.send"; s.params = {}; }
       else { delete s.params; s.fields = [{ name: "done", type: "boolean", label: "Done" }]; }
     }
     changed(true);
@@ -1805,8 +2026,8 @@ function editor(root) {
         f.help ? el("small", {}, f.help) : null);
     });
     const tip = b.kind === "task"
-      ? "A plain value is written into the agent's prompt. {{input.x}} or {{step.field}} is read from the run and stays data: the step must also read it (What it reads)."
-      : "A plain value, or {{run.record}}, {{input.x}}, {{step.field}} read from the run.";
+      ? "A plain value is written into the agent's prompt. A value in double braces, e.g. {{sort.reason}}, is read from the run and stays data: the work must also read it (What it reads)."
+      : "A plain value, or one read from the run in double braces, e.g. {{run.record}} or {{sort.reason}}.";
     return el("fieldset", {}, el("legend", {}, "Block parameters"), ...rows, el("small", { class: "muted" }, tip),
       el("p", {}, el("a", { href: "/blocks/" + b.id, target: "_blank" }, "Open the block"),
         el("span", { class: "muted" }, ` · returns ${b.outputs.join(", ") || "the fields of " + b.capability}` +
@@ -1814,125 +2035,234 @@ function editor(root) {
           b.active ? "" : " · not approved yet: the workflow cannot be approved until it is")));
   }
 
-  // ---- step operations
-  function renameStep(s, nid) {
-    nid = nid.trim();
-    const old = s.id;
-    if (!nid || nid === old) return;
+  // ---- adding, renaming and removing
+  const ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+  function fresh(prefix, taken) { let n = 1, id; do { id = `${prefix}-${n++}`; } while (taken.has(id)); return id; }
+  const stepIds = () => new Set(allSteps().map((o) => o.id));
+  function addState() {
+    const s = { id: fresh("state", new Set(wf.state.map((x) => x.id))), label: "New state", work: [] };
+    wf.state.push(s);
+    if (!wf.start.to && !wf.start.do.length) wf.start.to = s.id;
+    sel = { type: "state", obj: s }; changed(true);
+  }
+  function addWork(s) {
+    const kind = automated(s) ? "automation" : "task";
+    const role = cat.roles.length ? cat.roles[0].id : undefined;
+    const w = { id: fresh("work", stepIds()), title: kind === "task" ? "New task" : "Do it automatically", kind };
+    if (kind === "task") Object.assign(w, { role, risk: "low", fields: [{ name: "done", type: "boolean", label: "Done" }] });
+    else Object.assign(w, { action: "message.send", params: {} });
+    s.work.push(w);
+    sel = { type: "work", obj: w, owner: s }; changed(true);
+  }
+  function addEdge(s) {
+    const i = wf.state.indexOf(s), other = wf.state[i + 1] || wf.state.find((x) => x !== s) || s;
+    const e = { id: fresh("way", new Set(wf.edge.map((x) => x.id))), label: "Move on", from: s.id, to: other.id, do: [] };
+    const last = wf.edge.map((x) => x.from).lastIndexOf(s.id);  // with the others out of the same state
+    wf.edge.splice(last < 0 ? wf.edge.length : last + 1, 0, e);
+    sel = { type: "edge", obj: e }; changed(true);
+  }
+  function addDo(e) {
+    const a = { id: fresh("auto", stepIds()), title: "Do it automatically", action: "message.send", params: {} };
+    e.do.push(a);
+    sel = { type: "do", obj: a, owner: e }; changed(true);
+  }
+  function fixId(v, what) {
+    v = v.trim();
+    if (!ID.test(v) || v.includes("--")) { status.textContent = `${what}: lower-case letters, digits and single dashes.`; return null; }
+    return v;
+  }
+  function renameState(s, v) {
+    const nid = fixId(v, "A state's id"), old = s.id;
+    if (!nid || nid === old) return renderPanel();
     s.id = nid;
-    const re = new RegExp("\\b" + old.replace(/[-]/g, "\\-") + "\\.", "g");
-    for (const o of wf.steps) {
-      o.after = (o.after || []).map((a) => (a === old ? nid : a));
-      if (o.not_by) o.not_by = o.not_by.map((a) => (a === old ? nid : a));
+    if (wf.start.to === old) wf.start.to = nid;
+    for (const e of wf.edge) { if (e.from === old) e.from = nid; if (e.to === old) e.to = nid; }
+    for (const a of allSteps()) {
+      for (const k of ["to", "on_fail"]) if (a[k] === old) a[k] = nid;
+      if (Array.isArray(a.moves)) a.moves = a.moves.map((m) => (m === old ? nid : m));
+    }
+    changed(true);
+  }
+  function renameStep(s, v) {
+    const nid = fixId(v, "An id"), old = s.id;
+    if (!nid || nid === old) return renderPanel();
+    s.id = nid;
+    const re = new RegExp("(?<![A-Za-z0-9_-])" + old.replace(/-/g, "\\-") + "\\.", "g");
+    for (const o of [...allSteps(), ...wf.edge]) {
+      for (const k of ["after", "not_by"]) if (Array.isArray(o[k])) o[k] = o[k].map((a) => (a === old ? nid : a));
       if (o.review_of === old) o.review_of = nid;
       if (o.context) o.context = o.context.map((c) => (c === old ? nid : c.startsWith(old + ".") ? nid + c.slice(old.length) : c));
-      for (const f of ["when", "agent_criteria"]) if (o[f]) o[f] = o[f].replace(re, nid + ".");
+      for (const f of ["when", "agent_criteria", "until", "at"]) if (typeof o[f] === "string") o[f] = o[f].replace(re, nid + ".");
       if (o.params) o.params = JSON.parse(JSON.stringify(o.params).replace(new RegExp("\\{\\{\\s*" + old + "\\.", "g"), "{{" + nid + "."));
     }
-    selected = nid; changed(true);
+    changed(true);
   }
-  async function removeStep(s, trigger) {
-    const ok = await askConfirm(trigger, `Remove the step "${s.title || s.id}"? Steps that waited on it will no longer wait.`,
-      { danger: true, title: "Remove this step?", label: "Remove step" });
-    if (!ok) return;
-    wf.steps = wf.steps.filter((o) => o !== s);
-    for (const o of wf.steps) {
-      o.after = (o.after || []).filter((a) => a !== s.id);
-      if (o.not_by) o.not_by = o.not_by.filter((a) => a !== s.id);
-      if (o.review_of === s.id) delete o.review_of;
-      if (o.context) o.context = o.context.filter((c) => c !== s.id && !c.startsWith(s.id + "."));
+  function renameEdge(e, v) {
+    const nid = fixId(v, "A way out's id"), old = e.id;
+    if (!nid || nid === old) return renderPanel();
+    e.id = nid;
+    // a condition that reads the choice: <work>.outcome == '<edge>'
+    const re = new RegExp("(\\.outcome\\s*[!=]=\\s*)(['\"])" + old.replace(/-/g, "\\-") + "\\2", "g");
+    for (const o of [...allSteps(), ...wf.edge]) for (const f of ["when", "agent_criteria"])
+      if (typeof o[f] === "string") o[f] = o[f].replace(re, (m, a, q) => a + q + nid + q);
+    changed(true);
+  }
+  function forget(id) {  // what pointed at a removed piece of work or automation
+    for (const o of allSteps()) {
+      for (const k of ["after", "not_by"]) if (Array.isArray(o[k])) o[k] = o[k].filter((a) => a !== id);
+      if (o.review_of === id) delete o.review_of;
+      if (o.context) o.context = o.context.filter((c) => c !== id && !c.startsWith(id + "."));
     }
-    selected = null; changed(true);
   }
-  function addStep(kind) {
-    let n = wf.steps.length + 1, id;
-    do { id = `step-${n++}`; } while (stepById(id));
-    const prev = selected ? [selected] : wf.steps.length ? [wf.steps[wf.steps.length - 1].id] : [];
-    const role = cat.roles.length ? cat.roles[0].id : undefined;
-    const s = { id, title: kind === "gate" ? "Decide" : kind === "automation" ? "Do it automatically" : "New task", kind, after: prev };
-    if (kind === "task") Object.assign(s, { role, risk: "low", fields: [{ name: "done", type: "boolean", label: "Done" }] });
-    if (kind === "gate") Object.assign(s, { role, signer: "person", outcomes: ["approve", "decline"], meaning: "I approve this" });
-    if (kind === "automation") Object.assign(s, { action: "message.send", params: {} });
-    wf.steps.push(s); selected = id; changed(true);
+  async function remove(trigger) {
+    const { type, obj, owner } = sel;
+    const what = { state: `the state "${stateName(obj.id)}", its work and every way into or out of it`,
+      work: `the work "${stepTitle(obj)}"`, edge: `the way out "${edgeName(obj)}" and its automations`,
+      do: `the automation "${stepTitle(obj)}"` }[type];
+    const ok = await askConfirm(trigger, `Remove ${what}?`, { danger: true, title: "Remove this?", label: "Remove" });
+    if (!ok) return;
+    if (type === "state") {
+      for (const w of obj.work) forget(w.id);
+      for (const e of wf.edge.filter((x) => x.from === obj.id || x.to === obj.id)) for (const a of e.do) forget(a.id);
+      wf.state = wf.state.filter((x) => x !== obj);
+      wf.edge = wf.edge.filter((x) => x.from !== obj.id && x.to !== obj.id);
+      if (wf.start.to === obj.id) delete wf.start.to;
+      for (const a of allSteps()) for (const k of ["to", "on_fail"]) if (a[k] === obj.id) delete a[k];
+    } else if (type === "edge") {
+      for (const a of obj.do) forget(a.id);
+      wf.edge = wf.edge.filter((x) => x !== obj);
+    } else {
+      const items = type === "work" ? owner.work : owner.do;
+      items.splice(items.indexOf(obj), 1);
+      forget(obj.id);
+    }
+    sel = null; changed(true);
   }
 
   // ---- panels
   const put = (...k) => panel.append(...k.filter((x) => x !== null && x !== undefined && x !== false));
+  const stateOptions = () => wf.state.map((s) => [s.id, stateName(s.id)]);
+  function heading(kind, title) {
+    return el("h2", {}, kind ? el("span", { class: `ki ${kind[0]}` }, kind[1]) : null, title, el("span", { class: "sp" }),
+      el("button", { type: "button", class: "subtle", onclick: () => choose(null) }, "Workflow settings"));
+  }
+  const removeButton = (label) => el("p", {}, el("button", { type: "button", class: "danger", onclick: (ev) => remove(ev.currentTarget) }, label));
   function renderPanel() {
     panel.textContent = "";
-    const s = selected && stepById(selected);
-    if (!s) return workflowPanel();
-    const others = wf.steps.filter((o) => o !== s);
+    sayers = [];
+    if (!wf) return;
+    if (!sel) return workflowPanel();
+    ({ start: startPanel, state: statePanel, edge: edgePanel, work: stepPanel, do: stepPanel })[sel.type](sel.obj, sel.owner);
+  }
+  function startPanel(st) {
+    put(heading(null, "Where a record enters"),
+      select("Enters in", st, "to", stateOptions(), { blank: "no state: it only runs its automations", rebuild: true,
+        help: "the state a new record starts in, and one the workflow starts on again" }),
+      text("Called", st, "label", { placeholder: "Filed", help: "what the record's history calls its arrival, e.g. Filed by the lab" }),
+      el("p", {}, el("button", { type: "button", class: "secondary", onclick: () => addDo(st) }, "+ Automation on the way in")),
+      el("p", { class: "muted" }, "Its automations run as the record enters. Select one on the left to change it."));
+  }
+  function statePanel(s) {
+    put(heading(null, "State"),
+      text("Name", s, "label", { help: "what the record page shows" }),
+      text("Id", s, "id", { onchange: (v) => renameState(s, v), help: "the value its record's state field takes: lower-case letters, digits and dashes" }),
+      select("Tone", s, "tone", [["waiting", "waiting"], ["active", "being worked"], ["attention", "needs attention"], ["done", "done"], ["ended", "ended"]],
+        { blank: "plain", help: "how the state reads at a glance" }),
+      text("Help", s, "help", { area: true, rows: 2, help: "shown on the record page" }),
+      el("p", { class: "muted" }, automated(s) ? "Its work is automated, so the record leaves by the first way out whose condition holds."
+        : "Its work is a person's (an agent may do a task). A state is worked by people or automated, never both."),
+      el("p", {}, el("button", { type: "button", class: "secondary", onclick: () => addWork(s) }, "+ Work"), " ",
+        el("button", { type: "button", class: "secondary", onclick: () => addEdge(s) }, "+ Way out")),
+      removeButton("Remove state"));
+  }
+  function edgePanel(e) {
+    const from = stateById(e.from), auto = !!from && automated(from);
+    put(heading(null, "Way out"),
+      text("Label", e, "label", { help: "the button the person presses, and the history's word for the move" }),
+      text("Id", e, "id", { onchange: (v) => renameEdge(e, v), help: "lower-case letters, digits and single dashes" }),
+      select("From", e, "from", stateOptions(), { blank: "choose a state", rebuild: true }),
+      select("To", e, "to", stateOptions(), { blank: "choose a state", rebuild: true }),
+      text(auto ? "When" : "Offered only when", e, "when", { placeholder: "e.g. check.band in ['critical']", says: true,
+        help: auto ? "the record leaves this way when it holds; the last way out may go without, as the otherwise"
+          : "a condition on earlier work; without one it is always offered" }),
+      text("Help", e, "help", { area: true, rows: 2, help: "shown beside the button" }),
+      el("p", {}, el("button", { type: "button", class: "secondary", onclick: () => addDo(e) }, "+ Automation on the way")),
+      removeButton("Remove way out"));
+  }
+  function stepPanel(s, owner) {
+    const type = sel.type, kind = kindOf(type, s);
+    const others = allSteps().filter((o) => o !== s);
     const roles = cat.roles.map((r) => [r.id, r.name]);
-    const head = el("h2", {}, el("span", { class: `ki ${s.kind}` }, s.kind === "gate" ? "D" : (s.kind || "t")[0].toUpperCase()),
-      "Step", el("span", { class: "sp" }),
-      el("button", { type: "button", class: "subtle", onclick: () => { selected = null; redraw(); renderPanel(); } }, "Workflow settings"));
-    put(head,
+    const ki = kind === "gate" ? ["gate", "D"] : kind === "task" ? ["task", "T"] : ["automation", "A"];
+    const where = type === "do" ? (owner === wf.start ? "On the way in" : `On the way "${edgeName(owner)}"`) : `Work in "${stateName(owner.id)}"`;
+    put(heading(ki, where),
       text("Title", s, "title"),
-      text("Id", s, "id", { onchange: (v) => renameStep(s, v), help: "lower-case letters, digits and dashes; other steps refer to it" }),
-      select("Kind", s, "kind", [["task", "Task: someone fills in a form"], ["gate", "Decision: someone signs an outcome"],
-        ["automation", "Automation: a deterministic action"], ["wait", "Wait: until something holds, or for a time"]], { rebuild: true }),
-      s.kind !== "automation" ? select("Role", s, "role", roles, { blank: "choose a role", help: "steps name roles, never people" }) : null,
-      checks("Starts after", s, "after", others.map((o) => [o.id, o.title || o.id]), { none: "no other steps yet", help: "nothing ticked: it starts as soon as the run does" }),
-      text("Only when", s, "when", { placeholder: "e.g. triage.category == 'urgent'", help: "a condition on earlier steps or the input; otherwise the step is skipped" }));
+      text("Id", s, "id", { onchange: (v) => renameStep(s, v), help: "lower-case letters, digits and dashes; later work reads its answers by it" }),
+      type === "work" ? select("Kind", s, "kind", [["task", "Task: someone fills in a form"], ["gate", "Decision: someone signs which way out"],
+        ["automation", "Automation: a deterministic action"], ["wait", "Wait: until something holds, or for a time"]],
+        { rebuild: true, help: "a state is worked by people (tasks, decisions) or automated (automations, waits), never both",
+          after: () => { if (s.kind === "automation" && !s.action && !s.block) { s.action = "message.send"; s.params = {}; } } }) : null,
+      kind === "task" || kind === "gate" ? select("Role", s, "role", roles, { blank: "choose a role", help: "work names roles, never people" }) : null,
+      text("Only when", s, "when", { placeholder: "e.g. check.band in ['critical']", says: true,
+        help: type === "do" ? "it runs on this way only when this holds" : "a condition on earlier work or what the starter gave; otherwise this work is skipped" }));
     const blk = s.block && (cat.blocks || {})[s.block];
-    if (s.kind !== "gate" && blocksFor(s.kind).length) {
+    if (kind !== "gate" && kind !== "wait" && blocksFor(kind).length) {
       put(el("label", {}, "Use a block",
-        el("select", { onchange: (ev) => chooseBlock(s, ev.target.value) },
-          el("option", { value: "" }, s.kind === "task" ? "no: write the task here" : "no: use an action"),
-          blocksFor(s.kind).map((b) => el("option", { value: b.id, selected: s.block === b.id ? "selected" : null },
+        el("select", { onchange: (ev) => chooseBlock(s, kind, ev.target.value) },
+          el("option", { value: "" }, kind === "task" ? "no: write the task here" : "no: use an action"),
+          blocksFor(kind).map((b) => el("option", { value: b.id, selected: s.block === b.id ? "selected" : null },
             `${b.title} (${b.runtime === "prompt" ? "agent prompt" : b.runtime === "python" ? "Python" : "engine"})`))),
-        el("small", {}, s.kind === "task" ? "a prompt block: an agent with the block in its profile carries it out"
+        el("small", {}, kind === "task" ? "a prompt block: an agent with the block in its profile carries it out"
           : "a Python or engine block: deterministic, approved and signed")));
     }
     if (blk) put(paramsEditor(s, blk));
-    if (s.kind === "wait") {
+    if (kind === "wait") {
       put(el("fieldset", {}, el("legend", {}, "What it waits for"),
         el("small", { class: "muted" }, "Fill in one of the first three."),
-        text("Until this holds", s, "until", { placeholder: "e.g. record.status == 'approved'", help: "checked whenever a record changes, and by the clock" }),
+        text("Until this holds", s, "until", { placeholder: "e.g. record.status in ['approved']", says: true, help: "checked whenever a record changes, and by the clock" }),
         text("Or for", s, "for", { placeholder: "e.g. 3d", help: "a duration: 30m, 4h, 3d or 1w" }),
-        text("Or until", s, "at", { placeholder: "e.g. {{input.appointment}} - 1d", help: "a date or time from the run, moved by + or - a duration if you like" }),
-        text("Give up after", s, "timeout", { placeholder: "e.g. 2d", help: "with Until only: then it ends as timed out, and later steps can say when = \"" + s.id + ".timed_out\"" })));
+        text("Or until", s, "at", { placeholder: "e.g. {{book.appointment}} - 1d", help: "a date or time from the run, moved by + or - a duration if you like" }),
+        text("Give up after", s, "timeout", { placeholder: "e.g. 2d", help: "with Until only: then it ends as timed out, which a way out's condition can read" })));
     }
-    if (s.kind !== "automation" && s.kind !== "wait") {
+    if (kind === "task" || kind === "gate") {
       const skills = Object.values(cat.skills).map((k) => [k.id, k.title]);
       put(el("fieldset", {}, el("legend", {}, "Who may do it"),
         select("Risk", s, "risk", [["low", "low: an agent's work goes ahead"], ["medium", "medium: goes ahead, the sponsor is told"],
           ["high", "high: held until the sponsor approves"]], {}),
-        blk ? null : select("Agent skill", s, "skill", skills, { blank: "none: people only", help: "an agent can take the step only with a skill it has" }),
-        s.kind === "task" ? bool("People only, never an agent", s, "persons_only", { rebuild: false }) : null,
-        checks("Not by whoever did", s, "not_by", others.map((o) => [o.id, o.title || o.id]).concat([["run", "started this work"], ["record.editors", "wrote or changed its record"]]), { none: "no other steps" })));
+        blk ? null : select("Agent skill", s, "skill", skills, { blank: "none: people only", help: "an agent can take the work only with a skill it has" }),
+        kind === "task" ? bool("People only, never an agent", s, "persons_only", { rebuild: false }) : null,
+        checks("Not by whoever did", s, "not_by", others.map((o) => [o.id, stepTitle(o)]).concat([["run", "started this work"], ["record.editors", "wrote or changed its record"]]), { none: "no other work" })));
     }
-    if (s.kind === "gate") {
+    if (kind === "gate") {
+      const outs = outOf(owner.id);
       put(el("fieldset", {}, el("legend", {}, "Decision and signature"),
-        csv("Outcomes", s, "outcomes", { placeholder: "approve, decline" }),
+        el("p", { class: "muted" }, outs.length > 1 ? "Its choices are the ways out of this state: " + outs.map(edgeName).join(", ") + "."
+          : "A decision chooses between ways out: give this state more than one."),
         text("Meaning of the signature", s, "meaning", { placeholder: "I have reviewed this and I am responsible for it" }),
         select("Who may decide", s, "signer", [["person", "a person only, who signs"], ["any", "a person, or an agent within criteria (an agent attests, never signs)"]], { rebuild: true }),
-        s.signer === "any" ? text("Agents may decide only when", s, "agent_criteria", { placeholder: "e.g. code.amount <= 80" }) : null));
+        s.signer === "any" ? text("Agents may decide only when", s, "agent_criteria", { placeholder: "e.g. code.amount <= 80", says: true }) : null));
     }
-    if (s.kind === "task" && blk) {
+    if (kind === "task" && blk) {
       put(el("fieldset", {}, el("legend", {}, "Instructions"),
-        el("small", { class: "muted" }, "The block's prompt is the agent's instructions; a person who takes the step sees it too."),
-        select("Review the draft of", s, "review_of", others.map((o) => [o.id, o.title || o.id]), { blank: "nothing", help: "the person sees that step's answer, prefilled" })));
-    } else if (s.kind === "task") {
+        el("small", { class: "muted" }, "The block's prompt is the agent's instructions; a person who takes the work sees it too."),
+        select("Review the draft of", s, "review_of", others.map((o) => [o.id, stepTitle(o)]), { blank: "nothing", help: "the person sees that work's answer, prefilled" })));
+    } else if (kind === "task") {
       put(el("fieldset", {}, el("legend", {}, "Instructions"),
         text("Shown to whoever does it", s, "instructions", { area: true, rows: 3 }),
-        select("Review the draft of", s, "review_of", others.map((o) => [o.id, o.title || o.id]), { blank: "nothing", help: "the person sees that step's answer, prefilled" })));
+        select("Review the draft of", s, "review_of", others.map((o) => [o.id, stepTitle(o)]), { blank: "nothing", help: "the person sees that work's answer, prefilled" })));
       const sk = s.skill && cat.skills[s.skill];
       put(fieldsEditor(s, "fields", "What it produces",
         sk ? `Leave empty to use the skill's fields: ${sk.output.join(", ")}.` : ""));
     }
-    if (s.kind === "wait") {
-      // a wait reads nothing and does nothing
-    } else if (s.kind !== "automation") {
-      const ctxOpts = [...cat.data_classes.map((d) => ["record:" + d.id, d.name + " records"]), ["input", "the run's input"],
-        ...cat.providers.map((p) => ["provider:" + p, p]), ...others.map((o) => [o.id, "output of " + (o.title || o.id)])];
+    if (kind === "task" || kind === "gate") {
+      const ctxOpts = [...cat.data_classes.map((d) => ["record:" + d.id, d.name + " records"]), ["input", "what the starter gave"],
+        ...cat.providers.map((p) => ["provider:" + p, p]), ...others.map((o) => [o.id, "answers of " + stepTitle(o)])];
       put(el("fieldset", {}, el("legend", {}, "What it reads"),
-        checks("Context", s, "context", ctxOpts, { help: "data classes travel with data: whoever takes this step must be allowed to read all of it. To pass one field only, type it below." }),
+        checks("Context", s, "context", ctxOpts, { help: "data classes travel with data: whoever takes this work must be allowed to read all of it. To pass one field only, type it below." }),
         csv("Single fields", { get v() { return (s.context || []).filter((c) => !ctxOpts.some(([v]) => v === c)); },
           set v(x) { s.context = (s.context || []).filter((c) => ctxOpts.some(([v]) => v === c)).concat(x); } }, "v",
-          { placeholder: "e.g. edit.diagnosis_codes, input.medication" })));
-    } else if (!blk) {
+          { placeholder: "e.g. edit.diagnosis_codes" })));
+    } else if (kind === "automation" && !blk) {
       const params = el("textarea", { rows: 8, class: "code", spellcheck: "false",
         oninput: (ev) => { try { s.params = JSON.parse(ev.target.value || "{}"); ev.target.classList.remove("bad-json"); changed(false); }
           catch (e) { ev.target.classList.add("bad-json"); } } });
@@ -1940,10 +2270,18 @@ function editor(root) {
       put(el("fieldset", {}, el("legend", {}, "Action"),
         select("Action", s, "action", cat.actions.map((a) => [a, a]), { blank: "choose" }),
         el("label", {}, "Parameters (JSON)", params,
-          el("small", {}, "{{run.record}}, {{input.x}}, {{step.field}} are filled in from the run, as data.")),
-        ));
+          el("small", {}, "Values in double braces, e.g. {{run.record}} or {{sort.reason}}, are filled in from the run, as data."))));
     }
-    put(el("p", {}, el("button", { type: "button", class: "danger", onclick: (ev) => removeStep(s, ev.currentTarget) }, "Remove step")));
+    if (type === "do") {
+      const earlier = owner.do.slice(0, owner.do.indexOf(s));
+      put(el("fieldset", {}, el("legend", {}, "Where the record goes"),
+        owner === wf.start ? null : select("Sends the record instead to", s, "to", stateOptions(), { blank: "nowhere else: it goes where the way goes", rebuild: true,
+          help: "only when its condition holds: give it Only when as well" }),
+        select("If it fails, the record goes to", s, "on_fail", stateOptions(), { blank: "nowhere: it waits, and the practice is told", rebuild: true }),
+        checks("Also waits for", s, "after", earlier.map((o) => [o.id, stepTitle(o)]), { none: "no earlier automation on this way",
+          help: "it already waits for an earlier one whose answers it reads" })));
+    }
+    put(removeButton(type === "do" ? "Remove automation" : "Remove work"));
   }
   function deadlineOf() {  // [deadline] only once something is in it
     const get = (k) => (wf.deadline || {})[k];
@@ -1968,11 +2306,11 @@ function editor(root) {
         text("Done within", deadlineOf(), "within", { placeholder: "e.g. 5d", help: "a run still open after this is flagged, once" }),
         select("Then tell", deadlineOf(), "escalate_to", roles, { blank: "the practice's escalation role" })),
       fieldsEditor(wf, "input", "What the starter gives"),
-      el("p", { class: "muted" }, "Select a step in the diagram to edit it, or add one."));
+      el("p", { class: "muted" }, "Select a state, its work or a way out on the left to change it, or add a state."));
   }
 
   // ---- tabs, toolbar, submit
-  root.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () => addStep(b.dataset.add)));
+  root.querySelectorAll("[data-add=state]").forEach((b) => b.addEventListener("click", () => { if (wf) addState(); }));
   const tabs = [...root.querySelectorAll(".ed-tabs button[data-tab]")];
   const panels = { visual: root.querySelector("#wf-visual"), toml: root.querySelector("#wf-text") };
   const tabList = root.querySelector(".ed-tabs");
@@ -1995,13 +2333,21 @@ function editor(root) {
   }
   tabs.forEach((b) => b.addEventListener("click", async () => {
     if (b.dataset.tab === tab) return;
-    if (b.dataset.tab === "toml") {
-      tomlBox.value = toToml(wf); tab = "toml";
+    if (b.dataset.tab === "toml") {  // the hub writes the text from the diagram
+      const res = await check(true);
+      if (!res || typeof res.source !== "string") { status.prepend("The text could not be written. "); return; }
+      tomlBox.value = res.source; tab = "toml";
     } else {
-      lastSource = null;
-      const res = await check();
-      if (!res || !res.data) { status.prepend("Fix the TOML before going back to the diagram. "); syncTabs(); return; }
-      wf = res.data; wf.steps = wf.steps || []; selected = null; tab = "visual"; redraw(); renderPanel();
+      const res = await check(true);
+      if (!res || !res.data) { status.prepend("Fix the text before going back to the diagram. "); syncTabs(); return; }
+      if (res.old) {
+        status.prepend("This is written in the old form, as a list of steps. The diagram edits states and ways out only, "
+          + "and does not convert it: keep editing it as text. ");
+        syncTabs(); return;
+      }
+      wf = norm(res.data); sel = null; tab = "visual";
+      const old = document.getElementById("wf-old"); if (old) old.hidden = true;
+      redraw(); renderPanel();
     }
     syncTabs();
   }));
@@ -2017,10 +2363,17 @@ function editor(root) {
   });
   syncTabs();
   tomlBox.addEventListener("input", () => { dirty = true; schedule(); });
-  svg.addEventListener("click", () => { selected = null; redraw(); renderPanel(); });
-  form.addEventListener("submit", () => { sourceIn.value = currentSource(); dirty = false; });
+  canvas.addEventListener("click", () => { if (sel) choose(null); });
+  form.addEventListener("submit", () => {  // the text tab sends its text; the diagram sends its model, which the hub writes out
+    if (tab === "toml" || !wf) { sourceIn.value = tomlBox.value; modelIn.value = ""; }
+    else { sourceIn.value = ""; modelIn.value = JSON.stringify(wf); }
+    dirty = false;
+  });
   redraw(); renderPanel();
-  if (boot.problems && boot.problems.length) { showProblems(boot.problems); lastSource = currentSource(); } else check();
+  if (boot.problems && boot.problems.length) {
+    showProblems(boot.problems);
+    lastSent = JSON.stringify(tab === "toml" || !wf ? { source: tomlBox.value } : { model: wf });
+  } else check();
 }
 
 // A form in a dialog over the page, like Create in an issue tracker: a link marked data-modal loads its page and
@@ -2440,11 +2793,63 @@ function boards(modal) {
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && press) endPress(); });
 }
 
+// What a record's latest move set going (RecordWork._activity_html), kept current while some of it is still open:
+// the block alone is fetched again (every 4 s, every 15 s after two minutes, only while the tab is shown) and swapped
+// when its ETag changes, saying what changed in a polite live region. It stops when the block comes back without
+// data-live. When the record itself has moved on (data-at differs), the page's forms are left as they are and a
+// status line offers the page as it is now, so nothing typed is lost. Without the script: the block's Refresh link.
+function activity() {
+  let sec = document.querySelector("#activity[data-live]");
+  if (!sec) return;
+  const at0 = sec.dataset.at, t0 = Date.now();
+  const say = el("div", { class: "visually-hidden", role: "status", "aria-live": "polite" });
+  document.body.appendChild(say);
+  let tag = null, paused = false, told = false;
+  const words = (n) => (n.textContent || "").replace(/\s+/g, " ").trim();
+  const lines = (n) => [...n.querySelectorAll("li")].map(words);
+  const later = () => setTimeout(poll, Date.now() - t0 > 120000 ? 15000 : 4000);
+  async function poll() {
+    if (!sec || !sec.dataset.live) return;
+    if (document.hidden) { paused = true; return; }
+    let res = null;
+    try {
+      res = await fetch(sec.dataset.live, { credentials: "same-origin", headers: tag ? { "If-None-Match": tag } : {} });
+    } catch (e) { res = null; }
+    if (!res || res.status === 304) { later(); return; }
+    if (!res.ok) { if (res.status >= 500) later(); return; }  // refused or gone: stop asking
+    tag = res.headers.get("ETag");
+    const fresh = new DOMParser().parseFromString(await res.text(), "text/html").getElementById("activity");
+    if (!fresh) return;
+    const before = new Set(lines(sec)), was = sec.querySelector("details");
+    const now = fresh.querySelector("details");
+    if (was && now) now.open = was.open || !!fresh.dataset.live;  // what the reader opened stays open
+    const node = document.adoptNode(fresh);
+    sec.replaceWith(node);
+    sec = node;
+    const changed = lines(sec).filter((t) => !before.has(t));
+    if (changed.length) say.textContent = "Updated: " + changed.slice(0, 3).join("; ");
+    else if (!sec.dataset.live) say.textContent = "Everything this move set going has settled.";
+    if (!told && sec.dataset.at !== undefined && at0 !== undefined && sec.dataset.at !== at0) {
+      told = true;
+      const work = document.getElementById("work");
+      const note = el("p", { class: "flash info moved-on", role: "status" },
+        "This has moved on since you opened it. ", el("a", { href: location.pathname + location.search }, "Show it as it is now"));
+      if (work) work.prepend(note);
+    }
+    if (sec.dataset.live) later();
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && paused) { paused = false; poll(); }
+  });
+  later();
+}
+
 window.PH = { MD, el };  // for the live editor's script, which follows
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".avatar-menu").forEach(avatarMenu);
   const modal = formModal();
   if (document.querySelector(".board [data-moves]")) boards(modal);
+  activity();
   document.querySelectorAll("textarea.markdown[id]").forEach(mdEditor);
   formTabs(document);
   kindFields(document);
@@ -4842,6 +5247,17 @@ ol.timeline li{padding:6px 0;border-bottom:1px solid var(--line)}
 .tl-at{display:inline-block;min-width:9em;font-size:13px}
 .tl-versions{margin-top:16px}
 .filters.when{display:inline-flex;gap:4px;margin-left:8px}.filters.when .btn.selected{background:var(--selected-bg);color:var(--selected-fg)}
+.rw-activity{border-top:1px solid var(--line);padding-top:12px}
+.rw-activity>details>summary{cursor:pointer;list-style-position:outside}
+.rw-activity .ra-h{display:inline;margin:0;font-size:15px}
+.rw-activity .ra-then{margin:12px 0 4px;font-size:14px}
+ul.ra-list{margin:8px 0 0}ul.ra-list>li{padding:2px 0}
+ul.ra-started{margin:4px 0 0 20px}ul.ra-started>li{padding:2px 0}
+.ra-mark{display:inline-block;width:1em;text-align:center;color:var(--subtle)}
+.ra-word.bad{font-weight:600}.ra-failed .ra-mark{color:var(--danger-fg)}
+.ra-live{margin:8px 0 0}
+.tl-ran{margin:4px 0 0 9em}.tl-ran>summary{cursor:pointer;color:var(--subtle);font-size:13px}
+@media (max-width:640px){.tl-ran{margin-left:0}}
 """
 
 CSS = CSS + RECWORK_CSS

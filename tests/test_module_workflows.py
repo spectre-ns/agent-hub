@@ -147,12 +147,15 @@ def test_making_a_document_obsolete_is_a_controllers_signed_decision_with_a_reas
         hub.update_record(rana, ref, {"status": "retiring"})
     hub.update_record(rana, ref, {"status": "retiring", "obsolete_reason": "Replaced by the online form"})
     assert step_state(hub, run, "revise") == "skipped"  # the revision it was writing is withdrawn
-    g = item_for(hub, run, "retire")
+    assert hub.engine.run(run["id"])["status"] == "completed"  # that pass ends; the next one decides it
+    nxt = open_run(hub, "dms-review", ref)
+    assert nxt["ctx"]["run"]["previous"] == run["id"]
+    g = item_for(hub, nxt, "retire")
     assert hub.engine.item(g)["role"] == "document-controller"
     hub.engine.claim(amara, g)
     hub.engine.decide(amara, g, "obsolete")
     assert hub.records.read("Document", d["id"])["status"] == "obsolete"
-    assert hub.engine.run(run["id"])["status"] == "completed"
+    assert hub.engine.run(nxt["id"])["status"] == "completed"
     assert not runs(hub, "dms-review", ref, "running")
     # kept: it goes back to where it was
     d2 = hub.create_record(rana, "Document", {"title": "Still used"})
@@ -243,8 +246,15 @@ def old_modules(tmp_path, monkeypatch):
     for name in ("dms", "qms", "plm", "wiki", "inventory", "crm"):
         shutil.copytree(_v1(tmp_path, name), d / name)
     monkeypatch.setattr(packmod, "MODULES_DIR", d)
+    # version 1 was written in the old step form, refused now: a hub that has it installed got it before that rule,
+    # so it goes in as then (read as stored) until the upgrade, which gets every rule
+    from practicehub import workflows as wfmod
+    parse, then = wfmod.parse, {"on": True}
+    monkeypatch.setattr(wfmod, "parse", lambda source, catalog=None, *, stored=False:
+                        parse(source, catalog, stored=stored or then["on"]))
 
     def upgrade(hub, name):
+        then["on"] = False
         shutil.rmtree(d / name)
         shutil.copytree(ROOT / "modules" / name, d / name)
         hub.approve_module_code(M(hub, "dr-amara"), name)
@@ -264,8 +274,9 @@ def test_upgrading_dms_proposes_the_type_and_workflow_and_work_under_way_goes_on
     old = open_run(hub, "dms-review", ref)  # started by its event, version 1
     proposed = old_modules(hub, "dms")
     assert ("type", "Document") in proposed and ("workflow", "dms-review") in proposed
-    with pytest.raises(Invalid, match="record type first"):  # else new ones start nothing
+    with pytest.raises(Invalid) as no:  # else new ones start nothing, and the type in force has no 'retiring' state
         hub.approve_workflow(amara, "dms-review", proposed[("workflow", "dms-review")])
+    assert "record type first" in str(no.value) or any("is not a state of a Document" in p for p in no.value.problems)
     hub.approve(amara, "type", "Document", proposed[("type", "Document")])
     # the type now names the workflow, whose new version is not approved yet: the old one goes on alone
     d2 = hub.create_record(rana, "Document", {"title": "Interim"})
@@ -370,7 +381,7 @@ def test_a_capa_is_walked_by_its_workflow_and_a_pass_found_not_effective_is_walk
     hub.engine.claim(amara, v)
     hub.engine.decide(amara, v, "not-effective", "Still missed on weekends")
     rec = hub.records.read("CAPA", capa["id"])
-    assert rec["status"] == "actions" and rec["not_effective_because"] == "Still missed on weekends"
+    assert rec["status"] == "further-action" and rec["not_effective_because"] == "Still missed on weekends"
     assert hub.engine.run(run["id"])["status"] == "completed"
     again = open_run(hub, "qms-capa", ref)  # the next pass
     assert again["ctx"]["run"]["previous"] == run["id"]
@@ -495,9 +506,9 @@ def test_a_change_order_is_walked_from_draft_and_a_rejected_or_returned_one_is_w
     assert hub.engine.run(first["id"])["status"] == "completed"
     second = open_run(hub, "plm-change", cref)  # back with its author: the next pass holds it
     assert second["ctx"]["run"]["previous"] == first["id"]
-    assert step_state(hub, second, "submit") == "waiting"
+    assert step_state(hub, second, "revise") == "waiting"  # rejected: revised or cancelled by its author
     hub.update_record(rana, cref, {"status": "draft"})  # Revise
-    assert step_state(hub, second, "submit") == "waiting"
+    assert step_state(hub, second, "revise") == "done" and step_state(hub, second, "submit") == "waiting"
     hub.update_record(rana, cref, {"impact": "Use up the 10x10 stock first."})
     hub.update_record(rana, cref, {"status": "review"})
     _board(hub, second, "review", amara, "approve")
@@ -562,18 +573,18 @@ def test_upgrading_plm_hands_a_change_under_review_on_to_the_new_version(hub, ol
     _board(hub, old, "review", amara, "reject")
     assert hub.engine.run(old["id"])["status"] == "completed"
     new = open_run(hub, "plm-change", cref)  # version 1 left it rejected; version 2 holds it with its author
-    assert new["version"] > old["version"] and step_state(hub, new, "submit") == "waiting"
+    assert new["version"] > old["version"] and step_state(hub, new, "revise") == "waiting"
 
 
-# ------------------------------------------------------------------------------------------- wiki: WikiPage, Procedure
+# ------------------------------------------------------------------------------------------- wiki: WikiPage; wiki-sop
 @pytest.fixture
 def wiki(hub):
     def build(h):
-        for name in ("dms", "wiki"):
+        for name in ("dms", "wiki", "wiki-sop"):
             install(h, name)
         for m in h.pack.modules:
             m.module.demo(h)
-    snapshot_onto(hub, "modwf:wiki", build, modules=["dms", "wiki"])
+    snapshot_onto(hub, "modwf:wiki", build, modules=["dms", "wiki", "wiki-sop"])
     return hub
 
 
@@ -602,63 +613,90 @@ def test_a_flagged_page_is_walked_by_its_check_and_each_flag_is_one_pass(wiki):
     assert not runs(hub, "wiki-check", ref, "running")
 
 
-def test_a_sop_revision_is_walked_from_draft_to_in_use_and_its_periodic_review_never_moves_it(wiki):
+def test_a_wiki_page_made_a_controlled_document_is_a_pdf_of_the_page_filed_as_a_draft(wiki):
     hub = wiki
-    noor, amara, rana = M(hub, "noor"), M(hub, "dr-amara"), M(hub, "rana")
-    sop = hub.create_record(noor, "Procedure", {"title": "Sharps", "number": "SOP-090", "owner": "noor",
-                                                "body": "Use the yellow bin."})
-    ref = f"Procedure/{sop['id']}"
-    first = open_run(hub, "wiki-sop-release", ref)
-    assert step_state(hub, first, "write") == "waiting"
-    hub.update_record(noor, ref, {"change_summary": "First issue.", "status": "in-review"})
-    _board(hub, first, "release", amara, "release")
-    assert hub.records.read("Procedure", sop["id"])["status"] == "released"
-    assert step_state(hub, first, "in-use") == "waiting"
-    # the periodic review comes due: its companion asks for a revision, and the SOP's own run opens it
-    review = hub.engine.start(rana, "wiki-sop-review", record=ref, via_automation=True)
-    _board(hub, review, "review", noor, "revise", "The bins changed colour")
+    rana, amara, sam = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "sam")
+    page = _named(hub, "WikiPage", "Hand hygiene")
+    pref = f"WikiPage/{page['id']}"
+    made = runs(hub, "wiki-sop-file", pref)  # the demo made it SOP-021
+    assert len(made) == 1 and made[0]["status"] == "completed"
+    doc = next(d for d in hub.records.search("Document", limit=None) if d.get("number") == "SOP-021")
+    dref = f"Document/{doc['id']}"
+    assert doc["status"] == "draft" and doc["title"] == "Hand hygiene"
+    assert doc["file"]["contentType"] == "application/pdf"
+    data, _ = hub.read_file(amara, dref, doc["file"]["blob"])
+    assert data.startswith(b"%PDF-") and b"Hand hygiene" in data and b"Clean your hands" in data
+    assert {"rel": "mentions", "ref": dref} in hub.linked(amara, pref)  # the page names the document made from it
+    assert hub.records.read("WikiPage", page["id"])["status"] == "published"  # the page is not changed
+    # document control's own workflow walks it from there: sent for review, approved by a controller
+    first = open_run(hub, "dms-review", dref)
+    hub.update_record(M(hub, doc["owner"]), dref, {"status": "in-review"})
+    approver = amara if doc["owner"] != "dr-amara" else rana
+    _board(hub, first, "approve", approver, "approve")
+    assert hub.records.read("Document", doc["id"])["status"] == "approved"
+    # a number in use is not given twice; only a document author makes one
+    run = hub.engine.start(rana, "wiki-sop-file", record=pref, inputs={"number": "sop-021"})
+    assert hub.engine.run(run["id"])["status"] != "completed"
+    assert sum(1 for d in hub.records.search("Document", limit=None) if d.get("number") == "SOP-021") == 1
+    hub.engine.cancel(rana, run["id"], "wrong number")
+    with pytest.raises(Denied):
+        hub.engine.start(sam, "wiki-sop-file", record=pref, inputs={"number": "SOP-099"})
+
+
+def test_a_controlled_documents_periodic_review_confirms_it_or_asks_for_a_revision_and_never_moves_it(wiki):
+    from datetime import datetime, timedelta
+    hub = wiki
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    d = hub.create_record(rana, "Document", {"title": "Sharps", "number": "SOP-090", "owner": "rana",
+                                             "body": "Use the yellow bin."})
+    ref = f"Document/{d['id']}"
+    first = open_run(hub, "dms-review", ref)
+    hub.update_record(rana, ref, {"change_summary": "First issue.", "status": "in-review"})
+    _board(hub, first, "approve", amara, "approve")
+    rec = hub.records.read("Document", d["id"])
+    today = hub.engine.now().date()
+    assert rec["status"] == "approved" and rec["review_by"] == today.replace(year=today.year + 1).isoformat()
+    assert step_state(hub, first, "in-force") == "waiting"
+    # a year and a day on, the clock asks its owner to review it: they confirm it
+    due = datetime.fromisoformat(rec["review_by"]) + timedelta(days=1, hours=8)
+    hub.engine.tick(due)
+    review = open_run(hub, "dms-periodic-review", ref)
+    assert hub.records.read("Document", d["id"])["review_asked"] == rec["review_by"]
+    _board(hub, review, "review", rana, "confirm")
     assert hub.engine.run(review["id"])["status"] == "completed"
-    assert hub.records.read("Procedure", sop["id"])["status"] == "draft"
+    assert hub.records.read("Document", d["id"])["status"] == "approved"
+    # the next one asks for a revision: the document's own run opens it, numbered; the review moves nothing
+    rec = hub.records.read("Document", d["id"])
+    rec = {k: x for k, x in rec.items() if k != "meta"}
+    hub.records.update("Document", d["id"], {**rec, "review_by": (today - timedelta(days=2)).isoformat()})
+    hub.engine.tick(due + timedelta(days=1))
+    review = open_run(hub, "dms-periodic-review", ref)
+    _board(hub, review, "review", rana, "revise", "The bins changed colour")
+    rec = hub.records.read("Document", d["id"])
+    assert rec["status"] == "draft" and rec["revise_asked"] is False
     moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "draft"})
-    assert moved["run_id"] == first["id"]  # moved by its owner, never by the review
-    assert hub.engine.run(first["id"])["status"] == "completed"
-    second = open_run(hub, "wiki-sop-release", ref)
+    assert moved["run_id"] == first["id"]  # moved by its own run, never by the review
+    second = open_run(hub, "dms-review", ref)
     assert second["ctx"]["run"]["previous"] == first["id"]
-    hub.update_record(noor, ref, {"body": "Use the red bin.", "change_summary": "New bins."})
-    hub.update_record(noor, ref, {"status": "in-review"})
-    with pytest.raises(Denied):  # who wrote this revision does not release it
-        hub.engine.claim(noor, item_for(hub, second, "release"))
-    _board(hub, second, "release", amara, "release")
-    rec = hub.records.read("Procedure", sop["id"])
-    assert rec["status"] == "released" and rec["revision"] == 2 and rec["revise_asked"] is False
-    hub.update_record(rana, ref, {"status": "retired"}, comment="Replaced by SOP-091")
-    assert not runs(hub, "wiki-sop-release", ref, "running")
 
 
-def test_upgrading_the_wiki_hands_a_sop_in_review_on_to_the_new_version(hub, old_modules):
+def test_upgrading_the_wiki_takes_its_sops_out_and_a_page_check_under_way_goes_on(hub, old_modules):
     for name in ("dms", "wiki"):
         install(hub, name)
     for name in ("dms", "wiki"):
         demo(hub, name)
     amara = M(hub, "dr-amara")
-    sop = _named(hub, "Procedure", "Cleaning the treatment rooms")
-    ref = f"Procedure/{sop['id']}"
-    old = open_run(hub, "wiki-sop-release", ref)
     approve_all(hub, old_modules(hub, "dms"), amara)
     proposed = old_modules(hub, "wiki")
-    for key in (("type", "Procedure"), ("workflow", "wiki-sop-release"), ("type", "WikiPage"),
-                ("workflow", "wiki-check"), ("workflow", "wiki-sop-review")):
-        assert key in proposed
+    assert ("type", "WikiPage") in proposed and ("workflow", "wiki-check") in proposed
+    assert not any(did in ("Procedure", "wiki-sop-release", "wiki-sop-review") for _, did in proposed)
     approve_all(hub, proposed, amara)
-    _board(hub, old, "release", amara, "release")
-    assert hub.engine.run(old["id"])["version"] == old["version"]
-    new = open_run(hub, "wiki-sop-release", ref)  # in use now, walked by the new version
-    assert new["version"] > old["version"] and step_state(hub, new, "in-use") == "waiting"
+    assert hub.record_type("Procedure") is None  # controlled documents live in document control
     page = _named(hub, "WikiPage", "Booking rules")  # flagged under version 1: its check goes on as it was
     assert runs(hub, "wiki-check", f"WikiPage/{page['id']}", "running")[0]["version"] == 1
 
 
-# ------------------------------------------------------------------------------------------- inventory: StockMove, StockItem
+# ------------------------------------------------------------------------------------------- inventory: StockMove, Part
 @pytest.fixture
 def stock(hub):
     def build(h):
@@ -669,133 +707,87 @@ def stock(hub):
     return hub
 
 
-def _sku(hub, sku):
-    return next(i for i in hub.records.search("StockItem", limit=None) if i["sku"] == sku)
+def _stock_lot(hub, code):
+    part = next(p for p in hub.records.search("Part", limit=None) if p["code"] == code)
+    return next(x for x in hub.records.search("StockItem", limit=None) if x["part"] == f"Part/{part['id']}")
+
+
+def _sign_policy(hub, who, level):
+    rec = hub.create_record(who, "InventoryPolicy", {"level": level})
+    ref = f"InventoryPolicy/{rec['id']}"
+    hub.update_record(who, ref, {"status": "in-review"})
+    _board(hub, open_run(hub, "inventory-policy", ref), "sign-own", who, "in-force")
+    assert hub.records.read("InventoryPolicy", rec["id"])["status"] == "in-force"
+    assert not runs(hub, "inventory-policy", ref, "running")   # in force: no one's work until it is revised
 
 
 def test_a_stock_move_is_walked_from_draft_and_a_rejected_one_is_revised_and_walked_again(stock):
     hub = stock
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    gloves = _sku(hub, "GL-M")
-    m = hub.create_record(rana, "StockMove", {"kind": "count", "item": f"StockItem/{gloves['id']}", "quantity": 18,
+    _sign_policy(hub, rana, "tracked")
+    gloves = _stock_lot(hub, "GL-M")
+    m = hub.create_record(rana, "StockMove", {"kind": "count", "lot": f"StockItem/{gloves['id']}", "quantity": 18,
                                               "reason": "shelf count"})
     ref = f"StockMove/{m['id']}"
     first = open_run(hub, "inventory-post", ref)
     assert step_state(hub, first, "submit") == "waiting"  # with its author until submitted
     hub.update_record(rana, ref, {"status": "submitted"})
+    assert step_state(hub, first, "sign-own") == "skipped"   # the policy asks for a second person
     with pytest.raises((Denied, Invalid)):  # sent for sign-off: its author does not take it back
         hub.update_record(rana, ref, {"status": "draft"})
     with pytest.raises(Denied):
-        hub.engine.claim(rana, item_for(hub, first, "sign-off"))
-    _board(hub, first, "sign-off", amara, "reject", "count it again")
+        hub.engine.claim(rana, item_for(hub, first, "sign-other"))
+    _board(hub, first, "sign-other", amara, "reject", "count it again")
     assert hub.records.read("StockMove", m["id"])["status"] == "rejected"
     assert hub.engine.run(first["id"])["status"] == "completed"
     second = open_run(hub, "inventory-post", ref)  # back with its author: the next pass
-    assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "submit") == "waiting"
-    hub.update_record(rana, ref, {"status": "draft"})  # Revise: a move the open step waits on
+    assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "revise") == "waiting"
+    hub.update_record(rana, ref, {"status": "draft"})  # Revise: a move the rejected state's wait takes
+    assert step_state(hub, second, "submit") == "waiting"  # back in draft, in the same run
     hub.update_record(rana, ref, {"quantity": 19})
     hub.update_record(rana, ref, {"status": "submitted"})
     with pytest.raises(Denied):  # who wrote it never signs it off, on any pass
-        hub.engine.claim(rana, item_for(hub, second, "sign-off"))
-    _board(hub, second, "sign-off", amara, "post")
-    assert hub.records.read("StockMove", m["id"])["status"] == "posted" and _sku(hub, "GL-M")["on_hand"] == 19
+        hub.engine.claim(rana, item_for(hub, second, "sign-other"))
+    _board(hub, second, "sign-other", amara, "post")
+    assert hub.records.read("StockMove", m["id"])["status"] == "posted"
+    assert hub.records.read("StockItem", gloves["id"])["quantity"] == 19
     assert not runs(hub, "inventory-post", ref, "running")  # posted: no one's work
-
-
-def test_a_stock_item_reorder_cycle_is_one_run_and_a_delivery_restocks_it_through_the_wait(stock):
-    hub = stock
-    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    syr = _sku(hub, "SY-3")
-    ref = f"StockItem/{syr['id']}"
-    first = open_run(hub, "inventory-reorder", ref)
-    assert step_state(hub, first, "watch") == "waiting"
-    with pytest.raises((Denied, Invalid)):  # low and on order are its reorder work's, never typed in
-        hub.update_record(rana, ref, {"status": "low"})
-    issue = hub.create_record(rana, "StockMove", {"kind": "issue", "item": ref, "quantity": 2})
-    hub.update_record(rana, f"StockMove/{issue['id']}", {"status": "submitted"})  # 5 -> 3: at its reorder point
-    assert _sku(hub, "SY-3")["status"] == "low"
-    assert open_run(hub, "inventory-reorder", ref)["id"] == first["id"]  # the same run, now at its order
-    i = item_for(hub, first, "order")
-    hub.engine.claim(amara, i)
-    hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-1"})
-    assert _sku(hub, "SY-3")["status"] == "on-order" and step_state(hub, first, "delivered") == "waiting"
-    rcv = hub.create_record(rana, "StockMove", {"kind": "receive", "item": ref, "quantity": 10})
-    hub.update_record(rana, f"StockMove/{rcv['id']}", {"status": "submitted"})
-    item = _sku(hub, "SY-3")
-    assert item["on_hand"] == 13 and item["status"] == "stocked"
-    posts = [r["id"] for r in runs(hub, "inventory-post", f"StockMove/{rcv['id']}")]
-    moved = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "stocked"})
-    assert moved["run_id"] in posts  # the delivery's workflow moved it, through the wait the cycle held
-    # (the core starts a second, empty run of it here: see the xfail test below)
-    assert hub.engine.run(first["id"])["status"] == "completed"
-    second = open_run(hub, "inventory-reorder", ref)  # restocked: the next cycle watches it
-    assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "watch") == "waiting"
-    hub.update_record(rana, ref, {"status": "discontinued", "discontinue_reason": "No longer used"})
-    assert not runs(hub, "inventory-reorder", ref, "running")  # no longer kept: no one's work
 
 
 def test_a_stock_move_posted_at_once_is_walked_by_one_run(stock):
     hub = stock
     rana = M(hub, "rana")
-    ref = f"StockItem/{_sku(hub, 'SY-3')['id']}"
-    rcv = hub.create_record(rana, "StockMove", {"kind": "receive", "item": ref, "quantity": 10})
+    lot = _stock_lot(hub, "SY-3")
+    rcv = hub.create_record(rana, "StockMove", {"kind": "issue", "lot": f"StockItem/{lot['id']}", "quantity": 2})
     hub.update_record(rana, f"StockMove/{rcv['id']}", {"status": "submitted"})
     assert hub.records.read("StockMove", rcv["id"])["status"] == "posted"
-    assert len(runs(hub, "inventory-post", f"StockMove/{rcv['id']}")) == 1
+    run = runs(hub, "inventory-post", f"StockMove/{rcv['id']}")
+    assert len(run) == 1 and step_state(hub, run[0], "sign-own") == step_state(hub, run[0], "sign-other") == "skipped"
 
 
-def test_an_order_task_is_withdrawn_when_its_item_is_no_longer_low(stock):
+def test_a_part_is_walked_into_use_and_a_revision_is_walked_again(stock):
     hub = stock
-    rana = M(hub, "rana")
-    ref = f"StockItem/{_sku(hub, 'SY-3')['id']}"
-    first = open_run(hub, "inventory-reorder", ref)
-    issue = hub.create_record(rana, "StockMove", {"kind": "issue", "item": ref, "quantity": 2})
-    hub.update_record(rana, f"StockMove/{issue['id']}", {"status": "submitted"})
-    order = item_for(hub, first, "order")
-    rcv = hub.create_record(rana, "StockMove", {"kind": "receive", "item": ref, "quantity": 10})
-    hub.update_record(rana, f"StockMove/{rcv['id']}", {"status": "submitted"})  # a delivery posted before any order
-    assert _sku(hub, "SY-3")["status"] == "stocked"
-    assert step_state(hub, first, "order") == "skipped"
-    assert hub.engine.item(order)["status"] not in ("open", "claimed")  # no stale order left on anyone's list
-    assert hub.db.events.find_one({"action": "step.withdrawn", "run_id": first["id"], "data.step": "order"})
-    assert hub.engine.run(first["id"])["status"] == "completed"
-    assert step_state(hub, open_run(hub, "inventory-reorder", ref), "watch") == "waiting"
-
-
-def test_upgrading_inventory_hands_work_under_way_on_and_picks_up_items_on_their_next_write(hub, old_modules):
-    install(hub, "inventory")
-    demo(hub, "inventory")
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    syr, gloves = _sku(hub, "SY-3"), _sku(hub, "GL-M")
-    sref, gref = f"StockItem/{syr['id']}", f"StockItem/{gloves['id']}"
-    w = hub.create_record(rana, "StockMove", {"kind": "write-off", "item": gref, "quantity": 2, "reason": "wet"})
-    wref = f"StockMove/{w['id']}"
-    hub.update_record(rana, wref, {"status": "submitted"})
-    old_post = open_run(hub, "inventory-post", wref)  # version 1, started by its event
-    issue = hub.create_record(rana, "StockMove", {"kind": "issue", "item": sref, "quantity": 2})
-    hub.update_record(rana, f"StockMove/{issue['id']}", {"status": "submitted"})
-    old_reorder = open_run(hub, "inventory-reorder", sref)
-    assert not runs(hub, "inventory-reorder", gref)  # version 1: a stocked item is no one's work
-    proposed = old_modules(hub, "inventory")
-    for key in (("type", "StockMove"), ("type", "StockItem"), ("workflow", "inventory-post"),
-                ("workflow", "inventory-reorder")):
-        assert key in proposed
-    approve_all(hub, proposed, amara)
-    _board(hub, old_post, "sign-off", amara, "post")  # the run under way keeps its version
-    assert hub.records.read("StockMove", w["id"])["status"] == "posted"
-    assert hub.engine.run(old_post["id"])["status"] == "completed" and not runs(hub, "inventory-post", wref, "running")
-    i = item_for(hub, old_reorder, "order")
-    hub.engine.claim(amara, i)
-    hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-2"})
-    assert hub.engine.run(old_reorder["id"])["status"] == "completed"  # version 1 ended at on order
-    new = open_run(hub, "inventory-reorder", sref)  # handed on: version 2 waits for the delivery
-    assert new["version"] > old_reorder["version"] and step_state(hub, new, "delivered") == "waiting"
-    # an item filed before is picked up by its workflow on its next write, once
-    hub.update_record(rana, gref, {"supplier": "Another supplier"})
-    picked = open_run(hub, "inventory-reorder", gref)
-    assert step_state(hub, picked, "watch") == "waiting"
-    hub.update_record(rana, gref, {"supplier": "A third supplier"})
-    assert len(runs(hub, "inventory-reorder", gref)) == 1
+    p = hub.create_record(rana, "Part", {"code": "MK-1", "name": "Face masks"})
+    ref = f"Part/{p['id']}"
+    assert hub.records.read("Part", p["id"])["status"] == "active"   # basic: in use at once, by its own run
+    assert not runs(hub, "inventory-part", ref, "running")
+    _sign_policy(hub, rana, "regulated")
+    hub.update_record(rana, ref, {"status": "draft"}, comment="new supplier's mask")   # Revise
+    first = open_run(hub, "inventory-part", ref)
+    assert step_state(hub, first, "submit") == "waiting" and step_state(hub, first, "open") == "skipped"
+    hub.update_record(rana, ref, {"name": "Face masks, type IIR", "status": "in-review"})
+    with pytest.raises((Denied, Invalid)):   # in review: locked
+        hub.update_record(rana, ref, {"name": "Masks"})
+    _board(hub, first, "approve", amara, "send-back", "say which standard")
+    got = hub.records.read("Part", p["id"])
+    assert got["status"] == "draft" and got["return_reason"] == "say which standard"
+    second = open_run(hub, "inventory-part", ref)
+    assert second["ctx"]["run"]["previous"] == first["id"]
+    hub.update_record(rana, ref, {"notes": "EN 14683 type IIR", "status": "in-review"})
+    _board(hub, second, "approve", amara, "approve")
+    got = hub.records.read("Part", p["id"])
+    assert (got["status"], got["revision"]) == ("active", 1) and not runs(hub, "inventory-part", ref, "running")
 
 
 # ------------------------------------------------------------------------------------------- crm: Interaction, Person
@@ -839,7 +831,7 @@ def test_an_interaction_is_walked_by_its_follow_up_and_the_daily_sweep_never_mov
     now = _interaction(hub, rana)
     waiting = open_run(hub, "crm-follow-up", now)
     hub.update_record(rana, now, {"status": "follow-up"})
-    assert step_state(hub, waiting, "due") == "done" and step_state(hub, waiting, "asked") == "skipped"
+    assert step_state(hub, waiting, "due") == "done" and step_state(hub, waiting, "taken") == "done"
     assert open_run(hub, "crm-follow-up", now)["id"] == waiting["id"]
 
 

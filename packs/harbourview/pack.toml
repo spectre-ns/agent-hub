@@ -4,4 +4,4 @@
 base = "general-practice"
 
 # document control, quality (CAPA, SOPs), the practice wiki and stock: installed with the practice
-modules = ["dms", "qms", "wiki", "inventory"]
+modules = ["dms", "qms", "wiki", "wiki-sop", "inventory"]

@@ -3,8 +3,8 @@ title = "Patient asks to withhold information"
 record = "Consent"
 summary = """
 One directive, from asked for to in force or refused: the patient's request is this workflow's record (a consent
-directive, about the patient), and its status is where the work is: requested, reviewed by the privacy officer, then
-in force or refused. Nothing is withheld until it is in force.
+directive, about the patient), and its status is where the work is. It stops once, requested, while the privacy
+officer reviews it; the officer puts it in force or refuses it. Nothing is withheld until it is in force.
 
 A patient asks the practice to limit who sees part of their file, or withdraws their consent to its use or disclosure
 (PHIA). Whoever hears the request writes it down in the patient's words; the privacy officer (the practice manager)
@@ -30,7 +30,20 @@ label = "What the patient asks, in their words"
 required = true
 help = "what they want withheld (a result, their mental-health notes, everything clinical) and from whom"
 
-[[steps]]
+# ---------------------------------------------------------------------------------------------------------------
+# Written as the directive's states (where it stops, and the work done there) and the edges between them (what the
+# privacy officer chose, with the automations that run on the way). See practicehub/states.py.
+
+[start]
+to = "requested"
+label = "Asked for"
+
+[[state]]
+id = "requested"
+label = "Requested"
+tone = "attention"
+
+[[state.work]]
 id = "directive"
 title = "Record the patient's consent directive"
 kind = "task"
@@ -39,79 +52,84 @@ persons_only = true
 due = "2d"
 escalate_to = "medical-director"
 context = ["record:demographics", "record:privacy", "input.request"]
-state = "reviewed"
 instructions = """Check the request is the patient's own (or their substitute decision-maker's). If it is not, or the
 law does not let the practice withhold what is asked, refuse it and say why in what the patient is told. Otherwise
-say what is withheld (by kind of information) and who still sees it. A record that must be withheld on its own can be added on the directive
-afterwards, from the patient's page. Tell the patient that the people caring for them may not see it, that an
-emergency may still open it (and that each such access is reviewed), and that they can lift it at any time."""
-[[steps.fields]]
-name = "decision"
-type = "choice"
-choices = ["put-in-force", "refuse"]
-required = true
-[[steps.fields]]
+say what is withheld (by kind of information) and who still sees it, and put it in force. A record that must be
+withheld on its own can be added on the directive afterwards, from the patient's page. Tell the patient that the people
+caring for them may not see it, that an emergency may still open it (and that each such access is reviewed), and that
+they can lift it at any time."""
+[[state.work.fields]]
 name = "withhold"
 label = "Withhold these kinds of information"
 type = "list"
 help = "one a line: clinical, intake, visits, correspondence, billing (needed to put it in force)"
-[[steps.fields]]
+[[state.work.fields]]
 name = "allow_roles"
 label = "Still allowed: roles"
 type = "list"
 help = "one a line, e.g. physician; leave empty for nobody"
-[[steps.fields]]
+[[state.work.fields]]
 name = "told"
 label = "What the patient was told"
 type = "text"
 required = true
 
-[[steps]]
+[[edge]]
+id = "put-in-force"
+label = "Put in force"
+from = "requested"
+to = "active"
+
+[[edge.do]]
 id = "save"
 title = "Put the directive in force"
-kind = "automation"
-after = ["directive"]
-when = "directive.decision == 'put-in-force'"
 action = "record.update"
-state = "active"
-[steps.params.set]
+[edge.do.params.set]
 withhold_classes = "{{directive.withhold}}"
 allow_roles = "{{directive.allow_roles}}"
 told = "{{directive.told}}"
 
-[[steps]]
+[[edge.do]]
+id = "confirm"
+title = "Confirm to the patient"
+action = "message.send"
+[edge.do.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your request about your health information"
+body = """We have recorded your request to limit who sees part of your health information. {{directive.told}}
+You can change or lift it at any time by calling the office."""
+
+[[edge]]
+id = "refuse"
+label = "Refuse"
+from = "requested"
+to = "refused"
+
+[[edge.do]]
 id = "refuse"
 title = "Refuse the request"
-kind = "automation"
-after = ["directive"]
-when = "directive.decision == 'refuse'"
 action = "record.update"
-state = "refused"
-[steps.params.set]
+[edge.do.params.set]
 told = "{{directive.told}}"
 
-[[steps]]
+[[edge.do]]
 id = "tell-refused"
 title = "Tell the patient it was refused"
-kind = "automation"
-after = ["refuse"]
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your request about your health information"
 body = """We could not record your request to limit who sees part of your health information. {{directive.told}}
 Please call the office if you have questions."""
 
-[[steps]]
-id = "confirm"
-title = "Confirm to the patient"
-kind = "automation"
-after = ["save"]
-action = "message.send"
-[steps.params]
-channel = "patient-portal"
-to = "{{run.subject}}"
-subject = "Your request about your health information"
-body = """We have recorded your request to limit who sees part of your health information. {{directive.told}}
-You can change or lift it at any time by calling the office."""
+[[state]]
+id = "active"
+label = "In force"
+tone = "done"
+
+[[state]]
+id = "refused"
+label = "Refused"
+tone = "done"

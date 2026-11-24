@@ -1,0 +1,110 @@
+id = "visit-claim"
+title = "Visit claim"
+record = "ChargeItem"
+summary = """
+One visit's charge, from made to billed: the charge is this workflow's record, a sub-record of the visit, and its status
+is where the work is. Signing the visit's note makes it (planned); billing codes it from the visit summary (the visit
+type, its length and the physician's diagnosis codes, never the note), then the claim is submitted (billable) or held
+for billing staff. Routine, low-value claims may be submitted by the billing agent; whoever coded a claim does not also
+submit it.
+
+Written as the charge's states (where it waits, and the work done there) and the edges between them: see
+practicehub/states.py.
+"""
+
+[trigger]
+starters = ["billing"]
+
+[[input]]
+name = "visit_type"
+type = "choice"
+choices = ["minor", "complete", "counselling"]
+default = "minor"
+
+[[input]]
+name = "minutes"
+type = "number"
+
+[[input]]
+name = "diagnosis_codes"
+type = "list"
+help = "the ICD-9 codes the physician chose for billing"
+
+[start]
+to = "planned"
+label = "Made at signing"
+
+[[state]]
+id = "planned"
+label = "To code"
+tone = "waiting"
+
+[[state.work]]
+id = "code"
+title = "Code the visit"
+kind = "task"
+role = "billing"
+due = "5d"
+escalate_to = "practice-manager"
+skill = "visit-coding"
+risk = "medium"
+context = ["record:visits", "input.visit_type", "input.minutes", "input.diagnosis_codes"]
+
+[[edge]]
+id = "coded"
+label = "Coded"
+from = "planned"
+to = "coded"
+
+[[state]]
+id = "coded"
+label = "To submit"
+tone = "waiting"
+
+[[state.work]]
+id = "submit"
+title = "Submit the claim"
+kind = "gate"
+role = "billing"
+due = "5d"
+escalate_to = "practice-manager"
+skill = "claim-submit"
+signer = "any"
+meaning = "This claim matches the service documented"
+agent_criteria = "code.amount <= 80 and code.fee_code in ['minor-assessment', 'complete-assessment']"
+not_by = ["code"]
+context = ["record:visits", "code"]
+
+# Submitted: the charge says what was billed, and is billable.
+[[edge]]
+id = "submit"
+label = "Submit"
+from = "coded"
+to = "billable"
+
+[[edge.do]]
+id = "charge"
+title = "Record the charge"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+code = { text = "{{code.fee_code}}" }
+quantity = { value = "{{code.units}}" }
+priceOverride = { value = "{{code.amount}}", currency = "CAD" }
+
+[[edge]]
+id = "hold"
+label = "Hold"
+from = "coded"
+to = "on-hold"
+
+[[state]]
+id = "billable"
+label = "Billable"
+tone = "done"
+
+[[state]]
+id = "on-hold"
+label = "Held"
+tone = "attention"

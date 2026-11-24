@@ -11,13 +11,19 @@
 # when the message is queued and again when it is delivered. Agents may draft a follow-up; a person sends it.
 # It knows nothing about any one practice.
 
+# 3: A follow-up cancelled part way waits for the next follow-up date, as Not needed does, instead of coming straight
+#  back.
+# 4: Follow-ups and consent expiry are written as states and edges; a drafted follow-up waits as To send until a
+#  person sends it. The follow-up-due check is a workflow that only acts. Versions approved before keep running as
+#  they were.
+
 [module]
 requires_core = "1.0"
 id = "crm"
 name = "Relationships"
-version = "3"
-changes = """A follow-up cancelled part way waits for the next follow-up date, as Not needed does, instead of
-coming straight back."""
+version = "4"
+changes = """Follow-ups and consent expiry are written as states and edges; a drafted follow-up waits as To send until a
+person sends it. The follow-up-due check is a workflow that only acts."""
 summary = "Organisations, contacts, their interactions and enquiries, with consent to commercial messages (CASL)."
 requires = []
 shortcuts = ["Organization", "Person", "Enquiry"]

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from conftest import M, item_for, quiet, run_of, snapshot_onto, visit_run
+from conftest import M, claim_run, item_for, quiet, run_of, snapshot_onto, visit_run
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
-from practicehub.hub import Denied, Invalid, NotFound
+from practicehub.hub import Denied, Invalid, NotFound, member_ref
 from practicehub.models import ModelError, ModelGateway
 
 
@@ -97,7 +97,7 @@ def test_scheduler_context_has_no_clinical_data(hub):
     iid = item_for(hub, run, "propose")
     ctx = hub.engine.context(M(hub, "scheduling-agent"), iid)
     assert all(k in ("record:demographics", "provider:free-slots", "input.urgency", "input.preferences",
-                     "screen.admin_reason", "triage.decision", "triage.note_for_scheduler") for k in ctx["context"])
+                     "screen.admin_reason", "triage.outcome", "triage.note_for_scheduler") for k in ctx["context"])
     assert ctx["context"]["screen.admin_reason"] == "check-up"
     for rec in ctx["context"]["record:demographics"]:
         assert hub.pack.class_of(rec["resourceType"]) == "demographics"
@@ -108,8 +108,9 @@ def test_a_step_reading_a_clinical_step_needs_clinical_access(worked):
     hub = worked
     src = hub.workflow("appointment-request")[1]["source"].replace(
         'context = ["edit"]', 'context = ["edit"]\n', 1)
-    src = src.replace('kind = "gate"\nrole = "physician"\ndue = "3d"\nescalate_to = "medical-director"\nafter = ["edit"]',
-                      'kind = "gate"\nrole = "front-desk"\ndue = "3d"\nescalate_to = "medical-director"\nafter = ["edit"]')
+    old = 'id = "sign"\ntitle = "Sign the note"\nkind = "gate"\nrole = "physician"'
+    assert old in src
+    src = src.replace(old, 'id = "sign"\ntitle = "Sign the note"\nkind = "gate"\nrole = "front-desk"')
     out = hub.propose_workflow(M(hub, "jo"), src, "let the front desk sign notes (should not work for clinical data)")
     hub.approve_workflow(M(hub, "rana"), "appointment-request", out["version"])
     pat = hub.records.search("Patient")[0]
@@ -168,10 +169,11 @@ def test_agent_gate_decisions_stay_within_criteria_and_separation_of_duties(work
     hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
     from practicehub.agents.runner import run_all_local
     run_all_local(hub, log=quiet)
-    r = hub.engine.run(run["id"])
+    claim = claim_run(hub, run)  # billing works on the visit's charge, a record of its own
+    r = hub.engine.run(claim["id"])
     assert r["steps"]["code"]["by"] == "billing-agent"
     # whoever coded does not also submit: the billing agent coded, so the claim waits for Sam
-    it = hub.engine.item(item_for(hub, run, "submit"))
+    it = hub.engine.item(item_for(hub, claim, "submit"))
     ok, why = hub.engine.eligibility(M(hub, "billing-agent"), it)
     assert not ok and "does not also" in why
     hub.engine.decide(M(hub, "sam"), it["id"], "submit", "")
@@ -187,7 +189,7 @@ def test_guards_reject_a_wrong_claim_amount(worked):
         "subjective": "s", "assessment": "a", "plan": "p", "diagnosis_codes": "034"})
     hub.engine.decide(amara, item_for(hub, run, "sign"), "sign", "")
     sam = M(hub, "sam")
-    iid = item_for(hub, run, "code")
+    iid = item_for(hub, claim_run(hub, run), "code")
     with pytest.raises(Invalid) as exc:
         hub.engine.complete(sam, iid, {"fee_code": "minor-assessment", "units": 1, "amount": 99})
     assert exc.value.problems
@@ -223,7 +225,9 @@ def test_workflow_changes_need_a_different_person_to_approve(hub):
 
 def test_bad_workflows_are_refused_with_reasons(hub):
     with pytest.raises(Invalid) as exc:
-        hub.propose_workflow(M(hub, "rana"), 'id = "x"\ntitle = "X"\n[[steps]]\nid = "a"\ntitle = "A"\nkind = "task"\n'
+        hub.propose_workflow(M(hub, "rana"), 'id = "x"\ntitle = "X"\nrecord = "Patient"\n[start]\nto = "doing"\n'
+                                             '[[edge]]\nid = "did"\nfrom = "doing"\nto = "done"\n[[state]]\nid = "done"\n'
+                                             '[[state]]\nid = "doing"\n[[state.work]]\nid = "a"\ntitle = "A"\nkind = "task"\n'
                                              'role = "astronaut"\n', "bad")
     assert any("astronaut" in p for p in exc.value.problems)
 
@@ -458,12 +462,22 @@ required = true
 name = "missed_this_year"
 type = "number"
 default = 0
-[[steps]]
+[start]
+to = "assessing"
+[[edge]]
+id = "assessed"
+from = "assessing"
+to = "assessed"
+[[state]]
+id = "assessed"
+[[state]]
+id = "assessing"
+[[state.work]]
 id = "assess"
 title = "Apply the missed-appointment policy"
 kind = "automation"
 block = "missed-appointment-fee"
-[steps.params]
+[state.work.params]
 notice_hours = "{{input.notice_hours}}"
 missed_this_year = "{{input.missed_this_year}}"
 fee = 50
@@ -628,18 +642,29 @@ def test_an_engine_block_sends_its_inputs_and_checks_the_answer(hub, monkeypatch
 
     wf = '''id = "post-claim"
 title = "Post a claim"
+record = "Patient"
 [trigger]
 starters = ["billing"]
 [[input]]
 name = "amount"
 type = "number"
 required = true
-[[steps]]
+[start]
+to = "posting"
+[[edge]]
+id = "posted"
+from = "posting"
+to = "posted"
+[[state]]
+id = "posted"
+[[state]]
+id = "posting"
+[[state.work]]
 id = "post"
 title = "Post it"
 kind = "automation"
 block = "post-claim-to-erp"
-[steps.params]
+[state.work.params]
 claim = "Claim/123"
 amount = "{{input.amount}}"
 '''
@@ -648,7 +673,7 @@ amount = "{{input.amount}}"
     sam = M(hub, "sam")
     # no engine set up: the step fails and a person is told, nothing is guessed
     monkeypatch.delenv("PRACTICEHUB_ENGINE_WEBHOOK_URL", raising=False)
-    run = hub.engine.run(hub.engine.start(sam, "post-claim", inputs={"amount": 80})["id"])
+    run = hub.engine.run(hub.engine.start(sam, "post-claim", record=_patient(hub), inputs={"amount": 80})["id"])
     assert run["steps"]["post"]["state"] == "failed" and "not set up" in run["steps"]["post"]["error"]
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Engine)
@@ -670,7 +695,8 @@ amount = "{{input.amount}}"
     assert seen["auth"] == "Bearer engine-token"
     assert seen["body"]["input"] == {"claim": "Claim/123", "amount": 80}
     assert seen["body"]["target"] == "erpnext/claim"
-    ran = [x for x in hub.track.list(run_id=run["id"]) if x["action"] == "action.ran"][0]
+    ran = [x for x in hub.track.list(run_id=run["id"])
+           if x["action"] == "action.ran" and x["subject"] == "step:post"][0]
     assert ran["data"]["engine"] == "webhook" and ran["data"]["engine_ref"] == "exec-1"
 
 
@@ -744,7 +770,7 @@ def test_a_lifecycle_move_reserved_to_workflows_is_refused_to_people(quality):
     d = hub.create_record(rana, "Document", {"title": "Draft policy"})
     assert d["status"] == "draft"
     ref = f"Document/{d['id']}"
-    with pytest.raises(Invalid):  # not a move the lifecycle has
+    with pytest.raises((Denied, Invalid)):  # only its workflow puts it there (a revision walked from in force)
         hub.update_record(rana, ref, {"status": "approved"})
     hub.update_record(rana, ref, {"status": "in-review"})
     with pytest.raises(Denied):  # a move only a signed review makes
@@ -1122,22 +1148,24 @@ def test_changed_module_code_is_not_run_until_someone_upgrades_to_it(tmp_path, m
 
 def test_for_each_is_for_automations_over_one_list():
     from practicehub import workflows as wfmod
-    base = 'id = "w"\ntitle = "W"\n[trigger]\nstarters = ["x"]\n[[steps]]\nid = "a"\nkind = "automation"\naction = "record.update"\n'
+    base = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["x"]\n[start]\nto = "s"\n'
+            '[[edge]]\nid = "e"\nfrom = "s"\nto = "t"\n[[state]]\nid = "t"\n'
+            '[[state]]\nid = "s"\n[[state.work]]\nid = "a"\nkind = "automation"\naction = "record.update"\n')
     wfmod.parse(base + 'for_each = "{{record.documents}}"\nwhere = "each_record.status == \'approved\'"\n')
     for bad in ('for_each = "record.documents"\n', 'where = "each == 1"\n', 'for_each = "{{a}} and {{b}}"\n'):
         with pytest.raises(wfmod.DefinitionError):
             wfmod.parse(base + bad)
     with pytest.raises(wfmod.DefinitionError):
         wfmod.parse(base.replace('id = "a"', 'id = "record"'))
-    for bad in ('[steps.params]\nincrement = "revision"\n', '[steps.params]\nincrement = [true]\n'):
+    for bad in ('[state.work.params]\nincrement = "revision"\n', '[state.work.params]\nincrement = [true]\n'):
         with pytest.raises(wfmod.DefinitionError):
             wfmod.parse(base + bad)
     wfmod.parse(base + 'when = "record.status == \'approved\'"\n')  # a step's condition reads the record, live
     # by an amount: a table of field = a number or one placeholder (stock received, stock issued)
-    wfmod.parse(base + '[steps.params]\nincrement = { on_hand = "{{record.quantity}}" }\n')
-    wfmod.parse(base + '[steps.params]\ndecrement = { on_hand = 2 }\n')
-    for bad in ('[steps.params]\ndecrement = ["on_hand"]\n', '[steps.params]\nincrement = { on_hand = "two" }\n',
-                '[steps.params]\nincrement = { on_hand = true }\n', '[steps.params]\ndecrement = {}\n'):
+    wfmod.parse(base + '[state.work.params]\nincrement = { on_hand = "{{record.quantity}}" }\n')
+    wfmod.parse(base + '[state.work.params]\ndecrement = { on_hand = 2 }\n')
+    for bad in ('[state.work.params]\ndecrement = ["on_hand"]\n', '[state.work.params]\nincrement = { on_hand = "two" }\n',
+                '[state.work.params]\nincrement = { on_hand = true }\n', '[state.work.params]\ndecrement = {}\n'):
         with pytest.raises(wfmod.DefinitionError):
             wfmod.parse(base + bad)
 
@@ -1248,22 +1276,65 @@ def test_a_broken_file_in_a_module_never_stops_the_practice_starting(tmp_path, m
     assert h.record_type("Document")  # its definitions stay in force; only the module's code is not loaded
 
 
-def test_a_module_extends_another_modules_workflow_by_adding_steps_only(hub, mods):
-    install(hub, "dms")
+def _notify_module(mods):
     m = mods / "dms-notify"
     (m / "extends" / "workflows").mkdir(parents=True)
     (m / "module.toml").write_text('[module]\nid = "dms-notify"\nname = "Notify"\nversion = "1"\nrequires = ["dms"]\n')
-    (m / "extends" / "workflows" / "dms-review.toml").write_text('title = "Mine now"\n')
-    with pytest.raises(Invalid):
-        install(hub, "dms-notify")
-    assert not hub.workflow("dms-review")[0].title == "Mine now"
-    (m / "extends" / "workflows" / "dms-review.toml").write_text(
-        '[[steps]]\nid = "tell-owner"\nkind = "automation"\naction = "message.send"\nafter = ["publish"]\n'
-        '[steps.params]\nto = "{{record.owner}}"\nsubject = "Reviewed"\nbody = "Your document was reviewed."\n')
+    return m / "extends" / "workflows" / "dms-review.toml"
+
+
+def test_a_module_extends_another_modules_workflow_by_adding_only(hub, mods):
+    """extends/workflows: a module adds states, edges, work on a state the workflow has, and automations on an edge
+    it has; what the workflow says stays as it was, and taking the module out takes its additions out."""
+    install(hub, "dms")
+    ext = _notify_module(mods)
+    ext.write_text(
+        '[[edge]]\nedge = "approve"\n[[edge.do]]\nid = "tell-owner"\naction = "message.send"\nafter = ["publish"]\n'
+        '[edge.do.params]\nto = "{{record.owner}}"\nsubject = "Reviewed"\nbody = "Your document was reviewed."\n'
+        '[[state]]\nstate = "draft"\n[[state.work]]\nid = "proofread"\nkind = "task"\nrole = "document-author"\n'
+        'title = "Proofread it"\n[[state.work.fields]]\nname = "typos"\ntype = "text"\n'
+        '[[edge]]\nid = "hold"\nfrom = "in-review"\nto = "on-hold"\n'
+        '[[state]]\nid = "on-hold"\n[[state.work]]\nid = "unhold"\nkind = "task"\nrole = "document-controller"\n'
+        '[[state.work.fields]]\nname = "why"\ntype = "text"\n'
+        '[[edge]]\nid = "resume"\nfrom = "on-hold"\nto = "in-review"\n')
     install(hub, "dms-notify")
-    assert any(st.id == "tell-owner" for st in hub.workflow("dms-review")[0].steps)
+    wf = hub.workflow("dms-review")[0]
+    tell = wf.step("tell-owner")
+    assert tell.on_edge == "approve" and "publish" in tell.after  # runs on the approve edge, once it is published
+    assert wf.step("proofread").at_state == "draft" and wf.step("proofread").after == wf.step("revise").after
+    assert wf.step("unhold").at_state == "on-hold"
+    assert wf.step("approve").outcomes == ["approve", "return", "hold"]  # the base's edges, unchanged, then the new one
+    assert wf.step("publish").on_edge == "approve"
     hub.uninstall_module(M(hub, "rana"), "dms-notify", "not needed")
-    assert not any(st.id == "tell-owner" for st in hub.workflow("dms-review")[0].steps)
+    wf = hub.workflow("dms-review")[0]
+    assert not any(st.id in ("tell-owner", "proofread", "unhold") for st in wf.steps)
+    assert wf.step("approve").outcomes == ["approve", "return"]
+
+
+@pytest.mark.parametrize("bad, says", [
+    ('title = "Mine now"\n', "only adds"),                                           # a key of the workflow's own
+    ('[start]\nto = "approved"\n', "only adds"),                                      # where a record enters
+    ('[[steps]]\nid = "x"\nkind = "automation"\naction = "message.send"\n', "only adds"),  # the old form
+    ('[[edge]]\nedge = "approve"\nto = "draft"\n', "add only automations"),             # re-routes an edge
+    ('[[edge]]\nedge = "approve"\nwhen = "1 == 2"\n', "add only automations"),           # or says when it is offered
+    ('[[edge]]\nedge = "approve"\ndo = []\nfrom = "draft"\n', "add only automations"),  # or where it leaves from
+    ('[[edge]]\nid = "approve"\nfrom = "in-review"\nto = "draft"\n', "has this edge"),  # redefines it
+    ('[[state]]\nid = "draft"\n', "has this state"),                                  # a state it already has
+    ('[[state]]\nstate = "draft"\nlabel = "Scribbles"\n', "adds only its work"),       # relabels a state
+    ('[[state]]\nstate = "draft"\n[[state.work]]\nid = "revise"\nkind = "task"\nrole = "document-author"\n',
+     "ids of its own"),                                                                # replaces its work
+    ('[[edge]]\nedge = "approve"\n[[edge.do]]\nid = "publish"\naction = "message.send"\n', "ids of its own"),
+    ('[[edge]]\nedge = "nowhere"\n[[edge.do]]\nid = "x"\naction = "message.send"\n', "name one the workflow has"),
+])
+def test_a_module_never_changes_or_removes_what_a_workflow_it_extends_says(hub, mods, bad, says):
+    install(hub, "dms")
+    before = hub.workflow("dms-review")[1]["source"]
+    _notify_module(mods).write_text(bad)
+    with pytest.raises((Invalid, ValueError)) as exc:
+        install(hub, "dms-notify")
+    problems = getattr(exc.value, "problems", None) or [str(exc.value)]
+    assert any(says in p for p in problems), problems
+    assert hub.workflow("dms-review")[1]["source"] == before
 
 
 def test_work_an_agent_gives_up_goes_to_a_person_who_can_do_it(hub):
@@ -1332,14 +1403,16 @@ def test_staff_keep_the_approved_version_while_a_document_is_revised(quality):
 
 def test_a_wait_step_is_checked(hub):
     from practicehub.workflows import DefinitionError, parse
-    head = 'id = "w"\ntitle = "W"\n[trigger]\nstarters = ["nurse"]\n[[steps]]\nid = "x"\ntitle = "X"\n'
+    head = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["nurse"]\n[start]\nto = "s"\n'
+            '[[edge]]\nid = "e"\nfrom = "s"\nto = "t"\n[[state]]\nid = "t"\n'
+            '[[state]]\nid = "s"\n[[state.work]]\nid = "x"\ntitle = "X"\n')
     with pytest.raises(DefinitionError, match="a wait needs until"):
         parse(head + 'kind = "wait"\n')
     with pytest.raises(DefinitionError, match="until is for wait"):
-        parse(head + 'kind = "task"\nrole = "nurse"\nuntil = "record.done"\n[[steps.fields]]\nname = "a"\n')
-    assert parse(head + 'kind = "wait"\nuntil = "record.done == true"\n').steps[0].kind == "wait"
+        parse(head + 'kind = "task"\nrole = "nurse"\nuntil = "record.done"\n[[state.work.fields]]\nname = "a"\n')
+    assert parse(head + 'kind = "wait"\nuntil = "record.done == true"\n').step("x").kind == "wait"
     # or on time: for a while, or until a moment; one of the three (tests/test_engine_timing.py has the rest)
-    assert parse(head + 'kind = "wait"\nfor = "3d"\n').steps[0].wait_for == "3d"
+    assert parse(head + 'kind = "wait"\nfor = "3d"\n').step("x").wait_for == "3d"
     with pytest.raises(DefinitionError, match="one of until, for or at"):
         parse(head + 'kind = "wait"\nuntil = "record.done"\nfor = "3d"\n')
 
@@ -1348,8 +1421,10 @@ def test_a_step_setting_cannot_hide_among_its_parameters(hub):
     """Written after [steps.params] in TOML, when (or after, due...) becomes a parameter and the step runs every time;
     the check refuses it and says where it goes."""
     from practicehub.workflows import DefinitionError, parse
-    src = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["nurse"]\n[[steps]]\nid = "x"\ntitle = "X"\n'
-           'kind = "automation"\naction = "message.send"\n[steps.params]\nto = "a"\nwhen = "input.x == 1"\n')
+    src = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["nurse"]\n[start]\nto = "s"\n'
+           '[[edge]]\nid = "e"\nfrom = "s"\nto = "t"\n[[state]]\nid = "t"\n'
+           '[[state]]\nid = "s"\n[[state.work]]\nid = "x"\ntitle = "X"\n'
+           'kind = "automation"\naction = "message.send"\n[state.work.params]\nto = "a"\nwhen = "input.x == 1"\n')
     with pytest.raises(DefinitionError, match="when is a step setting, not a parameter"):
         parse(src)
 
@@ -1358,7 +1433,7 @@ def test_a_version_approved_before_a_new_rule_still_reads_and_runs_as_approved(h
     """A new check applies to new versions, never to ones already approved and stored: a hub updated onto new code
     keeps every page and its clock working (the demo hub went down on a stored version with when under its params)."""
     src = hub.db.workflow_versions.find_one({"workflow_id": "appointment-request", "status": "active"})["source"]
-    bad = src.replace('[steps.params]\nchannel', '[steps.params]\nwhen = "input.urgency == \'never\'"\nchannel', 1)
+    bad = src.replace('[start.do.params]\nchannel', '[start.do.params]\nwhen = "input.urgency == \'never\'"\nchannel', 1)
     assert bad != src
     hub.db.workflow_versions.update({"workflow_id": "appointment-request", "status": "active"}, {"$set": {"source": bad}})
     hub._require_sealed = lambda *a, **k: None  # the edit above stands in for a version sealed before the rule
@@ -1571,9 +1646,11 @@ def test_a_pack_upgrade_checks_a_new_workflow_against_the_data_classes_it_brings
     toml.write_text(toml.read_text() + '\n[[data_classes]]\nid = "audit-notes"\nname = "Audit notes"\n'
                                        'description = "Notes kept for an audit"\nrecord_types = []\n')
     wf = copy / "workflows" / "audit-note.toml"
-    wf.write_text('id = "audit-note"\ntitle = "Audit note"\n\n[[steps]]\nid = "look"\nkind = "task"\n'
+    wf.write_text('id = "audit-note"\ntitle = "Audit note"\nrecord = "Patient"\n\n[start]\nto = "looking"\n'
+                  '[[edge]]\nid = "looked"\nfrom = "looking"\nto = "looked"\n[[state]]\nid = "looked"\n'
+                  '[[state]]\nid = "looking"\n[[state.work]]\nid = "look"\nkind = "task"\n'
                   'role = "practice-manager"\ntitle = "Look at it"\ncontext = ["record:audit-notes"]\n'
-                  '\n[[steps.fields]]\nname = "seen"\ntype = "boolean"\n')
+                  '\n[[state.work.fields]]\nname = "seen"\ntype = "boolean"\n')
     hub = Hub(state)
     classes = {d["id"] for d in hub.pack.all_data_classes()}
     assert "audit-notes" not in classes
@@ -1583,7 +1660,9 @@ def test_a_pack_upgrade_checks_a_new_workflow_against_the_data_classes_it_brings
     assert hub.workflow("audit-note")
 
     # a refused upgrade puts back what the definitions are checked against
-    wf.write_text('id = "audit-note-2"\ntitle = "Broken"\n\n[[steps]]\nid = "look"\nkind = "task"\n'
+    wf.write_text('id = "audit-note-2"\ntitle = "Broken"\nrecord = "Patient"\n\n[start]\nto = "looking"\n'
+                  '[[edge]]\nid = "looked"\nfrom = "looking"\nto = "looked"\n[[state]]\nid = "looked"\n'
+                  '[[state]]\nid = "looking"\n[[state.work]]\nid = "look"\nkind = "task"\n'
                   'role = "no-such-role"\ntitle = "Look"\n')
     (copy / "workflows" / "audit-note-2.toml").write_text(wf.read_text())
     toml.write_text(toml.read_text() + '\n[[data_classes]]\nid = "more-notes"\nname = "More"\n'
@@ -1760,7 +1839,8 @@ def test_a_custom_overlay_is_its_base_with_its_own_modules_and_changes(tmp_path,
     monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
     gp = packmod.load("general-practice", run_modules=False)
     hv = packmod.load("harbourview", run_modules=False)
-    assert [m.id for m in gp.modules] == [] and [m.id for m in hv.modules] == ["dms", "qms", "wiki", "inventory"]
+    assert [m.id for m in gp.modules] == [] and [m.id for m in hv.modules] == ["dms", "qms", "wiki", "wiki-sop",
+                                                                         "inventory"]
     assert hv.id == gp.id == "general-practice" and hv.version == gp.version and hv.subject_type == "Patient"
     assert set(gp.type_sources) <= set(hv.type_sources) and set(gp.workflow_sources) <= set(hv.workflow_sources)
 
@@ -2061,7 +2141,7 @@ def test_an_appointment_for_a_symptom_is_read_by_a_nurse_before_a_slot_is_booked
     assert st["propose"]["state"] != "done" and item_for(hub, run, "triage")
     hub.engine.claim(M(hub, "noor"), item_for(hub, run, "triage"))
     hub.engine.complete(M(hub, "noor"), item_for(hub, run, "triage"),
-                        {"decision": "book-a-slot", "note_for_scheduler": "20 minutes"})
+                        {"outcome": "book-a-slot", "note_for_scheduler": "20 minutes"})
     ctx = hub.engine.context(M(hub, "scheduling-agent"), item_for(hub, run, "propose"))["context"]
     assert ctx["triage.note_for_scheduler"] == "20 minutes" and not ctx["screen.admin_reason"]
     assert "ankle" not in json.dumps(ctx)
@@ -2552,8 +2632,8 @@ def test_a_lab_review_never_files_another_patients_result(hub):
 
 
 def test_a_failed_step_holds_only_what_waits_on_it_and_the_signer_hears(hub):
-    """The result record vanished between start and sign-off: filing it fails, but the urgent call the physician
-    signed for is still made, and the physician (not only the manager) is told what did not happen."""
+    """The result record vanished between start and sign-off: filing the review on it fails, but the urgent call the
+    physician signed for is still asked for, and the physician (not only the manager) is told what did not happen."""
     _, own, _ = _obs_and_patients(hub)
     run = hub.engine.start(M(hub, "noor"), "lab-result-review", record=own,
                            inputs={"test": "Potassium", "value": "7.2", "unit": "mmol/L", "range": "3.5-5.0",
@@ -2563,8 +2643,10 @@ def test_a_failed_step_holds_only_what_waits_on_it_and_the_signer_hears(hub):
     hub.engine.claim(M(hub, "dr-amara"), iid)
     hub.engine.decide(M(hub, "dr-amara"), iid, "call-patient", "call now")
     st = hub.engine.run(run["id"])["steps"]
-    assert st["file-result"]["state"] == "failed"
-    assert st["call-critical"]["state"] == "active"                        # the urgent call is not held up
+    assert st["call-patient-filed"]["state"] == "failed"
+    # the urgent call is not held up by the filing: it is tried at once (and fails on its own: it names the result)
+    assert st["follow-up-now"]["state"] in ("done", "failed") and "call-patient-filed" not in \
+        hub.workflow("lab-result-review")[0].step("follow-up-now").after
     assert hub.engine.run(run["id"])["status"] == "running"                # nor is the run done with a step failed
     told = hub.db.items.find({"kind": "notice", "assignee": "dr-amara", "run_id": run["id"],
                               "title": {"$regex": "failed"}}, sort="n")
@@ -2821,7 +2903,8 @@ def test_formatted_text_never_passes_html_or_a_script_link_through():
 def test_wiki_pages_form_a_tree_and_link_each_other_by_title_even_before_the_page_exists(wiki):
     hub, amara = wiki, M(wiki, "dr-amara")
     tree = [(d, r["title"]) for d, r in hub.tree(amara, "WikiPage")]
-    assert tree[:4] == [(0, "Clinic handbook"), (1, "Booking rules"), (1, "On-call guide"), (1, "Onboarding")]
+    assert tree[:4] == [(0, "Clinic handbook"), (1, "Booking rules"), (1, "How we work"),
+                        (2, "Cleaning the treatment rooms")]
     home, oncall = _page(hub, "Clinic handbook"), _page(hub, "On-call guide")
     # the home page named the on-call guide before it existed; the link was made when the guide was created
     assert ("mentions", f"WikiPage/{oncall['id']}") in hub.mention_links(hub.record_type("WikiPage"), home)
@@ -2832,7 +2915,7 @@ def test_wiki_pages_form_a_tree_and_link_each_other_by_title_even_before_the_pag
     # a page knows the pages above it and below it
     assert [a["title"] for a in hub.ancestors(amara, f"WikiPage/{oncall['id']}")] == ["Clinic handbook"]
     assert [k["title"] for k in hub.children(amara, f"WikiPage/{home['id']}")] == [
-        "Booking rules", "On-call guide", "Onboarding", "Procedures"]
+        "Booking rules", "How we work", "On-call guide", "Onboarding"]
 
 
 def test_a_wiki_page_never_sits_under_itself(wiki):
@@ -2960,108 +3043,337 @@ def test_a_navigator_is_only_for_a_tree_and_hides_only_its_own_states(hub):
 
 @pytest.fixture
 def stock(hub):
-    """The demo practice with inventory and its demo data: a supply room, a vaccine fridge and four items."""
-    install(hub, "inventory")
-    for m in hub.pack.modules:
-        m.module.demo(hub)
+    """The demo practice with inventory and its demo data: a supply room, a vaccine fridge, a quarantine shelf, four
+    parts and their opening lots, under the module's own basic policy (no policy signed)."""
+    def build(hub):
+        install(hub, "inventory")
+        for m in hub.pack.modules:
+            m.module.demo(hub)
+    snapshot_onto(hub, "rules:stock", build, modules=["inventory"])
     return hub
 
 
-def _item(hub, sku):
-    return next(i for i in hub.records.search("StockItem", limit=None) if i["sku"] == sku)
+def _inv(hub):
+    """The inventory module's own code (pack.py)."""
+    return next(m.module for m in hub.pack.modules if m.id == "inventory")
 
 
-def _move(hub, who, sku, kind, quantity, **more):
-    m = hub.create_record(who, "StockMove", {"kind": kind, "item": f"StockItem/{_item(hub, sku)['id']}",
-                                             "quantity": quantity, **more})
+def _part(hub, code):
+    return next(p for p in hub.records.search("Part", limit=None) if p["code"] == code)
+
+
+def _lot(hub, code, lot=""):
+    """A part's live lot by lot number (its only one when lot is empty)."""
+    ref = f"Part/{_part(hub, code)['id']}"
+    got = [x for x in hub.records.search("StockItem", limit=None) if x["part"] == ref
+           and x.get("status") in ("available", "quarantined", "inspection") and (not lot or x.get("lot") == lot)]
+    assert len(got) == 1, got
+    return got[0]
+
+
+def _place(hub, name):
+    return f"Location/{next(x for x in hub.records.search('Location', limit=None) if x['name'] == name)['id']}"
+
+
+def _move(hub, who, kind, quantity=None, *, lot=None, **more):
+    """A stock move written and submitted by ``who``; ``lot`` is a StockItem record."""
+    data = {"kind": kind, **({"quantity": quantity} if quantity is not None else {}),
+            **({"lot": f"StockItem/{lot['id']}"} if lot else {}), **more}
+    m = hub.create_record(who, "StockMove", data)
     hub.update_record(who, f"StockMove/{m['id']}", {"status": "submitted"})
     return hub.records.read("StockMove", m["id"])
 
 
-def _post_run(hub, move):
-    """The stock move's own running inventory-post run."""
-    return next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-post"
-                and r["record"] == f"StockMove/{move['id']}" and r["status"] == "running")
+def _run(hub, ref, wid):
+    return next(r for r in hub.engine.runs(limit=1000) if r["workflow_id"] == wid and r["record"] == ref
+                and r["status"] == "running")
 
 
-def test_on_hand_is_set_only_by_a_workflow(stock):
-    hub, rana = stock, M(stock, "rana")
-    gloves = _item(hub, "GL-M")
-    with pytest.raises(Denied):  # nobody types in a stock count: a posted move changes it
-        hub.update_record(rana, f"StockItem/{gloves['id']}", {"on_hand": 999})
-    with pytest.raises(Denied):
-        hub.create_record(rana, "StockItem", {"sku": "X", "name": "X", "on_hand": 5})
-    hub.update_record(rana, f"StockItem/{gloves['id']}", {"supplier": "Another supplier"})  # its other fields are open
-    assert not any(f["name"] == "on_hand" for f in hub.record_type("StockItem").fields if f.get("by") != "workflow")
+def _sign(hub, who, ref, wid, step, outcome, comment=""):
+    i = item_for(hub, _run(hub, ref, wid), step)
+    hub.engine.claim(who, i)
+    hub.engine.decide(who, i, outcome, comment)
+    return hub.records.read(*ref.split("/", 1))
 
 
-def test_a_delivery_and_an_issue_post_at_once_and_an_issue_never_goes_below_zero(stock):
-    hub, rana = stock, M(stock, "rana")
-    assert _move(hub, rana, "GZ-10", "receive", 10, lot="L1")["status"] == "posted"
-    assert _item(hub, "GZ-10")["on_hand"] == 50
-    assert _move(hub, rana, "GZ-10", "issue", 15)["status"] == "posted"
-    assert _item(hub, "GZ-10")["on_hand"] == 35
-    assert _move(hub, rana, "GZ-10", "issue", 500)["status"] == "rejected"   # more than is on hand
-    assert _item(hub, "GZ-10")["on_hand"] == 35
+def _policy(hub, who, level, signer=None, step="sign-own", **switches):
+    """An inventory policy written and submitted by ``who`` and signed by ``signer`` (``who`` when not given)."""
+    rec = hub.create_record(who, "InventoryPolicy", {"level": level, **switches})
+    ref = f"InventoryPolicy/{rec['id']}"
+    hub.update_record(who, ref, {"status": "in-review"})
+    if hub.records.read("InventoryPolicy", rec["id"])["status"] == "in-review":
+        return _sign(hub, signer or who, ref, "inventory-policy", step, "in-force")
+    return hub.records.read("InventoryPolicy", rec["id"])
 
 
-def test_a_write_off_is_signed_off_by_someone_who_did_not_write_it(stock):
+def _open_items(hub):
+    return list(hub.db.items.find({"status": {"$in": ["open", "claimed"]}, "kind": {"$ne": "notice"},
+                                   "workflow_id": {"$in": ["inventory-post", "inventory-part", "inventory-policy"]}}))
+
+
+def test_a_lot_changes_only_when_a_move_posts_and_its_posted_moves_add_up(stock):
     hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
-    with pytest.raises(Invalid):   # a negative quantity would slip past the sign-off and the zero floor
-        _move(hub, rana, "GL-M", "issue", -4)
-    move = _move(hub, rana, "GL-M", "write-off", 4, reason="a box got wet")
-    assert move["status"] == "submitted" and _item(hub, "GL-M")["on_hand"] == 24
-    run = _post_run(hub, move)
-    i = item_for(hub, run, "sign-off")
+    pack = _inv(hub)
+    gauze = _lot(hub, "GZ-10")
+    for who in (rana, amara):   # not a stock keeper, not a manager: nobody types in a lot
+        with pytest.raises(Denied):
+            hub.update_record(who, f"StockItem/{gauze['id']}", {"quantity": 999})
+        with pytest.raises(Denied):
+            hub.create_record(who, "StockItem", {"part": gauze["part"], "quantity": 5})
+    assert all(f.get("by") == "workflow" for f in hub.record_type("StockItem").fields)
+    assert gauze["quantity"] == 40 and gauze["lot"] == "GZ2291"
+
+    got = _move(hub, rana, "receive", 10, part=gauze["part"], location=_place(hub, "Supply room"),
+                lot_number="GZ3001", expiry="2030-01-31")
+    assert got["status"] == "posted" and got["level"] == "basic"
+    new = _lot(hub, "GZ-10", "GZ3001")
+    assert new["quantity"] == 10 and new["status"] == "available" and got["entries"][0]["lot"] == f"StockItem/{new['id']}"
+    issued = _move(hub, rana, "issue", 15, lot=gauze, reason="dressings, room 2")
+    assert issued["status"] == "posted" and (issued["before_quantity"], issued["after_quantity"]) == (40, 25)
+    assert issued["entries"][0]["quantity"] == [40, 25]
+    assert _lot(hub, "GZ-10", "GZ2291")["quantity"] == 25
+    part = _part(hub, "GZ-10")
+    assert (part["on_hand"], part["available"], part["quarantined"]) == (35, 35, 0)   # summed from its lots
+    for lot in (gauze, new):
+        assert pack.ledger_problems(hub, f"StockItem/{lot['id']}") == []
+    # a lot changed behind the ledger's back is caught: its posted moves no longer add up to it
+    hub.records.update("StockItem", gauze["id"], {**hub.records.read("StockItem", gauze["id"]), "quantity": 26})
+    assert pack.ledger_problems(hub, f"StockItem/{gauze['id']}") == ["its posted moves leave 25; it holds 26"]
+
+
+def test_an_issue_never_goes_below_zero_and_a_refusal_says_why(stock):
+    hub, rana = stock, M(stock, "rana")
+    gloves = _lot(hub, "GL-M")
+    with pytest.raises(Invalid):   # a negative quantity would turn an issue into a receipt
+        _move(hub, rana, "issue", -4, lot=gloves)
+    short = _move(hub, rana, "issue", 500, lot=gloves)
+    assert short["status"] == "rejected"
+    assert short["reject_reason"] == "only 24 of GL-M Nitrile gloves, medium is in the untracked stock; this moves 500"
+    assert _lot(hub, "GL-M")["quantity"] == 24
+    hub.update_record(rana, f"StockMove/{short['id']}", {"status": "draft"})   # revised, it is walked again
+    hub.update_record(rana, f"StockMove/{short['id']}", {"quantity": 24})
+    hub.update_record(rana, f"StockMove/{short['id']}", {"status": "submitted"})
+    assert hub.records.read("StockMove", short["id"])["status"] == "posted"
+    with pytest.raises(Invalid):   # posted: people change nothing but the state
+        hub.update_record(rana, f"StockMove/{short['id']}", {"quantity": 5})
+    assert _part(hub, "GL-M")["on_hand"] == 0
+    assert hub.records.read("StockItem", gloves["id"])["status"] == "depleted"
+    again = _move(hub, rana, "issue", 1, lot=gloves)
+    assert again["status"] == "rejected" and "depleted" in again["reject_reason"]
+    wrong = _move(hub, rana, "receive", 5, part=gloves["part"], location=_place(hub, "Quarantine shelf"))
+    assert "keeps held stock" in wrong["reject_reason"]
+    site = _move(hub, rana, "receive", 5, part=gloves["part"], location=_place(hub, "Main clinic"))
+    assert "holds no stock" in site["reject_reason"]
+
+
+def test_a_one_person_basic_shop_is_never_blocked(stock):
+    hub, rana = stock, M(stock, "rana")
+    gloves = _lot(hub, "GL-M")
+    assert _inv(hub).policy_in_force(hub)["level"] == "basic"   # no policy signed: basic
+    for kind, q, more in (("count", 3, {}), ("adjust", 30, {}), ("scrap", 2, {}),
+                          ("hold", 5, {"location": _place(hub, "Quarantine shelf")})):
+        assert _move(hub, rana, kind, q, lot=gloves, reason="by myself")["status"] == "posted", kind
+    held = next(x for x in hub.records.search("StockItem", limit=None) if x.get("parent") == f"StockItem/{gloves['id']}")
+    assert _move(hub, rana, "release", lot=held, location=_place(hub, "Supply room"))["status"] == "posted"
+    assert _open_items(hub) == []   # nothing ever waited for a second person, or for anyone
+    assert hub.records.read("StockItem", gloves["id"])["quantity"] == 23 and \
+        hub.records.read("StockItem", held["id"])["status"] == "available"
+
+
+def test_a_write_off_is_never_signed_by_its_writer_when_a_second_person_signs(stock):
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    assert _policy(hub, rana, "tracked")["status"] == "in-force"   # tighter than basic: its writer may sign it
+    gloves = _lot(hub, "GL-M")
+    move = _move(hub, rana, "scrap", 4, lot=gloves, reason="a box got wet")
+    assert move["status"] == "submitted" and move["needs_signoff"].startswith("a write-off")
+    assert hub.records.read("StockItem", gloves["id"])["quantity"] == 24   # nothing moves before the signature
+    i = item_for(hub, _run(hub, f"StockMove/{move['id']}", "inventory-post"), "sign-other")
     with pytest.raises(Denied):
         hub.engine.claim(rana, i)
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "post")
-    assert _item(hub, "GL-M")["on_hand"] == 20
     assert hub.records.read("StockMove", move["id"])["status"] == "posted"
+    assert hub.records.read("StockItem", gloves["id"])["quantity"] == 20
+    no = _move(hub, rana, "scrap", 2, lot=gloves, reason="torn")
+    no = _sign(hub, amara, f"StockMove/{no['id']}", "inventory-post", "sign-other", "reject", "count it first")
+    assert no["status"] == "rejected" and "count it first" in no["reject_reason"]
+    assert hub.records.read("StockItem", gloves["id"])["quantity"] == 20
+    assert _move(hub, rana, "issue", 2, lot=gloves)["status"] == "posted"   # an issue is never held up
 
-    count = _move(hub, rana, "GL-M", "count", 18, reason="shelf count")
-    run = _post_run(hub, count)
-    i = item_for(hub, run, "sign-off")
-    hub.engine.claim(amara, i)
-    hub.engine.decide(amara, i, "reject", "count it again")
-    counted = hub.records.read("StockMove", count["id"])
-    assert _item(hub, "GL-M")["on_hand"] == 20 and counted["status"] == "rejected"
-    assert "count it again" in counted["reject_reason"]
-
-    big = _move(hub, rana, "GL-M", "write-off", 999, reason="flood")   # more than is on hand: never below zero
-    run = _post_run(hub, big)
-    i = item_for(hub, run, "sign-off")
-    hub.engine.claim(amara, i)
-    hub.engine.decide(amara, i, "post")
-    assert _item(hub, "GL-M")["on_hand"] == 20 and hub.records.read("StockMove", big["id"])["status"] == "rejected"
-
-    found = _move(hub, rana, "GL-M", "found", 2, reason="behind the shelf")
-    run = _post_run(hub, found)
-    i = item_for(hub, run, "sign-off")
-    hub.engine.claim(amara, i)
-    hub.engine.decide(amara, i, "post")
-    assert _item(hub, "GL-M")["on_hand"] == 22
-
-    posted = hub.records.read("StockMove", move["id"])   # sent for posting: people change nothing but the state
-    with pytest.raises(Invalid):
-        hub.update_record(rana, f"StockMove/{posted['id']}", {**posted, "quantity": 1})
+    own = _policy(hub, rana, "tracked", amara, "sign-other", signoff="self")   # loosening: someone else signs it
+    assert own["status"] == "in-force"   # now a one-person clinic: a move's writer signs it
+    assert _policy(hub, rana, "regulated", signoff="self")["status"] == "draft"   # regulated never signs its own
+    mine = _move(hub, rana, "scrap", 1, lot=gloves, reason="dropped")
+    assert _sign(hub, rana, f"StockMove/{mine['id']}", "inventory-post", "sign-own", "post")["status"] == "posted"
 
 
-def test_an_item_at_its_reorder_point_is_ordered_and_restocked_by_a_delivery(stock):
+def test_a_signature_covers_only_the_stock_it_was_checked_against(stock):
     hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
-    _move(hub, rana, "SY-3", "issue", 2)              # 5 -> 3, at or under its reorder point of 4
-    item = _item(hub, "SY-3")
-    assert item["on_hand"] == 3 and item["status"] == "low"
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "inventory-reorder"
-               and r["record"] == f"StockItem/{item['id']}" and r["status"] == "running")
-    i = item_for(hub, run, "order")
+    _policy(hub, rana, "tracked")
+    gloves = _lot(hub, "GL-M")
+    adjust = _move(hub, rana, "adjust", 30, lot=gloves, reason="found a box")
+    assert adjust["entries"][0]["quantity"] == [24, 30]
+    assert _move(hub, rana, "issue", 4, lot=gloves)["status"] == "posted"   # the shelf moved while it waited
+    stale = _sign(hub, amara, f"StockMove/{adjust['id']}", "inventory-post", "sign-other", "post")
+    assert stale["status"] == "rejected" and "stock changed" in stale["reject_reason"]
+    assert hub.records.read("StockItem", gloves["id"])["quantity"] == 20   # not 30: the signed plan no longer held
+
+
+def test_small_counts_cannot_drain_a_lot_unsigned(stock):
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    _policy(hub, rana, "tracked")   # counts may drift 2% from what was last signed for
+    gauze = _move(hub, rana, "receive", 100, part=_part_ref(hub, "GZ-10"), location=_place(hub, "Supply room"),
+                  lot_number="GZ4000", expiry="2030-01-31")
+    lot = _lot(hub, "GZ-10", "GZ4000")
+    assert gauze["status"] == "posted" and lot["count_baseline"] == 100
+    assert _move(hub, rana, "count", 99, lot=lot)["status"] == "posted"
+    assert _move(hub, rana, "count", 98, lot=_lot(hub, "GZ-10", "GZ4000"))["status"] == "posted"
+    third = _move(hub, rana, "count", 97, lot=_lot(hub, "GZ-10", "GZ4000"))   # one more, but 3% from the baseline
+    assert third["status"] == "submitted" and "against 100" in third["needs_signoff"]
+    assert _sign(hub, amara, f"StockMove/{third['id']}", "inventory-post", "sign-other", "post")["status"] == "posted"
+    lot = _lot(hub, "GZ-10", "GZ4000")
+    assert (lot["quantity"], lot["count_baseline"]) == (97, 97)   # signed for: the new baseline
+    assert _move(hub, rana, "count", 96, lot=lot)["status"] == "posted"
+
+
+def _part_ref(hub, code):
+    return f"Part/{_part(hub, code)['id']}"
+
+
+def test_held_stock_is_split_off_and_only_a_signed_release_frees_it(stock):
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    _policy(hub, rana, "tracked")
+    flu = _lot(hub, "VX-FLU", "FL5102")
+    hold = _move(hub, rana, "hold", 10, lot=flu, location=_place(hub, "Quarantine shelf"), reason="fridge alarm")
+    assert hold["status"] == "posted"   # holding is free and immediate
+    child = next(x for x in hub.records.search("StockItem", limit=None) if x.get("parent") == f"StockItem/{flu['id']}")
+    assert (child["quantity"], child["status"], child["lot"], child["expiry"]) == (10, "quarantined", "FL5102",
+                                                                                    flu["expiry"])
+    assert hub.records.read("StockItem", flu["id"])["quantity"] == 10
+    part = _part(hub, "VX-FLU")
+    assert (part["on_hand"], part["available"], part["quarantined"]) == (30, 20, 10)
+    for kind, more in (("issue", {}), ("transfer", {"location": _place(hub, "Vaccine fridge")})):
+        refused = _move(hub, rana, kind, 1, lot=child, **more)
+        assert refused["status"] == "rejected", kind
+    assert "signed release" in refused["reject_reason"]
+    into = _move(hub, rana, "transfer", 1, lot=_lot(hub, "VX-FLU", "FL4410"), location=_place(hub, "Quarantine shelf"))
+    assert "hold" in into["reject_reason"]   # available stock goes into quarantine only by a hold
+    release = _move(hub, rana, "release", lot=child, location=_place(hub, "Vaccine fridge"), reason="alarm was false")
+    assert release["status"] == "submitted" and hub.records.read("StockItem", child["id"])["status"] == "quarantined"
+    _sign(hub, amara, f"StockMove/{release['id']}", "inventory-post", "sign-other", "post")
+    assert hub.records.read("StockItem", child["id"])["status"] == "available"
+    assert _part(hub, "VX-FLU")["available"] == 30
+
+    probe = hub.create_record(rana, "Part", {"code": "TH-1", "name": "Thermometer", "tracking": "serial"})
+    assert hub.records.read("Part", probe["id"])["status"] == "active"   # tracked asks for no part approval
+    two = _move(hub, rana, "receive", 2, part=f"Part/{probe['id']}", location=_place(hub, "Supply room"),
+                serials="T1\nT2")
+    assert two["status"] == "posted" and len(two["entries"]) == 2
+    one = next(x for x in hub.records.search("StockItem", limit=None) if x.get("serial") == "T1")
+    for kind, q, why in (("hold", 0.5, "moves whole"), ("count", 2, "counts 1 or 0")):
+        assert why in _move(hub, rana, kind, q, lot=one)["reject_reason"]
+    again = _move(hub, rana, "receive", 1, part=f"Part/{probe['id']}", location=_place(hub, "Supply room"),
+                  serials="T2")
+    assert "already has serial number T2" in again["reject_reason"]
+
+
+def test_expired_stock_is_never_issued_and_the_first_to_expire_goes_first_when_regulated(stock):
+    from datetime import datetime
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    early, late = _lot(hub, "VX-FLU", "FL4410"), _lot(hub, "VX-FLU", "FL5102")
+    assert _move(hub, rana, "issue", 1, lot=late)["status"] == "posted"   # basic: first expiry, first out is off
+    _policy(hub, rana, "regulated")
+    first = _move(hub, rana, "issue", 1, lot=late)
+    assert first["status"] == "rejected" and "expires first" in first["reject_reason"]
+    assert _move(hub, rana, "issue", 1, lot=early)["status"] == "posted"
+    year = int(early["expiry"][:4])
+    hub.engine._now = datetime(year + 1, 1, 5, 9, 0)   # the early lot is past its expiry
+    try:
+        gone = _move(hub, rana, "issue", 1, lot=early)
+        assert gone["status"] == "rejected" and "expired" in gone["reject_reason"]
+        assert _move(hub, rana, "issue", 1, lot=late)["status"] == "posted"
+        assert _part(hub, "VX-FLU")["available"] == 18   # the expired lot is on hand, never available
+        old = _move(hub, rana, "receive", 5, part=early["part"], location=_place(hub, "Vaccine fridge"),
+                    lot_number="FL1", expiry=f"{year}-12-31")
+        assert "expired" in old["reject_reason"]
+        release = _move(hub, rana, "hold", lot=_lot(hub, "VX-FLU", "FL4410"))
+        assert release["status"] == "posted"
+        back = _move(hub, rana, "release", lot=_lot(hub, "VX-FLU", "FL4410"))
+        assert "expired" in back["reject_reason"]
+    finally:
+        hub.engine._now = None
+
+
+def test_the_morning_check_holds_expired_stock_once_by_a_posted_move(stock):
+    from datetime import datetime
+    hub, rana = stock, M(stock, "rana")
+    early, late = _lot(hub, "VX-FLU", "FL4410"), _lot(hub, "VX-FLU", "FL5102")
+    year = int(early["expiry"][:4])
+    hub.engine._now = datetime(year + 1, 1, 5, 7, 0)   # the early lot is past its expiry; the late one is not
+    try:
+        hub.engine.tick(hub.engine._now)
+        held = _lot(hub, "VX-FLU", "FL4410")
+        assert (held["status"], held["quantity"], held["location"]) == ("quarantined", 10, early["location"])
+        assert _lot(hub, "VX-FLU", "FL5102")["status"] == "available"
+        hold = [m for m in hub.records.search("StockMove", limit=None) if m.get("lot") == f"StockItem/{early['id']}"
+                and m["kind"] == "hold"]
+        assert len(hold) == 1 and hold[0]["status"] == "posted" and "expired on" in hold[0]["reason"]
+        assert (hub.title(hold[0]), hub.title(held)) == ("hold VX-FLU lot FL4410", "VX-FLU lot FL4410")
+        assert _inv(hub).ledger_problems(hub, f"StockItem/{early['id']}") == []
+        assert _part(hub, "VX-FLU")["quarantined"] == 10
+        hub.engine._now = datetime(year + 1, 1, 6, 7, 0)
+        hub.engine.tick(hub.engine._now)   # the next morning: held already, so nothing more
+        assert len([m for m in hub.records.search("StockMove", limit=None) if m["kind"] == "hold"]) == 1
+        assert _move(hub, rana, "issue", 1, lot=_lot(hub, "VX-FLU", "FL4410"))["status"] == "rejected"
+        assert late["status"] == "available"
+    finally:
+        hub.engine._now = None
+
+
+def test_a_policy_is_never_looser_than_its_level_and_loosening_it_takes_a_second_person(stock):
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    pack = _inv(hub)
+    loose = _policy(hub, rana, "regulated", inspection=False, fefo="suggest")
+    assert loose["status"] == "draft"
+    assert loose["return_reason"] == ("regulated needs receiving inspection at least on; this policy says off; "
+                                      "regulated needs first expiry, first out at least enforce; this policy says suggest")
+    assert pack.policy_in_force(hub)["level"] == "basic"
+    tight = _policy(hub, rana, "tracked", fefo="enforce")   # stricter than its level is fine, and signed by its writer
+    assert tight["status"] == "in-force" and pack.policy_in_force(hub)["fefo"] == "enforce"
+    reg = _policy(hub, rana, "regulated")
+    assert reg["status"] == "in-force" and hub.records.read("InventoryPolicy", tight["id"])["status"] == "retired"
+    with pytest.raises(Denied):   # loosening a second-person policy: never by its writer
+        _policy(hub, rana, "basic", step="sign-other")
+    basic = next(p for p in hub.records.search("InventoryPolicy", limit=None) if p["status"] == "in-review")
+    assert pack.policy_in_force(hub)["level"] == "regulated"   # still in force while the change waits
+    _sign(hub, amara, f"InventoryPolicy/{basic['id']}", "inventory-policy", "sign-other", "in-force")
+    assert pack.policy_in_force(hub)["level"] == "basic"
+    assert [p["level"] for p in hub.records.search("InventoryPolicy", limit=None) if p["status"] == "in-force"] == \
+        ["basic"]
+
+
+def test_a_part_is_approved_before_use_when_the_policy_asks_and_never_by_its_writer(stock):
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    _policy(hub, rana, "regulated")
+    part = hub.create_record(rana, "Part", {"code": "IV-1", "name": "IV set", "tracking": "lot"})
+    ref = f"Part/{part['id']}"
+    assert hub.records.read("Part", part["id"])["status"] == "draft"
+    early = _move(hub, rana, "receive", 5, part=ref, location=_place(hub, "Supply room"))
+    assert "only a part in use is received" in early["reject_reason"]
+    hub.update_record(rana, ref, {"status": "in-review"})
+    i = item_for(hub, _run(hub, ref, "inventory-part"), "approve")
+    with pytest.raises(Denied):
+        hub.engine.claim(rana, i)
     hub.engine.claim(amara, i)
-    hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-1"})
-    assert _item(hub, "SY-3")["status"] == "on-order"
-    _move(hub, rana, "SY-3", "receive", 10)
-    item = _item(hub, "SY-3")
-    assert item["on_hand"] == 13 and item["status"] == "stocked"
+    hub.engine.decide(amara, i, "approve")
+    got = hub.records.read("Part", part["id"])
+    assert (got["status"], got["revision"]) == ("active", 1)
+    rcv = _move(hub, rana, "receive", 5, part=ref, location=_place(hub, "Supply room"))
+    assert rcv["status"] == "posted" and _lot(hub, "IV-1")["lot"].startswith("LOT-")   # numbered when none is given
+    with pytest.raises(Invalid):   # no two parts share a code
+        hub.create_record(rana, "Part", {"code": "iv-1", "name": "Another"})
+    hub.update_record(amara, ref, {"status": "draft"})   # revised: still received as it was last approved
+    assert _move(hub, rana, "receive", 1, part=ref, location=_place(hub, "Supply room"))["status"] == "posted"
 
 
 # ------------------------------------------------------------------------------------------- a record walked by its workflow
@@ -3071,66 +3383,439 @@ def _own_run(hub, ref, wid):
     return got[0]
 
 
-def test_a_record_s_state_has_one_owning_workflow_and_others_move_it_only_through_a_move_it_waits_on(stock):
+# A test fixture, not a module: a counted item walked by its reorder cycle, and the slip that moves its count, walked by
+# its posting. The core rules below ride on it so that no shipped module's shape can change them.
+TALLY = """id = "Tally"
+data_class = "visits"
+{top}
+[[field]]
+name = "code"
+required = true
+[[field]]
+name = "on_hand"
+type = "number"
+by = "workflow"
+[[field]]
+name = "reorder_point"
+type = "number"
+[[field]]
+name = "supplier"
+[[field]]
+name = "status"
+type = "choice"
+choices = ["stocked", "low", "on-order", "discontinued"]
+[lifecycle]
+field = "status"
+initial = "stocked"
+abandoned = { "low" = "stocked" }
+[[lifecycle.transition]]
+from = ["stocked"]
+to = "low"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["low"]
+to = "on-order"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["low", "on-order"]
+to = "stocked"
+label = "Clear reorder"
+[[lifecycle.transition]]
+from = ["stocked", "low", "on-order"]
+to = "discontinued"
+[[lifecycle.transition]]
+from = ["discontinued"]
+to = "stocked"
+"""
+SLIP = """id = "Slip"
+data_class = "visits"
+{top}
+[[field]]
+name = "kind"
+type = "choice"
+choices = ["receive", "issue", "count"]
+required = true
+[[field]]
+name = "item"
+type = "reference"
+target = ["Tally"]
+rel = "moves"
+required = true
+[[field]]
+name = "quantity"
+type = "number"
+required = true
+min = 0
+[[field]]
+name = "reason"
+type = "text"
+[[field]]
+name = "reject_reason"
+type = "text"
+by = "workflow"
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "submitted", "posted", "rejected"]
+[lifecycle]
+field = "status"
+initial = "draft"
+abandoned = { "submitted" = "draft" }
+locked = ["submitted", "posted"]
+[[lifecycle.transition]]
+from = ["draft"]
+to = "submitted"
+[[lifecycle.transition]]
+from = ["submitted"]
+to = "posted"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["submitted"]
+to = "rejected"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["submitted"]
+to = "draft"
+by = "workflow"
+[[lifecycle.transition]]
+from = ["rejected"]
+to = "draft"
+"""
+TALLY_REORDER = """id = "tally-reorder"
+title = "Reorder a tally"
+record = "Tally"
+
+[start]
+to = "stocked"
+label = "Counted in"
+[[start.do]]
+id = "from-low"
+title = "Walk it from low"
+when = "record.status == 'low'"
+to = "low"
+[[start.do]]
+id = "from-on-order"
+title = "Walk it from on order"
+when = "record.status == 'on-order'"
+to = "on-order"
+
+[[state]]
+id = "stocked"
+label = "Stocked"
+tone = "done"
+[[state.work]]
+id = "watch"
+title = "Watch on hand against the reorder point"
+kind = "wait"
+until = "record.status != 'stocked' or (record.reorder_point != null and record.on_hand != null and record.on_hand <= record.reorder_point)"
+
+[[edge]]
+id = "runs-low"
+label = "Mark it low"
+from = "stocked"
+to = "low"
+when = "record.status == 'stocked'"
+
+[[edge]]
+id = "discontinue"
+label = "Discontinued"
+from = "stocked"
+to = "discontinued"
+
+[[state]]
+id = "low"
+label = "Low"
+tone = "attention"
+[[state.work]]
+id = "order"
+title = "Order more"
+kind = "task"
+role = "physician"
+when = "record.status == 'low'"
+moves = ["stocked", "discontinued"]
+[[state.work.fields]]
+name = "quantity"
+type = "number"
+required = true
+[[state.work.fields]]
+name = "order_ref"
+type = "string"
+required = true
+
+[[edge]]
+id = "ordered"
+label = "Mark it on order"
+from = "low"
+to = "on-order"
+
+[[state]]
+id = "on-order"
+label = "On order"
+tone = "active"
+[[state.work]]
+id = "delivered"
+title = "Wait for the delivery"
+kind = "wait"
+until = "record.status != 'on-order'"
+
+[[edge]]
+id = "restocked"
+label = "Restocked"
+from = "on-order"
+to = "stocked"
+when = "record.status == 'stocked'"
+
+[[edge]]
+id = "discontinue-on-order"
+label = "Discontinued"
+from = "on-order"
+to = "discontinued"
+
+[[state]]
+id = "discontinued"
+label = "Discontinued"
+tone = "done"
+"""
+SLIP_POST = """id = "slip-post"
+title = "Post a slip"
+record = "Slip"
+
+[start]
+to = "draft"
+label = "Written"
+[[start.do]]
+id = "from-rejected"
+title = "Walk it from rejected"
+when = "record.status == 'rejected'"
+to = "rejected"
+
+[[state]]
+id = "rejected"
+label = "Sent back"
+tone = "attention"
+[[state.work]]
+id = "revise"
+title = "Revise the slip that was sent back"
+kind = "wait"
+until = "record.status != 'rejected'"
+
+[[edge]]
+id = "revised"
+label = "Revised"
+from = "rejected"
+to = "draft"
+
+[[state]]
+id = "draft"
+label = "Draft"
+tone = "active"
+[[state.work]]
+id = "submit"
+title = "Write the slip and submit it"
+kind = "wait"
+until = "record.status != 'draft'"
+
+[[edge]]
+id = "submit"
+label = "Submit"
+from = "draft"
+to = "submitted"
+[[edge.do]]
+id = "receive"
+title = "Add the delivery"
+when = "record.kind == 'receive'"
+action = "record.update"
+for_each = "{{record.item}}"
+[edge.do.params]
+ref = "{{each}}"
+[edge.do.params.increment]
+on_hand = "{{record.quantity}}"
+[[edge.do]]
+id = "restock"
+title = "Mark the item stocked again"
+when = "record.kind == 'receive'"
+after = ["receive"]
+action = "record.update"
+for_each = "{{record.item}}"
+where = "(each_record.status == 'low' or each_record.status == 'on-order') and each_record.on_hand > each_record.reorder_point"
+[edge.do.params]
+ref = "{{each}}"
+[edge.do.params.set]
+status = "stocked"
+[[edge.do]]
+id = "issue"
+title = "Take the issue off"
+when = "record.kind == 'issue'"
+action = "record.update"
+for_each = "{{record.item}}"
+where = "each_record.on_hand >= record.quantity"
+[edge.do.params]
+ref = "{{each}}"
+[edge.do.params.decrement]
+on_hand = "{{record.quantity}}"
+[[edge.do]]
+id = "short"
+title = "Not enough to issue"
+when = "record.kind == 'issue' and issue.passed_over != []"
+to = "rejected"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+reject_reason = "Less is on hand than this issues."
+[[edge.do]]
+id = "posted-now"
+title = "Mark the slip posted"
+when = "record.kind == 'receive' or (record.kind == 'issue' and issue.passed_over == [])"
+after = ["restock", "issue"]
+to = "posted"
+
+[[state]]
+id = "submitted"
+label = "Submitted"
+tone = "attention"
+[[state.work]]
+id = "sign-off"
+title = "Sign off the count"
+kind = "gate"
+role = "physician"
+signer = "person"
+when = "record.kind == 'count'"
+not_by = ["record.editors"]
+meaning = "I have checked this count"
+
+[[edge]]
+id = "post"
+label = "Post"
+from = "submitted"
+to = "posted"
+[[edge.do]]
+id = "count"
+title = "Set on hand to the count"
+action = "record.update"
+for_each = "{{record.item}}"
+[edge.do.params]
+ref = "{{each}}"
+[edge.do.params.set]
+on_hand = "{{record.quantity}}"
+
+[[edge]]
+id = "reject"
+label = "Reject"
+from = "submitted"
+to = "rejected"
+[[edge.do]]
+id = "not-signed"
+title = "Return the slip to its author"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+reject_reason = "Not signed off: {{sign-off.comment}}"
+
+[[state]]
+id = "posted"
+label = "Posted"
+tone = "done"
+"""
+
+
+@pytest.fixture
+def shelf(hub):
+    """Two tallies (GL-M: 24 on hand, reorder at 6; SY-3: 5 on hand, reorder at 4), each walked by its reorder cycle,
+    and slips that move them, walked by their posting. Physicians write and sign off slips."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    for src in (TALLY, SLIP):
+        p = hub.propose("type", rana, src.replace("{top}", ""), "shelf")
+        hub.approve(amara, "type", src.split('"')[1], p["version"])
+    for src in (TALLY_REORDER, SLIP_POST):
+        w = hub.propose_workflow(rana, src, "shelf")
+        hub.approve_workflow(amara, src.split('"')[1], w["version"])
+    for src, wid, when in ((TALLY, "tally-reorder", "['stocked', 'low', 'on-order']"),
+                           (SLIP, "slip-post", "['draft', 'submitted', 'rejected']")):
+        p = hub.propose("type", rana, src.replace("{top}", f'workflow = {{ id = "{wid}", when = "record.status in {when}" }}'),
+                        "walked")
+        hub.approve(amara, "type", src.split('"')[1], p["version"])
+    me = {"id": "fixture", "kind": "automation", "name": "Shelf fixture", "status": "active"}
+    for code, on_hand, at in (("GL-M", 24, 6), ("SY-3", 5, 4)):
+        hub.create_record(me, "Tally", {"code": code, "on_hand": on_hand, "reorder_point": at})
+    return hub
+
+
+def _tally(hub, code):
+    return next(i for i in hub.records.search("Tally", limit=None) if i["code"] == code)
+
+
+def _slip(hub, who, code, kind, quantity, **more):
+    s = hub.create_record(who, "Slip", {"kind": kind, "item": f"Tally/{_tally(hub, code)['id']}",
+                                        "quantity": quantity, **more})
+    hub.update_record(who, f"Slip/{s['id']}", {"status": "submitted"})
+    return hub.records.read("Slip", s["id"])
+
+
+def test_a_record_s_state_has_one_owning_workflow_and_others_move_it_only_through_a_move_it_waits_on(shelf):
     """Rule: a record whose type names its workflow (``workflow = {id, when}``) is walked by one running run of it at
     a time (a second is refused), and its state moves with that run's steps in the same write. Another workflow, or a
     person, moves it only through a move the owner's open step waits on (a wait's ``until``, a step's ``moves``);
     anything else is refused. A non-lifecycle workflow (a sweep, a reaction) may start on its schedule or event, but
     writes only fields the owner's wait watches, never the state."""
-    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
-    syr = _item(hub, "SY-3")
-    ref = f"StockItem/{syr['id']}"
-    owner = _own_run(hub, ref, "inventory-reorder")
+    hub, liam, amara = shelf, M(shelf, "dr-liam"), M(shelf, "dr-amara")
+    ref = f"Tally/{_tally(hub, 'SY-3')['id']}"
+    owner = _own_run(hub, ref, "tally-reorder")
     with pytest.raises((Denied, Invalid)):
-        hub.engine.start(rana, "inventory-reorder", record=ref, via_automation=True)
+        hub.engine.start(liam, "tally-reorder", record=ref, via_automation=True)
     with pytest.raises((Denied, Invalid)):  # by its workflow only
-        hub.update_record(rana, ref, {"status": "low"})
-    _move(hub, rana, "SY-3", "issue", 2)  # on hand at its reorder point: the open wait ends, the run marks it low
+        hub.update_record(liam, ref, {"status": "low"})
+    _slip(hub, liam, "SY-3", "issue", 2)  # on hand at its reorder point: the open wait ends, the run marks it low
     low = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "low"})
     assert low["run_id"] == owner["id"]
     i = item_for(hub, owner, "order")
     hub.engine.claim(amara, i)
     hub.engine.complete(amara, i, {"quantity": 10, "order_ref": "PO-9"})
-    _move(hub, rana, "SY-3", "receive", 10)  # another workflow restocks it: a move the owner's wait takes
+    _slip(hub, liam, "SY-3", "receive", 10)  # another workflow restocks it: a move the owner's wait takes
     back = hub.db.events.find_one({"action": "record.transitioned", "subject": ref, "data.to": "stocked"})
     assert back["run_id"] != owner["id"] and hub.engine.run(owner["id"])["status"] == "completed"
 
 
-def test_a_loop_is_walked_by_the_next_run_which_knows_who_did_what_before(stock):
+def test_a_loop_is_walked_by_the_next_run_which_knows_who_did_what_before(shelf):
     """Rule: a workflow has no loops, so a lifecycle that comes back (a move rejected and revised) is walked one pass
     per run: a run that moved its record and ends with it back where its type's ``when`` holds starts the next run,
     whose ``run.previous`` is the one before, so ``not_by`` holds across passes. A run that never moved its record
     ends for good, and a companion's open run never holds the next pass back."""
-    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
-    count = _move(hub, rana, "GL-M", "count", 18, reason="shelf count")
-    ref = f"StockMove/{count['id']}"
-    first = _post_run(hub, count)
+    hub, liam, amara = shelf, M(shelf, "dr-liam"), M(shelf, "dr-amara")
+    count = _slip(hub, liam, "GL-M", "count", 18, reason="shelf count")
+    ref = f"Slip/{count['id']}"
+    first = _own_run(hub, ref, "slip-post")
     i = item_for(hub, first, "sign-off")
+    with pytest.raises(Denied):  # a physician, but the one who wrote it
+        hub.engine.claim(liam, i)
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "reject", "count again")
-    second = _own_run(hub, ref, "inventory-post")
+    assert hub.records.read("Slip", count["id"])["status"] == "rejected"
+    second = _own_run(hub, ref, "slip-post")
     assert second["id"] != first["id"] and second["ctx"]["run"]["previous"] == first["id"]
-    hub.update_record(rana, ref, {"status": "draft"})
-    hub.update_record(rana, ref, {"status": "submitted"})
+    hub.update_record(liam, ref, {"status": "draft"})
+    hub.update_record(liam, ref, {"status": "submitted"})
     with pytest.raises(Denied):
-        hub.engine.claim(rana, item_for(hub, second, "sign-off"))
+        hub.engine.claim(liam, item_for(hub, second, "sign-off"))
+    assert _tally(hub, "GL-M")["on_hand"] == 24
 
 
-def test_a_record_filed_before_its_type_named_a_workflow_or_had_a_lifecycle_is_picked_up_on_its_next_write(stock):
+def test_a_record_filed_before_its_type_named_a_workflow_or_had_a_lifecycle_is_picked_up_on_its_next_write(shelf):
     """Rule: the migration a module upgrade needs is done record by record: a record with no state (filed before its
     type had a lifecycle) is in its type's first state, written so on its next change; and a record its type's
     workflow has never walked at the active version is picked up there, once (idempotent, retried on each write
     until it starts, and never failing the write)."""
-    hub, rana = stock, M(stock, "rana")
-    rec = hub.records.create("StockItem", {"resourceType": "StockItem", "sku": "OLD-1", "name": "Old stock",
-                                           "on_hand": 50, "reorder_point": 5})  # the store, as an old hub left it
-    ref = f"StockItem/{rec['id']}"
+    hub, liam = shelf, M(shelf, "dr-liam")
+    rec = hub.records.create("Tally", {"resourceType": "Tally", "code": "OLD-1", "on_hand": 50,
+                                       "reorder_point": 5})  # the store, as an old hub left it
+    ref = f"Tally/{rec['id']}"
     assert not hub.db.runs.find_one({"record": ref})
-    hub.update_record(rana, ref, {"supplier": "Bluenose Supply"})
-    assert hub.records.read("StockItem", rec["id"])["status"] == "stocked"
-    run = _own_run(hub, ref, "inventory-reorder")
+    hub.update_record(liam, ref, {"supplier": "Bluenose Supply"})
+    assert hub.records.read("Tally", rec["id"])["status"] == "stocked"
+    run = _own_run(hub, ref, "tally-reorder")
     assert hub.engine.run(run["id"])["steps"]["watch"]["state"] == "waiting"
-    hub.update_record(rana, ref, {"supplier": "Another supplier"})
+    hub.update_record(liam, ref, {"supplier": "Another supplier"})
     assert len(list(hub.db.runs.find({"record": ref}))) == 1
 
 
@@ -3301,11 +3986,13 @@ def test_a_run_moving_a_record_nothing_walks_moves_it_and_its_workflow_picks_it_
 
 def test_increment_and_decrement_take_amounts_and_for_each_takes_one_reference(hub):
     from practicehub.workflows import parse
-    base = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["physician"]\n[[steps]]\nid = "a"\n'
+    base = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["physician"]\n[start]\nto = "s"\n'
+            '[[edge]]\nid = "e"\nfrom = "s"\nto = "t"\n[[state]]\nid = "t"\n[[state]]\nid = "s"\n'
+            '[[state.work]]\nid = "a"\n'
             'title = "A"\nkind = "automation"\naction = "record.update"\nfor_each = "{{run.record}}"\n'
-            '[steps.params]\nref = "{{each}}"\n')
-    parse(base + '[steps.params.increment]\nvisits = "{{input.n}}"\n')
-    parse(base + '[steps.params.decrement]\nvisits = 2\n')
+            '[state.work.params]\nref = "{{each}}"\n')
+    parse(base + '[state.work.params.increment]\nvisits = "{{input.n}}"\n')
+    parse(base + '[state.work.params.decrement]\nvisits = 2\n')
     with pytest.raises(Exception):
         parse(base + 'decrement = ["visits"]\n')
 
@@ -3326,8 +4013,11 @@ def test_a_gate_signs_the_sentence_for_the_outcome_chosen(worked):
     assert signed[0]["data"]["signed"]["meaning"] == "I discard this draft note"
     assert hub.track.verify_signature(signed[0])
     with pytest.raises(Invalid) as exc:   # a sentence for an outcome the gate does not have is refused
-        hub.propose_workflow(M(hub, "rana"), 'id = "x"\ntitle = "X"\n[[steps]]\nid = "a"\ntitle = "A"\nkind = "gate"\n'
-                                             'role = "physician"\nmeaning = "I agree"\noutcomes = ["yes", "no"]\n'
+        hub.propose_workflow(M(hub, "rana"), 'id = "x"\ntitle = "X"\nrecord = "Patient"\n[start]\nto = "s"\n'
+                                             '[[edge]]\nid = "yes"\nfrom = "s"\nto = "t"\n'
+                                             '[[edge]]\nid = "no"\nfrom = "s"\nto = "t"\n[[state]]\nid = "t"\n'
+                                             '[[state]]\nid = "s"\n[[state.work]]\nid = "a"\ntitle = "A"\nkind = "gate"\n'
+                                             'role = "physician"\nmeaning = "I agree"\n'
                                              'meanings = { maybe = "I am not sure" }\n', "bad")
     assert any("maybe" in p for p in exc.value.problems)
 
@@ -3568,6 +4258,8 @@ def test_finishing_a_visit_keeps_the_booked_reason_apart_from_the_codes(hub, mon
                                                "reasonCode": [{"text": "Knee pain"}]})
     v = hub.update_record(amara, f"Encounter/{v['id']}", {"reasonCode": [{"text": "ICD-9 719.46"}]})
     hub.records.update("Encounter", v["id"], {**{k: x for k, x in v.items() if k != "meta"}, "status": "finished"})
+    for r in hub.engine.runs(record=f"Encounter/{v['id']}"):  # finished by version 2: its run is over
+        hub.db.runs.set(r["id"], {"status": "completed"})
     walk_in = hub.records.create("Encounter", {**_visit(pat, "dr-amara", "2026-03-09T10:00", status="finished"),
                                                "reasonCode": [{"text": "ICD-9 034"}]})
     hub.db.set_setting("pack_upgrades_done", [u for u in hub.db.get_setting("pack_upgrades_done") or []
@@ -3764,70 +4456,45 @@ def test_two_people_editing_a_page_live_keep_both_changes_and_the_version_names_
     assert v["comment"] == f"Edited by {jo['name']} and {noor['name']}" and set(v["authors"]) == {"jo", "noor"}
 
 
-def _sop(hub, title):
-    return next(p for p in hub.records.search("Procedure", limit=None) if p["title"] == title)
-
-
-def test_a_sop_is_released_only_by_an_approver_who_did_not_write_it(wiki):
+def test_the_wiki_holds_no_controlled_documents_and_a_page_becomes_one_only_as_a_pdf_filed_in_document_control(wiki):
+    """Rule: a wiki page is never controlled. A document author makes one a controlled document with the wiki-sop
+    module: a PDF of the page at its version then, filed as a new draft Document (the page is not changed), which
+    document control's own workflow walks. A number in use is not given twice; an archived page is not filed."""
     hub = wiki
-    noor, liam, amara = M(hub, "noor"), M(hub, "dr-liam"), M(hub, "dr-amara")
-    sop = hub.create_record(noor, "Procedure", {"title": "Sharps", "number": "SOP-090", "owner": "noor",
-                                                "body": "Use the yellow bin."})
-    ref = f"Procedure/{sop['id']}"
-    with pytest.raises(Invalid):  # what changed is said first
-        hub.update_record(noor, ref, {"status": "in-review"})
-    # dr-liam writes part of it, live, with noor: he is one of its editors now
-    from practicehub.live import Live
-    lv = hub._live = Live(hub)
-    lv.join(noor, ref, "body")
-    lv.join(liam, ref, "body")
-    lv.submit(liam, ref, "body", "liam-s-0001", 0, [19, " Never recap."])
-    lv.leave(noor, ref, "body")
-    lv.leave(liam, ref, "body")
-    hub.update_record(noor, ref, {"change_summary": "First issue.", "status": "in-review"})
-    with pytest.raises(Invalid):  # locked: what the approver reads is what is released
-        hub.update_record(noor, ref, {"body": "Changed while in review."})
-    run = next(r for r in hub.engine.runs() if r["workflow_id"] == "wiki-sop-release" and r["record"] == ref)
-    i = item_for(hub, run, "release")
-    with pytest.raises(Denied):  # a co-editor does not release it
-        hub.engine.claim(liam, i)
-        hub.engine.decide(liam, i, "release")
-    hub.engine.claim(amara, i)
-    hub.engine.decide(amara, i, "release")
-    rec = hub.records.read("Procedure", sop["id"])
-    today = hub.engine.now().date()
-    assert rec["status"] == "released" and rec["revision"] == 1 and rec["effective"] == today.isoformat()
-    assert rec["review_by"] == today.replace(year=today.year + 1).isoformat()
-    with pytest.raises(Invalid):
-        hub.update_record(noor, ref, {"body": "x"})
+    rana, sam = M(hub, "rana"), M(hub, "sam")
+    assert hub.record_type("Procedure") is None
+    assert not [w for w in hub.workflows() if w["workflow"].record == "WikiPage" and w["workflow"].id != "wiki-check"]
+    install(hub, "wiki-sop")
+    page = _page(hub, "Cleaning the treatment rooms")
+    pref = f"WikiPage/{page['id']}"
+    with pytest.raises(Denied):  # a wiki editor who does not author documents does not make one
+        hub.engine.start(sam, "wiki-sop-file", record=pref, inputs={"number": "SOP-030"})
+    run = hub.engine.start(rana, "wiki-sop-file", record=pref, inputs={"number": "SOP-030", "title": "Cleaning"})
+    assert hub.engine.run(run["id"])["status"] == "completed"
+    doc = next(d for d in hub.records.search("Document", limit=None) if d.get("number") == "SOP-030")
+    assert doc["status"] == "draft" and doc["title"] == "Cleaning" and doc["owner"] == "rana"
+    assert hub.records.read("WikiPage", page["id"])["body"] == page["body"]  # the page itself is not changed
+    data, meta = hub.read_file(rana, f"Document/{doc['id']}", doc["file"]["blob"])
+    assert data.startswith(b"%PDF-") and b"Between patients" in data and b"SOP-030 Cleaning" in data
+    again = hub.engine.start(rana, "wiki-sop-file", record=pref, inputs={"number": "SOP-030"})  # the number is taken
+    assert hub.engine.run(again["id"])["status"] != "completed"
+    assert sum(1 for d in hub.records.search("Document", limit=None) if d.get("number") == "SOP-030") == 1
+    hub.engine.cancel(rana, again["id"], "number taken")
+    hub.update_record(rana, pref, {"status": "archived"})
+    gone = hub.engine.start(rana, "wiki-sop-file", record=pref, inputs={"number": "SOP-031"})
+    assert hub.engine.run(gone["id"])["status"] != "completed"
+    assert not any(d.get("number") == "SOP-031" for d in hub.records.search("Document", limit=None))
 
 
-def test_while_a_released_sop_is_revised_everyone_reads_the_released_revision(wiki):
+def test_a_workflow_step_attaches_a_file_as_it_makes_the_record_and_nobody_else_gets_past_the_writer_check(wiki):
+    """Rule: ``add_file`` needs a writer of the type's data class, except for an automation (a workflow step), which
+    may add a file as it may make the record."""
     hub = wiki
-    rana = M(hub, "rana")
-    sop = _sop(hub, "Hand hygiene")
-    ref = f"Procedure/{sop['id']}"
-    released = sop["body"]
-    hub.update_record(rana, ref, {"status": "draft"}, comment="the poster changed")  # Revise
-    rec = hub.records.read("Procedure", sop["id"])
-    assert rec["status"] == "draft" and hub.record_history(rana, ref)[0]["comment"] == "the poster changed"
-    hub.update_record(rana, ref, {"body": released + "\n\nNew poster."})
-    used = hub.in_use_version(M(hub, "jo"), ref)
-    assert used["data"]["body"] == released and used["data"]["revision"] == 2
-
-
-def test_a_returned_sop_says_why_and_goes_back_to_its_authors(wiki):
-    hub = wiki
-    amara = M(hub, "dr-amara")
-    sop = _sop(hub, "Cleaning the treatment rooms")
-    run = next(r for r in hub.engine.runs(status="running") if r["workflow_id"] == "wiki-sop-release"
-               and r["steps"]["release"]["state"] == "active")  # the SOP in review
-    i = item_for(hub, run, "release")
-    hub.engine.claim(amara, i)
-    hub.engine.decide(amara, i, "return", "Say which detergent.")
-    rec = hub.records.read("Procedure", sop["id"])
-    assert rec["status"] == "draft" and rec["returned_because"] == "Say which detergent."
-    assert not rec.get("revision")
+    step = {"id": "workflow:x", "kind": "automation", "name": "A step"}
+    assert hub.add_file(step, "Document", b"x", "x.txt", "text/plain")["blob"]
+    hub.authz.delete([("role:wiki-editor", "assignee", member_ref("sam"))])
+    with pytest.raises(Denied):
+        hub.add_file(M(hub, "sam"), "Document", b"x", "x.txt", "text/plain")
 
 
 def test_an_agent_is_mentioned_only_where_it_may_read_and_never_changes_the_text_itself(wiki):
@@ -4053,14 +4720,17 @@ def test_an_agents_proposed_decision_waits_for_its_sponsor_whatever_the_risk(hub
     """``decide(..., propose=True)`` (the MCP propose_decision tool): an agent's decision is held for its sponsor to
     approve and sign, even on a low-risk gate it could decide alone."""
     agent = M(hub, "intake-agent")
-    src = ('id = "propose-check"\ntitle = "Propose check"\n[trigger]\nstarters = ["intake-coordinator"]\n'
-           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[[steps]]\nid = "check"\ntitle = "Check"\n'
+    src = ('id = "propose-check"\ntitle = "Propose check"\nrecord = "Patient"\n[trigger]\nstarters = ["intake-coordinator"]\n'
+           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[start]\nto = "checking"\n'
+           '[[edge]]\nid = "ok"\nfrom = "checking"\nto = "checked"\n'
+           '[[edge]]\nid = "not-ok"\nfrom = "checking"\nto = "checked"\n[[state]]\nid = "checked"\n'
+           '[[state]]\nid = "checking"\n[[state.work]]\nid = "check"\ntitle = "Check"\n'
            f'kind = "gate"\nrole = "{agent["roles"][0]}"\nsigner = "any"\nagent_criteria = "input.kind == \'routine\'"\n'
-           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "low"\noutcomes = ["ok", "not-ok"]\n'
+           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "low"\n'
            'meaning = "I confirm the check"\ncontext = ["input.kind"]\n')
     p = hub.propose_workflow(M(hub, "jo"), src, "a check")
     hub.approve_workflow(M(hub, "rana"), "propose-check", p["version"])
-    run = hub.engine.start(M(hub, "jo"), "propose-check", inputs={"kind": "routine"})
+    run = hub.engine.start(M(hub, "jo"), "propose-check", record=_patient(hub), inputs={"kind": "routine"})
     iid = item_for(hub, run, "check")
     hub.engine.decide(agent, iid, "ok", "", seen=hub.engine.shown_digest(agent, iid), propose=True)
     assert hub.engine.item(iid)["status"] == "held"
@@ -4437,10 +5107,13 @@ def test_an_emergency_access_from_the_chart_is_never_told_to_whom_the_directive_
 def _agent_check(hub, risk="low"):
     """A gate an agent may decide on its own (signer any, within criteria), about a patient record."""
     agent = M(hub, "intake-agent")
-    src = ('id = "agent-check"\ntitle = "Agent check"\n[trigger]\nstarters = ["intake-coordinator"]\nrecord = "Patient"\n'
-           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[[steps]]\nid = "check"\ntitle = "Check"\n'
+    src = ('id = "agent-check"\ntitle = "Agent check"\nrecord = "Patient"\n[trigger]\nstarters = ["intake-coordinator"]\n'
+           '[[input]]\nname = "kind"\ntype = "string"\nrequired = true\n[start]\nto = "checking"\n'
+           '[[edge]]\nid = "ok"\nfrom = "checking"\nto = "checked"\n'
+           '[[edge]]\nid = "not-ok"\nfrom = "checking"\nto = "checked"\n[[state]]\nid = "checked"\n'
+           '[[state]]\nid = "checking"\n[[state.work]]\nid = "check"\ntitle = "Check"\n'
            f'kind = "gate"\nrole = "{agent["roles"][0]}"\nsigner = "any"\nagent_criteria = "input.kind == \'routine\'"\n'
-           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "{risk}"\noutcomes = ["ok", "not-ok"]\n'
+           f'skill = "{agent["profile"]["skills"][0]}"\nrisk = "{risk}"\n'
            'meaning = "I confirm the check"\ncontext = ["input.kind"]\n')
     p = hub.propose_workflow(M(hub, "jo"), src, "a check")
     hub.approve_workflow(M(hub, "rana"), "agent-check", p["version"])
@@ -4897,11 +5570,16 @@ def test_an_agent_is_given_no_role_its_sponsor_does_not_reach_and_nothing_is_wri
 
 
 # ------------------------------------------------------------------------------------------- what a signature says
-SIGNED = ('id = "{wid}"\ntitle = "Note check"\n[trigger]\nstarters = ["front-desk"]\n'
-          '[[steps]]\nid = "write"\ntitle = "Write it"\nkind = "task"\nrole = "physician"\n'
-          '[[steps.fields]]\nname = "done"\ntype = "boolean"\n'
-          '[[steps]]\nid = "sign"\ntitle = "Sign it"\nkind = "gate"\nrole = "physician"\nsigner = "person"\n'
-          'after = ["write"]\noutcomes = ["sign", "return"]\nmeaning = "I reviewed this note"\n{extra}')
+SIGNED = ('id = "{wid}"\ntitle = "Note check"\nrecord = "Patient"\n[trigger]\nstarters = ["front-desk"]\n'
+          '[start]\nto = "writing"\n[[edge]]\nid = "written"\nfrom = "writing"\nto = "signing"\n'
+          '[[edge]]\nid = "sign"\nfrom = "signing"\nto = "done"\n[[edge]]\nid = "return"\nfrom = "signing"\nto = "done"\n'
+          '[[state]]\nid = "done"\n'
+          '[[state]]\nid = "writing"\n'
+          '[[state.work]]\nid = "write"\ntitle = "Write it"\nkind = "task"\nrole = "physician"\n'
+          '[[state.work.fields]]\nname = "done"\ntype = "boolean"\n'
+          '[[state]]\nid = "signing"\n'
+          '[[state.work]]\nid = "sign"\ntitle = "Sign it"\nkind = "gate"\nrole = "physician"\nsigner = "person"\n'
+          'meaning = "I reviewed this note"\n{extra}')
 AUTHOR = 'meanings_if_did = { write = "I wrote this note and it is accurate" }\n'
 
 
@@ -4927,7 +5605,7 @@ def test_the_signed_meaning_is_the_one_for_whoever_did_the_step(hub, writer, sig
     wid = "note-check"
     p = hub.propose_workflow(M(hub, "jo"), SIGNED.format(wid=wid, extra=AUTHOR), "authorship")
     hub.approve_workflow(M(hub, "rana"), wid, p["version"])
-    run = hub.engine.start(M(hub, "jo"), wid)
+    run = hub.engine.start(M(hub, "jo"), wid, record=_patient(hub))
     iid = item_for(hub, run, "write")
     if writer == "taken-over":  # dr-amara took it, then it moved to dr-liam, who wrote it
         hub.engine.claim(M(hub, "dr-amara"), iid)
@@ -4949,7 +5627,7 @@ def test_an_outcome_with_its_own_meaning_says_it_even_for_the_author(hub):
     wid = "note-return"
     src = SIGNED.format(wid=wid, extra=AUTHOR + 'meanings = { return = "I return this note" }\n')
     hub.approve_workflow(M(hub, "rana"), wid, hub.propose_workflow(M(hub, "jo"), src, "return")["version"])
-    run = hub.engine.start(M(hub, "jo"), wid)
+    run = hub.engine.start(M(hub, "jo"), wid, record=_patient(hub))
     iid = item_for(hub, run, "write")
     hub.engine.complete(M(hub, "dr-amara"), iid, {"done": True})
     me = M(hub, "dr-amara")
@@ -5085,8 +5763,9 @@ def test_a_record_type_names_its_workflow_and_a_step_names_the_state_it_puts_the
     assert schema.starts_workflow(rt, {"status": "done"}) is None  # filed closed: nothing to walk
     assert not any("due" in p for p in schema.validate(rt, {"status": "asked"}))
     assert any("due" in p.lower() for p in schema.validate(rt, {"status": "done"}))
-    wf = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["front-desk"]\n'
-          '[[steps]]\nid = "a"\ntitle = "A"\nkind = "automation"\nstate = "done"\n')
+    wf = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["front-desk"]\n[start]\nto = "planned"\n'
+          '[[state]]\nid = "planned"\n[[state.work]]\nid = "a"\ntitle = "A"\nkind = "automation"\naction = "clock.now"\n'
+          '[[edge]]\nid = "e"\nfrom = "planned"\nto = "done"\n[[state]]\nid = "done"\n')
     for bad, says in ((wf, "the workflow is about none"),
                       (wf + '[new_record]\nstatus = "asked"\n', "say which type"),
                       (wf.replace('starters = ["front-desk"]\n', 'starters = ["front-desk"]\n'
@@ -5094,11 +5773,9 @@ def test_a_record_type_names_its_workflow_and_a_step_names_the_state_it_puts_the
         with pytest.raises(DefinitionError) as exc:
             parse(bad)
         assert any(says in p for p in exc.value.problems), (says, exc.value.problems)
-    # against the practice: a step's state is one of its record's states
-    visit = wf.replace('[trigger]', 'record = "Encounter"\n[trigger]').replace('state = "done"', 'state = "shelved"')
-    with pytest.raises(DefinitionError) as exc:
-        hub.check_workflow(visit)
-    assert any("'shelved' is not a state of a Encounter" in p for p in exc.value.problems), exc.value.problems
+    # against the practice: a state the record's field has no value for is a stop only the run keeps (run["at"])
+    visit = wf.replace('[trigger]', 'record = "Encounter"\n[trigger]').replace('"done"', '"shelved"')
+    assert hub.check_workflow(visit)
     assert hub.check_workflow(visit.replace('"shelved"', '"cancelled"'))
     # the practice's visit names its workflow, and the walk is the visit's own lifecycle
     enc = hub.record_type("Encounter")
@@ -5114,11 +5791,12 @@ def test_a_step_lists_the_moves_it_waits_on_and_a_trigger_refuses_only_the_same_
     from practicehub.workflows import DefinitionError, parse
     head = ('id = "w"\ntitle = "W"\nrecord = "Encounter"\n[trigger]\nstarters = ["front-desk"]\n{trig}'
             '[[input]]\nname = "reason"\ntype = "text"\n'
-            '[[steps]]\nid = "a"\ntitle = "A"\nkind = "{kind}"\nrole = "front-desk"\n{step}'
-            '[[steps.fields]]\nname = "done"\ntype = "boolean"\n'
-            '[[steps.fields]]\nname = "done"\ntype = "boolean"\n')
+            '[start]\nto = "in-progress"\n[[edge]]\nid = "e"\nfrom = "in-progress"\nto = "finished"\n'
+            '[[state]]\nid = "finished"\n[[state]]\nid = "in-progress"\n'
+            '[[state.work]]\nid = "a"\ntitle = "A"\nkind = "{kind}"\nrole = "front-desk"\n{step}'
+            '[[state.work.fields]]\nname = "done"\ntype = "boolean"\n')
     ok = parse(head.format(trig="", kind="task", step='moves = ["onleave"]\n'))
-    assert ok.steps[0].moves == ["onleave"]
+    assert ok.step("a").moves == ["onleave"]
     for trig, kind, step, says in (
             ("", "task", 'moves = "onleave"\n', "moves lists the lifecycle states"),
             ("", "automation", 'action = "message.send"\nmoves = ["onleave"]\n', "moves is for a person's step"),
@@ -5149,9 +5827,11 @@ def test_record_update_appends_one_entry_per_pass_and_never_an_empty_one():
     assert _record_update_append({}, {"append": {"done": "one"}, "set": {"x": 1}})["set"] == {"x": 1, "done": ["one"]}
     with pytest.raises(ValueError, match="not a list"):
         _record_update_append({"done": "text"}, {"append": {"done": "more"}})
-    wf = ('id = "w"\ntitle = "W"\n[trigger]\nstarters = ["front-desk"]\n[[steps]]\nid = "a"\ntitle = "A"\n'
-          'kind = "automation"\naction = "record.update"\n[steps.params]\nref = "x/1"\n{append}')
-    assert parse(wf.format(append='[steps.params.append]\ndone = "{{run.today}}"\n'))
+    wf = ('id = "w"\ntitle = "W"\nrecord = "Patient"\n[trigger]\nstarters = ["front-desk"]\n[start]\nto = "s"\n'
+          '[[edge]]\nid = "e"\nfrom = "s"\nto = "t"\n[[state]]\nid = "t"\n[[state]]\nid = "s"\n'
+          '[[state.work]]\nid = "a"\ntitle = "A"\n'
+          'kind = "automation"\naction = "record.update"\n[state.work.params]\nref = "x/1"\n{append}')
+    assert parse(wf.format(append='[state.work.params.append]\ndone = "{{run.today}}"\n'))
     with pytest.raises(DefinitionError) as exc:
         parse(wf.format(append='append = "done"\n'))
     assert any("append is a table" in p for p in exc.value.problems)
@@ -5268,6 +5948,74 @@ def test_a_new_portal_setting_on_an_existing_hub_is_not_taken_from_disk(tmp_path
     assert not hub.pack.portal and hub.pack_problem
 
 
+# ------------------------------------------------------------------ unique keys: one code, one serial within its batch
+GAUGE = """id = "Gauge"
+data_class = "visits"
+{top}
+[[field]]
+name = "code"
+required = true
+[[field]]
+name = "batch"
+[[field]]
+name = "serial"
+[[field]]
+name = "note"
+type = "text"
+"""
+
+
+def test_no_two_records_share_a_unique_key_whoever_writes_them(hub):
+    """Rule: a type's ``unique`` lists keys (a field, or fields that together are one key) no two of its records
+    share. The check and the write are one step, for a person, a workflow or an import alike, and a refusal names the
+    key and the record that has it, writing nothing. A key is checked only when all its fields are filled in (a
+    record with no serial shares none), text compared as a search compares it ("GL-M" is " gl-m"), and on a change
+    only when the key changed, so two records that shared one before the type said unique may still be edited."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    for bad, says in (('unique = ["cod"]', 'no field \'cod\' (did you mean "code"?)'),
+                      ('unique = ["note"]', "note is text"),
+                      ('unique = [["batch", "batch"]]', "names a field twice"),
+                      ('unique = "code"', "a list of fields"),
+                      ('unique = ["code", ["code"]]', "listed twice")):
+        with pytest.raises(DefinitionError) as exc:
+            schema.parse(GAUGE.replace("{top}", bad))
+        assert any(says in p for p in exc.value.problems), (says, exc.value.problems)
+    assert schema.parse(GAUGE.replace("{top}", 'unique = ["code", ["batch", "serial"]]')).unique == \
+        [["code"], ["batch", "serial"]]
+
+    rana, amara, liam = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam")
+    p = hub.propose("type", rana, GAUGE.replace("{top}", ""), "gauges")
+    hub.approve(amara, "type", "Gauge", p["version"])
+    twin_a = hub.create_record(liam, "Gauge", {"code": "OLD", "note": "filed before codes were unique"})
+    twin_b = hub.create_record(liam, "Gauge", {"code": "old"})
+    p = hub.propose("type", rana, GAUGE.replace("{top}", 'unique = ["code", ["batch", "serial"]]'), "unique")
+    hub.approve(amara, "type", "Gauge", p["version"])
+
+    first = hub.create_record(liam, "Gauge", {"code": "GL-M", "batch": "B1", "serial": "S1"})
+    with pytest.raises(Invalid) as exc:
+        hub.create_record(liam, "Gauge", {"code": " gl-m", "batch": "B2"})
+    assert any(p.startswith("Code: another gauge already has  gl-m") for p in exc.value.problems), exc.value.problems
+    robot = {"id": "engine", "kind": "automation", "name": "Engine", "status": "active"}
+    with pytest.raises(Invalid, match="not unique"):  # a workflow's write, or an import, is refused alike
+        hub.create_record(robot, "Gauge", {"code": "GL-M"})
+    with pytest.raises(Invalid) as exc:
+        hub.create_record(liam, "Gauge", {"code": "GZ-10", "batch": "b1", "serial": "s1"})
+    assert any(p.startswith("Batch and Serial: another gauge already has b1, s1") for p in exc.value.problems)
+    assert len(hub.records.search("Gauge", limit=None)) == 3  # nothing of a refused write is kept
+
+    hub.create_record(liam, "Gauge", {"code": "GZ-10", "batch": "B2", "serial": "S1"})  # the same serial, another batch
+    hub.create_record(liam, "Gauge", {"code": "SY-3", "batch": "B1"})                   # no serial: it shares none
+    hub.create_record(liam, "Gauge", {"code": "SY-5", "batch": "B1"})
+    with pytest.raises(Invalid, match="not unique"):  # a change to another's key
+        hub.update_record(liam, f"Gauge/{first['id']}", {"code": "SY-3"})
+    hub.update_record(liam, f"Gauge/{first['id']}", {"code": "gl-m", "note": "its own code, written another way"})
+    hub.update_record(liam, f"Gauge/{twin_a['id']}", {"note": "still edited"})  # they shared it before: not stopped
+    with pytest.raises(Invalid, match="not unique"):  # but a twin's key, changed, is checked
+        hub.update_record(liam, f"Gauge/{twin_b['id']}", {"code": "SY-5"})
+    assert hub.records.read("Gauge", first["id"])["code"] == "gl-m"
+
+
 # ------------------------------------------------------------------ record transitions: moving a record on its page
 JOB = """id = "Job"
 data_class = "visits"
@@ -5315,38 +6063,55 @@ from = ["*"]
 to = "cancelled"
 label = "Cancel"
 """
-JOB_FLOW = """id = "job-flow"
+# The job's workflow: the work is the move to done (moving it there by hand does it); filing the job sheet moves
+# nothing the record's field can say, so it ends at a stop the run keeps (filed: run["at"]), the record staying done.
+JOB_FLOW_HEAD = """id = "job-flow"
 title = "Do the job"
 record = "Job"
 [trigger]
 starters = ["physician"]
-[[steps]]
+[start]
+to = "open"
+[[state]]
+id = "open"
+[[state.work]]
 id = "work"
 title = "Do the work"
 kind = "task"
 role = "physician"
 moves = ["doing"]
-state = "done"
 context = ["record:clinical"]
-[[steps.fields]]
+[[state.work.fields]]
 name = "outcome"
 type = "text"
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "hours"
 type = "number"
-[[steps]]
+[[edge]]
+id = "finished"
+from = "open"
+to = "done"
+[[state]]
+id = "done"
+[[state.work]]
 id = "file"
 title = "File the job sheet"
 kind = "task"
 role = "physician"
-after = ["work"]
 when = "record.status == 'done'"
 context = ["record:clinical"]
-[[steps.fields]]
+[[state.work.fields]]
 name = "filed"
 type = "boolean"
+[[edge]]
+id = "filed"
+from = "done"
+to = "filed"
+[[state]]
+id = "filed"
 """
+JOB_FLOW = JOB_FLOW_HEAD + 'label = "Filed"\n'
 
 
 def _jobs(hub, *, walked=True):
@@ -5558,12 +6323,22 @@ record = "Job"
 cancel_by = ["physician"]
 [trigger]
 starters = ["nurse", "physician"]
-[[steps]]
+[start]
+to = "open"
+[[edge]]
+id = "checked"
+from = "open"
+to = "doing"
+[[state]]
+id = "doing"
+[[state]]
+id = "open"
+[[state.work]]
 id = "check"
 title = "Check the job"
 kind = "task"
 role = "physician"
-[[steps.fields]]
+[[state.work.fields]]
 name = "ok"
 type = "boolean"
 [[on_cancel]]
@@ -5658,17 +6433,18 @@ def test_a_write_that_makes_the_type_s_again_hold_starts_its_workflow_again_wher
     assert not list(hub.db.runs.find({"record": ref, "status": "running"}))
 
 
-def test_a_move_its_run_finishes_on_starts_no_second_run(stock):
+def test_a_move_its_run_finishes_on_starts_no_second_run(shelf):
     """Rule: a move a record's own run was waiting for, after which the run finishes at once (a delivery submitted
     and posted in one go), leaves one run: the type's workflow is not started again over the record as the move
     wrote it (submitted), only by the run's own end where the record is now (posted: nothing to walk)."""
-    hub, rana = stock, M(stock, "rana")
-    m = hub.create_record(rana, "StockMove", {"kind": "receive", "item": f"StockItem/{_item(hub, 'SY-3')['id']}",
-                                              "quantity": 10})
-    ref = f"StockMove/{m['id']}"
-    hub.update_record(rana, ref, {"status": "submitted"})
+    hub, liam = shelf, M(shelf, "dr-liam")
+    s = hub.create_record(liam, "Slip", {"kind": "receive", "item": f"Tally/{_tally(hub, 'SY-3')['id']}",
+                                         "quantity": 10})
+    ref = f"Slip/{s['id']}"
+    hub.update_record(liam, ref, {"status": "submitted"})
     assert hub.records.read(*ref.split("/"))["status"] == "posted"
-    assert [r["status"] for r in hub.db.runs.find({"workflow_id": "inventory-post", "record": ref})] == ["completed"]
+    assert [r["status"] for r in hub.db.runs.find({"workflow_id": "slip-post", "record": ref})] == ["completed"]
+    assert _tally(hub, "SY-3")["on_hand"] == 15
 
 
 # ------------------------------------------------------------------------------------------- a record walks its workflow
@@ -5682,8 +6458,9 @@ def test_a_record_its_type_walks_starts_its_run_on_create_and_only_that_run_move
     ref = f"Communication/{msg['id']}"
     (run,) = hub.engine.runs(record=ref)
     assert run["workflow_id"] == "patient-question" and run["subject"] == pat
-    with pytest.raises(Denied):
-        hub.update_record(jo, ref, {"handling": "answered"})
+    assert hub.records.read(*ref.split("/"))["handling"] == "drafting"  # routine: its reply is being drafted
+    with pytest.raises(Denied):  # the draft done moves it on to be checked: no one does that by hand
+        hub.update_record(jo, ref, {"handling": "to-check"})
 
 
 def test_a_correction_a_run_waits_for_lets_it_go_on_to_its_own_end_not_stopped(hub):
@@ -5713,20 +6490,28 @@ record = "Encounter"
 summary = "A test: a visit asks for a referral of its own."
 [trigger]
 starters = ["front-desk"]
-[[steps]]
+[start]
+to = "finished"
+[[edge]]
+id = "referred"
+from = "finished"
+to = "finished"
+[[state]]
+id = "finished"
+[[state.work]]
 id = "refer"
 title = "Refer"
 kind = "automation"
 action = "record.child"
-[steps.params]
+[state.work.params]
 type = "ServiceRequest"
-[steps.params.data]
+[state.work.params.data]
 status = "draft"
 intent = "order"
 priority = "routine"
 referral_to = "Cardiology"
 reason_text = "palpitations"
-[steps.params.input]
+[state.work.params.input]
 specialty = "Cardiology"
 reason = "palpitations"
 urgency = "routine"
@@ -5844,9 +6629,10 @@ def test_a_lifecycle_declares_how_each_state_reads_not_guessed_from_its_words(hu
     assert tone(RecordPages, "missed", rt) == "removed" and tone(RecordPages, "here", rt) == "inprogress"
     assert tone(RecordPages, "booked", rt) == "default"
     assert tone(RecordPages, "completed", schema.parse(_TIMED)) == "success"  # none declared: the words
-    # a referral sent is under way, not done (its code, active, reads as settled); a visit with no note needs action
+    # a referral sent waits for the specialist, not done (its FHIR code, active, would read as settled); a visit with
+    # no note needs action
     sr, enc = hub.record_type("ServiceRequest"), hub.record_type("Encounter")
-    assert tone(RecordPages, "active", sr) == "inprogress" and tone(RecordPages, "completed", sr) == "success"
+    assert tone(RecordPages, "sent", sr) == "default" and tone(RecordPages, "report-received", sr) == "success"
     assert tone(RecordPages, "undocumented", enc) == "moved" and tone(RecordPages, "noshow", enc) == "removed"
     assert tone(RecordPages, "finished", enc) == "success"
 
@@ -5910,41 +6696,43 @@ def test_repeated_escalations_of_one_item_are_one_notice_row_with_a_count(hub):
     assert len(hub.db.items.find({"kind": "notice", "escalates": iid, "role": "physician"})) == 2
 
 
-# ---------------------------------------------------------------------------- a lab result: closed only when told
-def test_a_reviewed_result_is_closed_only_once_the_patient_was_told(hub):
-    """A review that ends without the patient told (a visit booked) leaves the result "Patient not told": its review
-    ending does not close it, nor does anyone by hand. Only a physician's "Patient told" signature closes it."""
+# ------------------------------------------------------------------- a lab result: closed by its review, not by hand
+def test_a_reviewed_result_is_closed_by_its_review_and_never_by_hand(hub):
+    """A result its review is walking is moved only along the review's edges: nobody closes it by hand. The
+    physician's decision closes it once what follows is set going (here, a visit asked for), without waiting for
+    the visit."""
     from practicehub.agents.runner import run_all_local
     run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_patient(hub),
                            inputs={"test": "Sodium", "value": "131", "unit": "mmol/L", "range": "135-145",
                                    "flag": "abnormal"})
+    ref = hub.engine.run(run["id"])["record"]
+    with pytest.raises((Denied, Invalid)):
+        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})
     hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
                         {"category": "abnormal", "rationale": "low"})
-    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), "book-visit", "")
     run_all_local(hub, log=quiet)
-    ref = hub.engine.run(run["id"])["record"]
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review"), "book-visit", "")
+    run_all_local(hub, log=quiet)
     assert hub.engine.run(run["id"])["status"] == "completed"
-    assert hub.records.read(*ref.split("/", 1))["review"] == "not-told"
-    with pytest.raises(Denied):
-        hub.update_record(M(hub, "dr-amara"), ref, {"review": "closed"})
-    with pytest.raises(Denied):
-        hub.sign_record(M(hub, "noor"), ref, "Patient told")
-    hub.sign_record(M(hub, "dr-amara"), ref, "Patient told")
     assert hub.records.read(*ref.split("/", 1))["review"] == "closed"
 
 
 # ------------------------------------------------------- a step whose move is signed is done by moving, never on its item
-SIGNED_FLOW = JOB_FLOW + """[[steps]]
+SIGNED_FLOW = JOB_FLOW_HEAD + """[[state.work]]
 id = "approve"
 title = "Approve the job"
 kind = "task"
 role = "physician"
-after = ["file"]
-state = "approved"
 context = ["record:clinical"]
-[[steps.fields]]
+[[state.work.fields]]
 name = "note"
 type = "text"
+[[edge]]
+id = "approved"
+from = "filed"
+to = "approved"
+[[state]]
+id = "approved"
 """
 
 
@@ -6034,3 +6822,25 @@ def test_a_workflow_step_may_require_links_and_its_check_knows_the_record_types_
     assert "may point at" in problems('{ rel = "report", from = "Patient" }')
     assert "outcomes" in problems('{ rel = "report", outcomes = ["send"] }')   # the report step is a task
     assert "min" in problems('{ rel = "report", min = 0 }')
+
+
+# ------------------------------------------------------- what a move started: a record of a type one may not read
+def test_a_started_record_of_a_type_the_member_may_not_read_is_never_named_or_linked(hub):
+    """A result's "book a visit" starts a visit request (an Encounter, the visits class). A member who reads clinical
+    records but not visits sees the move and the automation that started it, but the visit only as not readable:
+    the page then gives it no title and no link."""
+    from tests.test_clinic_records import _flagged_review
+    rana = M(hub, "rana")
+    hub.add_member(rana, {"id": "locum", "name": "Dr. Locum", "roles": []})
+    hub.authz.write([("data_class:clinical", "reader", "member:locum")])
+    locum = M(hub, "locum")
+    assert hub.may_read(locum, "Observation") and not hub.may_read(locum, "Encounter")
+    _, ref = _flagged_review(hub, "book-visit")
+
+    def started(member):
+        (m,) = [m for m in hub.record_activity(member, ref) if m["edge"] == "book-visit"]
+        return [s for r in m["ran"] if not r["hidden"] for s in r["started"]]
+    (theirs,) = started(locum)
+    assert theirs["ref"].startswith("Encounter/") and theirs["readable"] is False
+    (mine,) = started(M(hub, "dr-amara"))
+    assert mine["ref"] == theirs["ref"] and mine["readable"] is True

@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from conftest import M, item_for, quiet, run_of, visit_run
+from conftest import M, follow_up_run, item_for, quiet, run_of, visit_run
 from practicehub.agents.runner import AgentRunner, HttpClient, Refused
 from practicehub.hub import Denied, Invalid
 from practicehub.web.server import App, Redirect, make_handler
@@ -369,7 +369,9 @@ def test_a_person_cannot_skip_a_move_reserved_to_workflows_from_the_page(hub, se
     d = next(r for r in hub.records.search("Document") if r["title"] == "Draft")
     page = call(server, "GET", f"/records/Document/{d['id']}", rana)[1]
     assert "Send for review" in page and ">Approve<" not in page
-    assert call(server, "POST", f"/records/Document/{d['id']}/move", rana, form={"to": "in-review"})[0] == 303
+    assert call(server, "POST", f"/records/Document/{d['id']}/move", rana, form={"to": "in-review"})[0] == 422
+    picks = {f"assign:{n['key']}": n["people"][0]["id"] for n in hub.move_assignments(f"Document/{d['id']}", "in-review")}
+    assert call(server, "POST", f"/records/Document/{d['id']}/move", rana, form={"to": "in-review", **picks})[0] == 303
     assert call(server, "POST", f"/records/Document/{d['id']}/move", rana, form={"to": "approved"})[0] == 403
     assert run_of(hub, "dms-review")
 
@@ -717,7 +719,7 @@ def test_whoever_cannot_reach_the_patient_sees_whom_else_to_call(hub):
     run = hub.engine.start(M(hub, "jo"), "patient-question", record=f"Patient/{pat['id']}",
                            inputs={"question": "crushing chest pain"})
     hub.engine.complete(M(hub, "noor"), item_for(hub, run, "urgent"),
-                        {"reached": False, "action": "could-not-reach", "notes": "no answer"})
+                        {"outcome": "could-not-reach", "notes": "no answer"})
     iid = item_for(hub, run, "not-reached")
     page = app.page_item({"me": M(hub, "dr-amara"), "query": {}, "path": f"/items/{iid}"}, iid)
     contact = hub.pack.facts(pat)["emergency contact"]
@@ -1777,7 +1779,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """Version 2 of the clinic pack merged Appointment into Visit (tests/test_rules.py upgrades a version 1)."""
-    assert hub.pack.version == "4.4" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "5.0" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert "2-appointments-are-visits" in hub.db.get_setting("pack_upgrades_done")  # a new practice has none to do
@@ -1895,14 +1897,21 @@ def test_a_move_from_a_board_applies_the_same_rules_and_a_refused_one_says_why(h
     code, page = call(server, "POST", url, rana, form={"to": "approved", "_version": ver, "_back": back, "_ask": "1"})
     assert code == 422 and "does not move from" in page and "data-modal-body" in page and 'role="alert"' in page
     assert hub.records.read("Document", doc["id"])["status"] == "draft"
-    # accepted: back to the board
+    # a move that sets people's work going opens its screen first, to choose who does it
     code, _ = call(server, "POST", url, rana, form={"to": "in-review", "_version": ver, "_back": back, "_ask": "1"})
+    assert code == 303 and hub.records.read("Document", doc["id"])["status"] == "draft"
+    picks = {f"assign:{n['key']}": n["people"][0]["id"] for n in hub.move_assignments(f"Document/{doc['id']}", "in-review")}
+    assert picks
+    # accepted: back to the board
+    code, _ = call(server, "POST", url, rana, form={"to": "in-review", "_version": ver, "_back": back, **picks})
     assert code == 303 and hub.records.read("Document", doc["id"])["status"] == "in-review"
     # changed since the board was drawn: refused as a conflict
     other = hub.create_record(M(hub, "rana"), "Document", {"title": "Sharps"})
     hub.update_record(M(hub, "rana"), f"Document/{other['id']}", {"title": "Sharps disposal"})
     code, page = call(server, "POST", f"/records/Document/{other['id']}/move", rana,
-                      form={"to": "in-review", "_version": str(other["meta"]["versionId"]), "_back": back, "_ask": "1"})
+                      form={"to": "in-review", "_version": str(other["meta"]["versionId"]), "_back": back, **{
+                          f"assign:{n['key']}": n["people"][0]["id"]
+                          for n in hub.move_assignments(f"Document/{other['id']}", "in-review")}})
     assert code == 409 and "changed this record" in page and hub.records.read("Document", other["id"])["status"] == "draft"
     # a move that asks for fields: its screen first, which returns to the board once it is accepted
     capa = hub.create_record(M(hub, "rana"), "CAPA", {"title": "T", "kind": "corrective", "problem": "P"})
@@ -2104,7 +2113,7 @@ def test_the_visit_list_names_the_patient_and_says_codes_in_words(hub, server):
     assert heads[:3] == ["Visit", "Status", "Patient"]
     assert ">In clinic<" in page and ">AMB<" not in page and "(born " in page
     assert '<span class="loz' in page and ">in-progress<" not in page and ">planned<" not in page  # states in words
-    assert re.search(r'<span class="loz [a-z]+">(Planned|In progress|Finished)</span>', page)
+    assert re.search(r'<span class="loz [a-z]+">(Booked|In progress|Note being drafted|Completed)</span>', page)
 
 
 def test_a_board_says_its_columns_in_the_lifecycles_words(hub, server):
@@ -2152,9 +2161,9 @@ def test_the_definition_editor_says_whether_the_hub_accepts_the_text_without_ask
 # ---- the record's own panel: its lifecycle and the open work about it, on its default view
 
 def _panel(page):
-    """The side panel of a record page (status, moves, open work), or of a patient's chart."""
-    m = re.search(r'<p class="wp-lifecycle".*?</aside>|<section class="wp-status".*?</aside>|'
-                  r'<section class="wp-work".*?</aside>', page, re.S)
+    """The side panel of a record page (status, moves, open work), or a patient's chart's open work (below it)."""
+    m = re.search(r'<div class="wp-inline wp-below".*?</main>|<p class="wp-lifecycle".*?</aside>|'
+                  r'<section class="wp-status".*?</aside>|<section class="wp-work".*?</aside>', page, re.S)
     return m.group(0) if m else ""
 
 
@@ -2167,14 +2176,14 @@ def test_a_record_shows_its_status_moves_and_open_work_beside_it(hub, server):
     page = call(server, "GET", f"/records/{visit}", token(hub, "dr-amara"))[1]
     panel = _panel(page)
     status = page.split('class="rec-status"', 1)[1].split("</div>", 1)[0]
-    assert "In progress" in status and "Draft the note" in status and "Move to" not in page  # words, not codes
+    assert "Note being drafted" in status and "Draft the note" in status and "Move to" not in page  # words, not codes
     assert 'id="work"' in page and 'href="/runs/' not in page and "Open work" not in panel  # its work is above
     # being documented: its workflow waits on no pause now, so the page offers none (only its workflow moves it)
     assert ">Patient stepped out<" not in panel
     assert "View workflow" in panel and f'{addr(hub, visit)}/workflow" data-modal' in panel
     status, modal = call(server, "GET", f"/records/{visit}/workflow", token(hub, "dr-amara"))
     assert status == 200 and "data-modal-body" in modal and "<svg" in modal
-    assert re.search(r'class="lc-node [a-z]+ current"><title>In progress', modal)
+    assert re.search(r'class="lc-node [a-z]+ current"><title>Note being drafted', modal)
     # the chart of the patient lists the same run beside it
     chart = call(server, "GET", f"/patients/{run['subject'].split('/')[1]}", token(hub, "dr-amara"))[1]
     assert f'href="{addr(hub, visit)}#work"' in _panel(chart) and "On this patient" in chart
@@ -2542,7 +2551,7 @@ def test_the_slot_picker_offers_every_day_and_every_physician(hub, server):
         for w in whom:
             assert 0 < sum(1 for c in free if c["day"] == d and c["with"] == w) <= int(cal["max_slots"])
     assert [c["value"][:16] for c in free] == sorted(c["value"][:16] for c in free)  # earliest first
-    status, page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))
+    status, page = call(server, "GET", f"/items/{iid}/answer", token(hub, "jo"))  # the step's Done… dialog
     assert status == 200
     picker = page.split('class="slot-picker"', 1)[1].split("</fieldset>", 1)[0]
     assert "data-slot-day" in picker and "data-slot-with" in picker and picker.count("<optgroup") == len(days)
@@ -2598,13 +2607,13 @@ def _critical_call_escalated(hub, times=3):
     gate = item_for(hub, run, "review-critical")
     eng.claim(amara, gate)
     eng.decide(amara, gate, "call-patient", "call her now", seen=eng.shown_digest(amara, gate))
-    call_ = item_for(hub, hub.engine.run(run["id"]), "call-critical")
+    call_ = item_for(hub, follow_up_run(hub, run), "call-now")
     eng.claim(noor, call_)
     eng.release(noor, call_, "Going on break")
     now = eng.now()
     for k in range(1, times + 1):
         eng.tick(now + timedelta(hours=k, minutes=5))
-    return run, call_
+    return follow_up_run(hub, run), call_
 
 
 def test_urgent_work_comes_first_one_row_per_record_with_a_counter(hub, server):
@@ -2648,34 +2657,30 @@ def test_a_chart_shows_urgent_work_under_its_banner_at_every_width(hub, server):
     page = call(server, "GET", f"/patients/{pid}", token(hub, "noor"))[1]
     assert 'class="urgent-band"' in page and call_ in page.split('class="urgent-band"', 1)[1].split("</section>")[0]
     banner_end = page.index('class="urgent-band"')
-    assert banner_end < page.index("file-tools") and banner_end < page.index('class="issue')
+    assert banner_end < page.index("file-tools") and banner_end < page.index('class="wp-inline wp-below')
     from practicehub.web.assets import CSS
     rule = CSS.split(".urgent-band", 1)[1].split("}", 1)[0]
     assert ".urgent-band" in CSS and not re.search(r"[{;]order:", rule)
 
 
-def test_a_result_the_patient_was_not_told_of_is_urgent_on_the_chart(hub, server):
-    """A result its review left "Patient not told" (a visit booked instead) has no work on it, yet it is listed under
-    Urgent on the chart, with a way to it, until a physician signs that the patient was told."""
+def test_a_result_whose_review_asked_for_a_visit_is_closed_and_not_left_on_the_chart(hub, server):
+    """A result its review asked a visit for is closed by the decision: the visit request is its own work, so the
+    result is not left waiting under Urgent on the chart."""
     from practicehub.agents.runner import run_all_local
     ref = _ellen(hub)
     run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=ref, inputs={
         "test": "Sodium", "value": "131", "unit": "mmol/L", "range": "135-145", "flag": "abnormal"})
     hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
                         {"category": "abnormal", "rationale": "low"})
-    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review-flagged"), "book-visit", "")
+    run_all_local(hub, log=quiet)
+    hub.engine.decide(M(hub, "dr-amara"), item_for(hub, run, "review"), "book-visit", "")
     run_all_local(hub, log=quiet)
     obs = hub.engine.run(run["id"])["record"]
-    assert hub.records.read(*obs.split("/", 1))["review"] == "not-told"
+    assert hub.records.read(*obs.split("/", 1))["review"] == "closed"
     pid = ref.split("/", 1)[1]
     page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
-    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
-    assert "Patient not told" in band and obs.split("/", 1)[1] in band
-    assert page.index('class="urgent-band"') < page.index('class="issue')
-    hub.sign_record(M(hub, "dr-amara"), obs, "Patient told", "Told at the visit")
-    page = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
-    assert "Patient not told" not in page.split('class="urgent-band"', 1)[-1].split("</section>", 1)[0] \
-        or 'class="urgent-band"' not in page
+    band = page.split('class="urgent-band"', 1)[1].split("</section>", 1)[0] if 'class="urgent-band"' in page else ""
+    assert obs.split("/", 1)[1] not in band and "Patient not told" not in band
 
 
 def test_reason_boxes_are_labelled_and_cancelling_work_is_asked_for(hub, server):
@@ -2707,7 +2712,7 @@ def test_an_urgent_row_takes_late_work_over_in_one_click_and_a_chart_row_names_o
     gate = item_for(hub, run, "review-critical")
     eng.claim(amara, gate)
     eng.decide(amara, gate, "call-patient", "call her now", seen=eng.shown_digest(amara, gate))
-    call_ = item_for(hub, eng.run(run["id"]), "call-critical")
+    call_ = item_for(hub, follow_up_run(hub, run), "call-now")
     eng.claim(noor, call_)  # she keeps it, and it is late
     eng.tick(eng.now() + timedelta(hours=1, minutes=5))
     takers = [m for m in hub.members("person") if m["status"] == "active" and any(
@@ -2725,4 +2730,38 @@ def test_an_urgent_row_takes_late_work_over_in_one_click_and_a_chart_row_names_o
     hub.db.items.set(call_, {"due_at": "2020-01-01T00:00:00Z"})
     chart = call(server, "GET", f"/patients/{pid}", token(hub, "dr-amara"))[1]
     band = chart.split('class="urgent-band"', 1)[1].split("</section>", 1)[0]
-    assert "<b>Lab result review</b>" in band and "Ellen MacLeod" not in band.split("</b>", 1)[0]
+    assert "<b>Patient follow-up</b>" in band and "Ellen MacLeod" not in band.split("</b>", 1)[0]
+
+
+def _get_with(base, path, tok, headers=None):
+    """GET with headers of its own (``If-None-Match``): (status, response headers, body)."""
+    req = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {tok}", **(headers or {})})
+    try:
+        with opener.open(req) as r:
+            return r.status, dict(r.headers), r.read().decode()
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers), exc.read().decode()
+
+
+def test_a_records_activity_block_is_fetched_alone_with_an_etag_and_refused_as_its_page(hub, server):
+    """``GET /records/<T>/<I>/activity``: the work section's block alone, as the page has it, with an ETag; the same
+    ETag sent back is a 304 with no body; a change (the follow-up finished) is a new answer, no longer live. Refused
+    as the page is: a member who may not read the type gets 403, a record that is not there 404."""
+    from test_record_page import _called_back
+    ref, run = _called_back(hub)
+    tok = token(hub, "dr-amara")
+    code, head, frag = _get_with(server, f"/records/{ref}/activity", tok)
+    assert code == 200 and frag.startswith('<section id="activity" class="rw-activity"') and "data-live" in frag
+    page = call(server, "GET", f"/records/{ref}", tok)[1]
+    assert frag in page  # the very block the page carries
+    tag = head.get("ETag")
+    assert tag and tag.startswith('"')
+    code, h304, body = _get_with(server, f"/records/{ref}/activity", tok, {"If-None-Match": tag})
+    assert code == 304 and body == "" and h304.get("ETag") == tag
+    fu = follow_up_run(hub, run)
+    hub.db.runs.update({"_id": fu["id"]}, {"$set": {"status": "completed"}})
+    code, head2, frag2 = _get_with(server, f"/records/{ref}/activity", tok, {"If-None-Match": tag})
+    assert code == 200 and head2.get("ETag") != tag and "data-live" not in frag2
+    assert _get_with(server, f"/records/{ref}/activity", token(hub, "jo"))[0] == 403  # no clinical read
+    assert call(server, "GET", f"/records/{ref}", token(hub, "jo"))[0] == 403  # as its page
+    assert _get_with(server, f"/records/{ref.split('/')[0]}/nothing-here/activity", tok)[0] == 404

@@ -9,7 +9,7 @@ order = 20
 # Every CAPA is worked from open to closed by one workflow: investigated and planned, its documents revised and
 # approved again, verified by someone who did not investigate; found not effective, the next pass acts again. Its
 # status is where that work is.
-workflow = { id = "qms-capa", when = "record.status in ['open', 'investigating', 'actions']" }
+workflow = { id = "qms-capa", when = "record.status in ['open', 'investigating', 'further-action', 'actions']" }
 summary = "A corrective or preventive action, and the documents it changes."
 
 [[field]]
@@ -38,7 +38,8 @@ type = "member"
 [[field]]
 name = "status"
 type = "choice"
-choices = ["open", "investigating", "actions", "verification", "closed", "cancelled"]
+choices = ["open", "investigating", "further-action", "actions", "verification", "closed", "cancelled"]
+labels = { open = "Open", investigating = "Investigating", further-action = "Further action", actions = "Actions", verification = "Verification", closed = "Closed", cancelled = "Cancelled" }
 
 [[field]]
 name = "documents"
@@ -88,8 +89,8 @@ show = true
 [lifecycle]
 field = "status"
 initial = "open"
-locked = ["actions", "verification", "closed", "cancelled"]   # once the plan is agreed, the root cause, plan and documents are what is acted on and verified
-abandoned = { "verification" = "actions", "actions" = "investigating" }   # cancelled verification leaves the actions open; cancelled actions go back to investigating, which a person may cancel
+locked = ["further-action", "actions", "verification", "closed", "cancelled"]   # once the plan is agreed, the root cause, plan and documents are what is acted on and verified
+abandoned = { "verification" = "further-action", "further-action" = "investigating", "actions" = "investigating" }   # cancelled verification leaves further action to take; cancelled actions go back to investigating, which a person may cancel
 
 [[lifecycle.transition]]
 from = ["open"]
@@ -99,34 +100,32 @@ screen = "start"              # a transition screen: who owns it, asked as it st
 require = ["owner"]
 comment = true
 
+# the qms-capa workflow's edges are its other moves; from investigating (a move by hand) its plan agreed is this one
 [[lifecycle.transition]]
 from = ["open", "investigating"]
 to = "actions"
 by = "workflow"
+fields = ["root_cause", "plan"]   # the investigation's answers, as its task is done
 require = ["root_cause", "plan"]
 label = "Plan agreed"
 
 [[lifecycle.transition]]
-from = ["actions"]
+from = ["further-action", "actions"]
 to = "investigating"
 by = "workflow"            # its run was cancelled: the plan is reopened (a quality manager may start it again, or cancel it)
 label = "Back to investigating"
 
 [[lifecycle.transition]]
-from = ["actions"]
-to = "verification"
-by = "workflow"
+from = ["verification"]
+to = "further-action"
+by = "workflow"            # its verification was cancelled (the not-effective edge makes this move too)
+label = "Back to further action"
 
 [[lifecycle.transition]]
 from = ["verification"]
 to = "actions"
-by = "workflow"
+by = "workflow"            # a pass walked by the workflow's first version, before further action was a state of its own
 label = "Not effective: more action"
-
-[[lifecycle.transition]]
-from = ["verification"]
-to = "closed"
-by = "workflow"
 
 [[lifecycle.transition]]
 from = ["open", "investigating"]   # once actions are under way, its workflow finishes or a quality manager cancels the run

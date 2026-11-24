@@ -6,7 +6,8 @@ commercial messages to them."""
 record = "Person"
 
 # A scheduled companion: a contact has no lifecycle (Person is no workflow's record to walk), so this sweep starts on
-# its schedule, writes only consent fields and moves no state.
+# its schedule and writes only consent fields. Written as states and edges (practicehub/states.py): with no state field
+# on a contact, the run keeps where it is itself and moves nothing on the record.
 
 [trigger]
 schedule = "daily 07:00"
@@ -15,24 +16,31 @@ where = """record.consent == 'implied' and record.consent_date != null and recor
 and record.consent_date + 2y > run.today and record.consent_date + 2y <= run.today + 30d
 and record.consent_flagged != record.consent_date"""
 
-[[steps]]
+[start]
+to = "to-renew"
+label = "Flagged"
+
+[[start.do]]
 id = "flag"
 title = "Flag the contact"
-kind = "automation"
 action = "record.update"
-[steps.params]
+[start.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[start.do.params.set]
 consent_flagged = "{{record.consent_date}}"
 consent_flag = "implied consent lapses {{record.consent_date + 2y}}"
 
-[[steps]]
+[[state]]
+id = "to-renew"
+label = "To renew"
+tone = "attention"
+
+[[state.work]]
 id = "renew"
 title = "Renew consent, or let it lapse"
 kind = "task"
 role = "relationship-manager"
 assign_to = "{{record.account_owner}}"
-after = ["flag"]
 persons_only = true
 due = "30d"
 escalate_to = "relationship-manager"
@@ -40,44 +48,75 @@ context = ["record:directory"]
 instructions = """This contact's implied consent to commercial messages lapses in under 30 days, two years after it
 was given. Ask them for express consent and record how they gave it, or note a new business dealing that implies it
 afresh (its date and what it was), or let it lapse: after that, the hub sends them no commercial message."""
-[[steps.fields]]
-name = "outcome"
-type = "choice"
-choices = ["express", "implied", "lapse"]
-required = true
-help = "express: they said yes; implied: a new dealing renews it; lapse: let it lapse"
-[[steps.fields]]
+[[state.work.fields]]
 name = "date"
 label = "Given on"
 type = "date"
-[[steps.fields]]
+help = "express or implied: when it was given"
+[[state.work.fields]]
 name = "source"
 label = "How it was given"
 type = "string"
 
-[[steps]]
+[[edge]]
+id = "express"
+label = "Express: they said yes"
+from = "to-renew"
+to = "renewed"
+
+[[edge.do]]
 id = "record-consent"
 title = "Record the consent"
-kind = "automation"
-after = ["renew"]
-when = "renew.outcome in ['express', 'implied'] and renew.date != null and renew.source != null"
+when = "renew.date != null and renew.source != null"
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
-consent = "{{renew.outcome}}"
+[edge.do.params.set]
+consent = "express"
 consent_date = "{{renew.date}}"
 consent_source = "{{renew.source}}"
 consent_flag = ""
 
-[[steps]]
+[[edge]]
+id = "implied"
+label = "Implied: a new dealing renews it"
+from = "to-renew"
+to = "renewed"
+
+[[edge.do]]
+id = "record-implied"
+title = "Record the renewed implied consent"
+when = "renew.date != null and renew.source != null"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+consent = "implied"
+consent_date = "{{renew.date}}"
+consent_source = "{{renew.source}}"
+consent_flag = ""
+
+[[edge]]
+id = "lapse"
+label = "Let it lapse"
+from = "to-renew"
+to = "lapsing"
+
+[[edge.do]]
 id = "lapse"
 title = "Note that it will lapse"
-kind = "automation"
-after = ["renew"]
-when = "renew.outcome == 'lapse'"
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 consent_flag = "implied consent lapses {{record.consent_date + 2y}}: not renewed"
+
+[[state]]
+id = "renewed"
+label = "Renewed"
+tone = "done"
+
+[[state]]
+id = "lapsing"
+label = "Left to lapse"
+tone = "done"

@@ -266,9 +266,11 @@ EXTENDS = {"types": "type", "views": "view", "workflows": "workflow"}
 
 def _extensions(d: Path) -> dict:
     """``extends/types/<Type>.toml``, ``extends/views/<view>.toml`` and ``extends/workflows/<id>.toml``: fields,
-    signatures, lifecycle moves, columns, widgets or workflow steps (``[[steps]]`` only) a module adds to a definition
-    another part of the practice owns. A practice changes or removes what others own through change control. Only additions: every value is
-    a list of tables (``[[field]]``, ``[[lifecycle.transition]]``), appended to what the practice has."""
+    signatures, lifecycle moves, columns, widgets, or a workflow's states and edges (``[[state]]``, ``[[edge]]``; work
+    on a state it has, ``[[state]] state = "<id>"`` with ``[[state.work]]``; automations on an edge it has,
+    ``[[edge]] edge = "<id>"`` with ``[[edge.do]]``: ``practicehub/states.py``) a module adds to a definition another
+    part of the practice owns. A practice changes or removes what others own through change control. Only additions:
+    every value is a list of tables (``[[field]]``, ``[[lifecycle.transition]]``), appended to what the practice has."""
     out = {}
     for sub, kind in EXTENDS.items():
         for p in sorted((d / "extends" / sub).glob("*.toml")) if (d / "extends" / sub).is_dir() else []:
@@ -279,10 +281,10 @@ def _extensions(d: Path) -> dict:
             bad = [k for k, v in doc.items()
                    if not (additions(v) or (isinstance(v, dict) and v and all(additions(x) for x in v.values())))]
             if kind == "workflow":
-                bad += [k for k in doc if k != "steps" and k not in bad]
+                bad += [k for k in doc if k not in ("state", "edge") and k not in bad]
             if bad:
-                raise ValueError(f"extends/{sub}/{p.name}: only adds lists of tables ([[field]], [[steps]], "
-                                 f"[[lifecycle.transition]]...), not {', '.join(bad)}")
+                raise ValueError(f"extends/{sub}/{p.name}: only adds lists of tables ([[field]], [[state]], "
+                                 f"[[edge]], [[lifecycle.transition]]...), not {', '.join(bad)}")
             out[(kind, p.stem)] = src
     return out
 

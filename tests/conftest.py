@@ -314,6 +314,13 @@ def M(hub, mid):
     return hub.member(mid)
 
 
+def stored_workflow(hub, source: str, note: str) -> int:
+    """A workflow version approved and kept before the current rules (the old step form, say): put in force as it was
+    stored, not proposed (a proposal gets every rule of today), so runs pinned to it still walk as they did."""
+    wid = source.split('"')[1]
+    return hub._put_version(M(hub, "rana"), "workflow", wid, source, note, "", None, "workflow.approved")
+
+
 def run_of(hub, workflow_id):
     runs = [r for r in hub.engine.runs() if r["workflow_id"] == workflow_id]
     assert runs, f"no {workflow_id} run"
@@ -328,11 +335,28 @@ def visit_run(hub):
     return runs[-1]
 
 
+def claim_run(hub, run):
+    """The visit's charge (a ChargeItem the signed visit made) and its visit-claim run: billing works on it."""
+    ref = hub.engine.run(run["id"])["record"]
+    kids = [k for k in hub.engine.children_of(ref) if k["ref"].startswith("ChargeItem/")]
+    assert kids and kids[-1]["run"], f"no charge for {ref}"
+    return kids[-1]["run"]
+
+
 def item_for(hub, run, step_id, status=("open", "claimed")):
     row = hub.db.items.find_one({"run_id": run["id"], "step_id": step_id, "kind": {"$ne": "notice"},
                                  "status": {"$in": list(status)}}, sort="n")
     assert row, f"no open item for {step_id}"
     return row["id"]
+
+
+def follow_up_run(hub, run):
+    """The follow-up (a Task, walked by patient-follow-up) a lab result's review asked for: its run."""
+    ref = hub.engine.run(run["id"])["record"]
+    tasks = [t for t in hub.records.search("Task", limit=None) if (t.get("focus") or {}).get("reference") == ref]
+    assert tasks, f"no follow-up for {ref}"
+    (fu,) = hub.engine.runs(record=f"Task/{tasks[-1]['id']}")[:1]
+    return fu
 
 
 def pytest_collection_modifyitems(config, items):

@@ -7,140 +7,220 @@ document's status is where this work is."""
 record = "Document"
 
 # The Document type names this workflow: making a document starts it, and the document's status is its position.
-# A revision is one run: returned or revised, the run ends and the next one walks the next revision (the hub starts
-# it, since a workflow has no loops), and who wrote a revision never approves it. Nothing else starts it.
+# Written as the document's states and the edges between them (practicehub/states.py), listed in the order a revision
+# goes through them. A revision is one run: an edge back to an earlier state (returned, revised, sent back for review,
+# kept) ends the run there, and the next one walks the next revision, knowing who wrote it; who wrote a revision never
+# approves it. Each run is walked from where the document is when it starts. Nothing else starts it. The periodic
+# review (dms-periodic-review) never moves the status: choosing revise there sets revise_asked, and this opens it.
 
-[[steps]]
-id = "opened"
-title = "Taken under control"
-kind = "wait"
-until = "true"   # done as the run starts: a revision may start in draft, in review, in force or proposed obsolete
-instructions = "Each revision is walked from where the document is when its run starts."
+[start]
+to = "draft"
+label = "Taken under control"
 
-[[steps]]
+# a revision may start in review (a CAPA sent it back), in force, or proposed obsolete: it is walked from there
+[[start.do]]
+id = "from-in-review"
+title = "Walk it from review"
+when = "record.status == 'in-review'"
+to = "in-review"
+
+[[start.do]]
+id = "from-approved"
+title = "Walk it from in force"
+when = "record.status == 'approved'"
+to = "approved"
+
+[[start.do]]
+id = "from-retiring"
+title = "Walk it from proposed obsolete"
+when = "record.status == 'retiring'"
+to = "retiring"
+
+[[state]]
+id = "draft"
+label = "Draft"
+tone = "active"
+
+[[state.work]]
 id = "revise"
 title = "Write the revision and send it for review"
 kind = "task"
-after = ["opened"]
 role = "document-author"
 assign_to = "{{record.owner}}"   # the document's owner writes its revisions; anyone with the role when it has none
-when = "record.status == 'draft'"
-state = "in-review"
-moves = ["in-review", "retiring"]   # sent for review on its page (that does this step), or proposed obsolete
+when = "record.status == 'draft'"  # proposed obsolete while it is written, the task is withdrawn
+moves = ["in-review", "retiring"]   # sent for review on its page (that does this task), or proposed obsolete
 due = "14d"
 escalate_to = "document-controller"
 context = ["record:documents"]
-instructions = """Write or revise the document, then send it for review (here, or on its page). If it was returned,
-the reason is on the document: Returned because. Whoever writes this revision cannot approve it."""
-[[steps.fields]]
+instructions = """Write or revise the document, then send it for review (here, or on its page). An OpenDocument file
+opens in the browser to edit (Edit together, beside the file on its page; New document makes a blank one); or attach
+a new file. If it was returned, the reason is on the document: Returned because. Whoever writes this revision cannot
+approve it."""
+[[state.work.fields]]
 name = "note"
 label = "What changed"
 type = "text"
 help = "for the reviewer, optional: sending it for review on its page does this step too"
 
-[[steps]]
+[[edge]]
+id = "send"
+label = "Send for review"
+from = "draft"
+to = "in-review"
+
+[[state]]
+id = "in-review"
+label = "In review"
+tone = "attention"
+
+[[state.work]]
 id = "approve"
 title = "Approve the document for use"
 kind = "gate"
-after = ["opened", "revise"]   # or a run that starts with it already in review
-when = "record.status == 'in-review'"
 role = "document-controller"
 signer = "person"
 not_by = ["record.editors"]   # an author never approves their own document
 meaning = "I approve this document for use"
 meanings = { return = "I return this document to its author unapproved" }
-outcomes = ["approve", "return"]
 context = ["record:documents"]
 due = "3d"
 escalate_to = "document-controller"
 instructions = """Read the document in full: what you sign is the text shown here, at this revision. Approve it for use,
 or return it to its author with what to change (your comment is written on the document as the reason)."""
 
-[[steps]]
+[[edge]]
+id = "approve"
+label = "Approve"
+from = "in-review"
+to = "approved"
+
+[[edge.do]]
 id = "publish"
 title = "Publish the approved document"
-kind = "automation"
-after = ["approve"]
-when = "approve.outcome == 'approve'"
 action = "record.update"
-state = "approved"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 effective = "{{run.today}}"
+review_by = "{{run.today + 1y}}"
 returned_because = ""
+revise_asked = false
 
-[[steps]]
+[[edge]]
 id = "return"
-title = "Return it to the author, saying why"
-kind = "automation"
-after = ["approve"]
-when = "approve.outcome == 'return'"
+label = "Return to the author"
+from = "in-review"
+to = "draft"                  # the next revision is the next run's
+
+[[edge.do]]
+id = "returned"
+title = "Write why it was returned on the document"
 action = "record.update"
-state = "draft"   # the next revision is the next run's
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 returned_because = "{{approve.comment}}"
 
-[[steps]]
+[[state]]
+id = "approved"
+label = "Approved"
+tone = "done"
+
+[[state.work]]
 id = "in-force"
 title = "In force until revised or made obsolete"
 kind = "wait"
-after = ["opened", "revise", "publish"]   # or a run that starts with it in force
-when = "record.status == 'approved'"
-until = "record.status != 'approved'"   # revised, sent back for review (a CAPA), or proposed obsolete
+until = "record.status != 'approved' or record.revise_asked == true"   # revised, sent back (a CAPA), proposed obsolete, or its review asks
 instructions = """The approved revision is in force: staff read it and sign that they understood it. Revising it
 starts the next revision; the one in force stays in use until that is approved."""
 
-[[steps]]
-id = "next-revision"
-title = "Number the new revision"
-kind = "automation"
-after = ["in-force"]
-when = "record.status == 'draft' and approve.outcome != 'return'"   # revised after it was approved (by a person, a CAPA or a change order), not returned
+[[edge]]
+id = "revision-asked"
+label = "Open the revision its review asked for"
+from = "approved"
+to = "draft"                  # the next revision is the next run's
+when = "record.status == 'approved' and record.revise_asked == true"   # still in force: its periodic review asked
+
+[[edge.do]]
+id = "open-revision"
+title = "Open the revision its periodic review asked for"
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
 increment = ["revision"]
+[edge.do.params.set]
+revise_asked = false
 
-[[steps]]
+[[edge]]
+id = "revised"
+label = "Revise"
+from = "approved"
+to = "draft"                  # by a person, a CAPA or a change order: the next revision is the next run's
+when = "record.status == 'draft'"
+
+[[edge.do]]
+id = "next-revision"
+title = "Number the new revision"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+increment = ["revision"]
+[edge.do.params.set]
+revise_asked = false          # revised by hand while its review asked for it: that is the revision it asked for
+
+[[edge]]
+id = "sent-back"
+label = "Send back for review"
+from = "approved"
+to = "in-review"              # a CAPA sends an approved document straight back for review: the next run reviews it
+when = "record.status == 'in-review'"
+
+[[edge]]
+id = "proposed-obsolete"
+label = "Propose making it obsolete"
+from = "approved"
+to = "retiring"
+when = "record.status == 'retiring'"
+
+[[state]]
+id = "retiring"
+label = "Proposed obsolete"
+tone = "attention"
+
+[[state.work]]
 id = "retire"
 title = "Decide whether to make the document obsolete"
 kind = "gate"
-after = ["opened", "revise", "in-force"]
-when = "record.status == 'retiring'"
 role = "document-controller"
 signer = "person"
 meaning = "I make this document obsolete"
 meanings = { keep = "I keep this document under control" }
-outcomes = ["obsolete", "keep"]
 context = ["record:documents"]
 due = "5d"
 escalate_to = "document-controller"
 instructions = """Someone proposed making this document obsolete; their reason is on it. Made obsolete, staff no
 longer read or follow it and nothing revises it again. Kept, it goes back to where it was."""
 
-[[steps]]
+[[edge]]
 id = "obsolete"
-title = "Make it obsolete"
-kind = "automation"
-after = ["retire"]
-when = "retire.outcome == 'obsolete'"
-state = "obsolete"
+label = "Make obsolete"
+from = "retiring"
+to = "obsolete"
 
-[[steps]]
+[[edge]]
+id = "keep"
+label = "Keep it"
+from = "retiring"
+to = "approved"               # proposed while in force: back in force, and the next run walks it
+
+# Proposed while it was being written, the writing run ended there and this run started here: it goes back to draft.
+[[edge.do]]
 id = "keep-draft"
 title = "Keep the draft"
-kind = "automation"
-after = ["retire"]
-when = "retire.outcome == 'keep' and revise.withdrawn == true"   # proposed while it was being written
-state = "draft"
+when = "run.start_state == 'retiring'"
+to = "draft"
 
-[[steps]]
-id = "keep-in-force"
-title = "Keep it in force"
-kind = "automation"
-after = ["retire"]
-when = "retire.outcome == 'keep' and revise.withdrawn != true"
-state = "approved"
+[[state]]
+id = "obsolete"
+label = "Obsolete"
+tone = "done"

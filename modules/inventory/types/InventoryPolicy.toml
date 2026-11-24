@@ -1,0 +1,132 @@
+# How much control the practice's stock is under: basic (a corner store: nothing is signed), tracked (a small clinic:
+# adjustments, write-offs and releases are signed) or regulated (ISO 13485 / 21 CFR 820: parts and suppliers are
+# approved, deliveries inspected and released, held stock leaves only by a nonconformance). A switch left empty takes
+# its level's setting; one set may be stricter than the level, never looser. With no policy signed, basic holds.
+id = "InventoryPolicy"
+label = "Inventory policy"
+plural = "Inventory policies"
+data_class = "inventory"
+title = "Inventory policy: {level}"
+flag = "status"
+order = 45
+workflow = { id = "inventory-policy", when = "record.status in ['draft', 'in-review']" }
+summary = "The control level stock is kept under, and who signs what."
+
+[[field]]
+name = "level"
+type = "choice"
+choices = ["basic", "tracked", "regulated"]
+required = true
+
+[[field]]
+name = "signoff"
+label = "Sign-off"
+type = "choice"
+choices = ["none", "self", "second"]
+help = "for adjustments, write-offs, returns, releases and counts beyond tolerance: none, the author may sign (self), or someone else (second)"
+
+[[field]]
+name = "part_approval"
+label = "Parts approved before use"
+type = "boolean"
+
+[[field]]
+name = "po_required"
+label = "Receive only against a purchase order"
+type = "boolean"
+
+[[field]]
+name = "approved_suppliers_only"
+label = "Approved suppliers only"
+type = "boolean"
+
+[[field]]
+name = "inspection"
+label = "Deliveries inspected and released"
+type = "boolean"
+
+[[field]]
+name = "nc_required"
+label = "Held stock leaves only by a nonconformance"
+type = "boolean"
+
+[[field]]
+name = "fefo"
+label = "First expiry, first out"
+type = "choice"
+choices = ["off", "suggest", "enforce"]
+
+[[field]]
+name = "count_tolerance_pct"
+label = "Count tolerance (%)"
+type = "number"
+min = 0
+help = "how far counts may move a lot from what was last signed for before a count needs a signature"
+
+[[field]]
+name = "over_receipt_pct"
+label = "Over-receipt tolerance (%)"
+type = "number"
+min = 0
+
+[[field]]
+name = "default_tracking"
+label = "New parts are tracked by"
+type = "choice"
+choices = ["none", "lot", "serial"]
+
+[[field]]
+name = "reason"
+type = "text"
+help = "why the practice keeps stock under this level"
+
+[[field]]
+name = "return_reason"
+label = "Why it was sent back"
+type = "text"
+by = "workflow"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "in-review", "in-force", "retired"]
+labels = { draft = "Draft", in-review = "In review", in-force = "In force", retired = "Retired" }
+
+[lifecycle]
+field = "status"
+initial = "draft"
+in_use = "in-force"
+locked = ["in-review", "in-force", "retired"]
+abandoned = { "in-review" = "draft" }
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "in-review"
+label = "Submit for signing"
+
+# Putting it in force and sending it back are the inventory-policy workflow's edges; only the moves people make by
+# hand, where cancelled work leaves it, and its retiring (by the next policy's run) are listed here.
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "draft"
+by = "workflow"            # only when its signing is cancelled part way
+label = "Back to its author"
+
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "in-force"
+by = "workflow"            # the in-force edge; said here too so the type knows a revision goes back in force (in_use)
+label = "Put in force"
+
+[[lifecycle.transition]]
+from = ["in-force"]
+to = "draft"
+label = "Revise"
+comment = true
+
+[[lifecycle.transition]]
+from = ["in-force"]
+to = "retired"
+by = "workflow"
+label = "Retired"

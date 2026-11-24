@@ -11,8 +11,9 @@ part_of = "subject"
 order = 80
 summary = "A referral to a specialist (or a requisition), signed by the referring physician."
 # A referral being written (a draft order) is walked by its own workflow from asked for to the specialist's report:
-# its status is where that work is. Asked for on the chart or written at a visit (the visit makes it), either way the
-# referral starts its workflow when it is made; one the physician files as already sent (active) starts none.
+# its stage is where that work is (its FHIR status, the standard's few words for it, is set on the way). Asked for on
+# the chart or written at a visit (the visit makes it), either way the referral starts its workflow when it is made;
+# one the physician files as already sent (active), or a lab order, starts none.
 workflow = { id = "referral", when = "record.status == 'draft' and record.intent == 'order'" }
 
 # Links a person makes by hand on the referral's page: the chart items sent with the letter, and the specialist's
@@ -32,11 +33,22 @@ many = false
 help = "the report the specialist sent back, filed on the chart"
 back = "Report for a referral"
 
+# The FHIR status: set by the referral workflow as it goes (active once signed and sent, completed with the report,
+# revoked when not sent or declined); a person puts a sent referral on hold, resumes it, or marks it entered in error.
 [[field]]
 name = "status"
 type = "choice"
 choices = ["draft", "active", "on-hold", "revoked", "completed", "entered-in-error", "unknown"]
+labels = { draft = "Being written", active = "Sent", on-hold = "On hold", completed = "Report received", revoked = "Cancelled", entered-in-error = "Entered in error" }
 required = true
+
+[[field]]
+name = "stage"
+label = "Stage"
+type = "choice"
+choices = ["filed", "drafting", "finalizing", "signing", "sent", "booked", "declined", "report-received", "cancelled"]
+labels = { filed = "Filed", drafting = "Being written", finalizing = "Letter to finalize", signing = "To sign", sent = "Sent", booked = "Booked with the specialist", declined = "Declined by the specialist", report-received = "Report received", cancelled = "Cancelled" }
+help = "where the referral's work is"
 
 [[field]]
 name = "intent"
@@ -156,42 +168,21 @@ type = "text"
 [[screen]]
 id = "referral"
 on = ["create"]
-fields = ["subject", "referral_to", "specialist", "priority", "intent", "reason_text", "requester", "authoredOn",
+fields = ["subject", "status", "referral_to", "specialist", "priority", "intent", "reason_text", "requester", "authoredOn",
           "encounter", "note_text"]
 
-# The referral workflow moves it: signed and sent (active), the specialist's report filed (completed), or closed unsent
-# or declined (revoked). Its work cancelled, a referral not yet sent is revoked; one already sent stays sent (the
+# Its stages and the moves between them are the referral workflow's (written as states and edges), not listed here.
+# Filed is where a referral (or a lab order) starts; its workflow starts only for a draft order. Its work cancelled, a
+# referral not yet sent is cancelled (the workflow's on_cancel revokes its status); one already sent stays sent (the
 # specialist has it). A run of an older version ending leaves it where it is.
 [lifecycle]
-field = "status"
-initial = "draft"
-labels = { draft = "Being written", active = "Sent", on-hold = "On hold", completed = "Report received", revoked = "Cancelled", entered-in-error = "Entered in error" }
-abandoned = { draft = "revoked" }
-# Sent is under way (the specialist or the lab has it), not done: done is the report received.
-tones = { draft = "active", active = "active", "on-hold" = "waiting", completed = "done", revoked = "ended", "entered-in-error" = "ended" }
+field = "stage"
+initial = "filed"
+labels = { filed = "Filed", drafting = "Being written", finalizing = "Letter to finalize", signing = "To sign", sent = "Sent", booked = "Booked with the specialist", declined = "Declined by the specialist", report-received = "Report received", cancelled = "Cancelled" }
+abandoned = { drafting = "cancelled", finalizing = "cancelled", signing = "cancelled" }
+tones = { filed = "waiting", drafting = "active", finalizing = "active", signing = "attention", sent = "waiting", booked = "waiting", declined = "attention", report-received = "done", cancelled = "ended" }
 [[lifecycle.transition]]
-from = ["draft"]
-to = "active"
-by = "workflow"
-label = "Signed and sent"
-[[lifecycle.transition]]
-from = ["active", "on-hold"]
-to = "completed"
-by = "workflow"
-label = "Report received"
-[[lifecycle.transition]]
-from = ["active"]
-to = "on-hold"
-label = "Put on hold"
-[[lifecycle.transition]]
-from = ["on-hold"]
-to = "active"
-label = "Resumed"
-[[lifecycle.transition]]
-from = ["draft", "active", "on-hold"]
-to = "revoked"
+from = ["drafting", "finalizing", "signing"]
+to = "cancelled"
 by = "workflow"
 label = "Cancelled"
-[[lifecycle.transition]]
-from = ["*"]
-to = "entered-in-error"

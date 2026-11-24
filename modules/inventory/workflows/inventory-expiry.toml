@@ -1,0 +1,22 @@
+id = "inventory-expiry"
+title = "Hold stock past its expiry"
+summary = """Each morning, a lot still available after its expiry date is held where it stands, by a posted hold
+move, so it is never issued. What becomes of it is then a signed write-off, or a return to its supplier."""
+record = "StockItem"
+
+# A sweep, started by the clock: a lot has no workflow and no lifecycle of its own, and only a posted move changes it.
+# Its [start] has automations and no state to enter, so the run ends once they have run. The hold is free and
+# immediate at every level, as a person's hold is.
+
+[trigger]
+schedule = "daily 06:00"
+for_each = "StockItem"
+where = "record.status == 'available' and record.expiry != null and record.expiry < run.today"
+
+[start]
+label = "Past its expiry"
+
+[[start.do]]
+id = "hold"
+title = "Hold the expired lot"
+action = "inventory.expire"

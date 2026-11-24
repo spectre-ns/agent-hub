@@ -290,10 +290,16 @@ most 20,000 runs of the period and says so when there were more.
 
 A module adds record types, views, workflows and roles to any practice, without the core knowing what it is for. One
 policy owner reviews a module's code and another installs it (`practicehub module review --as rana wiki`, then
-`practicehub module install --as dr-amara wiki`, or from the Modules page). Five ship in `modules/`:
+`practicehub module install --as dr-amara wiki`, or from the Modules page). These ship in `modules/`:
 
-- **dms**, document control: controlled documents, a signed review before one is used, and read-and-understood
-  signatures.
+- **dms**, document control: every controlled document (policies, SOPs, forms).
+  - **Its text is its file:** an OpenDocument file (.odt, .ods, .odp) is written together in Collabora Online while the
+    document is a draft, and opens read-only once it is sent for review (see Office documents). A PDF is kept as filed.
+  - **Its status is its workflow's:** each revision is walked from draft to in review to approved by `dms-review`. A
+    document controller who did not write it signs the approval, or returns it with the reason. Revising an approved
+    document numbers the next revision; making it obsolete is a controller's signed decision.
+  - **Periodic review:** a year after approval, `dms-periodic-review` asks its owner to sign that it is still right
+    or to ask for a revision, which the document's own workflow opens. Staff sign that they have read it.
 - **qms**, quality: corrective and preventive actions that send the documents they change back for review. It needs
   dms.
 - **plm**, product lifecycle: products at revisions, what each is made of, and the controlled documents that
@@ -311,27 +317,56 @@ policy owner reviews a module's code and another installs it (`practicehub modul
   - **Who:** everyone reads the wiki; the wiki-editor role writes in it.
   - **Checks:** a page anyone flags as out of date waits for a wiki owner, who signs that it is current or archives
     it.
+  - **Not controlled:** nothing in the wiki is approved or released. A page that must be becomes a controlled document
+    through wiki-sop.
+- **wiki-sop**: makes a wiki page a controlled document. A document author starts **Make a controlled document** on
+  the page and gives it a number. A PDF of the page as it is then (standard library, base-14 fonts: Latin-1 text) is
+  filed in document control as a new draft that links back to the page, and `dms-review` walks it from there. The
+  page is not changed. It needs dms and wiki.
 
-- **inventory**: stock items, the storage locations that hold them (a tree: site, room, cupboard or fridge), and
-  stock moves.
-  - **On hand:** only a posted stock move changes it (`by = "workflow"` on the field), so every count has a history.
-  - **Receive and issue:** these post at once. An issue for more than is on hand is rejected, never taken below zero.
-  - **Adjust and count:** an inventory manager signs these off first, and never the person who wrote the move.
-  - **Reorder:** an item that falls to its reorder point is marked low, and a purchaser is asked to order it. It
-    shows as on order until a delivery is received.
+- **inventory** (after InvenTree): parts, the lots that hold them (stock items, with lot, serial and expiry), the
+  storage locations they are kept in (a tree: site, room, cupboard or fridge), and the ledger of stock moves. It
+  installs alone.
+  - **The ledger:** a lot changes only when a stock move posts, and nobody writes a lot by hand. The move keeps each
+    lot it changed, before and after, so a lot's quantity is always the sum of its posted moves.
+  - **Check, sign, post:** submitting a move checks it first. One that is refused (more than is there, expired
+    stock, a location that only groups others) goes back to its author with the reason. A signature covers only the
+    stock it was checked against: if the lot changed in the meantime, the move goes back too.
+  - **Control levels:** a signed inventory policy sets how much is signed. With none signed, the hub runs at basic.
+    - **basic** (a corner store): nothing is signed.
+    - **tracked** (a small clinic): adjustments, write-offs, returns, releases and counts beyond tolerance are
+      signed by an inventory manager other than the writer, or by the writer when the policy says so.
+    - **regulated** (ISO 13485): always a second person; parts are approved before use, and the first lot to expire
+      is issued first.
+    - **Changing it:** a switch may be set stricter than its level, never looser. A change that loosens a control
+      the practice signs with a second person is signed by someone other than its author.
+  - **Holds:** a hold is free and immediate. Holding part of a lot splits off a child lot with the same lot number,
+    and only a release (signed, from tracked up) frees it.
+  - **Counts:** a count's tolerance is measured against the lot's last signed baseline, so small counts cannot
+    drain a lot unsigned.
+  - **Parts:** each code is unique. When the policy asks for part approval, someone with the stock quality role,
+    other than the writer, approves each revision.
 
-Each module, and the practice pack, names its **shortcuts** (`shortcuts = ["StockItem", "StockMove"]` in
+Each module, and the practice pack, names its **shortcuts** (`shortcuts = ["Part", "StockMove"]` in
 `[module]`, or in `[practice]`). These are the record types people work in most, listed in the sidebar and first in
 Start work. An entry `"start:<workflow>"` puts that workflow on the top bar as a button: the clinic pack's
 appointment request is one.
 
-Inventory rests on three core rules:
+These core rules came with inventory, and any module can use them:
 
 - **Workflow-only fields:** a field with `by = "workflow"` is changed only by a workflow, never by a person, and forms
   leave it out.
-- **Amounts:** `increment` and `decrement` in `record.update` take amounts, such as
-  `on_hand = "{{record.quantity}}"`.
+- **Amounts:** `increment` and `decrement` in `record.update` take amounts, such as `revision = 1` or
+  `count = "{{record.quantity}}"`.
 - **One reference:** `for_each` also takes a single reference.
+- **Unique keys** (`unique = ["code", ["part", "serial"]]` on a record type): no two records share a key. A key is one
+  field, or several that are unique together, such as a serial within its part.
+  - **When checked:** when a record is written with every field of the key filled in, whoever writes it: a person,
+    a workflow or an import. A record that leaves one empty, such as an untracked part with no serial, shares
+    nothing.
+  - **Comparison:** text is compared the way a search compares it, so "GL-M" and " gl-m" are the same code.
+  - **Older records:** on a change, the key is checked only if it changed. Two records that already shared a key
+    before the type said unique can still be edited.
 
 The wiki rests on three core features that any module can use:
 
@@ -353,7 +388,7 @@ The wiki rests on three core features that any module can use:
     links to its practitioner, and the patient's page shows its visits from the other side.
 - **Links written in the text**: they become links like a reference field's, including links to a page created after
   the text that named it.
-- **Trees of several types:** a parent field may point at more than one type (`target = ["WikiPage", "Procedure"]`).
+- **Trees of several types:** a parent field may point at more than one type (`target = ["Folder", "Page"]`).
   The types are then one tree, with one navigator, and the page of each says what kind of record its children are.
 
 ### Writing together
@@ -399,7 +434,7 @@ agent the wiki's `wiki-reader` role to let it answer there. The track has `menti
 `mention.answered` and `suggestion.proposed`/`accepted`/`rejected`. An agent never releases a SOP (the release is a
 person's signature) and never signs.
 
-### Released documents (SOPs)
+### Released documents
 
 A lifecycle with `in_use = "<state>"` keeps a record's approved revision in use while a new one is written.
 
@@ -410,8 +445,7 @@ A lifecycle with `in_use = "<state>"` keeps a record's approved revision in use 
   Its page says whether you signed it, and tells writers who has.
 - **Workflow dates:** a workflow template can count days, months and years (`{{run.today + 1y}}`,
   `{{record.effective + 30d}}`). A scheduled workflow's `where` can use `run.today`.
-- **The wiki's SOPs:** each SOP is released by an approver who did not write it, and comes back for review a year after
-  it is released.
+- **Controlled documents:** the dms module's Documents keep their approved revision in use while the next is written.
 
 ## MCP
 
@@ -454,7 +488,7 @@ practicehub/          the core: hub, engine, workflows, blocks, sandbox, backend
   agents/runner.py    an agent's loop: inbox → context → model → answer (or escalate)
   integrations/       Keycloak; Collabora (discovery, proof keys, blank documents) and its WOPI host
 packs/general-practice/  roles, data classes, grants, members, 8 workflows, 8 skills, 3 blocks, stand-in answers
-modules/              dms (document control), qms (quality), wiki
+modules/              dms (document control), qms (quality), plm, wiki, wiki-sop, inventory, crm
 tests/                rules, web (real HTTP), another practice (accounting)
 deploy/               docker compose, LiteLLM config, env example
 docs/                 workflows and packs

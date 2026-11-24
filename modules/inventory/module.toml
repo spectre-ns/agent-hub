@@ -1,50 +1,66 @@
-# Inventory: what the practice keeps on its shelves (supplies, vaccines, kits), where it is kept, and every movement in
-# or out. Stock on hand is never typed in: only a posted stock move changes it, so the count always has a history.
-# Receiving and issuing post at once; an adjustment or a count is signed off by an inventory manager first. When an
-# item falls to its reorder point, a purchaser is asked to order it.
-# It knows nothing about any one practice.
+# Inventory (after InvenTree): parts, the lots that hold them, where they are kept, and the ledger of stock moves. A
+# lot's quantity is never typed in: only a posted stock move changes it, and the move keeps what it changed, so every
+# number has its history. How much is signed is the practice's inventory policy: basic for a corner store (nothing),
+# tracked for a small clinic (adjustments, write-offs and releases), regulated for ISO 13485 (parts approved too).
+# It installs alone and knows nothing about any one practice.
 
 [module]
 requires_core = "1.0"
 id = "inventory"
 name = "Inventory"
-version = "3"
-changes = """An order task whose item is no longer low (stocked or discontinued on its page) is withdrawn."""
-summary = "Stock items, where they are kept, and the moves that receive, issue, adjust and count them."
+version = "4"
+changes = """Rebuilt on InvenTree's model: parts, lots (stock items) with lot, serial and expiry, locations with a
+purpose, and a ledger whose moves keep each lot before and after. Three control levels set by a signed inventory
+policy. Version 3's stock items and moves do not carry over: remove the module and install it again."""
+summary = "Parts, the lots that hold them, where they are kept, and the moves that receive, issue, hold and count them."
 requires = []
-shortcuts = ["StockItem", "StockMove"]
+shortcuts = ["Part", "StockMove"]
 
 [[roles]]
 id = "stock-keeper"
 name = "Stock keeper"
-description = "Receives deliveries, issues stock and counts the shelves."
+description = "Receives deliveries, issues stock, moves and counts it, and holds what should not be used."
 
 [[roles]]
 id = "purchaser"
 name = "Purchaser"
-description = "Orders stock when an item reaches its reorder point."
+description = "Orders stock when a part runs low."
 
 [[roles]]
 id = "inventory-manager"
 name = "Inventory manager"
-description = "Signs off adjustments and counts that change stock on hand. Never the one who wrote the move."
+description = "Signs adjustments, write-offs, returns, releases and counts beyond tolerance, and the inventory policy. Under a policy that asks for a second person, never the one who wrote it."
+
+[[roles]]
+id = "stock-quality"
+name = "Stock quality"
+description = "Approves parts for use (when the policy asks for it). A practice with a quality manager gives them this role."
 
 [[data_classes]]
 id = "inventory"
 name = "Inventory"
-description = "Stock items, storage locations and stock moves. No patient information."
+description = "Parts, storage locations, stock moves and the inventory policy. No patient information."
+
+[[data_classes]]
+id = "stock-ledger"
+name = "Stock ledger"
+description = "The lots: how much of each part is where. Nobody writes them; only a posted stock move does."
 
 [grants.everyone]   # everyone who works here may see what is in stock and where
-read = ["inventory"]
+read = ["inventory", "stock-ledger"]
 
 [grants.stock-keeper]
-read = ["inventory"]
+read = ["inventory", "stock-ledger"]
 write = ["inventory"]
 
 [grants.purchaser]
-read = ["inventory"]
+read = ["inventory", "stock-ledger"]
 write = ["inventory"]
 
 [grants.inventory-manager]
-read = ["inventory"]
+read = ["inventory", "stock-ledger"]
+write = ["inventory"]
+
+[grants.stock-quality]
+read = ["inventory", "stock-ledger"]
 write = ["inventory"]

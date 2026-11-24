@@ -13,7 +13,11 @@
 #
 # Modules that suit this practice (recommended, not required): crm (leads and proposals before a client signs an
 # engagement), dms (engagement letter templates, the firm's policies and procedures under document control).
-version = "1.0"
+#
+# 1.1: the engagement, T1 return, client signature and slip intake workflows are written as their records' states and
+# the edges between them (docs/workflows.md, "States and edges"), with the automations on the edges; the moves they
+# make are their edges, no longer listed on the Engagement and T1 return types. Runs open on 1.0 keep their version.
+version = "1.1"
 
 [practice]
 requires_core = "1.0"

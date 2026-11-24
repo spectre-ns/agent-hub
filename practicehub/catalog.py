@@ -96,6 +96,8 @@ class CatalogMixin:
         except DefinitionError as exc:
             self.__dict__.setdefault("broken_types", {})[tid] = str(exc)
             return None
+        if rt is not None and rt.workflow and rt.lifecycle:
+            rt = self._with_workflow_moves(rt, row)
         if rt is not None or version is not None:
             return rt
         if ever_defined():
@@ -107,6 +109,57 @@ class CatalogMixin:
         if key not in self._defs:
             self._defs[key] = schema.permissive(tid, dc, (self.pack.record_labels or {}).get(tid))
         return self._defs[key]
+
+    def _with_workflow_moves(self, rt, row: dict):
+        """A type whose workflow is written as states and edges (``practicehub/states.py``) moves as that workflow
+        says: its active version's edges are the type's moves by the workflow (each from the state it leaves to
+        every state it can land in; the entry from any state), and its states' labels and tones are the type's.
+        The type says which values its state field takes, and the moves people make by hand; the workflow, the rest."""
+        wrow = self.db.workflow_versions.find_one({"workflow_id": rt.workflow["id"], "status": "active"},
+                                                  fields=["_id", "version", "source"])
+        if not wrow or "[[edge]]" not in wrow["source"] and "[start]" not in wrow["source"]:
+            return rt
+        key = ("type+moves", row["_id"] if row else rt.id, wrow["_id"],
+               hashlib.sha256(wrow["source"].encode()).hexdigest())
+        if key in self._defs:
+            return self._defs[key]
+        try:
+            from . import workflows as wfmod
+            wf = wfmod.parse(wrow["source"], None, stored=True)
+        except Exception:  # noqa: BLE001 - an unreadable workflow is named on its own page; the type stands as written
+            self._defs[key] = rt
+            return rt
+        if not wf.shape or wf.record != rt.id:
+            self._defs[key] = rt
+            return rt
+        import copy
+        merged = copy.copy(rt)
+        lc = copy.deepcopy(rt.lifecycle)
+        states = list(lc.get("states") or [])
+        labels, tones = dict(lc.get("labels") or {}), dict(lc.get("tones") or {})
+        for st in wf.shape["states"]:
+            if st.get("label"):
+                labels[st["id"]] = st["label"]
+            if st.get("tone"):
+                tones[st["id"]] = st["tone"]
+        moves = list(lc.get("transition") or [])
+        for e in [*wf.shape["edges"], wf.shape["start"]]:  # an edge's own move first: the entry covers the rest
+            for to in e.get("lands") or []:
+                frm = [e["from"]] if e["from"] else [s for s in states if s != to]
+                if to not in states:  # a stop only the run keeps (the record's field has no value for it)
+                    continue
+                frm = [f for f in frm if f in states and f != to
+                       and not any(t["to"] == to and f in t["from"] for t in moves)]
+                if frm:
+                    moves.append({"from": frm, "to": to, "by": "workflow", "label": e["label"], "screen": None,
+                                  "fields": [], "require": [], "comment": False, "sign": None, "edge": e["id"],
+                                  **({"entry": True} if not e["from"] else {})})
+        lc.update(transition=moves, labels=labels, tones=tones,
+                  # a workflow starting on the record again (its entry) is no way back into use
+                  revising=schema.revising_states(states, [t for t in moves if not t.get("entry")], lc.get("in_use")))
+        merged.lifecycle = lc
+        self._defs[key] = merged
+        return merged
 
     def record_type_for_reading(self, tid: str) -> schema.RecordType | None:
         """The type to read a record by: the active one, else the last version before it was retired."""

@@ -1,4 +1,6 @@
-# Where stock is kept: a site, a room in it, a cupboard or fridge in the room. Locations form a tree.
+# Where stock is kept: a site, a room in it, a cupboard or fridge in the room. Locations form a tree. A location's
+# purpose says what may go in it: held stock goes only to quarantine or reject, and nothing is received there. A
+# structural one (a site, a building) only groups others and holds no stock itself.
 id = "Location"
 label = "Storage location"
 plural = "Storage locations"
@@ -27,7 +29,19 @@ help = "the room or site it is in; leave it empty for a site"
 [[field]]
 name = "kind"
 type = "choice"
-choices = ["site", "room", "cupboard", "fridge", "freezer", "cart"]
+choices = ["site", "room", "cupboard", "fridge", "freezer", "cart", "shelf"]
+
+[[field]]
+name = "purpose"
+type = "choice"
+choices = ["storage", "receiving", "quarantine", "reject"]
+help = "storage (empty means storage); receiving (deliveries waiting to be put away); quarantine (held stock, waiting for a decision); reject (stock to be written off or returned)"
+
+[[field]]
+name = "structural"
+label = "Groups other locations"
+type = "boolean"
+help = "a site or building: stock is kept in the locations inside it, never in it"
 
 [[field]]
 name = "cold_chain"

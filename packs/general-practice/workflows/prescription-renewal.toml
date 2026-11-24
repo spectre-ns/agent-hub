@@ -3,7 +3,8 @@ title = "Prescription renewal"
 record = "MedicationRequest"
 summary = """
 One renewal request, from asked for to closed: the request is a prescription proposal (draft) on the patient's chart,
-this workflow's record, and its status is where the work is. Prescribed, the same record becomes the active order
+this workflow's record. While it is worked it stays a draft, and its run says where it stops: preparing, to decide,
+not on the chart, writing, to sign. Prescribed, the same record becomes the active order
 (active); declined, or a visit booked instead, it is closed (cancelled). Nobody issues it by hand while it is walked.
 
 A patient (or their pharmacy) asks for a renewal. The clinical admin agent prepares it from the chart (the current
@@ -43,10 +44,24 @@ label = "Pharmacy"
 type = "string"
 help = "name and fax of the pharmacy"
 
-[[steps]]
+# ---------------------------------------------------------------------------------------------------------------
+# Written as the request's states (where it stops, and the work done there) and the edges between them (what the
+# person working it chose, with the automations that run on the way). See practicehub/states.py. Preparing, To
+# decide, Issuing, Not on the chart, Writing and To sign are stops FHIR's status has no value for: the run keeps
+# where it is (the request stays a draft) until an edge makes it the active order or closes it (cancelled).
+
+[start]
+to = "preparing"
+label = "Asked for"
+
+[[state]]
+id = "preparing"
+label = "Preparing"
+tone = "active"
+[[state.work]]
 id = "prepare"
-title = "Prepare the renewal"
 kind = "task"
+title = "Prepare the renewal"
 role = "clinical-assistant"
 due = "1d"
 escalate_to = "nurse"
@@ -54,179 +69,104 @@ skill = "renewal-prep"
 risk = "medium"
 context = ["record:clinical", "record:demographics", "record:visits", "input.medication"]
 
-[[steps]]
+[[edge]]
+id = "prepared"
+label = "Prepared"
+from = "preparing"
+to = "deciding"
+
+[[state]]
+id = "deciding"
+label = "To decide"
+tone = "attention"
+[[state.work]]
 id = "decide"
-title = "Decide on the renewal"
 kind = "gate"
+title = "Decide on the renewal"
 role = "physician"
 due = "2d"
 escalate_to = "medical-director"
-after = ["prepare"]
 signer = "person"
-outcomes = ["renew", "book-visit", "decline"]
 meaning = "I authorize this prescription renewal as prepared: medication, dose, quantity and repeats"
 meanings = { book-visit = "I do not renew this prescription without a visit", decline = "I decline this prescription renewal" }
 context = ["input.medication", "input.pharmacy", "prepare", "record:clinical"]
 instructions = """Check the medication, dose, quantity and repeats the assistant copied from the current order. Renew only
 if they are right; otherwise decline with a comment, or book a visit."""
 
-[[steps]]
+[[edge]]
+id = "renew"
+label = "Renew"
+from = "deciding"
+to = "issuing"
+
+[[edge]]
+id = "book-visit"
+label = "Book a visit"
+from = "deciding"
+to = "cancelled"
+[[edge.do]]
+id = "book"
+title = "Book a visit"
+action = "workflow.start"
+[edge.do.params]
+workflow = "appointment-request"
+record = "{{run.subject}}"
+[edge.do.params.input]
+reason = "Medication review ({{input.medication}})"
+urgency = "soon"
+
+[[edge.do]]
+id = "tell-patient"
+title = "Tell the patient a visit is needed"
+action = "message.send"
+[edge.do.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your renewal request"
+body = "Your physician would like to see you before renewing {{input.medication}}. We will contact you with an appointment."
+
+[[edge]]
+id = "decline"
+label = "Decline"
+from = "deciding"
+to = "cancelled"
+[[edge.do]]
+id = "tell-declined"
+title = "Tell the patient the renewal was not done"
+action = "message.send"
+[edge.do.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your renewal request"
+body = "Your physician has not renewed {{input.medication}}. Please call the office to talk about your medication."
+
+# Renewed: the patient's details for the pharmacy are looked up, and the medication is renewed only if its current
+# order is on the chart; otherwise the physician writes one.
+[[state]]
+id = "issuing"
+label = "Issuing"
+tone = "active"
+[[state.work]]
 id = "details"
-title = "Look up the patient's details for the pharmacy"
 kind = "automation"
-after = ["decide"]
-when = "decide.outcome == 'renew'"
+title = "Look up the patient's details for the pharmacy"
 action = "patient.details"
-[steps.params]
+[state.work.params]
 patient = "{{run.subject}}"
 physician = "{{decide.by}}"
 valid_days = 365
 
-[[steps]]
-id = "not-on-chart"
-title = "Write a new prescription (not on the chart)"
-kind = "task"
-role = "physician"
-due = "2d"
-escalate_to = "medical-director"
-after = ["details"]
-when = "not (prepare.found_in_chart == true and prepare.current_order != null and prepare.current_order != '')"
-persons_only = true
-context = ["input.medication", "input.pharmacy", "prepare", "record:clinical"]
-instructions = """The requested medication has no current order on the chart, so it cannot be renewed automatically.
-Choose written to write the prescription (you fill it in next and sign it as written, and it goes to the pharmacy), or
-not written and say why: the patient is told."""
-[[steps.fields]]
-name = "decision"
-label = "Prescription"
-type = "choice"
-choices = ["written", "not-written"]
-required = true
-[[steps.fields]]
-name = "notes"
-type = "text"
-required = true
-
-[[steps]]
-id = "write-rx"
-title = "Write the new prescription"
-kind = "task"
-role = "physician"
-due = "2d"
-escalate_to = "medical-director"
-after = ["not-on-chart"]
-when = "not-on-chart.decision == 'written'"
-persons_only = true
-context = ["input.medication", "input.pharmacy", "not-on-chart", "record:clinical"]
-instructions = "Write the prescription as it goes to the pharmacy. You sign it as written next."
-[[steps.fields]]
-name = "medication"
-label = "Medication"
-type = "string"
-required = true
-help = "the drug, strength and form, e.g. Ramipril 5 mg capsule"
-[[steps.fields]]
-name = "directions"
-type = "text"
-required = true
-help = "e.g. 1 capsule by mouth once daily"
-[[steps.fields]]
-name = "quantity"
-type = "number"
-required = true
-[[steps.fields]]
-name = "unit"
-type = "string"
-required = true
-help = "capsule, tablet, mL..."
-[[steps.fields]]
-name = "repeats"
-type = "number"
-required = true
-[[steps.fields]]
-name = "days_supply"
-label = "Days supply"
-type = "number"
-required = true
-
-# The prescription written here is signed as written by the physician who prescribes it: that signature, not the
-# renewal's "as prepared", covers what is issued.
-[[steps]]
-id = "sign-new"
-title = "Sign the new prescription"
-kind = "gate"
-role = "physician"
-due = "2d"
-escalate_to = "medical-director"
-after = ["write-rx"]
-signer = "person"
-outcomes = ["prescribe", "not-written"]
-meaning = "I prescribe this medication as written"
-meanings = { not-written = "I do not issue this prescription" }
-context = ["write-rx", "not-on-chart", "input.pharmacy"]
-
-[[steps]]
-id = "write-new"
-title = "Issue the new prescription"
-kind = "automation"
-after = ["sign-new"]
-when = "sign-new.outcome == 'prescribe'"
-action = "record.update"
-state = "active"
-[steps.params.set]
-intent = "order"
-authoredOn = "{{details.now}}"
-medicationCodeableConcept = { text = "{{write-rx.medication}}" }
-dosageInstruction = [{ text = "{{write-rx.directions}}" }]
-dispenseRequest = { validityPeriod = { start = "{{details.today}}", end = "{{details.valid_until}}" }, numberOfRepeatsAllowed = "{{write-rx.repeats}}", quantity = { value = "{{write-rx.quantity}}", unit = "{{write-rx.unit}}" }, expectedSupplyDuration = { value = "{{write-rx.days_supply}}", unit = "days" } }
-requester = { reference = "Practitioner/{{sign-new.by}}" }
-note = [{ text = "New prescription (not on the chart). {{not-on-chart.notes}}" }]
-
-[[steps]]
-id = "send-new-to-pharmacy"
-title = "Send the new prescription to the pharmacy"
-kind = "automation"
-after = ["write-new"]
-action = "message.send"
-[steps.params]
-channel = "fax"
-to = "{{input.pharmacy}}"
-subject = "New prescription: {{details.name}}"
-body = """New prescription from Harbourview Family Medicine.
-Patient: {{details.name}}, date of birth {{details.birth_date}}, NS health card {{details.health_card}}.
-Medication: {{write-rx.medication}}. Directions: {{write-rx.directions}}.
-Dispense: {{write-rx.quantity}} {{write-rx.unit}} ({{write-rx.days_supply}} days), {{write-rx.repeats}} repeat(s). Valid until {{details.valid_until}}.
-Signed by {{details.physician_name}} on {{details.today}}. Prescription {{run.record}}."""
-
-[[steps]]
-id = "not-written"
-title = "Close the request (no prescription written)"
-kind = "automation"
-after = ["not-on-chart", "sign-new"]
-when = "not-on-chart.decision != 'written' or sign-new.outcome == 'not-written'"
-state = "cancelled"
-
-[[steps]]
-id = "tell-not-written"
-title = "Tell the patient no prescription was written"
-kind = "automation"
-after = ["not-written"]
-action = "message.send"
-[steps.params]
-channel = "patient-portal"
-to = "{{run.subject}}"
-subject = "Your renewal request"
-body = "Your physician has not written a prescription for {{input.medication}}. Please call the office to talk about your medication."
-
-[[steps]]
+[[edge]]
+id = "on-chart"
+label = "Renewed"
+from = "issuing"
+to = "active"
+when = "prepare.found_in_chart == true and prepare.current_order != null and prepare.current_order != ''"
+[[edge.do]]
 id = "prescribe"
 title = "Write the prescription"
-kind = "automation"
-after = ["details"]
-when = "prepare.found_in_chart == true and prepare.current_order != null and prepare.current_order != ''"
 action = "record.update"
-state = "active"   # the request is the new order: the same record, now active
-[steps.params.set]
+[edge.do.params.set]
 intent = "order"
 authoredOn = "{{details.now}}"
 medicationCodeableConcept = { text = "{{prepare.medication}}" }
@@ -236,24 +176,21 @@ priorPrescription = { reference = "{{prepare.current_order}}" }
 requester = { reference = "Practitioner/{{decide.by}}" }
 note = [{ text = "Renewal of {{prepare.current_order}}. {{decide.comment}}" }]
 
-[[steps]]
+[[edge.do]]
 id = "replace-prior"
 title = "Mark the previous order completed"
-kind = "automation"
-after = ["prescribe"]
+after = ["prescribe"]   # only once the renewal is the order: the chart never shows the patient without one
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{prepare.current_order}}"
-[steps.params.set]
+[edge.do.params.set]
 status = "completed"
 
-[[steps]]
+[[edge.do]]
 id = "send-to-pharmacy"
 title = "Send to the pharmacy"
-kind = "automation"
-after = ["prescribe"]
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "fax"
 to = "{{input.pharmacy}}"
 subject = "Prescription renewal: {{details.name}}"
@@ -263,62 +200,195 @@ Medication: {{prepare.medication}}. Directions: {{prepare.dosage}}.
 Dispense: {{prepare.quantity}} {{prepare.unit}} ({{prepare.days_supply}} days), {{prepare.repeats}} repeat(s). Valid until {{details.valid_until}}.
 Authorized by {{details.physician_name}} on {{details.today}}. Prescription {{run.record}}."""
 
-[[steps]]
+[[edge.do]]
 id = "tell-prescribed"
 title = "Tell the patient the prescription went to the pharmacy"
-kind = "automation"
-after = ["send-to-pharmacy", "send-new-to-pharmacy"]
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your renewal request"
 body = "Your prescription for {{input.medication}} was sent to your pharmacy ({{input.pharmacy}})."
 
-[[steps]]
-id = "book"
-title = "Book a visit"
-kind = "automation"
-after = ["decide"]
-when = "decide.outcome == 'book-visit'"
-action = "workflow.start"
-[steps.params]
-workflow = "appointment-request"
-record = "{{run.subject}}"
-[steps.params.input]
-reason = "Medication review ({{input.medication}})"
-urgency = "soon"
+[[edge]]
+id = "not-on-chart"
+label = "Not on the chart"
+from = "issuing"
+to = "not-on-chart"
 
-[[steps]]
-id = "tell-patient"
-title = "Tell the patient a visit is needed"
-kind = "automation"
-after = ["decide"]
-when = "decide.outcome == 'book-visit'"
+[[state]]
+id = "not-on-chart"
+label = "Not on the chart"
+tone = "attention"
+[[state.work]]
+id = "not-on-chart"
+kind = "task"
+title = "Write a new prescription (not on the chart)"
+role = "physician"
+due = "2d"
+escalate_to = "medical-director"
+persons_only = true
+context = ["input.medication", "input.pharmacy", "prepare", "record:clinical"]
+instructions = """The requested medication has no current order on the chart, so it cannot be renewed automatically.
+Choose Write it to write the prescription (you fill it in next and sign it as written, and it goes to the pharmacy),
+or Not written and say why: the patient is told."""
+[[state.work.fields]]
+name = "notes"
+type = "text"
+required = true
+
+[[edge]]
+id = "write-it"
+label = "Write it"
+from = "not-on-chart"
+to = "writing"
+
+[[edge]]
+id = "not-writing"
+label = "Not written"
+from = "not-on-chart"
+to = "cancelled"
+[[edge.do]]
+id = "tell-not-written"
+title = "Tell the patient no prescription was written"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your renewal request"
-body = "Your physician would like to see you before renewing {{input.medication}}. We will contact you with an appointment."
+body = "Your physician has not written a prescription for {{input.medication}}. Please call the office to talk about your medication."
 
-[[steps]]
-id = "tell-declined"
-title = "Tell the patient the renewal was not done"
-kind = "automation"
-after = ["decide"]
-when = "decide.outcome == 'decline'"
+[[state]]
+id = "writing"
+label = "Writing"
+tone = "active"
+[[state.work]]
+id = "write-rx"
+kind = "task"
+title = "Write the new prescription"
+role = "physician"
+due = "2d"
+escalate_to = "medical-director"
+persons_only = true
+context = ["input.medication", "input.pharmacy", "not-on-chart", "record:clinical"]
+instructions = "Write the prescription as it goes to the pharmacy. You sign it as written next."
+[[state.work.fields]]
+name = "medication"
+label = "Medication"
+type = "string"
+required = true
+help = "the drug, strength and form, e.g. Ramipril 5 mg capsule"
+[[state.work.fields]]
+name = "directions"
+type = "text"
+required = true
+help = "e.g. 1 capsule by mouth once daily"
+[[state.work.fields]]
+name = "quantity"
+type = "number"
+required = true
+[[state.work.fields]]
+name = "unit"
+type = "string"
+required = true
+help = "capsule, tablet, mL..."
+[[state.work.fields]]
+name = "repeats"
+type = "number"
+required = true
+[[state.work.fields]]
+name = "days_supply"
+label = "Days supply"
+type = "number"
+required = true
+
+[[edge]]
+id = "written"
+label = "Written"
+from = "writing"
+to = "signing"
+
+# The prescription written here is signed as written by the physician who prescribes it: that signature, not the
+# renewal's "as prepared", covers what is issued.
+[[state]]
+id = "signing"
+label = "To sign"
+tone = "attention"
+[[state.work]]
+id = "sign-new"
+kind = "gate"
+title = "Sign the new prescription"
+role = "physician"
+due = "2d"
+escalate_to = "medical-director"
+signer = "person"
+meaning = "I prescribe this medication as written"
+meanings = { not-written = "I do not issue this prescription" }
+context = ["write-rx", "not-on-chart", "input.pharmacy"]
+
+[[edge]]
+id = "prescribe"
+label = "Prescribe"
+from = "signing"
+to = "active"
+[[edge.do]]
+id = "write-new"
+title = "Issue the new prescription"
+action = "record.update"
+[edge.do.params.set]
+intent = "order"
+authoredOn = "{{details.now}}"
+medicationCodeableConcept = { text = "{{write-rx.medication}}" }
+dosageInstruction = [{ text = "{{write-rx.directions}}" }]
+dispenseRequest = { validityPeriod = { start = "{{details.today}}", end = "{{details.valid_until}}" }, numberOfRepeatsAllowed = "{{write-rx.repeats}}", quantity = { value = "{{write-rx.quantity}}", unit = "{{write-rx.unit}}" }, expectedSupplyDuration = { value = "{{write-rx.days_supply}}", unit = "days" } }
+requester = { reference = "Practitioner/{{sign-new.by}}" }
+note = [{ text = "New prescription (not on the chart). {{not-on-chart.notes}}" }]
+
+[[edge.do]]
+id = "send-new-to-pharmacy"
+title = "Send the new prescription to the pharmacy"
 action = "message.send"
-[steps.params]
+[edge.do.params]
+channel = "fax"
+to = "{{input.pharmacy}}"
+subject = "New prescription: {{details.name}}"
+body = """New prescription from Harbourview Family Medicine.
+Patient: {{details.name}}, date of birth {{details.birth_date}}, NS health card {{details.health_card}}.
+Medication: {{write-rx.medication}}. Directions: {{write-rx.directions}}.
+Dispense: {{write-rx.quantity}} {{write-rx.unit}} ({{write-rx.days_supply}} days), {{write-rx.repeats}} repeat(s). Valid until {{details.valid_until}}.
+Signed by {{details.physician_name}} on {{details.today}}. Prescription {{run.record}}."""
+
+[[edge.do]]
+id = "tell-new-prescribed"
+title = "Tell the patient the prescription went to the pharmacy"
+action = "message.send"
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your renewal request"
-body = "Your physician has not renewed {{input.medication}}. Please call the office to talk about your medication."
+body = "Your prescription for {{input.medication}} was sent to your pharmacy ({{input.pharmacy}})."
 
-[[steps]]
-id = "not-renewed"
-title = "Close the request (not renewed)"
-kind = "automation"
-after = ["decide"]
-when = "decide.outcome != 'renew'"
-state = "cancelled"
+[[edge]]
+id = "not-written"
+label = "Not written"
+from = "signing"
+to = "cancelled"
+[[edge.do]]
+id = "tell-not-signed"
+title = "Tell the patient no prescription was written"
+action = "message.send"
+[edge.do.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your renewal request"
+body = "Your physician has not written a prescription for {{input.medication}}. Please call the office to talk about your medication."
+
+[[state]]
+id = "active"
+label = "Prescribed"
+tone = "done"
+
+[[state]]
+id = "cancelled"
+label = "Closed"
+tone = "done"

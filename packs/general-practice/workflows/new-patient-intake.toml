@@ -7,7 +7,8 @@ the person, whose `registration` is where the work is: received, checked, then a
 person's own record stays inactive (they cannot sign in or book) until the registration is accepted.
 
 A new patient registers (at the desk or on the portal). Their paperwork is checked, the patient is asked for anything
-missing, someone at the front desk accepts them into the practice, and their first visit is booked.
+missing, and someone at the front desk accepts them into the practice (their first visit is then asked for, a visit
+request of its own), puts them on the waitlist (they are told), or declines them.
 """
 
 [trigger]
@@ -21,7 +22,20 @@ questionnaire = "registration"
 authored = "{{run.today}}"
 registration = "received"
 
-[[steps]]
+# ---------------------------------------------------------------------------------------------------------------
+# Written as the registration's states (where it waits, and the work done there) and the edges between them (what the
+# person working it chose, with the automations that run on the way). See practicehub/states.py.
+
+[start]
+to = "received"
+label = "Registered"
+
+[[state]]
+id = "received"
+label = "Waiting to be checked"
+tone = "active"
+
+[[state.work]]
 id = "review"
 title = "Check the paperwork"
 kind = "task"
@@ -30,82 +44,99 @@ due = "3d"
 escalate_to = "practice-manager"
 skill = "intake-review"
 context = ["record:demographics", "record:intake"]
-state = "checked"
 
-[[steps]]
+[[edge]]
+id = "checked"
+label = "Paperwork checked"
+from = "received"
+to = "checked"
+[[edge.do]]
 id = "ask-for-missing"
 title = "Ask the patient for what is missing"
-kind = "automation"
-after = ["review"]
 when = "review.complete == false"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your registration with Harbourview Family Medicine"
 body = "Thank you for registering. To finish, we still need: {{review.missing}}. Reply on the portal or call the front desk."
 
-[[steps]]
+[[state]]
+id = "checked"
+label = "Checked"
+tone = "attention"
+
+[[state.work]]
 id = "accept"
 title = "Accept the patient"
 kind = "gate"
 role = "front-desk"
 due = "3d"
 escalate_to = "practice-manager"
-after = ["review"]
 signer = "person"
-outcomes = ["accept", "waitlist", "decline"]
 meaning = "I accept this patient into the practice's roster"
 meanings = { waitlist = "I put this patient on the waitlist", decline = "I decline this patient for the roster" }
 context = ["record:demographics", "record:intake", "review"]
 instructions = "Read the intake agent's summary and flags. The roster has room unless the practice manager has said otherwise."
 
-# A patient who registered online is a request until now: accepted, they may sign in and book.
-[[steps]]
+# A patient who registered online is a request until now: accepted, they may sign in and book. Their first visit is
+# asked for once they are taken in (a visit request of its own).
+[[edge]]
+id = "accept"
+label = "Accept"
+from = "checked"
+to = "accepted"
+[[edge.do]]
 id = "activate"
 title = "Take the patient in"
-kind = "automation"
-after = ["accept"]
-when = "accept.outcome == 'accept'"
 action = "record.update"
-state = "accepted"
-[steps.params]
+[edge.do.params]
 ref = "{{run.subject}}"
 set = { active = true }
-
-[[steps]]
+[[edge.do]]
 id = "book-first-visit"
 title = "Book the first visit"
-kind = "automation"
-after = ["activate"]
-when = "accept.outcome == 'accept'"
 action = "workflow.start"
-[steps.params]
+[edge.do.params]
 workflow = "appointment-request"
-record = "{{run.subject}}"
-[steps.params.input]
+record = "{{activate.reference}}"
+[edge.do.params.input]
 reason = "First visit (new patient)"
 urgency = "{{review.urgency}}"
 preferences = ""
 
-[[steps]]
+[[edge]]
+id = "waitlist"
+label = "Waitlist"
+from = "checked"
+to = "waitlisted"
+[[edge.do]]
 id = "tell-waitlist"
 title = "Tell the patient they are on the waitlist"
-kind = "automation"
-after = ["accept"]
-when = "accept.outcome == 'waitlist'"
 action = "message.send"
-state = "waitlisted"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "You are on our waitlist"
 body = "Thank you for registering. Our physicians' rosters are full; we will contact you as soon as a place opens."
 
-[[steps]]
+[[edge]]
+id = "decline"
+label = "Decline"
+from = "checked"
+to = "declined"
+
+[[state]]
+id = "accepted"
+label = "Accepted"
+tone = "done"
+
+[[state]]
+id = "waitlisted"
+label = "Waitlisted"
+tone = "waiting"
+
+[[state]]
 id = "declined"
-title = "Decline the registration"
-kind = "automation"
-after = ["accept"]
-when = "accept.outcome == 'decline'"
-state = "declined"
+label = "Declined"
+tone = "ended"

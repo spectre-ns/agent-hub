@@ -26,7 +26,7 @@ max_length = 200
 name = "parent"
 label = "Under"
 type = "reference"
-target = ["WikiPage", "Procedure"]
+target = ["WikiPage"]
 rel = "parent"
 help = "the page this one sits under; leave it empty to start a new space"
 
@@ -50,6 +50,7 @@ help = "who keeps the page current"
 name = "status"
 type = "choice"
 choices = ["draft", "published", "needs-check", "archived"]
+labels = { draft = "Draft", published = "Published", needs-check = "Needs a check", archived = "Archived" }
 
 [[field]]
 name = "checked"
@@ -73,21 +74,18 @@ to = "needs-check"
 label = "Flag as out of date"
 
 [[lifecycle.transition]]
-from = ["needs-check"]
-to = "published"
-by = "workflow"         # a wiki owner's check puts it back
-label = "Confirm it is current"
-
-[[lifecycle.transition]]
 from = ["draft", "published"]
 to = "archived"
 label = "Archive"
 
+# A flagged page is put back or archived only by its check, a wiki owner's signed decision: those moves are the
+# wiki-check workflow's edges. A check cancelled part way leaves the page as it was:
+
 [[lifecycle.transition]]
 from = ["needs-check"]
-to = "archived"
-by = "workflow"         # a flagged page is archived only by its check: a wiki owner's signed decision
-label = "Archive"
+to = "published"
+by = "workflow"         # only when its check is cancelled part way
+label = "Put back as it was"
 
 [[lifecycle.transition]]
 from = ["archived"]

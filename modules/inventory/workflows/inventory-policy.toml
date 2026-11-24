@@ -1,0 +1,113 @@
+id = "inventory-policy"
+title = "Sign an inventory policy into force"
+summary = """A submitted inventory policy is checked against its level (no switch looser than the level allows) and
+signed into force by an inventory manager; the policy it replaces is retired. A change that loosens a control is
+signed by someone other than its author whenever the policy in force or the new one asks for a second person."""
+record = "InventoryPolicy"
+
+# The InventoryPolicy type names this workflow: a policy in draft or in review is walked by it, and its status is this
+# work's position. Written as the policy's states and the edges between them (practicehub/states.py), listed in the
+# order a pass goes through them. Refused by its check or sent back, it goes to draft, which ends the pass; the next
+# run walks it again once resubmitted.
+
+[start]
+to = "draft"
+label = "Written"
+
+[[state]]
+id = "draft"
+label = "Draft"
+tone = "active"
+
+[[state.work]]
+id = "submit"
+title = "Choose the level and submit the policy"
+kind = "wait"
+until = "record.status != 'draft'"
+instructions = """Choose the control level; leave a switch empty to take the level's own setting, or set it stricter.
+Then submit it on its page."""
+
+[[edge]]
+id = "submit"
+label = "Submit for signing"
+from = "draft"
+to = "in-review"
+
+[[edge.do]]
+id = "check"
+title = "Check the policy against its level"
+action = "inventory.policy-check"
+
+[[edge.do]]
+id = "refused"
+title = "Send the policy back: looser than its level"
+when = "not check.ok"
+to = "draft"                    # back with its author: the next pass is the next run's
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+return_reason = "{{check.problem}}"
+
+[[state]]
+id = "in-review"
+label = "In review"
+tone = "attention"
+
+# Two alternative pieces of work: someone other than its author signs a change that loosens a control the practice
+# signs with a second person; anything else its author may sign, so a one-person shop is never stopped.
+[[state.work]]
+id = "sign-own"
+title = "Sign the inventory policy"
+kind = "gate"
+role = "inventory-manager"
+signer = "person"
+when = "not check.second"
+meaning = "I put this inventory policy into force"
+context = ["record:inventory"]
+due = "5d"
+
+[[state.work]]
+id = "sign-other"
+title = "Sign the inventory policy"
+kind = "gate"
+role = "inventory-manager"
+signer = "person"
+when = "check.second"
+not_by = ["record.editors"]
+meaning = "I put this inventory policy into force"
+context = ["record:inventory"]
+due = "5d"
+instructions = """It loosens a control the practice signs with a second person: someone other than its author signs
+it."""
+
+[[edge]]
+id = "in-force"
+label = "Put in force"
+from = "in-review"
+to = "in-force"
+
+[[edge.do]]
+id = "retire-others"
+title = "Retire the policy it replaces"
+action = "inventory.policy-in-force"
+
+[[edge]]
+id = "send-back"
+label = "Send back"
+from = "in-review"
+to = "draft"                    # back with its author: the next pass is the next run's
+
+[[edge.do]]
+id = "sent-back"
+title = "Return the policy to its author"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+return_reason = "Not signed: {{sign-own.comment}}{{sign-other.comment}}"
+
+[[state]]
+id = "in-force"
+label = "In force"
+tone = "done"

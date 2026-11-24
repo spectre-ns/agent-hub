@@ -160,11 +160,16 @@ def act_record_create(engine, run, step, params, actor):
     data = params.get("data") or {}
     if not rtype:
         raise ValueError("record.create: no type")
-    rec = engine.hub.create_record(actor, rtype, data, run_id=run["id"])
+    rec = engine.hub.create_record(actor, rtype, data, run_id=run["id"], origin=_origin(step))
     ref = f"{rtype}/{rec['id']}"
     if params.get("attest"):  # filed under a signature given earlier in this run (a note signed as a draft)
         engine.hub.attest(actor, ref, run, str(params["attest"]))
     return {"id": rec["id"], "reference": ref}
+
+
+def _origin(step) -> dict | None:
+    """Where a spawn came from: the step that made it and the edge that step runs on (None on no edge)."""
+    return {"step": step.id, "edge": getattr(step, "on_edge", None)} if step is not None else None
 
 
 def _record_update_append(rec: dict, params: dict) -> dict:
@@ -236,7 +241,8 @@ def act_workflow_start(engine, run, step, params, actor):
     child = engine.start(actor, params["workflow"],
                          record=params.get("record") or (run.get("ctx") or {}).get("run", {}).get("record")
                          or run["record"],
-                         inputs=params.get("input") or {}, via_automation=True, parent=run["id"])
+                         inputs=params.get("input") or {}, via_automation=True, parent=run["id"],
+                         origin=_origin(step))
     return {"run_id": child["id"]}
 
 
@@ -246,7 +252,7 @@ def act_context_set(engine, run, step, params, actor):
 
 def act_record_child(engine, run, step, params, actor):
     """record.child: a sub-record of this run's record (see ``Engine.make_child_record``)."""
-    return engine.make_child_record(run, params, actor)
+    return engine.make_child_record(run, params, actor, step)
 
 
 CORE_ACTIONS = {
@@ -353,7 +359,7 @@ def act_booking_book(engine, run, step, params, actor):
         "with": [member],
         **{k: str(params[k]) for k in ("kind", "priority") if params.get(k) and k in hub.record_type(rtype).base_map}},
         hub.member_ref_type(), dict(params.get("defaults") or {}))
-    made = hub.create_record(actor, rtype, rec, run_id=run["id"])
+    made = hub.create_record(actor, rtype, rec, run_id=run["id"], origin=_origin(step))
     return {"reference": f"{rtype}/{made['id']}", "when": start.strftime("%A %B %d at %H:%M"),
             "member": member, "member_name": who["name"]}
 
@@ -523,6 +529,9 @@ class Engine:
         self._now = None
         self._zone = None  # (until, the practice's ZoneInfo): ``zone`` reads the setting at most every 2 seconds
         self._advancing: set = set()  # runs advancing now (a record change inside one does not re-enter it)
+        # the people chosen, in the transition that is being made, for the work it sets going: "<workflow>/<step>" ->
+        # member id (``assignments_needed``); read by ``_route`` for work that names no one itself
+        self._picks: dict = {}
 
     def zone(self):
         """The practice's time zone (``[practice] timezone``, as its policy owners last set it). Raises
@@ -584,8 +593,14 @@ class Engine:
         return out
 
     def _save(self, run: dict) -> None:
+        # the people chosen, in the transition being made, for this run's work: kept on the run until that work
+        # starts (after an agent's step, a wait), each used once (``_route``)
+        mine = {k: v for k, v in self._picks.items() if k.startswith(f"{run['workflow_id']}/")}
+        if mine:
+            run["picks"] = {**(run.get("picks") or {}), **mine}
         self.hub.db.runs.set(run["id"], {"ctx": run["ctx"], "steps": run["steps"], "status": run["status"],
-                                         "refs": run_refs(run), **_waits(run), "updated_at": utcnow()})
+                                         "refs": run_refs(run), **_waits(run), "updated_at": utcnow(),
+                                         **({"picks": run["picks"]} if mine else {})})
 
     def automation_actor(self, run: dict) -> dict:
         return {"id": f"workflow:{run['workflow_id']}@v{run['version']}", "kind": "automation", "name": run["title"],
@@ -624,7 +639,8 @@ class Engine:
 
     def start(self, actor: dict, wid: str, *, record: str | None = None, inputs: dict | None = None,
               cause: int | None = None, via_automation: bool = False, parent: str | None = None,
-              allow_duplicate: bool = False, on_create: bool = False, previous: str | None = None) -> dict:
+              allow_duplicate: bool = False, on_create: bool = False, previous: str | None = None,
+              origin: dict | None = None) -> dict:
         """``allow_duplicate``: the starter confirmed starting another run although one with the same
         ``trigger.one_open_per`` value is open (only where the trigger has ``allow_duplicate = true``).
 
@@ -632,7 +648,8 @@ class Engine:
         subject): the run makes the record, as its first act, and is about it from then on. ``on_create``: started
         because its record was just made (the type names this workflow); the start form is what the record says
         (each ``[new_record]`` field that is one input gives it back), and nothing on it is required. ``previous``: the
-        run of the same workflow that walked the record's last pass (its ``not_by`` still counts: see ``_did``)."""
+        run of the same workflow that walked the record's last pass (its ``not_by`` still counts: see ``_did``).
+        ``origin``: for a run a step of ``parent`` started, ``{step, edge}`` (the move that set it going)."""
         from .hub import Denied, Invalid
         hub = self.hub
         wf, row = hub.workflow(wid)
@@ -708,7 +725,7 @@ class Engine:
             None
         ctx = {"run": {"id": run_id, "record": record, "subject": subject, "started_by": actor["id"],
                        "start_state": start_state, **({"previous": previous} if previous else {}),
-                       "workflow": wid, "parent": parent, "blocks": pins, "skills": skills, "now": utcnow(),
+                       "workflow": wid, "parent": parent, **({"origin": origin} if origin else {}), "blocks": pins, "skills": skills, "now": utcnow(),
                        "today": self.now().date().isoformat()},
                "input": values}
         with hub.db:  # checked in the transaction that starts it: two people pressing at once start one
@@ -728,7 +745,7 @@ class Engine:
                                 "root_event": None, "created_at": utcnow(), "updated_at": utcnow()})
             seq = hub.track.append(actor, "run.started", record or "", run_id=run_id, cause=cause,
                                    data={"workflow": wid, "version": row["version"], "title": title, "input": values,
-                                         "parent": parent})
+                                         "parent": parent, **({"origin": origin} if origin else {})})
             hub.db.runs.set(run_id, {"root_event": seq, "item": self._run_item(run_id, wf, title, seq)})
             if getattr(wf, "deadline", None):  # [deadline] within: when the run is to be done by
                 hub.db.runs.set(run_id, {"deadline_at": self._deadline_at(wf), "deadline_missed_at": None})
@@ -1076,7 +1093,7 @@ class Engine:
         return rec
 
     # ------------------------------------------------------------------ sub-records: a record's step makes another
-    def make_child_record(self, run: dict, params: dict, actor: dict) -> dict:
+    def make_child_record(self, run: dict, params: dict, actor: dict, step=None) -> dict:
         """``record.child``: a step makes a record of another type (``type``; ``data`` by its field names) about the
         same subject as the run's record and linked to it (its parent: the new record's one reference to the
         parent's type, or the field ``link`` names). The new type's own workflow starts on it in the same
@@ -1109,10 +1126,11 @@ class Engine:
         # the parent's own history says what was made from it (with or without a workflow of its own)
         seq = hub.track.append(actor, "record.child", parent, run_id=run["id"], cause=ev["seq"] if ev else None,
                                data={"child": ref, "type": rt.id})
-        child = self._start_child_run(rt, ref, run, params.get("input") or {}, seq)
+        child = self._start_child_run(rt, ref, run, params.get("input") or {}, seq, origin=_origin(step))
         return {"id": made["id"], "reference": ref, **({"run_id": child["id"]} if child else {})}
 
-    def _start_child_run(self, rt, ref: str, parent_run: dict, inputs: dict, cause) -> dict | None:
+    def _start_child_run(self, rt, ref: str, parent_run: dict, inputs: dict, cause,
+                         origin: dict | None = None) -> dict | None:
         """The sub-record's own workflow (its type's), started on it as a child run of ``parent_run``."""
         rec = self.hub.records.read(*ref.split("/", 1))
         wid = schema.starts_workflow(rt, rec) if rec else None
@@ -1120,7 +1138,7 @@ class Engine:
             return None
         starter = {"id": f"type:{rt.id}", "kind": "automation", "name": rt.label, "status": "active"}
         return self.start(starter, wid, record=ref, inputs=inputs, cause=cause, via_automation=True,
-                          on_create=True, parent=parent_run["id"])
+                          on_create=True, parent=parent_run["id"], origin=origin)
 
     def _subject_field(self, rt, subject_type: str) -> dict | None:
         return next((f for f in rt.fields if f["type"] == "reference" and f.get("rel") == "subject"
@@ -1161,12 +1179,39 @@ class Engine:
         ref = str((prow or {}).get("record") or "")
         return ref if "/" in ref and ref not in (run.get("record"), run.get("subject")) else None
 
+    def started_by(self, run: dict) -> dict | None:
+        """The record whose move started this run, and that move's edge label: ``{ref, label}`` from the run's
+        ``parent`` and ``origin``. A run started before origins were kept (or by a step on no edge) has the record
+        only (``label`` None). None for a run no other record's work started."""
+        rc = (run.get("ctx") or {}).get("run") or {}
+        pid = rc.get("parent")
+        prow = self.hub.db.runs.get(pid) if pid else None
+        ref = str((prow or {}).get("record") or "")
+        if "/" not in ref or ref == run.get("record"):
+            return None
+        label = None
+        edge = (rc.get("origin") or {}).get("edge")
+        if edge:
+            try:
+                shape = getattr(self.hub.workflow(prow["workflow_id"], prow["version"])[0], "shape", None) or {}
+            except Exception:  # noqa: BLE001 - a workflow that cannot be read names no edge
+                shape = {}
+            label = next((e.get("label") for e in [shape.get("start"), *(shape.get("edges") or [])]
+                          if e and e.get("id") == edge), None)
+        return {"ref": ref, "label": label}
+
     def _move_record(self, run: dict, step, actor: dict, cause) -> None:
         """``state`` on a step: the run's record moves to that lifecycle state as the step is done, through the
         record's own transitions (their rules, events and audit), by the workflow."""
         hub = self.hub
         ref = run.get("record") or ""
         rt = hub.record_type(ref.split("/", 1)[0]) if "/" in ref else None
+        if rt is not None and step.on_edge and (not rt.lifecycle or step.state not in rt.states()):
+            # written as states and edges, a stop the record's state field has no value for (or a record with no
+            # state field): the run keeps where it is, and the record stays as it is (a renewal is a draft throughout)
+            run["at"] = step.state
+            hub.db.runs.set(run["id"], {"at": step.state})
+            return
         if rt is None or not rt.lifecycle:
             raise ValueError(f"state: the run's record ({ref or 'none'}) has no lifecycle to move through")
         rec = hub.records.read(*ref.split("/", 1))
@@ -1250,6 +1295,38 @@ class Engine:
                     self.alert(run, step, f"After your \"{prior.title}\": {text}", assignee=out["by"], cause=seq,
                                priority="urgent")
 
+    def _fail_over(self, run: dict, wf, step, actor: dict, cause) -> None:
+        """An edge's automation written with ``on_fail`` (states.py) failed: its record goes where that says and the
+        run goes on from there. What waited on it to move the record along its edge is skipped; the failure stays
+        recorded and told, and the step is not retried (the record went on without it)."""
+        fid = f"{step.id}--failed"
+        fb = next((s for s in wf.steps if s.id == fid and s.on_edge), None)
+        if fb is None or run["steps"].get(fid, {}).get("state") != "pending":
+            return
+        hub = self.hub
+        for sid in sorted(self._waiting_on(wf, step.id) - {fid}):
+            s = wf.step(sid)
+            if s.state and s.on_edge == fb.on_edge and run["steps"][sid]["state"] == "pending":
+                run["steps"][sid] = {"state": "skipped"}
+                hub.track.append(actor, "step.skipped", f"step:{sid}", run_id=run["id"], cause=cause,
+                                 data={"step": sid, "failed": step.id})
+        run["steps"][step.id]["failed_over"] = True
+        self._save(run)
+        try:
+            with hub.db:
+                self._move_record(run, fb, actor, cause)
+        except Exception as exc:  # noqa: BLE001 - the move refused: the failure already asks a person
+            run = self.run(run["id"])
+            run["steps"][fid] = {"state": "failed", "error": str(exc)}
+            self._save(run)
+            return
+        run = self.run(run["id"])
+        run["steps"][fid] = {"state": "done", "by": actor["id"], "moved": True}
+        self._save(run)
+        self._hist_note(run, fb, outcome="done", by=actor["id"])
+        hub.track.append(actor, "action.ran", f"step:{fid}", run_id=run["id"], cause=cause,
+                         data={"step": fid, "action": None, "params": {}, "output": {}, "failed": step.id})
+
     @staticmethod
     def _waiting_on(wf, failed: str) -> set[str]:
         """Every step that waits, directly or through others, on the failed one."""
@@ -1287,8 +1364,9 @@ class Engine:
                 if not all(run["steps"][a]["state"] in ("done", "skipped") for a in step.after):
                     continue
                 progressed = True
-                if step.after and all(run["steps"][a]["state"] == "skipped" for a in step.after):
-                    holds = False  # a step after only skipped steps is skipped too
+                anchors = step.after if step.needs is None else step.needs
+                if anchors and all(run["steps"][a]["state"] == "skipped" for a in anchors):
+                    holds = False  # a step after only skipped steps is skipped too (on an edge: after its work)
                 else:
                     holds = expr.holds(step.when, self._live_ctx(run))
                 if not holds:
@@ -1323,8 +1401,9 @@ class Engine:
                         with hub.db:  # a savepoint: an automation that fails halfway leaves nothing behind
                             if step.block:
                                 output, extra = self._run_block(run, step, params)
-                            elif not step.action:  # a step that only moves the record
-                                output = {}
+                            elif not step.action:  # a step that only moves the record, or chooses the way on
+                                output = {"edge": next((e for e, c in step.route if expr.holds(c, live)), None)} \
+                                    if step.route else {}
                             else:
                                 fn = CORE_ACTIONS.get(step.action) or (hub.pack.actions.get(step.action)
                                                                        if hub.pack else None)
@@ -1347,6 +1426,7 @@ class Engine:
                                                data={"step": step.id, "action": step.action, "error": str(exc),
                                                      **({"block": step.block} if step.block else {})})
                         self._failed(run, step, exc, seq)
+                        self._fail_over(run, wf, step, actor, seq)
                         progressed = True  # steps that do not wait on this one go on: an urgent call is not held
                         break
                     run = self.run(run_id)  # the action may have changed the run (e.g. started a child)
@@ -1593,7 +1673,107 @@ class Engine:
                     out.append(s)
             except Exception:  # noqa: BLE001 - a condition over what is not there yet: it does not follow (yet)
                 continue
+        # written as states and edges: where the record lands, then the work waiting for it there
+        for s in [s for s in out if s.on_edge and s.state]:
+            out += [w for w in wf.steps if w.at_state == s.state and w.kind != "automation" and w not in out
+                    and (not w.when or self._holds_quietly(w.when, live))]
         return out
+
+    def assignments_needed(self, run: dict, step, outcome: str) -> list[dict]:
+        """The people's work that ``step`` ended with ``outcome`` sets going, each to be given to one person by whoever
+        ends it: in this run (the steps ``outcome_follows`` names) and in the runs its automations start
+        (``workflow.start``: the work waiting in the new run's first state). Each is ``{key, title, workflow, role,
+        people}``: ``key`` ("<workflow>/<step>") is what the choice is sent under, ``people`` the active people who
+        hold the role. Work that names its own person (``assign_to``), is done once per person (``for_each``), that
+        agents of its role may take, or that nobody holds the role for is not asked about: it goes where it goes."""
+        hub = self.hub
+        wf = hub.workflow(run["workflow_id"], run["version"])[0]
+        follows = self.outcome_follows(run, step, outcome)
+        live = {**self._live_ctx(run), step.id: {"outcome": outcome}}
+        out, seen = [], set()
+
+        def need(wid, wtitle, s):
+            n = self.assignable(wid, wtitle, s)
+            if n and n["key"] not in seen:
+                seen.add(n["key"])
+                out.append(n)
+
+        for s in follows:
+            if s.kind in ("task", "gate"):
+                need(wf.id, wf.title, s)
+            elif s.kind == "automation" and s.action == "workflow.start":
+                try:
+                    params = wfmod.render(s.params, live) or {}
+                    child = hub.workflow(str(params.get("workflow") or ""))[0]
+                except Exception:  # noqa: BLE001 - a workflow not there (yet): nothing to ask about
+                    continue
+                first = next((x for x in child.steps if x.on_edge == "start" and x.state), None)
+                if first is None:
+                    continue
+                ctx = {"input": params.get("input") or {}, "run": {"record": run.get("record")}}
+                for w in child.steps:
+                    if w.at_state == first.state and (not w.when or self._holds_quietly(w.when, ctx)):
+                        need(child.id, child.title, w)
+        return out
+
+    def assignable(self, wid: str, wtitle: str, s) -> dict | None:
+        """People's work at step ``s`` of workflow ``wid`` as one to be given to a person where it is set going (see
+        ``assignments_needed``), else None."""
+        if s.kind not in ("task", "gate") or not s.role or s.assign_to or s.for_each:
+            return None
+        holders = self.hub.active_holders(s.role)
+        if not holders or (s.agents_may and any(m["kind"] != "person" for m in holders)):
+            return None
+        people = [m for m in holders if m["kind"] == "person"]
+        if not people:
+            return None
+        return {"key": f"{wid}/{s.id}", "title": s.title, "workflow": wtitle, "role": s.role, "people": people}
+
+    def holding(self, picks: dict):
+        """While a transition is made: ``picks`` (checked) are who its new work goes to (``_route``)."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def held():
+            saved, self._picks = self._picks, dict(picks or {})
+            try:
+                yield
+            finally:
+                self._picks = saved
+        return held()
+
+    @staticmethod
+    def pick_problems(needed: list[dict], assign: dict | None, *, required: bool = False) -> dict:
+        """``assign`` checked against ``needed``: the picks by key, or Invalid saying what is missing or wrong."""
+        from .hub import Invalid
+        if assign is not None and not isinstance(assign, dict):
+            raise Invalid("assign is who does each piece of work it sets going: {\"<workflow>/<step>\": \"<member>\"}")
+        picks, problems = {}, []
+        for n in needed:
+            who = str((assign or {}).get(n["key"]) or "").strip()
+            if not who:
+                if required:
+                    problems.append(f"choose who does “{n['title']}”")
+                continue
+            if who not in {m["id"] for m in n["people"]}:
+                problems.append(f"“{n['title']}” is done by someone who holds {n['role']}: {who} does not")
+                continue
+            picks[n["key"]] = who
+        if problems:
+            raise Invalid("; ".join(problems), problems)
+        return picks
+
+    def check_picks(self, run: dict, step, outcome: str, assign: dict, *, required: bool = False) -> dict:
+        """The people chosen for the work ending ``step`` with ``outcome`` sets going, checked: each one of the people
+        ``assignments_needed`` offers for it (and, ``required``, every one chosen). Returns them by key."""
+        return self.pick_problems(self.assignments_needed(run, step, outcome), assign, required=required)
+
+    @staticmethod
+    def _holds_quietly(cond, ctx) -> bool:
+        try:
+            return bool(expr.holds(cond, ctx))
+        except Exception:  # noqa: BLE001 - over what is not there yet
+            return False
 
     def _live_ctx(self, run) -> dict:
         """The run's context plus ``record``: its record as it is now. Read fresh each time and never stored, so a
@@ -1722,6 +1902,8 @@ class Engine:
             st = run["steps"].get(step_id)
             if not st or st["state"] != "failed":
                 raise Invalid(f"step {step_id!r} has not failed")
+            if st.get("failed_over"):
+                raise Invalid(f"step {step_id!r} failed and the record went on without it: it is not run again")
             run["steps"][step_id] = {"state": "pending"}
             self._save(run)
             self.hub.db.items.update({"run_id": run_id, "step_id": step_id, "kind": "notice", "status": "open"},
@@ -1900,6 +2082,13 @@ class Engine:
             due_at = clock.stamp(clock.utc(self.now(), tz) + timedelta(seconds=secs), tz)
         assignee = None
         who = person
+        if who is None and not step.assign_to:  # chosen by whoever made the move that set it going, used once
+            key = f"{run['workflow_id']}/{step.id}"
+            kept = run.get("picks") or {}
+            who = self._picks.pop(key, None) or kept.get(key)
+            if key in kept:
+                kept.pop(key)
+                self.hub.db.runs.set(run["id"], {"picks": kept})
         if who is None and step.assign_to:  # offered to that member only if they hold the step's role and are active
             who = wfmod.render(step.assign_to, self._live_ctx(run))
             who = (who.get("reference") if isinstance(who, dict) else who) or ""
@@ -2621,6 +2810,36 @@ class Engine:
         return run, wf, wf.step(item["step_id"])
 
     def fields_for(self, step, run: dict | None = None) -> list[dict]:
+        """The answer a task asks for: its own fields, else its block's outputs, else its skill's. A task with
+        ``outcomes`` asks first which way it ended (``outcome``)."""
+        fields = self._answer_fields(step, run)
+        if step.kind == "task" and step.outcomes:
+            return [{"name": "outcome", "label": "How it ended", "type": "choice", "required": True, "help": "",
+                     "choices": self.open_outcomes(run, step), **self._outcome_words(step)}, *fields]
+        return fields
+
+    def open_outcomes(self, run: dict | None, step) -> list[str]:
+        """The outcomes a person may choose now: on a workflow written as states and edges, the edges out of the
+        record's state whose condition holds (an edge's ``when``), as an issue tracker offers only the transitions
+        whose conditions pass."""
+        if not step.outcome_when or run is None:
+            return list(step.outcomes)
+        live = self._live_ctx(run)
+        out = []
+        for o in step.outcomes:
+            cond = step.outcome_when.get(o)
+            try:
+                if not cond or expr.holds(cond, live):
+                    out.append(o)
+            except Exception:  # noqa: BLE001 - a condition over what is not there: the edge is not offered
+                continue
+        return out
+
+    @staticmethod
+    def _outcome_words(step) -> dict:
+        return {"labels": dict(step.outcome_labels)} if step.outcome_labels else {}
+
+    def _answer_fields(self, step, run: dict | None = None) -> list[dict]:
         if step.fields:
             return step.fields
         if step.block and run is not None:
@@ -2703,14 +2922,15 @@ class Engine:
             data["mention"] = mentions_of(hub).context(member, item["output"]["mention"])
         if step.kind == "gate":
             fields = [{"name": "outcome", "label": "Decision", "type": "choice", "required": True,
-                       "choices": step.outcomes, "help": ""},
+                       "choices": self.open_outcomes(run, step), "help": "", **self._outcome_words(step)},
                       {"name": "comment", "label": "Comment", "type": "text", "required": False, "help": ""}]
         return {
             "item": item, "run": {"id": run["id"], "title": self.hub.run_title(member, run), "record": run["record"],
                                   "workflow": wf.id, "version": run["version"],
                                   "today": self.now().date().isoformat(), "time_zone": self.zone().key},
             "step": {"id": step.id, "title": step.title, "kind": step.kind, "risk": step.risk, "role": step.role,
-                     "instructions": instructions, "outcomes": step.outcomes,
+                     "instructions": instructions, "outcomes": self.open_outcomes(run, step),
+                     "outcome_labels": dict(step.outcome_labels),
                      "meaning": self.meaning_for(member, run, step),
                      "meanings": {o: self.meaning_for(member, run, step, o) for o in step.outcomes},
                      "signer": step.signer, "skill": skill.id if skill else step.skill, "block": step.block,
@@ -2757,8 +2977,26 @@ class Engine:
             rt = self.hub.record_type(run["record"].split("/", 1)[0])
             raise Invalid(f"this step needs the {rt.label.lower() if rt else 'record'} to have: {'; '.join(missing)}", missing)
 
-    def complete(self, member: dict, item_id: str, output: dict) -> dict:
-        """Finish a task with its fields."""
+    def complete(self, member: dict, item_id: str, output: dict, *, assign: dict | None = None,
+                 assign_required: bool = False) -> dict:
+        """Finish a task with its fields. ``assign``: who does each piece of work it sets going (``check_picks``)."""
+        out = dict(output or {})
+        with self._picking(item_id, str(out.get("outcome") or ""), assign, assign_required):
+            return self._complete(member, item_id, out)
+
+    def _picking(self, item_id: str, outcome: str, assign: dict | None, required: bool):
+        """While a transition is made: the people chosen for the work it sets going, checked, for ``_route``."""
+        picks = {}
+        if assign is not None or required:
+            item = self.item(item_id)
+            if item["kind"] in ("task", "gate"):
+                run, _, step = self.step_of(item)
+                picks = self.check_picks(run, step, outcome, assign or {}, required=required)
+            else:
+                self.pick_problems([], assign)
+        return self.holding(picks)
+
+    def _complete(self, member: dict, item_id: str, output: dict) -> dict:
         from .hub import Invalid
         hub = self.hub
         with hub.db:
@@ -2822,7 +3060,13 @@ class Engine:
         return now
 
     def decide(self, member: dict, item_id: str, outcome: str, comment: str = "", *, seen: str | None = None,
-               propose: bool = False) -> dict:
+               propose: bool = False, assign: dict | None = None, assign_required: bool = False) -> dict:
+        """Decide a gate (``_decide``). ``assign``: who does each piece of work the decision sets going."""
+        with self._picking(item_id, outcome, assign, assign_required):
+            return self._decide(member, item_id, outcome, comment, seen=seen, propose=propose)
+
+    def _decide(self, member: dict, item_id: str, outcome: str, comment: str = "", *, seen: str | None = None,
+                propose: bool = False) -> dict:
         """Decide a gate. A person's decision is an electronic signature with the step's meaning, by this signer, over
         the hash of what they were shown (``seen``: the hash the page showed them; refused if it no longer matches).
 
@@ -2845,8 +3089,8 @@ class Engine:
                 raise Invalid("this item is not a decision")
             self._require_eligible(member, item)
             run, wf, step = self.step_of(item)
-            if outcome not in step.outcomes:
-                raise Invalid(f"the decision is one of: {', '.join(step.outcomes)}")
+            if outcome not in self.open_outcomes(run, step):
+                raise Invalid(f"the decision is one of: {', '.join(self.open_outcomes(run, step))}")
             self._require_links(run, step, outcome)
             values = {"outcome": outcome, "comment": comment or ""}
             what = {"run": run["id"], "step": step.id, "outcome": outcome,

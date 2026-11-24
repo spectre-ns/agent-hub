@@ -1,17 +1,27 @@
-# Document control: controlled documents (policies, procedures, forms) that are reviewed, approved and published.
+# Document control: controlled documents (policies, procedures, forms) that are reviewed, approved and published. The
+# wiki keeps what the practice knows; what it controls is here.
 # An overlay module: it adds to whatever practice it is installed in. It knows nothing about any one practice.
+
+# 3: Returned documents say why: the controller's comment is written on the document (Returned because) and shown on
+#  the next revision. Writing a revision is a task for the document's owner, due in 14 days and escalated to a
+#  document controller. Every revision after approval is numbered by the document's own workflow, including one
+#  revised by hand. Making a document obsolete is a proposal with a reason, decided and signed by a document
+#  controller (the new Retiring state).
+# 4: The document review is written as its states and edges; approving, returning, retiring and keeping a document are
+#  its edges. An obsolete document or procedure is no longer brought back into use by hand: it is revised as a new
+#  document. Versions approved before keep running as they were.
 
 [module]
 requires_core = "1.0"
 id = "dms"
 name = "Document control"
-version = "3"
-changes = """Returned documents say why: the controller's comment is written on the document (Returned because) and
-shown on the next revision. Writing a revision is a task for the document's owner, due in 14 days and escalated to a
-document controller. Every revision after approval is numbered by the document's own workflow, including one
-revised by hand. Making a document obsolete is a proposal with a reason, decided and signed by a document
-controller (the new Retiring state)."""
-summary = "Controlled documents with review, approval, publication and read-and-understood signatures."
+version = "4"
+changes = """Document control is where every controlled document lives, the SOPs the wiki used to keep included. A document
+in force has a periodic review: a year after it is approved its owner confirms it is still right (signed) or asks
+for a revision (dms-periodic-review). A document's OpenDocument file is edited together in the browser with
+Collabora Online while it is a draft. A wiki page becomes a controlled document through the wiki-sop module. Its
+workflows are written as the document's states and the edges between them."""
+summary = "Controlled documents (policies, SOPs, forms) written in OpenDocument, approved, reviewed yearly, signed as read."
 shortcuts = ["Document"]
 
 [[roles]]

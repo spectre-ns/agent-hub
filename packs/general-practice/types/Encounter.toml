@@ -15,10 +15,10 @@ standard = "fhir-r4"
 extends = "Booking"
 strict = true
 date = "plannedStartDate"
-active = "record.status in ['requested', 'planned', 'arrived', 'triaged', 'in-progress', 'onleave']"
+active = "record.status in ['requested', 'reading', 'callback', 'not-reached', 'planned', 'arrived', 'triaged', 'in-progress', 'onleave', 'drafting', 'editing', 'signing']"
 # Every visit is worked from open to closed by one workflow: asked for (requested) or booked straight on the calendar
-# (planned) or a walk-in (arrived), it is screened and booked, checked in, seen, documented, signed and completed, or
-# cancelled (late: under the missed-appointment policy) or a no-show. Its status is where that work is. A visit filed
+# (planned) or a walk-in (arrived), it is screened, read or called back, and booked, checked in, seen, its note drafted,
+# edited and signed, and completed, or cancelled (late: under the missed-appointment policy) or a no-show. Its status is where that work is. A visit filed
 # after the fact is filed under way (in-progress): it is documented, signed and billed the same way. One filed already
 # completed (finished, from an old chart) is not walked.
 workflow = { id = "appointment-request", when = "record.status in ['requested', 'planned', 'arrived', 'in-progress']" }
@@ -56,17 +56,17 @@ request_inputs = ["kind", "reason", "urgency"]
 [[field]]
 name = "status"
 type = "choice"
-choices = ["requested", "planned", "arrived", "triaged", "in-progress", "onleave", "finished", "undocumented", "cancelled", "noshow",
-           "entered-in-error", "unknown"]
+choices = ["requested", "reading", "callback", "not-reached", "planned", "arrived", "triaged", "in-progress", "onleave",
+           "drafting", "editing", "signing", "finished", "undocumented", "cancelled", "noshow", "entered-in-error", "unknown"]
 required = true
-help = "planned is booked, arrived checked in, finished completed; requested (asked for, no time yet), undocumented (completed, its note discarded) and noshow are the practice's own"
+help = "planned is booked, arrived checked in, finished completed; requested (asked for, no time yet), reading (a nurse reads the reason), callback (a nurse calls back), not-reached (a physician decides), drafting, editing and signing (the visit note), undocumented (completed, its note discarded) and noshow are the practice's own"
 
 [[field]]
 name = "plannedStartDate"
 label = "Booked for"
 type = "datetime"
 required = true
-required_unless = "record.status in ['requested', 'cancelled', 'finished']"   # asked for: no time yet; handled on the phone: never booked
+required_unless = "record.status in ['requested', 'reading', 'callback', 'not-reached', 'cancelled', 'finished']"   # asked for: no time yet; handled on the phone: never booked
 
 [[field]]
 name = "plannedEndDate"
@@ -292,30 +292,24 @@ on = ["create"]
 fields = ["subject", "practitioner", "plannedStartDate", "plannedEndDate", "booking_reason", "reason_text", "urgency",
           "visit_type", "setting"]
 
-# A visit is asked for (requested) and booked (planned), or booked straight away; the patient is checked in (arrived),
-# may be triaged, is seen (in progress), and the visit is completed (finished) once its note is signed. Or a request is
-# not booked after all (cancelled), a booking is cancelled, or the patient does not come (noshow). The appointment
-# workflow makes the moves marked by = "workflow"; people check in, start the visit, cancel and mark a no-show here.
+# A visit is asked for (requested), read by a nurse (reading) or called back (callback; not-reached when nobody
+# answers), and booked (planned), or booked straight away; the patient is checked in (arrived), may be triaged, is
+# seen (in progress), its note is drafted, edited and signed (drafting, editing, signing), and the visit is completed
+# (finished). Or a request is not booked after all (cancelled), a booking is cancelled, or the patient does not come
+# (noshow). The appointment workflow's states and edges make its own moves; people check in, start the visit, cancel
+# and mark a no-show here.
 [lifecycle]
 starts = ["in-progress"]   # a visit filed after the fact: under way, documented, signed and billed like any other
 field = "status"
 initial = "planned"
-labels = { requested = "Requested", planned = "Booked", arrived = "Checked in", finished = "Completed", undocumented = "Completed: no note", onleave = "Patient stepped out", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
-abandoned = { requested = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
+labels = { requested = "Requested", reading = "Being read", callback = "To call back", "not-reached" = "Not reached", drafting = "Note being drafted", editing = "Note being edited", signing = "Note to sign", planned = "Booked", arrived = "Checked in", finished = "Completed", undocumented = "Completed: no note", onleave = "Patient stepped out", noshow = "No-show", "in-progress" = "In progress", "entered-in-error" = "Entered in error" }
+abandoned = { requested = "cancelled", reading = "cancelled", callback = "cancelled", "not-reached" = "cancelled", planned = "cancelled" }   # its work cancelled: the request or booking is too
 # How each state reads at a glance: a visit no-showed or cancelled has ended, one with no note needs the physician.
-tones = { requested = "waiting", planned = "waiting", arrived = "active", triaged = "active", "in-progress" = "active", onleave = "active", finished = "done", undocumented = "attention", cancelled = "ended", noshow = "ended", "entered-in-error" = "ended" }
+tones = { requested = "waiting", reading = "waiting", callback = "attention", "not-reached" = "attention", drafting = "active", editing = "active", signing = "active", planned = "waiting", arrived = "active", triaged = "active", "in-progress" = "active", onleave = "active", finished = "done", undocumented = "attention", cancelled = "ended", noshow = "ended", "entered-in-error" = "ended" }
+# A request whose work is cancelled before it is booked is cancelled too (lifecycle.abandoned): not an edge of the
+# workflow, so the move is kept here.
 [[lifecycle.transition]]
-from = ["requested"]
-to = "planned"
-by = "workflow"
-label = "Book"
-[[lifecycle.transition]]
-from = ["requested"]
-to = "finished"
-by = "workflow"
-label = "Handled on the phone"
-[[lifecycle.transition]]
-from = ["requested"]
+from = ["requested", "reading", "callback", "not-reached"]
 to = "cancelled"
 by = "workflow"
 # Checking in opens two hours before the visit is booked for, and a no-show only once its time has come: the desk who
@@ -342,26 +336,6 @@ label = "Patient is back"
 from = ["in-progress"]
 to = "onleave"
 label = "Patient stepped out"
-[[lifecycle.transition]]
-from = ["in-progress", "onleave"]
-to = "finished"
-by = "workflow"
-[[lifecycle.transition]]
-from = ["planned", "arrived", "triaged"]
-to = "finished"
-by = "workflow"
-# Its draft note discarded: the visit took place but has no note (Completed: no note, never plain Completed), with
-# the physician asked to write it; once they have, it is completed.
-[[lifecycle.transition]]
-from = ["in-progress", "onleave"]
-to = "undocumented"
-by = "workflow"
-label = "Complete without a note"
-[[lifecycle.transition]]
-from = ["undocumented"]
-to = "finished"
-by = "workflow"
-label = "Note written"
 # Cancelling asks who cancelled, and says how much notice that is: a patient's cancellation with less than 24 hours'
 # notice runs the missed-appointment policy on the visit's own run. Without an answer (the portal: the patient
 # themselves) it is the patient's.

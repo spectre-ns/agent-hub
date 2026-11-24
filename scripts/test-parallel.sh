@@ -11,7 +11,9 @@ slots=${PH_TEST_SLOTS:-$(( $(nproc) / 2 ))}; [ "$slots" -lt 1 ] && slots=1
 if [ -z "${PH_TEST_LOCKED:-}" ]; then
   said=""
   while :; do
-    for k in $(seq 1 "$slots"); do
+    # any free slot of the machine's (half the cores): PH_TEST_SLOTS sets a run's share of the cores, not which
+    # slots it may take, so a whole-machine run never waits on a small one holding the first
+    for k in $(seq 1 "$(( $(nproc) / 2 > 1 ? $(nproc) / 2 : 1 ))"); do
       f=$lock; [ "$k" -gt 1 ] && f=$lock.$k
       exec 9>"$f"
       if flock -n 9; then PH_TEST_LOCKED=1 exec "$0" "$@"; fi

@@ -1,37 +1,75 @@
-# One movement of stock: a delivery received, stock issued for use, a write-off (damaged, expired, lost), stock found, or a count.
-# It names the inventory-post workflow, which walks its status: making one starts it, submitting it posts it (the
-# item's on hand changes), and one rejected and revised is walked again.
+# One movement of stock, and its line in the ledger: a delivery received, stock issued for use, moved, counted,
+# adjusted, held, released, written off or returned to its supplier. It names the inventory-post workflow: submitting
+# it checks it and, when the policy in force asks for a signature, waits for one; posting it changes the stock, and
+# what it changed is kept on it (each lot before and after). One refused goes back to its author with the reason.
 id = "StockMove"
 label = "Stock move"
 plural = "Stock moves"
 data_class = "inventory"
-title = "{kind} {quantity} {item}"
+title = "{kind}[ {quantity}][ {stock}]"
 date = "moved"
 flag = "status"
 order = 41
 workflow = { id = "inventory-post", when = "record.status in ['draft', 'submitted', 'rejected']" }
-summary = "Stock received, issued, written off, found or counted. Posting it changes what is on hand."
+summary = "Stock received, issued, moved, counted, adjusted, held, released, written off or returned."
 
 [[field]]
 name = "kind"
 type = "choice"
-choices = ["receive", "issue", "write-off", "found", "count"]
+choices = ["receive", "issue", "transfer", "count", "adjust", "hold", "release", "scrap", "return"]
 required = true
-help = "receive a delivery, issue for use, write off what was damaged, expired or lost, add stock that was found, or a shelf count"
+help = "receive a delivery; issue for use; move it; count the shelf; adjust to what is there; hold it (nobody uses it until it is released); write it off (scrap); return it to the supplier"
 
 [[field]]
-name = "item"
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "moves-part"
+help = "for a delivery: what was received"
+
+[[field]]
+name = "lot"
+label = "Stock"
 type = "reference"
 target = ["StockItem"]
 rel = "moves"
-required = true
+help = "the lot or serial it moves (a delivery makes its own)"
 
 [[field]]
 name = "quantity"
 type = "number"
-required = true
 min = 0
-help = "how many units (never negative: the kind says which way it goes); for a count, how many are on the shelf"
+help = "how many (never negative: the kind says which way). For a count or an adjustment, how many there are. Left empty to hold, move, release or write off all of it."
+
+[[field]]
+name = "location"
+label = "To"
+type = "reference"
+target = ["Location"]
+rel = "to"
+help = "where a delivery goes, or where stock is moved, held or released to"
+
+[[field]]
+name = "lot_number"
+label = "Lot number"
+max_length = 60
+help = "for a delivery of a lot-tracked part: the lot on the label (one is made up when left empty)"
+
+[[field]]
+name = "supplier_lot"
+label = "Supplier's lot"
+max_length = 60
+
+[[field]]
+name = "serials"
+label = "Serial numbers"
+type = "text"
+help = "for a delivery of a serial-tracked part: one per line"
+
+[[field]]
+name = "expiry"
+type = "date"
+help = "for a delivery of a part with a shelf life: the expiry on the label"
 
 [[field]]
 name = "moved"
@@ -39,25 +77,63 @@ label = "Date"
 type = "date"
 
 [[field]]
-name = "location"
-label = "At"
-type = "reference"
-target = ["Location"]
-rel = "at"
-
-[[field]]
-name = "lot"
-label = "Lot number"
-max_length = 60
-
-[[field]]
-name = "expires"
-type = "date"
-
-[[field]]
 name = "reason"
 type = "text"
 help = "why: the delivery note, who it was issued to, what was damaged"
+
+[[field]]
+name = "stock"
+label = "What it moves"
+max_length = 200
+by = "workflow"
+help = "the part and lot, named when the move is checked"
+
+[[field]]
+name = "needs_signoff"
+label = "Why it is signed"
+type = "text"
+by = "workflow"
+
+[[field]]
+name = "before_quantity"
+label = "Before"
+type = "number"
+by = "workflow"
+
+[[field]]
+name = "after_quantity"
+label = "After"
+type = "number"
+by = "workflow"
+
+[[field]]
+name = "entries"
+label = "Ledger lines"
+type = "json"
+by = "workflow"
+help = "each lot it changes: quantity, status, place and count baseline before and after"
+
+[[field]]
+name = "policy"
+label = "Posted under"
+by = "workflow"
+
+[[field]]
+name = "level"
+label = "Control level"
+by = "workflow"
+
+[[field]]
+name = "authority"
+label = "Posted for"
+by = "workflow"
+help = "the signed record that posted it (a goods receipt's release, a nonconformance's disposition)"
+
+[[field]]
+name = "posted_seq"
+label = "Ledger number"
+type = "number"
+by = "workflow"
 
 [[field]]
 name = "reject_reason"
@@ -69,6 +145,7 @@ by = "workflow"
 name = "status"
 type = "choice"
 choices = ["draft", "submitted", "posted", "rejected"]
+labels = { draft = "Draft", submitted = "Submitted", posted = "Posted", rejected = "Sent back" }
 
 [lifecycle]
 field = "status"
@@ -81,22 +158,12 @@ from = ["draft"]
 to = "submitted"
 label = "Submit for posting"
 
-[[lifecycle.transition]]
-from = ["submitted"]
-to = "posted"
-by = "workflow"
-label = "Posted"
-
-[[lifecycle.transition]]
-from = ["submitted"]
-to = "rejected"
-by = "workflow"
-label = "Rejected"
-
+# Posting it and sending it back are the inventory-post workflow's edges; only the moves people make by hand, and
+# where cancelled work leaves it, are listed here.
 [[lifecycle.transition]]
 from = ["submitted"]
 to = "draft"
-by = "workflow"
+by = "workflow"            # only when its sign-off is cancelled part way
 label = "Back to its author"
 
 [[lifecycle.transition]]

@@ -17,6 +17,7 @@ from test_web import call, server, token  # noqa: F401
 
 CALLBACK = '''id = "callback"
 title = "Call back"
+record = "Patient"
 [trigger]
 starters = ["front-desk"]
 one_open_per = "input.phone"
@@ -25,16 +26,30 @@ allow_duplicate = true
 name = "phone"
 label = "Phone number"
 type = "string"
-[[steps]]
+[start]
+to = "to-call"
+[[state]]
+id = "to-call"
+[[state.work]]
 id = "call"
 title = "Call them back"
 kind = "task"
 role = "front-desk"
-[[steps.fields]]
+[[state.work.fields]]
 name = "note"
 label = "What was said"
 type = "text"
+[[edge]]
+id = "called"
+from = "to-call"
+to = "called-back"
+[[state]]
+id = "called-back"
 '''
+
+
+def _pat(hub):
+    return "Patient/" + hub.records.search("Patient", limit=1)[0]["id"]
 
 
 def _install(hub, src):
@@ -89,7 +104,7 @@ def test_a_second_press_names_the_open_item(hub, server):  # noqa: F811
 def test_start_another_anyway_only_where_the_workflow_allows(hub, server):  # noqa: F811
     _install(hub, CALLBACK)
     jo = token(hub, "jo")
-    form = {"_workflow": "callback", "phone": "902 555 0101"}
+    form = {"_workflow": "callback", "_record": _pat(hub), "phone": "902 555 0101"}
     assert call(server, "POST", "/start", jo, form=form)[0] == 303
     code, page = call(server, "POST", "/start", jo, form=form)
     assert code == 409 and "Start another anyway" in page and "Call them back" in page
@@ -101,8 +116,8 @@ def test_start_another_anyway_only_where_the_workflow_allows(hub, server):  # no
 def test_an_event_is_never_refused_as_a_duplicate(hub):
     _install(hub, CALLBACK)
     jo = M(hub, "jo")
-    hub.engine.start(jo, "callback", inputs={"phone": "1"})
-    hub.engine.start(jo, "callback", inputs={"phone": "1"}, via_automation=True)
+    hub.engine.start(jo, "callback", record=_pat(hub), inputs={"phone": "1"})
+    hub.engine.start(jo, "callback", record=_pat(hub), inputs={"phone": "1"}, via_automation=True)
     assert len(hub.db.runs.find({"workflow_id": "callback"})) == 2
 
 
@@ -112,7 +127,8 @@ def test_one_open_per_is_checked():
                       ('one_open_per = "record"\n', "needs a record"),
                       ('allow_duplicate = true\n', "needs one_open_per")):
         with pytest.raises(DefinitionError) as exc:
-            parse(CALLBACK.replace('one_open_per = "input.phone"\nallow_duplicate = true\n', bad))
+            src = CALLBACK.replace('one_open_per = "input.phone"\nallow_duplicate = true\n', bad)
+            parse(src.replace('record = "Patient"\n', "") if "record" in bad else src)
         assert any(says in p for p in exc.value.problems), (bad, exc.value.problems)
     wf = parse(CALLBACK)
     assert wf.one_open_per == "input.phone" and wf.allow_duplicate
@@ -190,10 +206,10 @@ def test_board_and_item_say_a_person_must(worked, server):  # noqa: F811
 def test_done_takes_the_item_on_the_record(hub, server):  # noqa: F811
     _install(hub, CALLBACK)
     jo = M(hub, "jo")
-    run = hub.engine.start(jo, "callback", inputs={"phone": "902 555 0101"})
+    run = hub.engine.start(jo, "callback", record=_pat(hub), inputs={"phone": "902 555 0101"})
     iid = item_for(hub, run, "call")
     _, page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))
-    assert "Assign to me" in page and "Done assigns it to you anyway" in page
+    assert "Assign to me" in page and "Finishing it assigns it to you anyway" in page
     hub.engine.complete(jo, iid, {"note": "left a message"})
     claimed = hub.track.list(run_id=run["id"], limit=50)
     assert any(ev["action"] == "item.claimed" and ev["actor"] == "jo" for ev in claimed)
@@ -219,3 +235,45 @@ def test_the_board_by_step(hub, server):  # noqa: F811
     shown = [s.title for s in wf.steps if s.kind in ("task", "gate", "wait")]
     assert shown and all(f'aria-label="{html.escape(t)}"' in page for t in shown)
     assert '<option value="appointment-request" selected' in page
+
+
+def test_what_a_move_ran_reads_plainly_in_history(hub, server):  # noqa: F811
+    """The list under a move in History (``tl-ran``) speaks as the page does: no ids, no conditions."""
+    from tests.test_clinic_records import LAB, _pat as _patient
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_patient(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    amara = M(hub, "dr-amara")
+    iid = item_for(hub, run, "review")
+    hub.engine.decide(amara, iid, "call-patient", "", seen=hub.engine.shown_digest(amara, iid))
+    ref = hub.engine.run(run["id"])["record"]
+    _, page = call(server, "GET", f"/records/{ref}?tab=history", token(hub, "dr-amara"))
+    nested = re.findall(r'<details class="tl-ran">.*?</details>', page, flags=re.S)
+    assert nested
+    seen = _text(" ".join(nested))
+    assert "automations ran" in seen and "Ask a nurse to call the patient" in seen
+    assert not re.search(r"\b(run|item)-[0-9a-f]{6,}", seen)
+    assert "input." not in seen and "==" not in seen and " run " not in f" {seen.lower()} "
+
+
+def test_the_block_of_what_a_move_set_going_reads_plainly(hub, server):  # noqa: F811
+    """The work section's block (``rw-activity``) speaks as the page does: the edge's and the automations' own
+    words and the outcome in words; no ids, no conditions, no "run"."""
+    from tests.test_clinic_records import LAB, _pat as _patient
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_patient(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    hub.engine.complete(M(hub, "clinical-admin-agent"), item_for(hub, run, "sort"),
+                        {"category": "abnormal", "rationale": "low"})
+    amara = M(hub, "dr-amara")
+    iid = item_for(hub, run, "review")
+    hub.engine.decide(amara, iid, "call-patient", "", seen=hub.engine.shown_digest(amara, iid))
+    ref = hub.engine.run(run["id"])["record"]
+    for who in ("dr-amara", "noor"):
+        _, page = call(server, "GET", f"/records/{ref}", token(hub, who))
+        block = page.split('<section id="activity"', 1)[1].split("</section>", 1)[0]
+        seen = _text("<div " + block + "</div>")
+        assert "After “Call the patient”" in seen and "Ask a nurse to call the patient" in seen and "done" in seen
+        assert not re.search(r"\b(run|item)-[0-9a-f]{6,}", seen)
+        assert "input." not in seen and "==" not in seen and " run " not in f" {seen.lower()} "
+        assert "automation ran" in seen or "automations ran" in seen

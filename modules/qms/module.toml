@@ -1,15 +1,20 @@
 # Quality: corrective and preventive actions (CAPA). It builds on document control: a CAPA names the controlled
 # documents it affects, and sending a CAPA's actions out sends those documents for review in the dms module.
 
+# 3: Root cause and plan are written by the CAPA's workflow and locked while it is in actions or verification. Every
+#  pass's action is kept under Actions taken. Found not effective, the verifier's comment is written on the CAPA
+#  (Found not effective because), and the next pass reopens only the documents its further action names. The record's
+#  own signature meaning, which repeated the verification gate's, is removed.
+# 4: The CAPA workflow is written as its states and edges; the moves it makes are its edges, no longer listed on the
+#  CAPA type. Versions approved before keep running as they were.
+
 [module]
 requires_core = "1.0"
 id = "qms"
 name = "Quality"
-version = "3"
-changes = """Root cause and plan are written by the CAPA's workflow and locked while it is in actions or verification.
-Every pass's action is kept under Actions taken. Found not effective, the verifier's comment is written on the CAPA
-(Found not effective because), and the next pass reopens only the documents its further action names. The record's
-own signature meaning, which repeated the verification gate's, is removed."""
+version = "4"
+changes = """The CAPA workflow is written as its states and edges; the moves it makes are its edges, no longer listed on the
+CAPA type."""
 summary = "Corrective and preventive actions, linked to the controlled documents they change."
 shortcuts = ["CAPA"]
 requires = ["dms"]

@@ -3,8 +3,9 @@ title = "Patient question"
 record = "Communication"
 summary = """
 One message, from received to closed: the patient's message is this workflow's record, about the patient, and where
-it is in its handling is where the work is: received, triaged (screened and sent to whoever answers it), answered,
-closed. Each message is its own record and its own run: a new question while another waits is never folded into it.
+it is in its handling is where the work is. Screened as it arrives, it waits with whoever answers it: a nurse to call
+the patient now, an agent drafting a reply, the front desk checking that reply, or a nurse answering it. Answered, it
+is closed. Each message is its own record and its own run: a new question while another waits is never folded into it.
 
 A patient writes in with a question. Code screens it first for red flags (chest pain, trouble breathing, stroke
 signs...): a flagged message goes straight to a nurse to call the patient within 30 minutes. Every patient is told
@@ -35,41 +36,58 @@ type = "text"
 label = "The patient's message"
 required = true
 
-[[steps]]
+# ---------------------------------------------------------------------------------------------------------------
+# Written as the message's states (where it waits, and the work done there) and the edges between them (what the
+# person working it chose, with the automations that run on the way). See practicehub/states.py.
+
+# Received: screened by code for red flags, and the patient told at once what to do in an emergency. A red flag goes
+# to a nurse to call now; a message plainly about paperwork to an agent's draft; anything else to a nurse.
+[start]
+to = "with-nurse"
+label = "Received"
+
+[[start.do]]
 id = "screen"
 title = "Screen the message for red flags"
-kind = "automation"
 block = "patient-message-screen"
-[steps.params]
+[start.do.params]
 question = "{{input.question}}"
 
-# Screened, the message is triaged: it is with whoever answers it (a nurse now, a nurse within hours, or the desk).
-[[steps]]
-id = "triaged"
-title = "Triage the message"
-kind = "automation"
-after = ["screen"]
-state = "triaged"
-
-[[steps]]
+[[start.do]]
 id = "safety-net"
 title = "Tell the patient what to do in an emergency"
-kind = "automation"
-after = ["screen"]
 action = "message.send"
-[steps.params]
+[start.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "We have your message"
 body = "{{screen.advice}}"
 
-[[steps]]
+[[start.do]]
+id = "routine"
+title = "Have a reply drafted (paperwork only)"
+when = "screen.routine == true"
+to = "drafting"
+
+# last, so a red flag wins over anything else the screen said
+[[start.do]]
+id = "red-flag"
+title = "Have a nurse call now (red flag)"
+when = "screen.red_flag == true"
+to = "to-call"
+
+# --- a red flag: a nurse calls now ------------------------------------------------------------------------------
+
+[[state]]
+id = "to-call"
+label = "To call now"
+tone = "attention"
+
+[[state.work]]
 id = "urgent"
 title = "Call the patient now (red flag)"
 kind = "task"
 role = "nurse"
-after = ["screen"]
-when = "screen.red_flag == true"
 persons_only = true
 priority = "urgent"
 due = "30m"
@@ -77,26 +95,46 @@ escalate_to = "physician"
 context = ["record:demographics", "record:clinical", "input.question", "screen"]
 instructions = """The message may describe an emergency. Call the patient now. Advise 911 or the emergency department if
 needed, or book them in today. Write down what you did."""
-[[steps.fields]]
-name = "reached"
-type = "boolean"
-[[steps.fields]]
-name = "action"
-type = "choice"
-choices = ["sent-to-emergency", "booked-today", "advised", "could-not-reach"]
-required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "notes"
 type = "text"
 required = true
 
-[[steps]]
+[[edge]]
+id = "sent-to-emergency"
+label = "Sent to emergency"
+from = "to-call"
+to = "answered"
+
+[[edge]]
+id = "booked-today"
+label = "Booked today"
+from = "to-call"
+to = "answered"
+
+[[edge]]
+id = "advised"
+label = "Advised"
+from = "to-call"
+to = "answered"
+
+[[edge]]
+id = "could-not-reach"
+label = "Could not reach"
+from = "to-call"
+to = "not-reached"
+
+# Nobody reached: a physician decides. Reached, the message is answered; otherwise it is closed with what they did.
+[[state]]
+id = "not-reached"
+label = "Could not reach"
+tone = "attention"
+
+[[state.work]]
 id = "not-reached"
 title = "The nurse could not reach the patient (red flag)"
 kind = "task"
 role = "physician"
-after = ["urgent"]
-when = "urgent.action == 'could-not-reach'"
 persons_only = true
 priority = "urgent"
 due = "30m"
@@ -104,26 +142,61 @@ escalate_to = "medical-director"
 context = ["input.question", "screen", "urgent", "record:demographics", "record:clinical"]
 instructions = """The patient's message may describe an emergency and a nurse could not reach them. Decide what happens
 now: try again, call their emergency contact, or ask for a welfare check. Write down what you did."""
-[[steps.fields]]
-name = "action"
-type = "choice"
-choices = ["reached-the-patient", "called-emergency-contact", "welfare-check", "no-further-action"]
-required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "notes"
 type = "text"
 required = true
 
-# A red flag answered on the phone is answered; a patient nobody reached is closed with what the physician did.
-[[steps]]
-id = "called"
-title = "Answered on the phone"
-kind = "automation"
-after = ["urgent", "not-reached"]
-when = "urgent.action != 'could-not-reach' or not-reached.action == 'reached-the-patient'"
-state = "answered"
+[[edge]]
+id = "reached-the-patient"
+label = "Reached the patient"
+from = "not-reached"
+to = "answered"
 
-[[steps]]
+[[edge]]
+id = "called-emergency-contact"
+label = "Called their emergency contact"
+from = "not-reached"
+to = "closed"
+[[edge.do]]
+id = "close-emergency-contact"
+title = "Close the message"
+action = "record.update"
+[edge.do.params.set]
+status = "completed"
+
+[[edge]]
+id = "welfare-check"
+label = "Asked for a welfare check"
+from = "not-reached"
+to = "closed"
+[[edge.do]]
+id = "close-welfare-check"
+title = "Close the message"
+action = "record.update"
+[edge.do.params.set]
+status = "completed"
+
+[[edge]]
+id = "no-further-action"
+label = "Nothing more to do"
+from = "not-reached"
+to = "closed"
+[[edge.do]]
+id = "close-no-further-action"
+title = "Close the message"
+action = "record.update"
+[edge.do.params.set]
+status = "completed"
+
+# --- paperwork: an agent drafts, the front desk checks and sends ---------------------------------------------
+
+[[state]]
+id = "drafting"
+label = "Reply being drafted"
+tone = "active"
+
+[[state.work]]
 id = "draft"
 title = "Draft a reply"
 kind = "task"
@@ -132,22 +205,34 @@ people_role = "nurse"
 due = "1d"
 escalate_to = "nurse"
 block = "patient-reply-draft"
-after = ["screen"]
-when = "screen.routine == true"
 context = ["record:demographics", "input.question"]
-[steps.params]
+[state.work.params]
 question = "{{input.question}}"
 tone = "warm"
 
-[[steps]]
+# A draft the agent says needs a clinician goes to a nurse instead of the front desk.
+[[edge]]
+id = "drafted"
+label = "Drafted"
+from = "drafting"
+to = "to-check"
+[[edge.do]]
+id = "needs-clinician"
+title = "Pass it to a nurse"
+when = "draft.needs_clinician == true"
+to = "with-nurse"
+
+[[state]]
+id = "to-check"
+label = "Reply to check"
+tone = "active"
+
+[[state.work]]
 id = "review"
 title = "Check and send the reply"
 kind = "gate"
 role = "front-desk"
-after = ["draft"]
-when = "draft.needs_clinician == false"
 signer = "person"
-outcomes = ["send", "needs-a-clinician"]
 meaning = "I have read this reply and it may go to the patient"
 due = "1d"
 escalate_to = "nurse"
@@ -156,57 +241,87 @@ instructions = """Read the patient's message first, then the drafted reply. Send
 administrative question and the reply says nothing clinical. If the message describes any symptom, or anything
 sounds urgent, choose needs-a-clinician: a nurse answers the patient instead."""
 
-[[steps]]
+[[edge]]
+id = "send"
+label = "Send"
+from = "to-check"
+to = "answered"
+[[edge.do]]
 id = "send"
 title = "Send the reply"
-kind = "automation"
-after = ["review"]
-when = "review.outcome == 'send'"
 action = "message.send"
-state = "answered"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your question"
 body = "{{draft.reply}}"
 
-[[steps]]
+[[edge]]
+id = "needs-a-clinician"
+label = "Needs a clinician"
+from = "to-check"
+to = "with-nurse"
+
+# --- anything else: a nurse answers ------------------------------------------------------------------------------
+
+[[state]]
+id = "with-nurse"
+label = "With a nurse"
+tone = "active"
+
+[[state.work]]
 id = "clinician"
 title = "Answer a clinical question"
 kind = "task"
 role = "nurse"
-after = ["screen", "draft", "review"]
-when = "(screen.red_flag == false and screen.routine != true) or draft.needs_clinician == true or review.outcome == 'needs-a-clinician'"
 persons_only = true
 due = "4h"
 escalate_to = "physician"
 context = ["input.question", "screen", "record:demographics", "record:clinical", "draft.reply"]
 instructions = """The patient's question needs clinical judgement. Read their message for anything urgent first: if
 it may be an emergency, call them now. Then write the answer they will receive, or book them in and say so."""
-[[steps.fields]]
+[[state.work.fields]]
 name = "answer"
 type = "text"
 required = true
 
-[[steps]]
+[[edge]]
+id = "answer"
+label = "Answered"
+from = "with-nurse"
+to = "answered"
+[[edge.do]]
 id = "send-answer"
 title = "Send the nurse's answer"
-kind = "automation"
-after = ["clinician"]
 action = "message.send"
-state = "answered"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your question"
 body = "{{clinician.answer}}"
 
-[[steps]]
+# --- answered, then closed -----------------------------------------------------------------------------------------
+
+[[state]]
+id = "answered"
+label = "Answered"
+tone = "done"
+
+[[state.work]]
 id = "close"
 title = "Close the message"
 kind = "automation"
-after = ["send", "send-answer", "called", "not-reached"]
 action = "record.update"
-state = "closed"
-[steps.params.set]
+[state.work.params.set]
 status = "completed"
+
+[[edge]]
+id = "closed"
+label = "Closed"
+from = "answered"
+to = "closed"
+
+[[state]]
+id = "closed"
+label = "Closed"
+tone = "done"

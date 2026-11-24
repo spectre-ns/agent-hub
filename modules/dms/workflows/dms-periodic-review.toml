@@ -1,0 +1,89 @@
+id = "dms-periodic-review"
+title = "Review a controlled document that is due"
+summary = """A controlled document in force past its review date goes to its owner: confirm it is still right (signed), or
+ask for a revision."""
+record = "Document"
+
+# A companion, started by the clock: the document's status belongs to dms-review, which walks it. This never moves
+# the status; choosing revise sets revise_asked, and the document's own workflow opens the revision and numbers it.
+# Written as states and edges (practicehub/states.py) whose states are none of the document's statuses: they are this
+# run's own stops (the run keeps where it is), and the document stays as it is.
+
+[trigger]
+schedule = "daily 07:00"
+for_each = "Document"
+where = "record.status == 'approved' and record.review_by != '' and record.review_by < run.today and record.review_asked != record.review_by"
+
+[start]
+to = "review-due"
+label = "Due for review"
+
+[[start.do]]
+id = "asked"
+title = "Note that the review was asked for"
+action = "record.update"
+[start.do.params]
+ref = "{{run.record}}"
+[start.do.params.set]
+review_asked = "{{record.review_by}}"
+
+[[state]]
+id = "review-due"
+label = "Due for review"
+tone = "attention"
+
+[[state.work]]
+id = "review"
+title = "Review the document"
+kind = "gate"
+role = "document-author"
+assign_to = "{{record.owner}}"
+signer = "person"
+meaning = "I have reviewed this document and it is still right"
+meanings = { revise = "I ask for a revision of this document" }
+context = ["record:documents"]
+due = "14d"
+escalate_to = "document-controller"
+instructions = """The document is due for its periodic review. Read it: if it is still right, confirm it (its next
+review is a year from today). If something has to change, choose revise: a new revision is opened for its owner, and
+staff keep reading the one in force until the new one is approved."""
+
+[[edge]]
+id = "confirm"
+label = "Still right"
+from = "review-due"
+to = "review-confirmed"
+
+[[edge.do]]
+id = "confirm"
+title = "Set the next review"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+review_by = "{{run.today + 1y}}"
+
+[[edge]]
+id = "revise"
+label = "Ask for a revision"
+from = "review-due"
+to = "revision-asked"
+
+[[edge.do]]
+id = "revise"
+title = "Ask for a revision"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+revise_asked = true   # the document's own workflow opens the revision
+
+[[state]]
+id = "review-confirmed"
+label = "Reviewed: still right"
+tone = "done"
+
+[[state]]
+id = "revision-asked"
+label = "Revision asked for"
+tone = "done"

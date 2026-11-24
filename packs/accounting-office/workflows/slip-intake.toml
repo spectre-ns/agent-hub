@@ -11,21 +11,40 @@ goes to the office.
 [trigger]
 starters = ["partner", "manager", "senior", "staff", "bookkeeper", "admin", "client-portal"]
 
-[[steps]]
+# Written as the slip's states and the edges between them (see practicehub/states.py). Received, the documents agent
+# reads it (or a person records what it says, on the slip's page); read, it counts on the client's return.
+[start]
+to = "received"
+label = "Received"
+
+[[state]]
+id = "received"
+label = "Received"
+tone = "waiting"
+
+[[state.work]]
 id = "extract"
 title = "Read the slip"
 kind = "task"
 role = "document-clerk"
 skill = "slip-extract"
 risk = "low"
-state = "extracted"
 due = "1d"
 people_role = "staff"
 context = ["record:documents"]
 
-[[steps]]
+[[edge]]
+id = "read"
+label = "Read"
+from = "received"
+to = "extracted"
+
+[[edge.do]]
 id = "file-slip"
 title = "Count it on the client's return"
-kind = "automation"
-after = ["extract"]
 action = "t1.slip_filed"
+
+[[state]]
+id = "extracted"
+label = "Read"
+tone = "done"

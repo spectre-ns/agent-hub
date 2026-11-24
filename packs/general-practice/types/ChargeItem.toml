@@ -6,7 +6,10 @@ data_class = "billing"
 standard = "fhir-r4"
 strict = true
 date = "occurrenceDateTime"
-active = "record.status in ['planned', 'billable']"
+active = "record.status in ['planned', 'coded', 'on-hold', 'billable']"
+# A visit's charge is made when its note is signed (planned), and walked by one workflow: coded by billing, then the
+# claim submitted (billable) or held for billing staff (on-hold). Its status is where that work is.
+workflow = { id = "visit-claim", when = "record.status == 'planned'" }
 order = 120
 summary = "A billable service, from the fee schedule."
 part_of = "context"
@@ -14,8 +17,9 @@ part_of = "context"
 [[field]]
 name = "status"
 type = "choice"
-choices = ["planned", "billable", "not-billable", "aborted", "billed", "entered-in-error", "unknown"]
+choices = ["planned", "coded", "on-hold", "billable", "not-billable", "aborted", "billed", "entered-in-error", "unknown"]
 required = true
+help = "planned is to code, billable submitted; coded (to submit) and on-hold (held for billing staff) are the practice's own"
 
 [[field]]
 name = "code"
@@ -78,3 +82,17 @@ type = "list"
 [[field]]
 name = "note"
 type = "list"
+
+[lifecycle]
+field = "status"
+initial = "planned"
+labels = { planned = "To code", coded = "To submit", "on-hold" = "Held", billable = "Billable", "not-billable" = "Not billable", aborted = "Aborted", billed = "Billed", "entered-in-error" = "Entered in error" }
+abandoned = { planned = "aborted", coded = "aborted" }   # its work cancelled: the charge is too
+tones = { planned = "waiting", coded = "waiting", "on-hold" = "attention", billable = "done", "not-billable" = "ended", aborted = "ended", billed = "done", "entered-in-error" = "ended" }
+[[lifecycle.transition]]
+from = ["planned", "coded"]
+to = "aborted"
+by = "workflow"   # its claim's work cancelled (lifecycle.abandoned)
+[[lifecycle.transition]]
+from = ["*"]
+to = "entered-in-error"

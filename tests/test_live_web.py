@@ -1,5 +1,5 @@
 """The live wiki over HTTP: the editor for writers, comments, versions compared and restored, two editors at once,
-a SOP's banner and read-and-sign, and an agent mentioned in a comment answering in the thread."""
+a controlled document read and signed, and an agent mentioned in a comment answering in the thread."""
 
 import json
 import re
@@ -92,27 +92,23 @@ def test_versions_are_compared_word_by_word_and_one_is_restored(wiki):
     assert hub.record_history(M(hub, "jo"), f"WikiPage/{p['id']}")[0]["comment"] == f"Restored version {vs[0]}"
 
 
-def test_a_sop_being_revised_shows_readers_the_released_text_and_asks_them_to_read_and_sign(wiki):
+def test_a_controlled_document_is_read_and_signed_and_readers_keep_its_approved_revision_while_it_is_revised(wiki):
     hub, srv = wiki
-    sop = _page(hub, "Hand hygiene", "Procedure")
-    ref, url = f"Procedure/{sop['id']}", f"/records/Procedure/{sop['id']}"
-    hub.authz.delete([("role:wiki-editor", "assignee", member_ref("sam"))])
+    doc = _page(hub, "Handling a critical lab result", "Document")
+    ref, url = f"Document/{doc['id']}", f"/records/Document/{doc['id']}"
     sam = token(hub, "sam")
-    page = call(srv, "GET", url, sam)[1]
-    assert "Read and sign" in page
-    seen = re.search(r'class="read-sign".*?name="seen" value="([0-9a-f]{64})"', page, re.S).group(1)
-    meaning = re.search(r'class="read-sign".*?name="meaning" value="([^"]*)"', page, re.S).group(1)
-    code, _ = call(srv, "POST", url + "/sign", sam, form={"meaning": meaning.replace("&#x27;", "'"), "seen": seen,
-                                                          "passphrase": passphrase(hub, "sam")})
+    page = call(srv, "GET", url + "?tab=signatures", sam)[1]
+    assert "I have read and understood this document" in page
+    seen = re.search(r'name="seen" value="([0-9a-f]{64})"', page).group(1)
+    code, _ = call(srv, "POST", url + "/sign", sam, form={"meaning": "I have read and understood this document",
+                                                          "seen": seen, "passphrase": passphrase(hub, "sam")})
     assert code == 303
-    assert "You signed" in call(srv, "GET", url, sam)[1]
+    assert any(s["by"] == "sam" for s in hub.signatures(M(hub, "sam"), ref))
     rana = M(hub, "rana")
-    hub.update_record(rana, ref, {"status": "draft"}, comment="new poster")
-    hub.update_record(rana, ref, {"body": sop["body"] + "\n\nA NEW LINE."})
-    page = call(srv, "GET", url, sam)[1]
-    assert "A new revision is being written" in page and "A NEW LINE" not in page  # readers work from the released
-    page = call(srv, "GET", url, token(hub, "rana"))[1]
-    assert "You are reading the" in page and "A NEW LINE" in page and "show=in-use" in page
+    hub.update_record(rana, ref, {"status": "draft"}, comment="new escalation path")  # Revise
+    hub.update_record(rana, ref, {"body": doc["body"] + " A NEW LINE."})
+    used = hub.in_use_version(M(hub, "sam"), ref)
+    assert "A NEW LINE" not in used["data"]["body"] and used["data"]["status"] == "approved"
 
 
 def test_an_agent_mentioned_in_a_comment_answers_in_the_thread_over_the_api(wiki):

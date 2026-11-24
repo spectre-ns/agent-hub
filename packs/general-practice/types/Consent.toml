@@ -78,7 +78,7 @@ path = "withhold_records.*"
 type = "reference"
 target = ["Observation", "Composition", "Condition", "DiagnosticReport", "MedicationRequest", "MedicationStatement",
           "AllergyIntolerance", "Immunization", "ServiceRequest", "Encounter", "Communication",
-          "QuestionnaireResponse"]
+          "QuestionnaireResponse", "Task"]
 help = "particular records of the patient's file"
 
 [[field]]
@@ -107,10 +107,12 @@ on = ["create", "edit"]
 fields = ["patient", "status", "received", "request", "withhold_classes", "withhold_records", "withhold_types",
           "allow_members", "allow_roles", "told"]
 
-# The privacy-request workflow reviews a request and puts it in force or refuses it; the privacy officer lifts one in
-# force (and may put a lifted one back). A request whose work is cancelled is withdrawn, never silently refused or
-# put in force. A run of an older version (which put a directive of its own in force) that ends leaves its request
-# withdrawn.
+# The privacy-request workflow (written as states and edges) reviews a request and puts it in force or refuses it: its
+# moves are the workflow's, not listed here. The privacy officer lifts one in force (and may put a lifted one back). A
+# request whose work is cancelled is withdrawn, never silently refused or put in force. A run of an older version
+# (which put a directive of its own in force) that ends leaves its request withdrawn. Reviewed is where a run of an
+# earlier pack version passes (its review moved the request there before putting it in force or refusing it): the
+# moves through it stay for those runs.
 [lifecycle]
 field = "status"
 initial = "requested"

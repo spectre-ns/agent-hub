@@ -1,163 +1,171 @@
 id = "inventory-post"
 title = "Post a stock move"
-summary = """A submitted stock move changes the item's on hand. A delivery received or stock issued posts at once (an
-issue for more than is on hand goes back to a stock keeper); a write-off, stock found or a count is signed off by an inventory
-manager first, never the one who wrote it."""
+summary = """A submitted stock move is checked against the stock and the policy in force, and posted: the lots it moves
+change, and the move keeps what changed. Under a policy that asks for it, an adjustment, a write-off, a return, a
+release or a count beyond its tolerance is signed first (by someone other than its author when the policy says
+second). A move that cannot post goes back to its author with the reason."""
 record = "StockMove"
 
 # The StockMove type names this workflow: making a stock move starts it, and its status is this work's position.
-# Rejected (not signed off, or short), it goes back to its author and the next run walks it again. Nothing else starts
-# it. It moves a stock item's status (a delivery restocks it) only through a move that item's reorder pass waits on.
+# Written as the move's states and the edges between them (practicehub/states.py), listed in the order a pass goes
+# through them. A move sent back (refused by the check, not signed, or the stock changed since it was checked) goes to
+# rejected, which ends the pass; the next run walks it again once revised. Every check runs before anyone signs, and
+# the post checks again: a signature covers only the stock it was checked against. A move that needs no signature
+# under the policy in force posts on the way out of draft, so a one-person shop never waits on anyone.
 
-[[steps]]
+[start]
+to = "draft"
+label = "Written"
+
+[[start.do]]
+id = "from-rejected"
+title = "Walk it from rejected"
+when = "record.status == 'rejected'"
+to = "rejected"
+
+[[state]]
+id = "rejected"
+label = "Sent back"
+tone = "attention"
+
+[[state.work]]
+id = "revise"
+title = "Revise the move that was sent back"
+kind = "wait"
+until = "record.status != 'rejected'"
+instructions = """Not posted: why is on the move (Why it was sent back). Revise it on its page, then submit it
+again."""
+
+[[edge]]
+id = "revised"
+label = "Revised"
+from = "rejected"
+to = "draft"
+
+[[state]]
+id = "draft"
+label = "Draft"
+tone = "active"
+
+[[state.work]]
 id = "submit"
 title = "Write the move and submit it for posting"
 kind = "wait"
-until = "record.status != 'draft' and record.status != 'rejected'"
-moves = ["draft"]   # a rejected move revised: still with its author
-instructions = """Say what moved, how many and why, then submit it on its page. A write-off, stock found or a count
-is signed off by an inventory manager who did not write it."""
+until = "record.status != 'draft'"
+instructions = """Say what moved, how many and why, then submit it on its page."""
 
-[[steps]]
-id = "sign-off"
-title = "Sign off the stock change"
+# Submitted: checked against the stock and the policy in force. Refused, it goes back; with no signature needed it
+# posts at once; otherwise it waits in submitted for one.
+[[edge]]
+id = "submit"
+label = "Submit for posting"
+from = "draft"
+to = "submitted"
+
+[[edge.do]]
+id = "policy"
+title = "Read the inventory policy in force"
+action = "inventory.policy"
+
+[[edge.do]]
+id = "check"
+title = "Check the move against the stock"
+after = ["policy"]
+action = "inventory.check"
+
+[[edge.do]]
+id = "refused"
+title = "Send the move back: it cannot post"
+when = "not check.ok"           # inventory.check wrote why on the move
+to = "rejected"                 # back with its author: the next pass is the next run's
+
+[[edge.do]]
+id = "post-now"
+title = "Post the move"
+when = "check.ok and check.signoff == ''"
+action = "inventory.post"
+
+[[edge.do]]
+id = "stale-now"
+title = "Send the move back: the stock changed"
+when = "check.ok and check.signoff == '' and not post-now.ok"
+to = "rejected"
+
+[[edge.do]]
+id = "posted-now"
+title = "Mark the move posted"
+when = "post-now.ok"
+to = "posted"
+
+[[state]]
+id = "submitted"
+label = "Submitted"
+tone = "attention"
+
+# Two alternative pieces of work, one per sign-off setting: the policy says whether its author may sign it (self) or
+# only someone else (second). A gate nobody may take would block for good, so not_by rides only on the second.
+[[state.work]]
+id = "sign-own"
+title = "Sign the stock change"
 kind = "gate"
 role = "inventory-manager"
 signer = "person"
-after = ["submit"]
-when = "record.status == 'submitted' and record.kind in ['write-off', 'found', 'count']"
+when = "check.ok and check.self"
+meaning = "I have checked this change to stock"
+context = ["record:inventory"]
+due = "2d"
+instructions = """The move says why it needs a signature, and each lot before and after. Check the reason (and,
+for a count, that the shelf was counted): post it, or reject it and it goes back to whoever wrote it."""
+
+[[state.work]]
+id = "sign-other"
+title = "Sign the stock change"
+kind = "gate"
+role = "inventory-manager"
+signer = "person"
+when = "check.ok and check.second"
 not_by = ["record.editors"]
-meaning = "I have checked this change to stock on hand"
-outcomes = ["post", "reject"]
+meaning = "I have checked this change to stock"
 context = ["record:inventory"]
 due = "2d"
 escalate_to = "inventory-manager"
-instructions = """A write-off, stock found or a count changes on hand without a delivery or an issue. Check the reason (and, for a
-count, that the shelf was counted): post it, or reject it and it goes back to whoever wrote it."""
+instructions = """The move says why it needs a signature, and each lot before and after. Check the reason (and,
+for a count, that the shelf was counted): post it, or reject it and it goes back to whoever wrote it. Someone other
+than its author signs it."""
 
-[[steps]]
-id = "receive"
-title = "Add the delivery to on hand"
-kind = "automation"
-after = ["submit"]
-when = "record.status == 'submitted' and record.kind == 'receive'"
-action = "record.update"
-for_each = "{{record.item}}"
-[steps.params]
-ref = "{{each}}"
-[steps.params.increment]
-on_hand = "{{record.quantity}}"
+[[edge]]
+id = "post"
+label = "Post"
+from = "submitted"
+to = "posted"
 
-[[steps]]
-id = "restock"
-title = "Mark the item stocked again"
-kind = "automation"
-after = ["receive"]
-action = "record.update"
-for_each = "{{record.item}}"
-where = "(each_record.status == 'low' or each_record.status == 'on-order') and each_record.on_hand > each_record.reorder_point"
-[steps.params]
-ref = "{{each}}"
-[steps.params.set]
-status = "stocked"   # a move the item's reorder pass waits on
+[[edge.do]]
+id = "post-signed"
+title = "Post the move"
+action = "inventory.post"
 
-[[steps]]
-id = "issue"
-title = "Take the issued stock off on hand"
-kind = "automation"
-after = ["submit"]
-when = "record.status == 'submitted' and record.kind == 'issue'"
-action = "record.update"
-for_each = "{{record.item}}"
-where = "each_record.on_hand >= record.quantity"   # never below zero: a short issue goes back to a person
-[steps.params]
-ref = "{{each}}"
-[steps.params.decrement]
-on_hand = "{{record.quantity}}"
+[[edge.do]]
+id = "stale"
+title = "Send the move back: the stock changed"
+when = "not post-signed.ok"     # inventory.post wrote why on the move
+to = "rejected"
 
-[[steps]]
-id = "short"
-title = "Not enough on hand to issue"
-kind = "automation"
-after = ["issue"]
-when = "issue.passed_over != []"
-action = "record.update"
-state = "rejected"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-reject_reason = "Less is on hand than this issues."
+[[edge]]
+id = "reject"
+label = "Reject"
+from = "submitted"
+to = "rejected"                 # back with its author: the next pass is the next run's
 
-[[steps]]
-id = "write-off"
-title = "Take the written-off stock off on hand"
-kind = "automation"
-after = ["sign-off"]
-when = "sign-off.outcome == 'post' and record.kind == 'write-off'"
-action = "record.update"
-for_each = "{{record.item}}"
-where = "each_record.on_hand >= record.quantity"   # never below zero: count the shelf instead
-[steps.params]
-ref = "{{each}}"
-[steps.params.decrement]
-on_hand = "{{record.quantity}}"
-
-[[steps]]
-id = "short-write-off"
-title = "Not enough on hand to write off"
-kind = "automation"
-after = ["write-off"]
-when = "write-off.passed_over != []"
-action = "record.update"
-state = "rejected"
-[steps.params]
-ref = "{{run.record}}"
-[steps.params.set]
-reject_reason = "Less is on hand than this writes off: count the shelf instead."
-
-[[steps]]
-id = "found"
-title = "Add the found stock to on hand"
-kind = "automation"
-after = ["sign-off"]
-when = "sign-off.outcome == 'post' and record.kind == 'found'"
-action = "record.update"
-for_each = "{{record.item}}"
-[steps.params]
-ref = "{{each}}"
-[steps.params.increment]
-on_hand = "{{record.quantity}}"
-
-[[steps]]
-id = "count"
-title = "Set on hand to the count"
-kind = "automation"
-after = ["sign-off"]
-when = "sign-off.outcome == 'post' and record.kind == 'count'"
-action = "record.update"
-for_each = "{{record.item}}"
-[steps.params]
-ref = "{{each}}"
-[steps.params.set]
-on_hand = "{{record.quantity}}"
-
-[[steps]]
-id = "rejected"
+[[edge.do]]
+id = "not-signed"
 title = "Return the move to its author"
-kind = "automation"
-after = ["sign-off"]
-when = "sign-off.outcome == 'reject'"
 action = "record.update"
-state = "rejected"   # back with its author: the next pass is the next run's
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
-reject_reason = "Not signed off: {{sign-off.comment}}"
+[edge.do.params.set]
+reject_reason = "Not signed: {{sign-own.comment}}{{sign-other.comment}}"
 
-[[steps]]
+[[state]]
 id = "posted"
-title = "Mark the move posted"
-kind = "automation"
-after = ["restock", "issue", "write-off", "found", "count"]
-when = "record.status == 'submitted'"   # a short issue or write-off has already been rejected
-state = "posted"
+label = "Posted"
+tone = "done"

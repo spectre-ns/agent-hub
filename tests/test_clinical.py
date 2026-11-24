@@ -20,7 +20,7 @@ def types():
 
 
 def test_every_type_parses_and_matches_its_file(types):
-    assert len(types) == 18  # Appointment became the Visit (pack version 2); a patient's Consent directive
+    assert len(types) == 19  # a follow-up (Task, pack version 5); Appointment became the Visit (pack version 2); a patient's Consent directive
     for name, rt in types.items():
         assert rt.id == name
     assert [rt.id for rt in types.values() if rt.subject] == ["Patient"]
@@ -56,10 +56,10 @@ def test_a_result_summary_never_hides_one_value_behind_another(hub):
 
 def test_abnormal_result_cannot_be_filed_as_normal(worked):
     run = run_of(worked, "lab-result-review")
-    with pytest.raises(AssertionError):
-        item_for(worked, run, "review")          # the file-normal gate is not offered
     amara = M(worked, "dr-amara")
-    worked.engine.decide(amara, item_for(worked, run, "review-flagged"), "no-action-needed", "recheck in 3 months")
+    with pytest.raises(Exception):  # filing it as normal is an edge not offered for an abnormal result
+        worked.engine.decide(amara, item_for(worked, run, "review"), "file-normal", "")
+    worked.engine.decide(amara, item_for(worked, run, "review"), "no-action-needed", "recheck in 3 months")
     run_all_local(worked, log=quiet)
     bodies = [r["body"] for r in worked.db.outbox.find({"channel": "patient-portal"}, sort="id")]
     result_msgs = [b for b in bodies if "result" in b]
@@ -151,7 +151,7 @@ def test_a_red_flag_message_goes_straight_to_a_nurse(hub):
     assert run["steps"]["draft"]["state"] == "skipped"  # no agent drafts a reply to an emergency
     assert any("911" in b for b in _outbox(hub, run))
     hub.engine.complete(M(hub, "noor"), item_for(hub, run, "urgent"),
-                        {"reached": True, "action": "sent-to-emergency", "notes": "Called, advised 911."})
+                        {"outcome": "sent-to-emergency", "notes": "Called, advised 911."})
     assert hub.engine.run(run["id"])["status"] == "completed"
 
 
@@ -176,7 +176,8 @@ def test_a_lab_value_out_of_range_is_never_filed_as_normal(hub):
     assert run["steps"]["page"]["state"] == "done"  # paged though the lab said normal
     # critical: straight to an urgent physician review, never waiting on an agent's sort
     assert run["steps"]["sort"]["state"] == "skipped"
-    assert run["steps"]["review"]["state"] == "skipped" and run["steps"]["review-flagged"]["state"] == "skipped"
+    assert run["steps"]["review"]["state"] == "skipped"
+    assert run["ctx"]["run"]["record"] and read_review(hub, run) == "received"  # straight to in review
     item = hub.engine.item(item_for(hub, run, "review-critical"))
     assert item["priority"] == "urgent" and item["role"] == "physician"
 
@@ -213,7 +214,7 @@ def test_a_patient_nobody_could_reach_goes_to_a_physician(hub):
     run = hub.engine.run(run["id"])
     assert run["steps"]["safety-net"]["state"] == "done"  # told to call 911, though nobody marked it urgent
     hub.engine.complete(M(hub, "noor"), item_for(hub, run, "nurse-call"),
-                        {"reached": False, "advice": "no answer, left a voicemail"})
+                        {"outcome": "could-not-reach", "advice": "no answer, left a voicemail"})
     run = hub.engine.run(run["id"])
     item = hub.engine.item(item_for(hub, run, "not-reached"))
     assert item["role"] == "physician" and item["priority"] == "urgent"
@@ -423,18 +424,19 @@ def test_a_desk_booking_is_booked_at_once_only_for_a_plainly_routine_reason(hub)
         "reason": "my knee hurts when I run", "kind": "new-concern", "slot": "2027-03-09T09:00|dr-liam"})
     assert not _visits_at(hub, "2027-03-09T09:00")  # not booked before a nurse read it
     triage = hub.engine.item(item_for(hub, run, "triage"))
-    assert triage["role"] == "nurse" and hub.engine.run(run["id"])["steps"]["book-chosen"]["state"] == "pending"
-    hub.engine.complete(noor, triage["id"], {"decision": "book-a-slot"})
+    assert triage["role"] == "nurse" and hub.engine.run(run["id"])["steps"]["book-chosen"]["state"] == "skipped"
+    hub.engine.complete(noor, triage["id"], {"outcome": "book-a-slot"})
     (v,) = _visits_at(hub, "2027-03-09T09:00")
     assert v["subject"]["reference"] == pat
     run = hub.engine.run(run["id"])
-    assert run["steps"]["propose"]["state"] == "skipped" and run["steps"]["confirm-chosen"]["state"] == "done"
+    assert run["steps"]["book-slot"]["state"] == "done" and run["steps"]["confirm-slot"]["state"] == "done"
+    assert run["steps"]["propose"]["state"] == "skipped" and v["status"] == "planned"  # booked: nothing to propose
     # sooner: the desk's slot is not booked, the scheduler proposes another
     run = hub.engine.start(jo, "appointment-request", record=pat, inputs={
         "reason": "a rash on my arm", "kind": "new-concern", "slot": "2027-03-09T10:00|dr-liam"})
-    hub.engine.complete(noor, item_for(hub, run, "triage"), {"decision": "book-it-soon"})
+    hub.engine.complete(noor, item_for(hub, run, "triage"), {"outcome": "book-it-soon"})
     run = hub.engine.run(run["id"])
-    assert run["steps"]["book-chosen"]["state"] == "skipped" and run["steps"]["propose"]["state"] == "active"
+    assert run["steps"]["book-slot"]["state"] == "skipped" and run["steps"]["propose"]["state"] == "active"
     assert not _visits_at(hub, "2027-03-09T10:00")
 
 
@@ -481,3 +483,7 @@ def test_a_clean_routine_booking_from_a_slot_sends_no_emergency_message(hub):
     run = hub.engine.run(hub.engine.start(M(hub, "jo"), "appointment-request", record=_pat(hub),
                                           inputs={"reason": "a form for work"})["id"])
     assert run["steps"]["safety-net"]["state"] == "done"
+
+
+def read_review(hub, run):
+    return hub.records.read(*run["record"].split("/", 1))["review"]

@@ -1,0 +1,90 @@
+# Something to do for a patient that a review set going: calling them about a lab result. Its own record, so the
+# result it came from is closed once the call is asked for, and the call is worked, and found, on its own.
+id = "Task"
+label = "Follow-up"
+plural = "Follow-ups"
+data_class = "clinical"
+standard = "fhir-r4"
+strict = true
+date = "authoredOn"
+active = "record.stage != 'done'"
+part_of = "subject"
+order = 45
+summary = "A call to a patient (or other follow-up) that a physician's review asked for."
+short_title = "{what}"
+# A follow-up is walked by its own workflow from asked for to done: its stage is where that work is.
+workflow = { id = "patient-follow-up", when = "record.stage == 'to-call'" }
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["requested", "in-progress", "completed", "cancelled", "entered-in-error"]
+required = true
+
+[[field]]
+name = "intent"
+type = "choice"
+choices = ["order"]
+advanced = true
+
+[[field]]
+name = "what"
+label = "What to do"
+path = "description"
+type = "string"
+required = true
+
+[[field]]
+name = "subject"
+label = "Patient"
+path = "for"
+type = "reference"
+target = ["Patient"]
+rel = "subject"
+required = true
+
+[[field]]
+name = "because_of"
+label = "Because of"
+path = "focus"
+type = "reference"
+target = ["Observation"]
+rel = "reason"
+help = "the result whose review asked for it"
+
+[[field]]
+name = "priority"
+type = "choice"
+choices = ["routine", "urgent"]
+labels = { routine = "Routine", urgent = "Urgent" }
+
+[[field]]
+name = "asked_by"
+label = "Asked by"
+path = "requester"
+type = "reference"
+target = ["Practitioner"]
+
+[[field]]
+name = "authoredOn"
+label = "Asked for"
+type = "datetime"
+
+[[field]]
+name = "note_text"
+label = "What the physician said"
+path = "note.0.text"
+type = "text"
+
+[[field]]
+name = "stage"
+label = "Stage"
+path = "businessStatus.text"
+type = "choice"
+choices = ["to-call", "not-reached", "done"]
+labels = { to-call = "To call", not-reached = "Could not reach", done = "Done" }
+
+# Its stages and the moves between them are the patient-follow-up workflow's (written as states and edges).
+[lifecycle]
+field = "stage"
+initial = "to-call"

@@ -51,7 +51,7 @@ def test_the_export_maps_each_kind_of_step():
     # two steps follow the same outcome, so the split is inclusive (every step whose condition holds runs)
     assert proc.find(f"{B}inclusiveGateway[@id='Gateway_split_decide']") is not None
     cond = [f.find(B + "conditionExpression").text for f in proc.iter(B + "sequenceFlow")
-            if f.get("targetRef") == "details"]
+            if f.get("targetRef") == "renew--to"]  # the renew edge's move, which the lookup follows
     assert cond == ["decide.outcome == 'renew'"]
     due = proc.find(f"{B}boundaryEvent[@attachedToRef='decide']")
     assert due.get("cancelActivity") == "false" and due.find(f"{B}timerEventDefinition/{B}timeDuration").text == "P2D"
@@ -74,10 +74,66 @@ def test_schedules_and_durations_convert_both_ways():
     assert bpmn.duration_from_iso("P1M") is None  # a month is not a fixed length
 
 
+# Written as steps (a workflow written as states and edges takes its steps from them, so a diagram's changes to its
+# steps are not imported: bpmn.import_bpmn says so)
+STEPS_FORM = """id = "renewal"
+title = "Renewal"
+record = "MedicationRequest"
+[trigger]
+starters = ["physician"]
+[[steps]]
+id = "prepare"
+title = "Prepare the renewal"
+kind = "task"
+role = "clinical-assistant"
+due = "1d"
+skill = "renewal-prep"
+[[steps]]
+id = "decide"
+title = "Decide on the renewal"
+kind = "gate"
+role = "physician"
+after = ["prepare"]
+signer = "person"
+outcomes = ["renew", "book-visit", "decline"]
+meaning = "I authorize this renewal"
+[[steps]]
+id = "not-on-chart"
+title = "Write a new prescription"
+kind = "task"
+role = "physician"
+after = ["decide"]
+when = "decide.outcome == 'renew'"
+[[steps.fields]]
+name = "notes"
+type = "text"
+[[steps]]
+id = "prescribe"
+title = "Write the prescription"
+kind = "automation"
+after = ["not-on-chart"]
+action = "record.update"
+[steps.params.set]
+intent = "order"
+[[steps]]
+id = "tell-declined"
+title = "Tell the patient"
+kind = "automation"
+after = ["decide"]
+when = "decide.outcome == 'decline'"
+action = "message.send"
+[steps.params]
+channel = "patient-portal"
+to = "{{run.subject}}"
+subject = "Your renewal request"
+body = "Not renewed."
+"""
+
+
 def test_what_the_diagram_says_wins_over_the_extension():
     """A task renamed, a condition changed and a step moved to another lane in a BPMN tool come back changed; what
     BPMN has no place for (params, outcomes) comes back from the extension."""
-    wf = wfmod.parse((ROOT / "packs/general-practice/workflows/prescription-renewal.toml").read_text())
+    wf = wfmod.parse(STEPS_FORM, stored=True)  # a version kept from before the states form
     root = ET.fromstring(bpmn.export_bpmn(wf))
     proc = root.find(B + "process")
     proc.find(f"{B}userTask[@id='prepare']").set("name", "Get the renewal ready")
@@ -91,7 +147,7 @@ def test_what_the_diagram_says_wins_over_the_extension():
     due = proc.find(f"{B}boundaryEvent[@attachedToRef='prepare']")
     due.find(f"{B}timerEventDefinition/{B}timeDuration").text = "PT8H"
     out = bpmn.import_bpmn(ET.tostring(root))
-    wf2 = wfmod.parse(out.source)
+    wf2 = wfmod.parse(out.source, stored=True)
     assert wf2.step("prepare").title == "Get the renewal ready" and wf2.step("prepare").due == "8h"
     assert wf2.step("tell-declined").when == "decide.outcome in ['decline']"
     assert wf2.step("not-on-chart").role == "clinical-assistant"

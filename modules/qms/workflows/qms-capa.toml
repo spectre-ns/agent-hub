@@ -5,14 +5,37 @@ reviewed and approved again (the dms module's review), a quality manager who did
 action worked. Not effective: the next pass takes further action and is verified again."""
 record = "CAPA"
 
-# The CAPA type names this workflow: making a CAPA starts it, and the CAPA's status is its position. A CAPA found
-# not effective goes back to actions and the next run walks that pass (the hub starts it; a workflow has no loops):
-# whoever investigated or took the action, in any pass, does not verify it. A quality manager may also start it by
-# hand on a CAPA nothing walks (one whose work was cancelled).
+# The CAPA type names this workflow: making a CAPA starts it, and the CAPA's status is its position. Written as the
+# CAPA's states and the edges between them (practicehub/states.py), listed in the order a pass goes through them. A
+# CAPA found not effective goes back to further action, which ends the pass; the next run walks the next one: whoever
+# investigated or took the action, in any pass, does not verify it. Each run is walked from where the CAPA is when it
+# starts. A quality manager may also start it by hand on a CAPA nothing walks (one whose work was cancelled).
 [trigger]
 starters = ["quality-manager"]
 
-[[steps]]
+[start]
+to = "open"
+label = "Opened"
+
+# a pass after one found not effective (or one handed on part way) is walked from where the CAPA is
+[[start.do]]
+id = "from-further-action"
+title = "Walk it from further action"
+when = "record.status in ['further-action', 'actions']"
+to = "further-action"
+
+[[start.do]]
+id = "from-verification"
+title = "Walk it from verification"
+when = "record.status == 'verification'"
+to = "verification"
+
+[[state]]
+id = "open"
+label = "Open"
+tone = "active"
+
+[[state.work]]
 id = "investigate"
 title = "Investigate the root cause and plan the action"
 kind = "task"
@@ -22,153 +45,173 @@ moves = ["investigating", "cancelled"]   # started on its page (naming its owner
 context = ["record:quality", "record:documents"]
 due = "5d"
 escalate_to = "quality-manager"
-[[steps.fields]]
+[[state.work.fields]]
 name = "root_cause"
 label = "Root cause"
 type = "text"
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "plan"
 label = "Action plan"
 type = "text"
 required = true
 
-[[steps]]
+[[edge]]
+id = "plan-agreed"
+label = "Plan agreed"
+from = "open"
+to = "actions"
+
+[[edge.do]]
 id = "record-plan"
 title = "Write the plan into the CAPA"
-kind = "automation"
-after = ["investigate"]
 action = "record.update"
-state = "actions"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 root_cause = "{{investigate.root_cause}}"
 plan = "{{investigate.plan}}"
-[steps.params.append]
+[edge.do.params.append]
 actions = "{{run.today}}, {{investigate.by}}: {{investigate.plan}}"
 
-[[steps]]
+[[edge.do]]
+id = "revise-documents"
+title = "Open the affected documents for revision"
+action = "record.update"
+for_each = "{{record.documents}}"   # the first pass: every document it names
+where = "each_record.status == 'approved'"  # a draft or one already in review is left as it is
+[edge.do.params]
+ref = "{{each}}"
+[edge.do.params.set]
+status = "draft"   # a move the document's own workflow waits on (it numbers the revision); its owner revises it
+
+[[state]]
+id = "further-action"
+label = "Further action"
+tone = "attention"
+
+[[state.work]]
 id = "act"
 title = "Take further action"
 kind = "task"
 role = "quality-manager"
-when = "run.start_state == 'actions'"   # a pass after one found not effective
 context = ["record:quality", "record:documents"]
 due = "14d"
 escalate_to = "quality-manager"
 instructions = """The action was found not effective: why is on the CAPA (Found not effective because), and every
 earlier pass's action is under Actions taken. Say what further action is taken, and which of the affected documents
 it changes: only those are opened for revision again. It is verified again by someone who did not take it."""
-[[steps.fields]]
+[[state.work.fields]]
 name = "plan"
 label = "Further action"
 type = "text"
 required = true
-[[steps.fields]]
+[[state.work.fields]]
 name = "reopen"
 label = "Documents to revise again"
 type = "list"
 help = "of the documents this CAPA affects, the ones this action changes (Document/id); none: no document changes"
 
-[[steps]]
+[[edge]]
+id = "acted"
+label = "Further action taken"
+from = "further-action"
+to = "actions"
+
+[[edge.do]]
 id = "record-more"
 title = "Write the further action into the CAPA"
-kind = "automation"
-after = ["act"]
 action = "record.update"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 plan = "{{act.plan}}"
-[steps.params.append]
+[edge.do.params.append]
 actions = "{{run.today}}, {{act.by}}: {{act.plan}}"
 
-[[steps]]
-id = "revise-documents"
-title = "Open the affected documents for revision"
-kind = "automation"
-after = ["record-plan", "record-more"]
-when = "record.status == 'actions' and run.start_state != 'actions'"   # the first pass: every document it names
-action = "record.update"
-for_each = "{{record.documents}}"
-where = "each_record.status == 'approved'"  # a draft or one already in review is left as it is
-[steps.params]
-ref = "{{each}}"
-[steps.params.set]
-status = "draft"   # a move the document's own workflow waits on (it numbers the revision); its owner revises it
-
-[[steps]]
+[[edge.do]]
 id = "revise-named"
 title = "Open the documents the further action changes"
-kind = "automation"
-after = ["record-more"]
-when = "run.start_state == 'actions'"   # a later pass: only the ones its action names
 action = "record.update"
-for_each = "{{act.reopen}}"
+for_each = "{{act.reopen}}"   # a later pass: only the ones its action names
 where = "each in record.documents and each_record.status == 'approved'"
-[steps.params]
+[edge.do.params]
 ref = "{{each}}"
-[steps.params.set]
+[edge.do.params.set]
 status = "draft"
 
-[[steps]]
+[[state]]
+id = "actions"
+label = "Actions"
+tone = "active"
+
+[[state.work]]
 id = "documents-approved"
 title = "Wait until every affected document is approved"
 kind = "wait"
 role = "document-controller"
-after = ["revise-documents", "revise-named"]
 for_each = "{{record.documents}}"
 until = "each_record.status == 'approved' or each_record.status == 'obsolete'"
 instructions = """Each affected document is listed with where it is and who holds it: its owner revises it and a
 document controller approves it, in its own work."""
 
-[[steps]]
-id = "to-verification"
-title = "Ready for verification"
-kind = "automation"
-after = ["documents-approved"]
-state = "verification"
+[[edge]]
+id = "ready"
+label = "Ready for verification"
+from = "actions"
+to = "verification"
 
-[[steps]]
+[[state]]
+id = "verification"
+label = "Verification"
+tone = "attention"
+
+[[state.work]]
 id = "verify"
 title = "Did the action work?"
 kind = "gate"
 role = "quality-manager"
 due = "30d"
 escalate_to = "quality-manager"
-after = ["to-verification"]
 signer = "person"
 meaning = "I have checked this action and found it effective"
 meanings = { "not-effective" = "I have checked this action and found it not effective" }
-outcomes = ["effective", "not-effective"]
 context = ["record:quality", "record:documents"]
 not_by = ["investigate", "act"]   # in this pass or an earlier one
 instructions = """Check whether the action worked. Not effective: say why in your comment; it is written on the CAPA
 for whoever takes the further action."""
 
-[[steps]]
+[[edge]]
+id = "effective"
+label = "Effective"
+from = "verification"
+to = "closed"
+
+[[edge.do]]
 id = "close"
 title = "Close the CAPA"
-kind = "automation"
-after = ["verify"]
-when = "verify.outcome == 'effective'"
 action = "record.update"
-state = "closed"
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 not_effective_because = ""
 
-[[steps]]
+[[edge]]
+id = "not-effective"
+label = "Not effective"
+from = "verification"
+to = "further-action"         # the next pass is the next run's
+
+[[edge.do]]
 id = "reopen"
-title = "Back to actions, saying why"
-kind = "automation"
-after = ["verify"]
-when = "verify.outcome == 'not-effective'"
+title = "Back to further action, saying why"
 action = "record.update"
-state = "actions"   # the next pass is the next run's
-[steps.params]
+[edge.do.params]
 ref = "{{run.record}}"
-[steps.params.set]
+[edge.do.params.set]
 not_effective_because = "{{verify.comment}}"
+
+[[state]]
+id = "closed"
+label = "Closed"
+tone = "done"

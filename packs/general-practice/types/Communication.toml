@@ -90,19 +90,22 @@ type = "list"
 name = "handling"
 label = "Handling"
 type = "choice"
-choices = ["received", "triaged", "answered", "closed"]
-labels = { received = "Waiting to be read", triaged = "Triaged", answered = "Answered", closed = "Closed" }
+choices = ["received", "to-call", "not-reached", "drafting", "to-check", "with-nurse", "triaged", "answered", "closed"]
+labels = { received = "Waiting to be read", to-call = "To call now", not-reached = "Could not reach", drafting = "Reply being drafted", to-check = "Reply to check", with-nurse = "With a nurse", triaged = "Triaged", answered = "Answered", closed = "Closed" }
 help = "where the practice's handling of a patient's message is"
 
-# The handling: the patient-question workflow moves it. A message no run walks (its work cancelled, or one entered as
-# received by hand) stays waiting to be read until someone closes it: a patient's message is never closed unread.
+# The handling: its states and the moves between them are the patient-question workflow's (written as states and
+# edges), not listed here. A message no run walks (one entered as received by hand) stays waiting to be read until
+# someone closes it: a patient's message is never closed unread. Triaged is where a run of pack 4.5 or before left a
+# message: screened and with whoever answers it.
 [lifecycle]
 field = "handling"
 initial = "received"
 starts = ["closed"]
-labels = { received = "Waiting to be read", triaged = "Triaged", answered = "Answered", closed = "Closed" }
-abandoned = { triaged = "closed", answered = "closed" }
+labels = { received = "Waiting to be read", to-call = "To call now", not-reached = "Could not reach", drafting = "Reply being drafted", to-check = "Reply to check", with-nurse = "With a nurse", triaged = "Triaged", answered = "Answered", closed = "Closed" }
+abandoned = { to-call = "closed", not-reached = "closed", drafting = "closed", to-check = "closed", with-nurse = "closed", triaged = "closed", answered = "closed" }
 ended = { received = "closed", triaged = "closed", answered = "closed" }
+# the moves a run of pack 4.5 or before still makes: screened (triaged), then answered
 [[lifecycle.transition]]
 from = ["received"]
 to = "triaged"
@@ -113,10 +116,12 @@ from = ["triaged"]
 to = "answered"
 by = "workflow"
 label = "Answered"
+# where its work cancelled leaves it (and where an older run that ended left it): closed, by the workflow
 [[lifecycle.transition]]
-from = ["answered", "triaged"]
+from = ["to-call", "not-reached", "drafting", "to-check", "with-nurse", "triaged", "answered"]
 to = "closed"
 by = "workflow"
+label = "Closed"
 [[lifecycle.transition]]
 from = ["received"]
 to = "closed"

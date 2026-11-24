@@ -1,32 +1,39 @@
 id = "inventory-stock"
 title = "Stock"
-summary = "What is in stock, what is running low, and the latest moves."
+summary = "What is in stock and where, what is held, and the latest moves."
+
+[[widget]]
+kind = "table"
+title = "Parts"
+type = "Part"
+where = "record.status != 'obsolete'"
+columns = ["code", "name", "available", "on_hand", "quarantined", "unit", "status"]
 
 [[widget]]
 kind = "board"
-title = "Stock items"
+title = "Lots"
 type = "StockItem"
-where = "record.status != 'discontinued'"
+where = "record.status == 'available' or record.status == 'quarantined' or record.status == 'inspection'"
 group_by = "status"
-columns = ["name", "on_hand", "unit"]
+columns = ["part", "lot", "serial", "quantity", "location", "expiry"]
 
 [[widget]]
 kind = "table"
 title = "Running low"
-type = "StockItem"
-where = "record.status == 'low' or record.status == 'on-order'"
-columns = ["sku", "name", "on_hand", "reorder_point", "supplier", "status"]
+type = "Part"
+where = "record.status == 'active' and record.minimum_stock != null and record.available <= record.minimum_stock"
+columns = ["code", "name", "available", "minimum_stock", "reorder_quantity"]
 
 [[widget]]
 kind = "table"
 title = "Recent moves"
 type = "StockMove"
-columns = ["kind", "item", "quantity", "moved", "status"]
+columns = ["kind", "quantity", "part", "lot", "moved", "status", "reject_reason"]
 limit = 20
 
 [[widget]]
 kind = "table"
 source = "items"
-title = "Waiting for sign-off or an order"
+title = "Waiting for a signature"
 workflow = "inventory-post"
 status = ["open", "claimed"]

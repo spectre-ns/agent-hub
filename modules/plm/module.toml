@@ -5,14 +5,19 @@
 # A sub-module of quality (qms): a change order may come from a CAPA, and the CAPA shows it on its Linked tab.
 # It knows nothing about any one practice.
 
+# 3: The change board's comment on its decision is written on the change order (Board's note), and its review has its
+#  own meanings for approval and rejection. Changed documents are numbered by their own workflow, not by the change
+#  order. The record's own signature meaning, which repeated the review's, is removed.
+# 4: The change order's workflow is written as its states and edges; the moves it makes are its edges, no longer
+#  listed on the change order type. Versions approved before keep running as they were.
+
 [module]
 requires_core = "1.0"
 id = "plm"
 name = "Product lifecycle"
-version = "3"
-changes = """The change board's comment on its decision is written on the change order (Board's note), and its
-review has its own meanings for approval and rejection. Changed documents are numbered by their own workflow, not by
-the change order. The record's own signature meaning, which repeated the review's, is removed."""
+version = "4"
+changes = """The change order's workflow is written as its states and edges; the moves it makes are its edges, no longer
+listed on the change order type."""
 summary = "Products at revisions, their parts and specifications, and change orders that release new revisions."
 shortcuts = ["Product", "ChangeOrder"]
 requires = ["dms", "qms"]

@@ -29,29 +29,67 @@ choices = ["approve", "question"]
 labels = { approve = "I approve and sign", question = "I have a question first" }
 required = true
 
-[[steps]]
+# Written as states and edges (see practicehub/states.py). A client has no state field: the run keeps where it is.
+# The answer is recorded at once; one the hub could not record (a question, or nothing waiting) goes to the office.
+[start]
+to = "answered"
+label = "Answered on the portal"
+
+[[state]]
+id = "answered"
+label = "Answered"
+tone = "active"
+
+[[state.work]]
 id = "sign"
 title = "Record the client's approval"
 kind = "automation"
 action = "client.sign"
-[steps.params]
+[state.work.params]
 what = "{{input.what}}"
 answer = "{{input.answer}}"
 
-[[steps]]
+[[edge]]
+id = "to-office"
+label = "For the office"
+from = "answered"
+to = "with-office"
+when = "sign.signed != true"
+
+[[edge]]
+id = "recorded"
+label = "Recorded"
+from = "answered"
+to = "done"
+
+[[state]]
+id = "with-office"
+label = "With the office"
+tone = "attention"
+
+[[state.work]]
 id = "office"
 title = "Answer the client"
 kind = "task"
 role = "admin"
 persons_only = true
-after = ["sign"]
-when = "sign.signed != true"
 due = "1d"
 escalate_to = "manager"
 context = ["sign", "record:correspondence"]
 instructions = "The client asked a question on the portal, or approved something that was not waiting for them. Call or write back."
-[[steps.fields]]
+[[state.work.fields]]
 name = "reply"
 label = "What you told them"
 type = "text"
 required = true
+
+[[edge]]
+id = "answered-by-office"
+label = "Answered"
+from = "with-office"
+to = "done"
+
+[[state]]
+id = "done"
+label = "Done"
+tone = "done"

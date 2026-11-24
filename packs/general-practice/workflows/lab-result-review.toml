@@ -2,20 +2,20 @@ id = "lab-result-review"
 title = "Lab result review"
 record = "Observation"
 summary = """
-One result, from received to closed: the result is this workflow's record, and its review is where the work is:
-in review (received), reviewed by a physician (reviewed), the patient told (told), closed. A result is closed
-only when the patient was told: a review that ends without that (the patient not reached, a visit booked, the review
-cancelled) leaves it "Patient not told" until a physician signs it closed. A result the lab
-files starts its review; a result the lab sends for a patient (the lab.result event) is filed as one, or, when it names
-the result it already filed, walks that one; a result already reviewed that the lab sends again (corrected) is
-reviewed again, from waiting for review. The lab's own status stays the lab's.
+One result, from filed to closed: the result is this workflow's record, and its review is where the work is. It
+stops in two places: to sort, and in review. A physician's decision closes it, with what follows set going on the
+way out: the patient told it is normal or that it was reviewed, a call asked for (a follow-up of its own), or a visit
+asked for. The result does not stay open while the call or the visit is worked.
 
 A result arrives from the lab. Code checks the value against its range and the practice's critical limits, whatever
-the lab's flag says; a result the lab or the check calls critical pages the physicians at once and goes straight to an urgent physician review, without waiting for the sort. Other
-results are sorted first.
-A physician reviews every result and decides what happens next. Only a result that both the lab and the sort call
-normal, and that the range check finds in range, can be filed as normal, and only then is the patient told it is normal. The reviewing physician and the date
-are written back to the result. Agents sort; they never sign off a result.
+the lab's flag says; a result the lab or the check calls critical pages the physicians at once and goes straight to an
+urgent physician review, without waiting for the sort. Other results are sorted first. Only a result that the lab,
+the sort and the range check all call normal can be filed as normal, and only then is the patient told it is normal.
+The reviewing physician and the date are written back to the result. Agents sort; they never sign off a result.
+
+A result the lab files starts its review; a result the lab sends for a patient (the lab.result event) is filed as
+one, or, when it names the result it already filed, walks that one; a result already reviewed that the lab sends
+again (corrected) is reviewed again, from the start. The lab's own status stays the lab's.
 """
 
 [trigger]
@@ -66,34 +66,44 @@ type = "reference"
 target = ["Observation"]
 help = "The result the lab filed for this patient, if it filed one (another patient's is refused); else one is filed"
 
-# The lab sending a correction of a result already reviewed (input.observation names it): it is reviewed again,
-# from waiting for review, whatever the last review decided.
-[[steps]]
-id = "reopen"
-title = "Review the corrected result again"
-kind = "automation"
-when = "record.review != 'received'"
-state = "received"
+# ---------------------------------------------------------------------------------------------------------------
+# Written as the result's states (where it stops, and the work done there) and the edges between them (what the
+# person working it chose, with the automations that run on the way). See practicehub/states.py.
 
-[[steps]]
+# Filed (or sent again, corrected): checked against its range, by code. A critical one pages the physicians and goes
+# straight to review; any other is sorted first.
+[start]
+to = "checking"
+label = "Filed by the lab"
+
+[[state]]
+id = "checking"
+label = "Checking"
+tone = "active"
+
+[[state.work]]
 id = "check"
 title = "Check the value against its range"
 kind = "automation"
 block = "lab-range-check"
-[steps.params]
+[state.work.params]
 test = "{{input.test}}"
 value = "{{input.value}}"
 unit = "{{input.unit}}"
 range = "{{input.range}}"
 
-[[steps]]
+[[edge]]
+id = "critical"
+label = "Critical"
+from = "checking"
+to = "received"
+when = "(input.flag == 'critical' or check.band == 'critical')"
+
+[[edge.do]]
 id = "page"
-title = "Page the physicians (critical result)"
-kind = "automation"
-after = ["check"]
-when = "input.flag == 'critical' or check.band == 'critical'"
+title = "Page the physicians"
 action = "message.send"
-[steps.params]
+[edge.do.params]
 channel = "page"
 to = "role:physician"
 subject = "CRITICAL result"
@@ -101,20 +111,28 @@ body = "Critical {{input.test}} {{input.value}} {{input.unit}} for {{run.subject
 
 # The page waits for the connector; each physician on duty is also told on the board at once. The notice names no
 # test, value or patient (a notice's title shows where the record is withheld); it shows the page and its status.
-[[steps]]
+[[edge.do]]
 id = "tell-physicians"
-title = "Tell every physician on the board (critical result)"
-kind = "automation"
-after = ["page"]
-when = "input.flag == 'critical' or check.band == 'critical'"
+title = "Tell every physician on the board"
 action = "notice.send"
-[steps.params]
+[edge.do.params]
 role = "physician"
 priority = "urgent"
 text = "A critical lab result needs a physician's review now"
 outbox = "{{page.message_id}}"
 
-[[steps]]
+[[edge]]
+id = "to-sort"
+label = "Not critical"
+from = "checking"
+to = "sorting"
+
+[[state]]
+id = "sorting"
+label = "To sort"
+tone = "active"
+
+[[state.work]]
 id = "sort"
 title = "Sort the result"
 kind = "task"
@@ -124,43 +142,35 @@ due = "1d"
 escalate_to = "physician"
 skill = "lab-triage"
 risk = "medium"
-after = ["check"]
-when = "not (input.flag == 'critical' or check.band == 'critical')"
 context = ["record:clinical", "input"]
 
-[[steps]]
+[[edge]]
+id = "sorted"
+label = "Sorted"
+from = "sorting"
+to = "received"
+
+[[state]]
+id = "received"
+label = "In review"
+tone = "attention"
+
+[[state.work]]
 id = "review"
-title = "Review the result (normal)"
+title = "Review the result"
 kind = "gate"
 role = "physician"
 due = "2d"
 escalate_to = "medical-director"
-after = ["sort", "check"]
-when = "input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal'"
+when = "not (input.flag == 'critical' or check.band == 'critical')"
 signer = "person"
-outcomes = ["file-normal", "call-patient", "book-visit"]
 meaning = "I have reviewed this result"
 context = ["record:clinical", "input", "check", "sort"]
-instructions = "The lab, the range check and the sort both call this result normal. File it as normal only if you agree; the patient is then told it is normal."
+instructions = """File it as normal only when the lab, the range check and the sort all call it normal and you agree: the
+patient is then told it is normal. Otherwise choose no action needed (the patient is told it was reviewed, not that it
+is normal), or have the patient called or booked in."""
 
-[[steps]]
-id = "review-flagged"
-title = "Review the result (abnormal or critical)"
-kind = "gate"
-role = "physician"
-due = "4h"
-escalate_to = "medical-director"
-after = ["sort", "check"]
-when = "not (input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal') and not (input.flag == 'critical' or check.band == 'critical')"
-signer = "person"
-outcomes = ["no-action-needed", "call-patient", "book-visit"]
-meaning = "I have reviewed this result"
-context = ["record:clinical", "input", "check", "sort"]
-instructions = """This result is flagged abnormal or critical. It cannot be filed as normal. Choose no-action-needed when
-it needs no action now (the patient is told it was reviewed, not that it is normal), or have the patient called or
-booked."""
-
-[[steps]]
+[[state.work]]
 id = "review-critical"
 title = "Review the result now (critical)"
 kind = "gate"
@@ -168,186 +178,186 @@ role = "physician"
 priority = "urgent"
 due = "1h"
 escalate_to = "medical-director"
-after = ["sort", "check"]
-when = "input.flag == 'critical' or check.band == 'critical'"
+when = "(input.flag == 'critical' or check.band == 'critical')"
 signer = "person"
-outcomes = ["no-action-needed", "call-patient", "book-visit"]
 meaning = "I have reviewed this critical result"
 context = ["input", "check", "record:clinical"]
 instructions = """The lab or the range check calls this result critical. Act on it now: have the patient called, or
 send them to emergency care. It has not been sorted by an agent."""
 
-[[steps]]
-id = "reviewed"
+[[edge]]
+id = "file-normal"
+label = "File as normal"
+from = "received"
+to = "closed"
+when = "input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal'"
+[[edge.do]]
+id = "file-normal-noted"
 title = "Note who reviewed the result, and when"
-kind = "automation"
-after = ["review", "review-flagged", "review-critical"]
 action = "clock.now"
-[steps.params]
-by = "{{review.by}}{{review-flagged.by}}{{review-critical.by}}"
-outcome = "{{review.outcome}}{{review-flagged.outcome}}{{review-critical.outcome}}"
-comment = "{{review.comment}}{{review-flagged.comment}}{{review-critical.comment}}"
-
-[[steps]]
-id = "file-result"
+[edge.do.params]
+by = "{{review.by}}{{review-critical.by}}"
+outcome = "file-normal"
+comment = "{{review.comment}}{{review-critical.comment}}"
+[[edge.do]]
+id = "file-normal-filed"
 title = "File the review on the result"
-kind = "automation"
-after = ["reviewed", "reopen"]
 action = "record.update"
-state = "reviewed"
-[steps.params.set]
+[edge.do.params.set]
 status = "final"
 extension = [
-  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-by", valueReference = { reference = "Practitioner/{{reviewed.by}}" } },
-  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-on", valueDateTime = "{{reviewed.now}}" },
-  { url = "https://harbourview.example/fhir/StructureDefinition/review-outcome", valueString = "{{reviewed.outcome}}" },
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-by", valueReference = { reference = "Practitioner/{{file-normal-noted.by}}" } },
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-on", valueDateTime = "{{file-normal-noted.now}}" },
+  { url = "https://harbourview.example/fhir/StructureDefinition/review-outcome", valueString = "file-normal" },
 ]
-
-[[steps]]
+[[edge.do]]
 id = "tell-normal"
 title = "Tell the patient it is normal"
-kind = "automation"
-after = ["file-result"]
-when = "reviewed.outcome == 'file-normal' and input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal'"
 action = "message.send"
-state = "told"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your {{input.test}} result"
 body = "Your physician has reviewed your {{input.test}} result and it is within the normal range. No action is needed."
 
-[[steps]]
+[[edge]]
+id = "no-action-needed"
+label = "No action needed"
+from = "received"
+to = "closed"
+when = "not (input.flag == 'normal' and sort.category == 'normal' and check.band == 'normal')"
+[[edge.do]]
+id = "no-action-needed-noted"
+title = "Note who reviewed the result, and when"
+action = "clock.now"
+[edge.do.params]
+by = "{{review.by}}{{review-critical.by}}"
+outcome = "no-action-needed"
+comment = "{{review.comment}}{{review-critical.comment}}"
+[[edge.do]]
+id = "no-action-needed-filed"
+title = "File the review on the result"
+action = "record.update"
+[edge.do.params.set]
+status = "final"
+extension = [
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-by", valueReference = { reference = "Practitioner/{{no-action-needed-noted.by}}" } },
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-on", valueDateTime = "{{no-action-needed-noted.now}}" },
+  { url = "https://harbourview.example/fhir/StructureDefinition/review-outcome", valueString = "no-action-needed" },
+]
+[[edge.do]]
 id = "tell-reviewed"
 title = "Tell the patient their result was reviewed"
-kind = "automation"
-after = ["file-result"]
-when = "reviewed.outcome == 'no-action-needed'"
 action = "message.send"
-state = "told"
-[steps.params]
+[edge.do.params]
 channel = "patient-portal"
 to = "{{run.subject}}"
 subject = "Your {{input.test}} result"
 body = "Your physician has reviewed your {{input.test}} result. No action is needed right now; you can talk about it at your next visit, or call us if you have questions."
 
-[[steps]]
-id = "call"
-title = "Call the patient about their result"
-kind = "task"
-role = "nurse"
-due = "1d"
-escalate_to = "physician"
-after = ["file-result"]
-when = "reviewed.outcome == 'call-patient' and not (input.flag == 'critical' or check.band == 'critical')"
-persons_only = true
-context = ["record:demographics", "record:clinical", "input", "reviewed"]
-instructions = "Call the patient about this result. If you cannot reach them, leave reached unticked: a physician decides what to do next."
-[[steps.fields]]
-name = "reached"
-type = "boolean"
-[[steps.fields]]
-name = "notes"
-type = "text"
-required = true
-
-[[steps]]
-id = "call-critical"
-title = "Call the patient now about a critical result"
-kind = "task"
-role = "nurse"
-priority = "urgent"
-due = "1h"
-escalate_to = "physician"
-after = ["reviewed"]   # a critical call is never held up by filing the result
-when = "reviewed.outcome == 'call-patient' and (input.flag == 'critical' or check.band == 'critical')"
-persons_only = true
-context = ["record:demographics", "record:clinical", "input", "reviewed"]
-instructions = "This result is critical: call the patient now, and send them to the emergency department if the physician asked. If you cannot reach them, leave reached unticked: a physician decides what to do next."
-[[steps.fields]]
-name = "reached"
-type = "boolean"
-[[steps.fields]]
-name = "notes"
-type = "text"
-required = true
-
-[[steps]]
-id = "not-reached"
-title = "The patient could not be reached about their result"
-kind = "task"
-role = "physician"
-after = ["call", "call-critical"]
-when = "(call.notes != null and call.reached != true) or (call-critical.notes != null and call-critical.reached != true)"
-persons_only = true
-priority = "urgent"
-due = "1h"
-escalate_to = "medical-director"
-context = ["input", "check", "reviewed", "call", "call-critical", "record:demographics", "record:clinical"]
-instructions = """A nurse could not reach this patient about a result you asked to discuss. Decide what happens now:
-try again, write to them, call their emergency contact, or book them in."""
-[[steps.fields]]
-name = "action"
-type = "choice"
-choices = ["reached-the-patient", "letter-sent", "called-emergency-contact", "booked-a-visit", "no-further-action"]
-required = true
-[[steps.fields]]
-name = "notes"
-type = "text"
-required = true
-
-[[steps]]
-id = "book"
-title = "Book a visit"
-kind = "automation"
-after = ["file-result"]
-when = "reviewed.outcome == 'book-visit' and not (input.flag == 'critical' or check.band == 'critical')"
+[[edge]]
+id = "call-patient"
+label = "Call the patient"
+from = "received"
+to = "closed"
+[[edge.do]]
+id = "call-patient-noted"
+title = "Note who reviewed the result, and when"
+action = "clock.now"
+[edge.do.params]
+by = "{{review.by}}{{review-critical.by}}"
+outcome = "call-patient"
+comment = "{{review.comment}}{{review-critical.comment}}"
+[[edge.do]]
+id = "call-patient-filed"
+title = "File the review on the result"
+action = "record.update"
+[edge.do.params.set]
+status = "final"
+extension = [
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-by", valueReference = { reference = "Practitioner/{{call-patient-noted.by}}" } },
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-on", valueDateTime = "{{call-patient-noted.now}}" },
+  { url = "https://harbourview.example/fhir/StructureDefinition/review-outcome", valueString = "call-patient" },
+]
+[[edge.do]]
+id = "follow-up"
+title = "Ask a nurse to call the patient"
+when = "review.outcome == 'call-patient'"
 action = "workflow.start"
-[steps.params]
+[edge.do.params]
+workflow = "patient-follow-up"
+record = "{{run.subject}}"
+[edge.do.params.input]
+what = "Call about the {{input.test}} result"
+urgency = "routine"
+because_of = "{{run.record}}"
+note = "{{review.comment}}"
+
+[[edge.do]]
+id = "follow-up-now"
+title = "Ask a nurse to call the patient now (critical result)"
+when = "review-critical.outcome == 'call-patient'"
+action = "workflow.start"
+[edge.do.params]
+workflow = "patient-follow-up"
+record = "{{run.subject}}"
+[edge.do.params.input]
+what = "Call about the {{input.test}} result"
+urgency = "urgent"
+because_of = "{{run.record}}"
+note = "{{review-critical.comment}}"
+
+[[edge]]
+id = "book-visit"
+label = "Book a visit"
+from = "received"
+to = "closed"
+[[edge.do]]
+id = "book-visit-noted"
+title = "Note who reviewed the result, and when"
+action = "clock.now"
+[edge.do.params]
+by = "{{review.by}}{{review-critical.by}}"
+outcome = "book-visit"
+comment = "{{review.comment}}{{review-critical.comment}}"
+[[edge.do]]
+id = "book-visit-filed"
+title = "File the review on the result"
+action = "record.update"
+[edge.do.params.set]
+status = "final"
+extension = [
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-by", valueReference = { reference = "Practitioner/{{book-visit-noted.by}}" } },
+  { url = "https://harbourview.example/fhir/StructureDefinition/reviewed-on", valueDateTime = "{{book-visit-noted.now}}" },
+  { url = "https://harbourview.example/fhir/StructureDefinition/review-outcome", valueString = "book-visit" },
+]
+[[edge.do]]
+id = "book"
+title = "Ask for a visit"
+when = "review.outcome == 'book-visit'"
+action = "workflow.start"
+[edge.do.params]
 workflow = "appointment-request"
 record = "{{run.subject}}"
-[steps.params.input]
+[edge.do.params.input]
 reason = "Follow-up on {{input.test}} result"
 urgency = "soon"
 because_of = "{{run.record}}"
 
-[[steps]]
+[[edge.do]]
 id = "book-critical"
-title = "Book an urgent visit (critical result)"
-kind = "automation"
-after = ["reviewed"]
-when = "reviewed.outcome == 'book-visit' and (input.flag == 'critical' or check.band == 'critical')"
+title = "Ask for an urgent visit (critical result)"
+when = "review-critical.outcome == 'book-visit'"
 action = "workflow.start"
-[steps.params]
+[edge.do.params]
 workflow = "appointment-request"
 record = "{{run.subject}}"
-[steps.params.input]
+[edge.do.params.input]
 reason = "Follow-up on {{input.test}} result"
 urgency = "urgent"
 because_of = "{{run.record}}"
 
-[[steps]]
-id = "told-by-phone"
-title = "The patient was told by phone"
-kind = "automation"
-after = ["call", "call-critical", "not-reached", "file-result"]   # told once the review is filed
-when = "call.reached == true or call-critical.reached == true or not-reached.action == 'reached-the-patient'"
-state = "told"
-
-# Every path ends here. The patient told, the result is closed; otherwise (not reached and no one has told them since,
-# a visit booked to talk it over) it is "Patient not told", until a physician signs it closed.
-[[steps]]
-id = "not-told"
-title = "The patient has not been told of the result"
-kind = "automation"
-after = ["tell-normal", "tell-reviewed", "told-by-phone", "not-reached", "book", "book-critical"]
-when = "record.review == 'reviewed'"
-state = "not-told"
-
-[[steps]]
-id = "close"
-title = "Close the result"
-kind = "automation"
-after = ["tell-normal", "tell-reviewed", "told-by-phone", "not-reached", "book", "book-critical", "not-told"]
-when = "record.review == 'told'"
-state = "closed"
+[[state]]
+id = "closed"
+label = "Closed"
+tone = "done"

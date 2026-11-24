@@ -1,5 +1,5 @@
-# A result: a lab value, a vital sign. A lab result is walked by its review (review: received, reviewed, patient told,
-# closed, or patient not told); the physician's review is written back (status final, reviewed-by extensions).
+# A result: a lab value, a vital sign. A lab result is walked by its review (review: to sort, in review, closed); the
+# physician's review is written back (status final, reviewed-by extensions).
 id = "Observation"
 label = "Lab result"
 plural = "Lab results"
@@ -17,10 +17,10 @@ summary = "A result: a lab value or a vital sign, and the physician's review of 
 # where its name travels (its work in the inbox, crumbs, tabs): the test and its value; the lab's flag and status are
 # beside it, not in it
 short_title = "{test}[ {value}][ {unit}]"
-# A result filed (by the lab, an import, a person) is walked by its review: in review (received), reviewed by a physician, the
-# patient told, closed; corrected by the lab, it is reviewed again. A review that ends without the patient told (not reached, a visit booked, the review
-# cancelled) leaves the result "Patient not told" until a physician signs it closed. Its review, not its status, is where that work is: the lab's own status (preliminary, final,
-# corrected) stays the lab's to move while a physician reviews it. A vital sign taken in the clinic is not reviewed.
+# A result filed (by the lab, an import, a person) is walked by its review: sorted, reviewed by a physician, closed
+# once the review has told the patient or started what follows (a call, a visit); corrected by the lab, it is reviewed
+# again. Its review, not its status, is where that work is: the lab's own status (preliminary, final, corrected) stays
+# the lab's to move while a physician reviews it. A vital sign taken in the clinic is not reviewed.
 workflow = { id = "lab-result-review", when = "record.review == 'received' and record.category_text != 'vital-signs'" }
 
 [[field]]
@@ -183,8 +183,8 @@ help = "the physician's review: reviewed-by (valueReference), reviewed-on (value
 name = "review"
 label = "Review"
 type = "choice"
-choices = ["received", "reviewed", "told", "closed", "not-told"]
-labels = { received = "In review", reviewed = "Reviewed", told = "Patient told", closed = "Closed", not-told = "Patient not told" }
+choices = ["received", "checking", "sorting", "reviewed", "told", "closed", "not-told"]
+labels = { received = "In review", checking = "Checking", sorting = "To sort", reviewed = "Reviewed", told = "Patient told", closed = "Closed", not-told = "Patient not told" }
 help = "where the physician's review of the result is"
 
 [[screen]]
@@ -193,48 +193,27 @@ on = ["create"]
 fields = ["subject", "status", "test", "category_text", "effectiveDateTime", "value", "unit", "valueString", "range_text",
           "flag_text", "encounter", "note_text"]
 
-# The review: the lab-result-review workflow moves it. A result no review walks (a vital sign entered as received)
-# may be closed by hand.
+# The review: its states and the moves between them are the lab-result-review workflow's (written as states and
+# edges), not listed here: nobody moves a result its review is walking by hand. Here are only the hand moves left: a
+# closed result reviewed again, and the moves out of where reviews of earlier pack versions left a result.
+# Reviewed, Patient told and Patient not told are where a review of pack 4.5 or before left a result: a review now
+# closes the result once it has told the patient or started the call or visit that follows (a record of its own).
 [lifecycle]
 field = "review"
 initial = "received"
-labels = { received = "In review", reviewed = "Reviewed", told = "Patient told", closed = "Closed", not-told = "Patient not told" }
-# its review cancelled, a result stays waiting for review (never closed unread); one reviewed but the patient not yet
-# told is "Patient not told" (never closed); one the patient was told of is closed
-abandoned = { reviewed = "not-told", told = "closed" }
-# a review run of an older version (it did not move the review) that ends has done the review
-ended = { received = "closed", reviewed = "closed", told = "closed" }
-[[lifecycle.transition]]
-from = ["received"]
-to = "reviewed"
-by = "workflow"
-label = "Reviewed by a physician"
-[[lifecycle.transition]]
-from = ["reviewed"]
-to = "told"
-by = "workflow"
-label = "Patient told"
+ended = { reviewed = "closed", told = "closed" }
 [[lifecycle.transition]]
 from = ["reviewed", "told"]
 to = "closed"
-by = "workflow"
-[[lifecycle.transition]]
-from = ["reviewed"]
-to = "not-told"
-by = "workflow"
-label = "Patient not told"
+label = "Close"
 # only a physician's signature closes a result the patient was not told of (see the signature below)
 [[lifecycle.transition]]
 from = ["not-told"]
 to = "closed"
 by = "workflow"
 label = "Closed: the patient was told"
-[[lifecycle.transition]]
-from = ["received"]
-to = "closed"
-label = "No review needed"
-# a result the lab corrects (or one the patient was not told of) is reviewed again: the lab sending its corrected
-# result (lab.result naming it) starts a new review, which moves it back to waiting for review
+# a result the lab corrects is reviewed again: the lab sending its corrected result (lab.result naming it) starts a
+# new review, which moves it back to be sorted
 [[lifecycle.transition]]
 from = ["closed", "not-told"]
 to = "received"

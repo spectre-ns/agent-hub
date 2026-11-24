@@ -30,7 +30,12 @@
 # 4.4: a referral is linked by hand to what was sent with its letter and to the specialist's report, and is
 # closed only with the report linked.
 # patient record is reached through the patient (Patient > Prescriptions > Prescription), and its address is under them.
-version = "4.4"
+# 4.5: a call to the patient ends as "Patient reached" or "Could not reach" (the task's outcomes, <step>.outcome), a
+# red-flag call as what was done; no more "reached" box to leave unticked.
+# 5.0: a lab result's review is written as its states (to sort, in review, closed) and the edges between them, with
+# the automations on the edges; the physician's decision closes the result, and a call it asks for is a follow-up
+# (Task) of its own, walked by the patient-follow-up workflow.
+version = "5.0"
 
 [practice]
 requires_core = "1.0"
@@ -169,7 +174,7 @@ record_types = ["Encounter"]
 id = "clinical"
 name = "Clinical record"
 record_types = ["Composition", "Observation", "Condition", "AllergyIntolerance", "MedicationRequest",
-                "MedicationStatement", "ServiceRequest", "DiagnosticReport", "Immunization"]
+                "MedicationStatement", "ServiceRequest", "DiagnosticReport", "Immunization", "Task"]
 
 [[data_classes]]
 id = "correspondence"
@@ -341,6 +346,7 @@ QuestionnaireResponse = "Intake form"
 Encounter = "Visit"
 Composition = "Note"
 Observation = "Result"
+Task = "Follow-up"
 Condition = "Problem"
 AllergyIntolerance = "Allergy"
 MedicationRequest = "Prescription"

@@ -1,5 +1,6 @@
 # A person's income tax return (T1) for one year. It is part of its client, made when the year's T1 engagement is
-# signed, and walked by the t1-return workflow from gathering the slips to the notice of assessment.
+# signed, and walked by the t1-return workflow (its states and edges) from gathering the slips to the notice of
+# assessment.
 #
 # Two moves are signed by a person and never made by an agent or a workflow: the review ("I reviewed this return...",
 # a manager or partner) and filing ("I authorise filing...", a partner). Only after a partner's signature does the
@@ -52,7 +53,7 @@ rel = "engagement"
 name = "status"
 label = "Status"
 type = "choice"
-choices = ["gathering", "preparing", "in-review", "client-approval", "client-signed", "filing", "filed", "assessed", "withdrawn"]
+choices = ["organizer", "gathering", "chasing", "reminded", "slips-missing", "comparing", "preparing", "in-review", "client-approval", "with-client", "t183-overdue", "client-signed", "filing", "filed", "assessment-differs", "assessed", "withdrawn"]
 required = true
 
 [[field]]
@@ -198,13 +199,13 @@ states = ["client-signed"]
 [lifecycle]
 field = "status"
 initial = "gathering"
-labels = { gathering = "Gathering slips", preparing = "Preparing", in-review = "In review", client-approval = "With the client", client-signed = "Client authorised (T183)", filing = "Filing", filed = "Filed", assessed = "Assessed", withdrawn = "Withdrawn" }
-tones = { gathering = "waiting", preparing = "active", in-review = "attention", client-approval = "waiting", client-signed = "attention", filing = "active", filed = "done", assessed = "done", withdrawn = "ended" }
+labels = { organizer = "Writing the organizer", gathering = "Gathering slips", chasing = "Chasing slips", reminded = "Gathering slips (reminded)", slips-missing = "Slips missing", comparing = "Comparing with last year", preparing = "Preparing", in-review = "In review", client-approval = "Summary for the client", with-client = "With the client", t183-overdue = "T183 not signed yet", client-signed = "Client authorised (T183)", filing = "Filing", filed = "Filed", assessment-differs = "Assessed: it differs", assessed = "Assessed", withdrawn = "Withdrawn" }
+tones = { organizer = "active", gathering = "waiting", chasing = "active", reminded = "waiting", slips-missing = "attention", comparing = "active", preparing = "active", in-review = "attention", client-approval = "active", with-client = "waiting", t183-overdue = "attention", client-signed = "attention", filing = "active", filed = "done", assessment-differs = "attention", assessed = "done", withdrawn = "ended" }
 abandoned = { filing = "client-signed" }   # its work cancelled mid-transmission, it waits for a partner again
 
 [[lifecycle.transition]]
-from = ["gathering"]
-to = "preparing"
+from = ["gathering", "reminded"]
+to = "comparing"
 label = "Start preparing"
 
 [[lifecycle.transition]]
@@ -223,7 +224,7 @@ requires = ["total_income", "net_refund"]
 sign = "I reviewed this return and it is ready for the client"
 
 [[lifecycle.transition]]
-from = ["client-approval"]
+from = ["with-client", "t183-overdue"]
 to = "client-signed"
 label = "Record the client's authorisation (T183)"
 asks = ["t183_signed_on", "t183_how"]
@@ -239,14 +240,6 @@ confirm = "The return is transmitted to the CRA as soon as you sign."
 
 [[lifecycle.transition]]
 from = ["filing"]
-to = "filed"
-by = "workflow"
-label = "Accepted by the CRA"
-asks = ["efile_confirmation", "filed_on"]
-requires = ["efile_confirmation", "filed_on"]
-
-[[lifecycle.transition]]
-from = ["filing"]
 to = "client-signed"
 by = "workflow"
 label = "Not transmitted: back to the partner"
@@ -259,7 +252,7 @@ asks = ["noa_date", "assessed_refund", "assessed_taxable_income"]
 requires = ["noa_date", "assessed_refund"]
 
 [[lifecycle.transition]]
-from = ["gathering", "preparing", "in-review", "client-approval", "client-signed"]
+from = ["organizer", "gathering", "chasing", "reminded", "slips-missing", "comparing", "preparing", "in-review", "client-approval", "with-client", "t183-overdue", "client-signed"]
 to = "withdrawn"
 label = "Withdraw (no return to file)"
 asks = ["note"]

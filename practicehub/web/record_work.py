@@ -60,6 +60,10 @@ class RecordWork:
                   else {"may": [], "may_not": []})
         by_move = {m["to"] for m in screen["may"] if m.get("does")}
         for run, wf in self.own_runs(me, ref):
+            here = next((x for x in ((wf.shape or {}).get("states") or []) if x["id"] == run.get("at")), None)
+            if here and status and run["at"] not in rt.states():  # a stop only the run keeps (the record a draft)
+                tone = self.TONE_CLASS.get(here.get("tone") or "", "default")
+                status[0] = f'<span class="loz {tone}">{e(here.get("label") or run["at"])}</span>'
             n = self._pass_number(run)
             if n > 1:
                 status.append(f'<span class="rs-item">pass {n}</span>')
@@ -146,6 +150,9 @@ class RecordWork:
         parts = [p for p in stuck if p]
         if moved_err is not None:
             parts.insert(0, f'<div class="flash error" role="alert"><p>{e(str(moved_err))}</p></div>')
+        if rt is not None:  # what the latest move set going, from work of any status (a closed one's open follow-up)
+            parts.append(self._activity_html(me, ref, url))
+            parts = [p for p in parts if p]
         if moves:
             parts.append(f'<div class="rw-moves" role="group" aria-label="Move it on">{moves}</div>')
         parts += steps
@@ -156,6 +163,140 @@ class RecordWork:
         body = (f'<section id="work" class="rec-work" aria-label="Its work">{"".join(parts)}</section>'
                 if parts else '<span id="work"></span>')
         return head, body
+
+    # ------------------------------------------------------------------------------- what a move set going
+    MESSAGE_WORDS = {"queued": "waiting to be sent", "sending": "being sent", "sent": "sent",
+                     "delivered": "delivered", "failed": "not delivered"}
+    RECENT = 600  # seconds: a settled move this recent still shows its list open
+
+    def activity_of(self, me, ref: str) -> list[dict]:
+        """``Hub.record_activity``, read once a request: the block, History and "Started from" all ask for it."""
+        cache = getattr(self._local, "activity", None)
+        if cache is None:
+            return self.hub.record_activity(me, ref)
+        key = (me.get("id"), ref)
+        if key not in cache:
+            cache[key] = self.hub.record_activity(me, ref)
+        return cache[key]
+
+    def activity_url(self, ref: str) -> str:
+        """Where the block alone is fetched from: the record's flat address (a part's too), never a run's."""
+        return f"/records/{ref}/activity"
+
+    def _activity_html(self, me, ref: str, url: str) -> str:
+        """The block in the work section: what the latest move (a person's, with the moves that followed on from it
+        by themselves) ran and started, each in words with its outcome, from ``Hub.record_activity``. Empty when the
+        record has no such move or the move ran nothing. ``url``: the record page's address, already escaped. While
+        anything is still going on, the section carries ``data-live`` (the script fetches it again) and a Refresh
+        link; ``data-at`` is the record's version and its work's last change, so the script can tell a page that
+        has moved on from one whose follow-ups only changed."""
+        from .records_pages import ran_summary  # History's words for the same list
+        hub = self.hub
+        moves = self.activity_of(me, ref)
+        if not moves:
+            return ""
+        first = max((i for i, m in enumerate(moves) if m.get("after_person")), default=len(moves) - 1)
+        cascade = moves[first:]
+        if not any(m.get("ran") for m in cascade):
+            return ""
+        settled = all(m.get("settled") for m in cascade)
+        ran = [r for m in cascade for r in m.get("ran") or []]
+        lead = cascade[0]
+        when = (f'{self.who(lead["who"])} ' if lead.get("who") else "") + (self._at(lead["at"]) if lead.get("at")
+                                                                           else "")
+        recent = False
+        if lead.get("at") or cascade[-1].get("at"):
+            from datetime import datetime, timezone
+            try:
+                at = datetime.fromisoformat(str(cascade[-1].get("at") or lead["at"]).replace("Z", "+00:00"))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=timezone.utc)
+                recent = (datetime.now(timezone.utc) - at).total_seconds() < self.RECENT
+            except ValueError:
+                recent = False
+        body = [self._ran_list_html(me, lead.get("ran") or [])]
+        for m in cascade[1:]:
+            body.append(f'<h4 class="ra-then">Then, “{e(m.get("label") or "")}”</h4>'
+                        + self._ran_list_html(me, m.get("ran") or []))
+        live = ""
+        if not settled:
+            live = (f'<p class="ra-live"><span class="muted small">Some of this is still going on.</span> '
+                    f'<a href="{url}#activity">Refresh</a></p>')
+        rec = hub.records.read(*ref.split("/", 1)) or {}
+        runs = list(hub.db.runs.find({"record": ref}))
+        changed = max((str(r.get("updated_at") or r.get("created_at") or "") for r in runs), default="")
+        at_attr = f'{((rec.get("meta") or {}).get("versionId", ""))}|{changed}'
+        data_live = f' data-live="{e(self.activity_url(ref))}"' if not settled else ""
+        opened = " open" if not settled or recent else ""
+        return (f'<section id="activity" class="rw-activity" aria-labelledby="rw-activity-h" data-at="{e(at_attr)}"'
+                f'{data_live}><details class="ra-fold"{opened}><summary><h3 id="rw-activity-h" class="ra-h">'
+                f'After “{e(lead.get("label") or "")}”</h3>'
+                + (f' <span class="muted small ra-when">{when}</span>' if when else "")
+                + f' <span class="muted small ra-sum">{e(ran_summary(ran))}</span></summary>'
+                + "".join(body) + live + "</details></section>")
+
+    def _ran_list_html(self, me, ran: list[dict]) -> str:
+        """What one move ran, one line per automation: its title and, in words, done, did not go through (with what
+        went wrong) or waiting on the one that did not; a message's own status (waiting to be sent, sent, not
+        delivered); and under it each record it started, as it is now: its state and where its own work is (Done,
+        Stopped, Stuck, or who holds it and when it is due). One the member may not read keeps its kind, state and
+        holder but neither its title nor a link. Automations kept from the member fold to one line. Shared by the
+        work section's block and the History tab."""
+        hub, viewer = self.hub, Viewer(self.hub, me)
+        failed = next((r for r in ran if r.get("state") == "failed"), None)
+        blocker = ("a step you may not see" if failed is None or failed.get("hidden")
+                   else f"“{failed.get('title') or ''}”")
+        lines, hidden = [], 0
+        for r in ran:
+            if r.get("hidden"):
+                hidden += 1
+                continue
+            state = r.get("state")
+            title = e(r.get("title") or "")
+            if state == "failed":
+                said = '<span class="ra-mark" aria-hidden="true">✕</span> <span class="ra-word bad">did not go through</span>'
+                if r.get("error"):
+                    said += f' <span class="muted small">{e(str(r["error"])[:200])}</span>'
+            elif state == "held":
+                said = (f'<span class="ra-mark" aria-hidden="true">…</span> '
+                        f'<span class="ra-word">waiting on {e(blocker)}</span>')
+            elif r.get("message"):
+                word = self.MESSAGE_WORDS.get(r["message"], r["message"])
+                mark = "✕" if r["message"] == "failed" else "✓" if r["message"] in ("sent", "delivered") else "…"
+                said = (f'<span class="ra-mark" aria-hidden="true">{mark}</span> '
+                        f'<span class="ra-word{" bad" if r["message"] == "failed" else ""}">{e(word)}</span>')
+            else:
+                said = '<span class="ra-mark" aria-hidden="true">✓</span> <span class="ra-word">done</span>'
+            kids = "".join(self._started_html(me, s, viewer) for s in r.get("started") or [])
+            lines.append(f'<li class="ra-{e(str(state or ""))}"><b>{title}</b>: {said}'
+                         + (f'<ul class="plain ra-started">{kids}</ul>' if kids else "") + "</li>")
+        if hidden:
+            lines.append(f'<li class="muted ra-hidden">{"a step" if hidden == 1 else f"{hidden} steps"} '
+                         f'you may not see</li>')
+        return f'<ul class="plain ra-list">{"".join(lines)}</ul>' if lines else ""
+
+    def _started_html(self, me, s: dict, viewer) -> str:
+        """One record a move started, as it is now (``started_from``'s words for it)."""
+        from .. import schema
+        hub = self.hub
+        ref = str(s.get("ref") or "")
+        run = s.get("run")
+        if isinstance(run, str):
+            row = hub.db.runs.get(run) if run else None
+            run = {**row, "id": row.get("id") or row.get("_id") or run} if row else None
+        if "/" not in ref:
+            ref = str((run or {}).get("record") or "")
+        if "/" not in ref:
+            return ""
+        rtype = ref.split("/", 1)[0]
+        krt = hub.record_type(rtype)
+        rec = hub.records.read(*ref.split("/", 1))
+        st = schema.first(rec, krt.lifecycle["path"]) if rec and krt and krt.lifecycle else None
+        readable = s.get("readable", True) and hub.may_read(me, rtype)
+        name = (self._family_link(ref, rec) if readable and rec else
+                f'<span class="muted">{e(krt.label if krt else "a record")}</span>')
+        work = self._child_work(run or {}, viewer)[0]
+        return f'<li>{name} {self._state_loz(st, krt) if st else ""} {work}</li>'
 
     def _move_buttons(self, rt, rec, st, url: str, may: list[dict]) -> str:
         """The moves a member may make now, as buttons: the forward one loud, a correction or an ending in red, the
@@ -176,7 +317,7 @@ class RecordWork:
             if t is None or m["to"] not in ok:
                 continue
             kind = "danger-subtle" if self._undoing(t) else "primary" if m["to"] == ahead else "secondary"
-            asks = m["asks"] or m["requires"] or m["sign"] or m["comment"]
+            asks = m["asks"] or m["requires"] or m["sign"] or m["comment"] or m.get("assign")
             if asks:
                 out.append(f'<a class="btn {kind}" href="{url}/move?to={e(urllib.parse.quote(m["to"]))}" '
                            f'data-modal>{e(m["label"])}…</a>')

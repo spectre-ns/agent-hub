@@ -125,14 +125,18 @@ def test_a_name_written_in_the_page_text_is_a_mention_too(wiki):
     assert mentioned_ids("mail a@b.ca, then @noor") == ["noor"]
 
 
-def test_an_agent_never_releases_a_sop(wiki):
+def test_an_agent_never_approves_a_controlled_document(wiki):
     hub = wiki
-    _let_read(hub)
-    hub.authz.write([("role:sop-approver", "assignee", member_ref(AGENT))])  # even holding the role
-    assert "sop-approver" in M(hub, AGENT)["roles"]
-    run = next(r for r in hub.engine.runs(status="running") if r["workflow_id"] == "wiki-sop-release"
-               and r["steps"]["release"]["state"] == "active")  # the SOP in review
-    i = item_for(hub, run, "release")
+    install(hub, "dms")
+    next(m for m in hub.pack.modules if m.id == "dms").module.demo(hub)  # its roles for the policy owners
+    rana = M(hub, "rana")
+    hub.authz.write([("role:document-controller", "assignee", member_ref(AGENT))])  # even holding the role
+    assert "document-controller" in M(hub, AGENT)["roles"]
+    d = hub.create_record(rana, "Document", {"title": "Sharps", "number": "SOP-090", "owner": "rana"})
+    hub.update_record(rana, f"Document/{d['id']}", {"status": "in-review"})
+    run = next(r for r in hub.engine.runs(status="running") if r["workflow_id"] == "dms-review"
+               and r["record"] == f"Document/{d['id']}")
+    i = item_for(hub, run, "approve")
     ok, why = hub.engine.eligibility(M(hub, AGENT), hub.engine.item(i))
     assert not ok and "person" in why
     with pytest.raises(Denied):

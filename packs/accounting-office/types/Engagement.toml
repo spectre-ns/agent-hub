@@ -1,7 +1,7 @@
 # What the firm agreed to do for a client: one service for one year (a T1 for 2025, the 2025 bookkeeping, a T2 for
 # the year ending 2025-12-31). It is part of its client. The engagement workflow sends the letter, waits for the
 # client's signature (on the portal, or recorded from paper), then opens the work (for a T1, the year's T1 return) and,
-# once the work is done and the next season comes, proposes next year's.
+# once the work is done, closes and plans next year's, which waits for its season.
 id = "Engagement"
 label = "Engagement"
 plural = "Engagements"
@@ -13,7 +13,7 @@ date = "sent_on"
 part_of = "client"
 order = 30
 summary = "One service for one year, as the client signed it."
-workflow = { id = "engagement", when = "record.status == 'proposed'" }
+workflow = { id = "engagement", when = "record.status in ['proposed', 'planned']" }
 
 [[field]]
 name = "client"
@@ -49,7 +49,7 @@ help = "The tax year (T1), the fiscal year (T2), or the calendar year the servic
 name = "status"
 label = "Status"
 type = "choice"
-choices = ["proposed", "signed", "active", "closed", "declined"]
+choices = ["planned", "drafting", "proposed", "overdue", "signed", "active", "closed", "declined"]
 required = true
 
 [[field]]
@@ -126,21 +126,15 @@ type = "text"
 [lifecycle]
 field = "status"
 initial = "proposed"
-labels = { proposed = "Sent to the client", signed = "Signed", active = "In progress", closed = "Done", declined = "Declined" }
-tones = { proposed = "waiting", signed = "active", active = "active", closed = "done", declined = "ended" }
+labels = { planned = "Next season", drafting = "Writing the letter", proposed = "Sent to the client", overdue = "Not signed yet", signed = "Signed", active = "In progress", closed = "Done", declined = "Declined" }
+tones = { planned = "waiting", drafting = "active", proposed = "waiting", overdue = "attention", signed = "active", active = "active", closed = "done", declined = "ended" }
 
 [[lifecycle.transition]]
-from = ["proposed"]
+from = ["proposed", "overdue"]
 to = "signed"
 label = "Record the client's signature"
 asks = ["client_signed_on", "client_signed_how", "signed_by_name"]
 requires = ["client_signed_on", "client_signed_how"]
-
-[[lifecycle.transition]]
-from = ["signed"]
-to = "active"
-by = "workflow"
-label = "Start the work"
 
 [[lifecycle.transition]]
 from = ["active"]
@@ -149,7 +143,7 @@ label = "Close: the work is done"
 asks = ["completed_on"]
 
 [[lifecycle.transition]]
-from = ["proposed", "signed"]
+from = ["planned", "drafting", "proposed", "overdue", "signed"]
 to = "declined"
 label = "Declined by the client"
 asks = ["note"]

@@ -14,7 +14,7 @@ date = "at"
 order = 30
 title = "{kind}: {summary}"
 summary = "A call, meeting, email, letter or visit: who, when, what was said, and when to follow up."
-workflow = { id = "crm-follow-up", when = "record.status == 'logged' or record.status == 'follow-up'" }
+workflow = { id = "crm-follow-up", when = "record.status in ['logged', 'follow-up', 'to-send']" }
 
 [[field]]
 name = "with"
@@ -80,22 +80,24 @@ advanced = true
 name = "status"
 label = "Follow-up"
 type = "choice"
-choices = ["logged", "follow-up"]
+choices = ["logged", "follow-up", "to-send"]
 advanced = true
 
 [lifecycle]
 field = "status"
 initial = "logged"
-abandoned = { "follow-up" = "logged" }   # a follow-up cancelled: it waits for its next date
-labels = { "logged" = "Logged", "follow-up" = "Being followed up" }
+abandoned = { "follow-up" = "logged", "to-send" = "logged" }   # a follow-up cancelled: it waits for its next date
+labels = { "logged" = "Logged", "follow-up" = "Being followed up", "to-send" = "To send" }
 
 [[lifecycle.transition]]
 from = ["logged"]
 to = "follow-up"           # its follow-up date came (its workflow), or a person follows it up now
 label = "Follow up now"
 
+# The moves its follow-up makes (drafted, followed up) are the crm-follow-up workflow's edges; this one is also where a
+# follow-up cancelled part way leaves it.
 [[lifecycle.transition]]
-from = ["follow-up"]
+from = ["follow-up", "to-send"]
 to = "logged"
-by = "workflow"            # followed up (or not needed)
+by = "workflow"            # followed up (or not needed), or its follow-up cancelled
 label = "Followed up"

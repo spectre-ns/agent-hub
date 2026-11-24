@@ -4,7 +4,9 @@ A workflow is a TOML document a practice manager can read and edit. Its steps ar
 by people, agents or both; the workflow never says which. Three kinds of step:
 
 * ``task``: someone holding the role does the work and fills in the step's fields. An agent does it with the step's
-  ``skill``; a person with a form. Same fields, same validation.
+  ``skill``; a person with a form. Same fields, same validation. A task may name how it can end (``outcomes``, e.g.
+  ``["reached", "not-reached"]`` for a call): the answer then carries ``outcome``, one of them, read by later steps as
+  ``<step>.outcome``, and a person ends the task with a button per outcome, as a decision is made, but unsigned.
 * ``gate``: someone decides, choosing one of the ``outcomes``. A decision is an electronic signature. A gate with
   ``signer = "person"`` is never decided by an agent; one with ``signer = "any"`` may be decided by an agent only
   while ``agent_criteria`` holds.
@@ -198,6 +200,14 @@ class Step:
     moves: list = field(default_factory=list)  # states a person may move the record to on its page meanwhile
     # links the run's record must have before a person's step is done: [{rel, from, min}] (``requires_links``)
     requires_links: list[dict] = field(default_factory=list)
+    # written as states and edges (``practicehub/states.py``): the steps a skip carries over from (None: ``after``),
+    # the edge an automation runs on, the state a person's work is done in, and its outcomes' conditions and words
+    needs: list | None = None
+    on_edge: str | None = None
+    at_state: str | None = None
+    outcome_when: dict = field(default_factory=dict)
+    outcome_labels: dict = field(default_factory=dict)
+    route: list = field(default_factory=list)  # an automated state's choice of edge: [[edge, when]], the first that holds
 
     @property
     def agents_may(self) -> bool:
@@ -229,6 +239,7 @@ class Workflow:
     one_open_same: list = field(default_factory=list)  # trigger.one_open_same: ...and with these same inputs
     on_cancel: list = field(default_factory=list)  # [[on_cancel]]: actions run in the transaction that cancels a run
     cancel_by: list = field(default_factory=list)  # cancel_by: roles that take cancelling over once their step is claimed
+    shape: dict = field(default_factory=dict)  # written as states and edges: {start, states, edges} (states.py)
 
     def step(self, sid: str) -> Step:
         for s in self.steps:
@@ -342,6 +353,17 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
         problems += check_spec(spec)
         if spec.get("name"):
             inputs.append(normalize(spec))
+    shape: dict = {}
+    if is_states_form(doc):
+        from .states import compile_states
+        doc["steps"], shape = compile_states(doc, problems)
+        if not doc["steps"] and not problems:
+            problems.append("state: a workflow written as states and edges needs at least one state with its work")
+    elif doc.get("steps") and not stored:
+        # the old form: a list of steps. Versions approved in it still read (stored); new ones are written as states.
+        raise DefinitionError(problems + [
+            "steps: a workflow is written as its record's states and the edges between them ([start], [[state]], "
+            "[[edge]]), not as a list of [[steps]]. See \"States and edges\" in docs/workflows.md."])
     steps: list[Step] = []
     seen = set()
     for i, raw in enumerate(doc.get("steps", []) or []):
@@ -379,7 +401,10 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
             people_role=raw.get("people_role") or None, for_each=raw.get("for_each") or None, where=raw.get("where") or None,
             until=raw.get("until") or None, wait_for=raw.get("for") or None, at=raw.get("at") or None,
             timeout=raw.get("timeout") or None, state=raw.get("state") or None,
-            moves=list(raw.get("moves") or []) if isinstance(raw.get("moves") or [], list) else [None])
+            moves=list(raw.get("moves") or []) if isinstance(raw.get("moves") or [], list) else [None],
+            needs=raw.get("needs"), on_edge=raw.get("on_edge"), at_state=raw.get("at_state"),
+            outcome_when=dict(raw.get("outcome_when") or {}), outcome_labels=dict(raw.get("outcome_labels") or {}),
+            route=[list(r) for r in raw.get("route") or []] if isinstance(raw.get("route") or [], list) else [])
         step.requires_links, more = _requires_links(raw.get("requires_links"), where)
         problems += more
         for need in step.requires_links:
@@ -501,12 +526,23 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
                 problems.append(f"{where}: use an action or a block, not both")
             if step.skill:
                 problems.append(f"{where}: a block step takes its skill from the block; remove skill")
-        if kind == "automation" and not step.action and not step.block and not step.state:
+        if step.route and (kind != "automation" or step.action or step.block or step.state or not all(
+                len(r) == 2 and isinstance(r[0], str) for r in step.route)):
+            problems.append(f"{where}: route is an automated state's choice of edge, worked out from its edges")
+        if kind == "automation" and not step.action and not step.block and not step.state and not step.route:
             problems.append(f"{where}: an automation names its action or block")
-        if kind == "task" and not step.fields and not step.skill and not step.block:
-            problems.append(f"{where}: a task needs fields (what it produces), a skill, or a prompt block")
+        if kind == "task" and not step.fields and not step.skill and not step.block and not step.outcomes:
+            problems.append(f"{where}: a task needs fields (what it produces), outcomes, a skill, or a prompt block")
+        if kind == "task" and step.outcomes:
+            if len(step.outcomes) < 2 or len(set(step.outcomes)) != len(step.outcomes):
+                problems.append(f"{where}: a task's outcomes are at least two different ways it can end")
+            if any(f["name"] == "outcome" for f in step.fields):
+                problems.append(f"{where}: a task with outcomes keeps its outcome in 'outcome'; name the field otherwise")
+        if kind == "automation" and step.outcomes:
+            problems.append(f"{where}: an automation has no outcomes to choose from")
         for cond, label in ((step.when, "when"), (step.agent_criteria, "agent_criteria"), (step.where, "where"),
-                            (step.until, "until")):
+                            (step.until, "until"), *((c, f"edge {o}: when") for o, c in step.outcome_when.items()),
+                            *((r[1], f"edge {r[0]}: when") for r in step.route if len(r) == 2)):
             if cond:
                 try:
                     expr.check(cond)
@@ -583,7 +619,7 @@ def parse(source: str, catalog=None, *, stored: bool = False) -> Workflow:
                   one_open_per=one or None, allow_duplicate=trig.get("allow_duplicate") is True,
                   one_open_while=while_ or None, new_record=dict(new_record),
                   one_open_within=str(within) if within else None, one_open_same=list(same),
-                  on_cancel=on_cancel, cancel_by=list(cancel_by))
+                  on_cancel=on_cancel, cancel_by=list(cancel_by), shape=shape)
     if catalog is not None:  # report every problem at once, so an author fixes them in one go
         try:
             problems += [p for p in catalog.check_workflow(wf) if p not in problems]
@@ -637,6 +673,11 @@ def _fill(m, ctx: dict):
     if m.group(2):  # {{run.today + 1y}}: date arithmetic, in days (d), weeks (w), months (m) or years (y)
         v = shift_date(v, m.group(2), int(m.group(3)), m.group(4))
     return v
+
+
+def is_states_form(doc: dict) -> bool:
+    """Whether a workflow's TOML is written as states and edges (see practicehub/states.py), not as steps."""
+    return any(k in doc for k in ("state", "edge", "start"))
 
 
 def render(value, ctx: dict):

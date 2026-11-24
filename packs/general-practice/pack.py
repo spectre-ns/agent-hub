@@ -17,7 +17,9 @@ from datetime import date, datetime, timedelta
 
 # how a visit's status reads in its one-line label (planned is FHIR's word for booked)
 STATUS_WORDS = {"planned": "booked", "arrived": "checked in", "in-progress": "in progress", "onleave": "on leave", "noshow": "no-show",
-                "entered-in-error": "entered in error"}
+                "entered-in-error": "entered in error", "reading": "being read", "callback": "to call back",
+                "not-reached": "not reached", "drafting": "note being drafted", "editing": "note being edited",
+                "signing": "note to sign"}
 SETTING_WORDS = {"AMB": "in clinic", "VR": "virtual", "HH": "home visit"}   # the visit's class (v3-ActCode)
 FEES = {"minor-assessment": 35, "complete-assessment": 65, "counselling": 55, "renewal-no-visit": 15}
 SEVERITY = {"normal": 0, "abnormal": 1, "critical": 2}
@@ -146,7 +148,8 @@ def summarize(rec: dict) -> str:
     if t == "Encounter":
         booked = str(rec.get("plannedStartDate") or "")
         when = _date_words((rec.get("period") or {}).get("start") or booked, time=False)
-        if rec.get("status") in ("requested", "planned", "arrived", "triaged", "in-progress", "onleave") and booked:
+        if rec.get("status") in ("requested", "reading", "callback", "not-reached", "planned", "arrived", "triaged",
+                                 "in-progress", "onleave", "drafting", "editing", "signing") and booked:
             when = _date_words(booked)  # a booking is known by its time: Mon Nov 23, 09:00
         reason = _text(rec.get("reasonCode"))  # clinical: a title (read by every reader) is made without it
         if not reason:  # what it is booked for (not clinical), when the reason is not there to read
@@ -550,7 +553,7 @@ def standin_visit_coding(ctx):
     else:
         units, code = 1, "complete-assessment" if vt == "complete" else "minor-assessment"
     return {"fee_code": code, "units": units, "amount": FEES[code] * units,
-            "note": f"{vt} visit, {minutes} min, dx {', '.join(ctx['context'].get('edit.diagnosis_codes') or [])}"}
+            "note": f"{vt} visit, {minutes} min, dx {', '.join(ctx['context'].get('input.diagnosis_codes') or ctx['context'].get('edit.diagnosis_codes') or [])}"}
 
 
 def standin_claim_submit(ctx):
