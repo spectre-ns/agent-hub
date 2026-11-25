@@ -755,6 +755,8 @@ class Engine:
             self._refuse_duplicate(wf, record, values, by_hand=not via_automation and cause is None,
                                    confirmed=allow_duplicate, subject=subject)
             self._refuse_second_owner_run(wf, record)
+            if not via_automation and make is None:
+                self._refuse_start_over(wf, record)
             if make is not None:  # the record is made in the same step: refused, nothing is left behind
                 record = self._make_record(wf, row, run_id, make, subject, ctx, cause)
                 ctx["run"]["record"] = record
@@ -831,6 +833,32 @@ class Engine:
         if self.hub.db.runs.find_one({"workflow_id": wf.id, "record": record, "status": "running"}, fields=["id"]):
             raise Invalid(f"{wf.title} is already under way about this {rt.label.lower()}: its own workflow walks it "
                           f"once at a time")
+
+    def start_over_refusal(self, wf, record: str | None) -> str | None:
+        """Why a member may not start ``wf`` about ``record``, when the record's type names it as its own workflow
+        and the record is in a locked state, or None. Starting it puts the record in the workflow's first state,
+        whatever state it was in: for a locked record (a return that was filed, a document made obsolete) that
+        would open to changes what its lock keeps as it was reviewed, by no move its lifecycle has. So it is refused
+        unless the type says its workflow walks the record where it is (its ``workflow.when``: a document in force
+        that is revised). What the hub starts itself (a record made, sent back, picked up) asks the type the same
+        thing before it starts, and is not asked again here."""
+        if not record or "/" not in record:
+            return None
+        rt = self.hub.record_type(record.split("/", 1)[0])
+        if rt is None or (rt.workflow or {}).get("id") != wf.id or not rt.lifecycle:
+            return None
+        rec = self.hub.records.read(*record.split("/", 1))
+        state = schema.first(rec, rt.lifecycle["path"]) if rec else None
+        if state not in rt.lifecycle.get("locked", []) or schema.starts_workflow(rt, rec) == wf.id:
+            return None
+        return (f"a {rt.label.lower()} that is {rt.state_label(state).lower()} is not started again: it is kept as "
+                f"it is, and {wf.title} would take it back to its first step")
+
+    def _refuse_start_over(self, wf, record: str | None) -> None:
+        from .hub import Invalid
+        why = self.start_over_refusal(wf, record)
+        if why:
+            raise Invalid(why)
 
     def _re_enter(self, run: dict, cause) -> None:
         """A lifecycle that loops (a document revised after it was approved, a change order sent back, a CAPA found

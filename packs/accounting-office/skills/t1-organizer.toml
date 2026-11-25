@@ -6,14 +6,16 @@ plain email asking for them. Base the list on what came last year (last year's s
 e.g. "T4 · Harbour Logistics Ltd."), and say which of them are already in for this year (missing_slips are those not
 yet received). Ask also for anything new: a new job, a new investment account, a property sold, RRSP contributions,
 childcare, medical, donations. Never quote a SIN or a business number. Do not estimate a refund or give tax advice.
+A client in their first year with the firm has nothing on file from last year: the list is then empty, and the email
+asks for every slip and receipt they received for the year.
 """
 
+# Not required: a first-year client has no slips from last year, and the return then waits for its first income slip.
 [[output]]
 name = "expected_slips"
 label = "Slips expected"
 type = "list"
-required = true
-help = "what came last year, one per slip: 'T4 · Issuer'"
+help = "what came last year, one per slip: 'T4 · Issuer'; empty for a client with nothing on file from last year"
 
 [[output]]
 name = "missing_slips"

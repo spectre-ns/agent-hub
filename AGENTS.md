@@ -30,6 +30,7 @@ Notes for anyone, human or agent, changing this code.
 | What an agent may write outside its work (nothing, unless its profile has `direct_writes`) | `Hub.writes_directly`, `Hub.require_writer` in `practicehub/hub.py` |
 | Which files a record may name, and who reads a file | `Hub._check_files_named`, `Hub.read_file` in `practicehub/hub.py` |
 | Who reads a queued message (data classes, and a subject's directive on the file it is about) | `Hub.may_read_message`, `Hub.message_restricted` in `practicehub/outbox.py` |
+| A record in a locked state: people change nothing but its state, and its own workflow is not started on it again | the `locked` check in `Hub.update_record`; `Engine.start_over_refusal` in `practicehub/engine.py` |
 | An event nothing started on is not dropped | `Engine.emit`, `Engine._unhandled` in `practicehub/engine.py` |
 | Blocks: parsing, who may propose (agents: prompt blocks only), workflow checks, version pinning | `practicehub/blocks.py`, `Hub.propose_block`, `Hub._block_problems`, `Engine.start` |
 | What Python block code may do | `practicehub/sandbox.py` (static check and the child's audit hook) |

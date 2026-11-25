@@ -366,6 +366,84 @@ def test_a_locked_return_still_takes_the_client_s_authorisation_recorded_from_pa
     assert ret["net_refund"] == before["net_refund"] and ret["total_income"] == before["total_income"]
 
 
+def test_a_return_that_was_assessed_is_not_started_again_and_its_page_does_not_offer_it(firm):
+    """Starting a return's workflow puts it back at the organizer, whatever state it was in. For last year's return,
+    filed and assessed, that would open its figures to changes and walk it to a second filing: it is refused, for
+    whoever asks, and the button is not on its page. A return still being gathered keeps its button."""
+    from practicehub.web.server import App
+    ethan, anne = firm.member("ethan"), firm.member("anne")
+    cref = _client(firm)
+    last = next(r for r in firm.records.search("T1Return", subject=cref, limit=None) if r["year"] == 2024)
+    ref = f"T1Return/{last['id']}"
+    for who in (ethan, anne):
+        with pytest.raises(Invalid, match="assessed is not started again"):
+            firm.engine.start(who, "t1-return", record=ref)
+    assert firm.records.read("T1Return", last["id"]) == last
+    assert not firm.db.runs.find_one({"record": ref})
+    app = App(firm, dev=False)
+    assert "/start/t1-return" not in app.start_buttons(ethan, "T1Return", ref)
+    # nor does its page say its workflow moves it anywhere: where a workflow begins is no way on from here
+    page = str(app.page_record({"me": ethan, "query": {}, "path": "/records/" + ref}, *ref.split("/", 1)))
+    assert "is not edited. It is kept as it is." in page and "moves it to" not in page
+    assert "/start/t1-return" not in page
+    # a return not locked yet (its run cancelled while the slips were coming in) can still be started
+    firm.engine.start(firm.member("client-portal"), "client-sign", record=cref,
+                      inputs={"what": "engagement", "answer": "approve"})
+    run_all_local(firm, log=quiet)
+    now = f"T1Return/{_the_return(firm, cref)['id']}"
+    firm.engine.cancel(anne, _run_on(firm, now, "t1-return")["id"], "Opened by mistake")
+    assert _the_return(firm, cref)["status"] == "gathering"
+    assert "/start/t1-return" in app.start_buttons(ethan, "T1Return", now)
+
+
+def _first_year_client(firm):
+    """A client with nothing on file from last year, their engagement signed: this year's return is open."""
+    sophie, portal = firm.member("sophie"), firm.member("client-portal")
+    c = firm.create_record(sophie, "Client", {"kind": "person", "name": "Daniel Boudreau", "client_number": "TW-0002",
+                                              "email": "daniel@example.ca", "birth_date": "1991-06-12",
+                                              "services": ["t1"], "partner_in_charge": "anne"})
+    cref = f"Client/{c['id']}"
+    firm.create_record(sophie, "Engagement", {"client": cref, "client_name": "Daniel Boudreau", "service": "t1",
+                                              "year": 2025, "fee": 350, "status": "proposed"})
+    run_all_local(firm, log=quiet)
+    firm.engine.start(portal, "client-sign", record=cref, inputs={"what": "engagement", "answer": "approve"})
+    return cref
+
+
+def test_a_first_year_client_s_organizer_expects_no_slips_and_the_return_waits_for_the_first_one(firm):
+    cref = _first_year_client(firm)
+    run_all_local(firm, log=quiet)
+    ret = _the_return(firm, cref)
+    ref = f"T1Return/{ret['id']}"
+    # the agent wrote the organizer though nothing came last year: it asks for everything, and expects no slip by name
+    assert _by(firm, ref, "t1-return", "organizer") == "documents-agent"
+    assert ret["status"] == "gathering" and not ret.get("expected_slips") and not ret.get("slips_complete")
+    sent = firm.db.outbox.find_one({"run_id": _run_on(firm, ref, "t1-return")["id"]})
+    assert "every slip and receipt" in sent["body"]
+    # the first income slip is what it was waiting for
+    firm.create_record(firm.member("client-portal"), "TaxSlip", {"client": cref, "status": "received",
+                                                                 "source": "portal", "text": T4})
+    run_all_local(firm, log=quiet)
+    assert _the_return(firm, cref)["status"] in ("preparing", "in-review")
+
+
+def test_what_the_documents_agent_hands_to_people_is_work_the_office_administrator_may_take(firm):
+    """The organizer, the chasing and the T183 go to the office administrator when no agent does them. They sit on
+    the return, a tax record, so the administrator reads tax records (and changes nothing on one)."""
+    sophie, agent = firm.member("sophie"), firm.member("documents-agent")
+    cref = _first_year_client(firm)
+    ref = f"T1Return/{_the_return(firm, cref)['id']}"
+    item = firm.db.items.find_one({"run_id": _run_on(firm, ref, "t1-return")["id"], "step_id": "organizer"})
+    firm.engine.claim(agent, item["id"])
+    firm.engine.release(agent, item["id"], "the client's file has two addresses", escalate=True)
+    item = firm.db.items.get(item["id"])
+    assert item["role"] == "admin" and item["persons_only"]
+    assert firm.engine.eligibility(sophie, item) == (True, "")
+    assert firm.may_read(sophie, "T1Return") and not firm.may_write(sophie, "T1Return")
+    # and the agent's sponsor reaches what the agent does
+    assert firm.can(sophie, "reader", "data_class:tax") and agent["sponsor"] == "sophie"
+
+
 def test_the_demo_has_every_t1_state_and_work_in_each_person_s_inbox(monkeypatch):
     monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
     hub = snapshot_hub("accounting_office_demo", PACK, lambda h: h.install(PACK, demo=True))

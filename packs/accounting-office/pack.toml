@@ -23,7 +23,9 @@
 # the date filed (the hub never made a real transmission, and no longer writes a confirmation number of its own). A
 # return is locked once its review is signed; "Reopen for changes", or a slip that comes late, sends it back to be
 # compared, drafted, reviewed and authorised (T183) again.
-version = "1.2"
+# 1.3: the office administrator reads tax records (they take the organizer and the chasing when the agent cannot, and
+# chase the T183), and an organizer may expect no slips: a client's first year with the firm has none on file.
+version = "1.3"
 
 [practice]
 requires_core = "1.0"
@@ -205,8 +207,12 @@ read = ["profile", "engagement"]
 write = ["payroll", "correspondence"]
 read = ["profile", "engagement"]
 
+# The office administrator reads tax records: they take the document clerk's work when the agent cannot do it (the
+# organizer, chasing slips), chase the client's T183 from the return's own page, and sponsor that agent, so they
+# reach what it reaches. They change nothing on a return: preparing and reviewing stay with the accountants.
 [grants.admin]
 write = ["profile", "documents", "engagement", "correspondence"]
+read = ["tax"]
 
 [grants.document-clerk]
 read = ["profile", "documents", "tax", "engagement"]

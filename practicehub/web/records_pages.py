@@ -288,12 +288,14 @@ class RecordPages:
 
     def start_buttons(self, me, rtype: str, ref: str) -> str:
         """The workflows this member may start about a record of this type: one button each, opening its start
-        form in the dialog with the record already chosen. Every page that offers work about a record uses these."""
+        form in the dialog with the record already chosen. Every page that offers work about a record uses these.
+        A locked record's own workflow is not offered: it is not started again (``Engine.start_over_refusal``)."""
         hub = self.hub
         return "".join(
             f'<a class="btn" href="/start/{e(wf.id)}?record={e(urllib.parse.quote(ref, safe=""))}" data-modal>{e(wf.title)}</a>'
             for wf in (w["workflow"] for w in hub.workflows())
-            if rtype in hub.engine.start_on(wf) and hub.can(me, "starter", f"workflow:{wf.id}"))
+            if rtype in hub.engine.start_on(wf) and hub.can(me, "starter", f"workflow:{wf.id}")
+            and not hub.engine.start_over_refusal(wf, ref))
 
     def record_link(self, ref: str) -> str:
         t, _, rid = ref.partition("/")
@@ -1605,9 +1607,11 @@ class RecordPages:
                             f'revision is {e(lc["in_use"])}, work from this version (saved {self._at(used["at"])}).'
                             f'</p><table class="kv">{body}</table></section>')
             if locked:
-                main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(rt.state_label(st))}</b> is not edited. '
-                            + e("; ".join(t["label"] for t in lc["transition"] if st in t["from"] and t["by"] != "workflow")
-                                or "A workflow moves it on") + ' to change it.</p></div>')
+                by_hand = "; ".join(t["label"] for t in lc["transition"] if st in t["from"] and t["by"] != "workflow")
+                on = any(st in t["from"] and t["by"] == "workflow" and not t.get("entry") for t in lc["transition"])
+                main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(rt.state_label(st))}</b> is not edited.'
+                            + (" " + e(by_hand or "A workflow moves it on") + " to change it." if by_hand or on
+                               else " It is kept as it is.") + '</p></div>')
             elif editing and not is_page:
                 inputs = self._inputs(rt, shown, me, "edit", skip=(rt.part_of["field"],) if rt.part_of else ())
                 main[2] = (f'{refused}<form method="post" action="{url}/edit" class="card stack editing" id="edit">'
@@ -1672,8 +1676,9 @@ class RecordPages:
 
         moves = [t for t in lc.get("transition", []) if (st in t["from"] or "*" in t["from"]) and t["to"] != st] \
             if lc else []
-        # where its workflow moves it from here: not where it goes only if that work is cancelled (``abandoned``)
-        auto = [t for t in moves if t["by"] == "workflow" and not t.get("abandon")]
+        # where its workflow moves it from here: not where it goes only if that work is cancelled (``abandoned``),
+        # and not where the workflow begins (``entry``): a workflow starting on it again is no way on from here
+        auto = [t for t in moves if t["by"] == "workflow" and not t.get("abandon") and not t.get("entry")]
         status, work = self.record_work(req, ref, rt, rec, st, url, editing=editing)
         moves_html = ""
         sigs = hub.signatures(me, ref)

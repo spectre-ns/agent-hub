@@ -540,9 +540,14 @@ def test_views_show_in_the_sidebar_and_work_starts_about_any_record(hub, server)
     assert code == 422  # a CAPA workflow is about a CAPA
     code, page = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
     assert code == 422 and "already under way" in page  # its own workflow walks it: never a second run
-    hub.update_record(hub.member(qm["id"]), f"CAPA/{capa['id']}", {"status": "cancelled", "cancel_reason": "Test"})
+    walking = hub.db.runs.find_one({"workflow_id": "qms-capa", "record": f"CAPA/{capa['id']}", "status": "running"})
+    hub.engine.cancel(hub.member("rana"), walking["id"], "Opened twice")
     code, _ = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
     assert code == 303  # nothing of it open: work starts about it
+    # a CAPA that was cancelled is locked: starting its workflow would put it back at open, so it is not started again
+    hub.update_record(hub.member(qm["id"]), f"CAPA/{capa['id']}", {"status": "cancelled", "cancel_reason": "Test"})
+    code, page = call(server, "POST", "/start", who, form={"_workflow": "qms-capa", "_record": f"CAPA/{capa['id']}"})
+    assert code == 422 and "is not started again" in page
 
 
 def test_the_privacy_officer_reports_who_accessed_a_file(hub, server):
