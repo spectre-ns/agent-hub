@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import logging
 import tomllib
 
 from . import schema
@@ -326,6 +327,15 @@ class CatalogMixin:
             text = schema.render_title(base.title, values or vals())
             if text:
                 return text
+        # the last resort, an id on the screen, says something is wrong: its type gives no title that renders and
+        # the pack's code names nothing (or is not running). Said in the log as well, once for each type.
+        told = self.__dict__.setdefault("_untitled", set())
+        if rtype not in told:
+            told.add(rtype)
+            why = getattr(self, "pack_problem", None) or (
+                "its type has no title that renders and the pack's summarize names nothing" if self.pack
+                else "its type has no title that renders and there is no pack")
+            logging.getLogger(__name__).warning("%s/%s is named by its type and id: %s", rtype, rec.get("id", ""), why)
         return f"{rt.label if rt else rtype} {rec.get('id', '')}".strip()
 
     def short_title(self, rec: dict | None, *, seen: bool = False) -> str:

@@ -53,6 +53,9 @@ def call(base, method, path, token=None, body=None, form=None):
         if method == "GET" and exc.code == 303 and path.startswith("/records/") and _nested(where):
             # a part's own address goes to its address under its owner, as a browser follows it
             return call(base, "GET", exc.headers["Location"].split("#", 1)[0], token)
+        if method == "GET" and exc.code == 303 and re.fullmatch(r"/items/[\w-]+", path):
+            # open work's own address goes to its record's page, where it is done, as a browser follows it
+            return call(base, "GET", exc.headers["Location"].split("#", 1)[0], token)
         return exc.code, exc.read().decode()
 
 
@@ -120,6 +123,8 @@ def browser(base, cookie=None):
         got = hdrs.get("Set-Cookie") or ""
         if got.startswith("ph_session="):
             jar["cookie"] = got.split(";", 1)[0] if "Max-Age=0" not in got else None
+        if method == "GET" and code == 303 and re.fullmatch(r"/items/[\w-]+", path):
+            return go("GET", hdrs["Location"].split("#", 1)[0])  # open work's address goes to its record's page
         return code, text
     go.jar = jar
     return go
@@ -220,7 +225,7 @@ def test_a_physician_edits_and_signs_with_forms(hub, server):
     # the decision leads the step's page: a button per outcome, each opening its own dialog
     assert html.index('class="section rw-decide"') < html.index("<h2>Description</h2>") if "<h2>Description</h2>" in html \
         else 'class="section rw-decide"' in html
-    assert f'href="/items/{sign}/decide?outcome=sign"' in html and 'type="radio"' not in html
+    assert f'href="/items/{sign}/decide?outcome=sign' in html and 'type="radio"' not in html
     code, html = page("GET", f"/items/{sign}/decide?outcome=sign")
     assert "electronic signature" in html and 'name="passphrase"' in html and 'name="credential"' not in html
     seen = re.search(r'name="seen" value="([0-9a-f]{64})"', html).group(1)
@@ -1555,7 +1560,8 @@ def test_pages_show_times_in_the_practices_zone(hub, server):
     """Work items and the track keep instants in UTC; a page shows them in the practice's zone (Halifax, -4)."""
     it = hub.db.items.find_one({"status": "open", "kind": "notice"}) or hub.db.items.find_one({"status": "open"})
     hub.db.items.set(it["id"], {"created_at": "2026-11-23T00:30:00Z", "assignee": "jo"})
-    page = call(server, "GET", f"/items/{it['id']}", token(hub, "jo"))[1]
+    # the item's own page (open work on a record is done on the record's page; this is the page a notice keeps)
+    page = App(hub, dev=False).page_item({"me": M(hub, "jo"), "query": {}, "path": f"/items/{it['id']}"}, it["id"])
     assert "2026-11-22 20:30" in page and "2026-11-23 00:30" not in page
 
 
@@ -2601,8 +2607,10 @@ def test_one_holder_is_named_the_same_way_everywhere(hub, server):
     run = hub.engine.start(hub.member("jo"), "appointment-request", record=_ellen(hub),
                            inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
     iid = item_for(hub, run, "propose")
-    page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))[1]
-    assert "Held by" in page and "Waiting for</span> Scheduler" in page and ">Assignee<" not in page
+    page = call(server, "GET", f"/items/{iid}", token(hub, "jo"))[1]  # (its record's page: the work is done there)
+    assert "Waiting for</span> Scheduler" in page and ">Assignee<" not in page
+    own = App(hub, dev=False).page_item({"me": M(hub, "jo"), "query": {}, "path": f"/items/{iid}"}, iid)
+    assert "Held by" in own and "Waiting for</span> Scheduler" in own and ">Assignee<" not in own
     hub.engine.claim(M(hub, "jo"), iid)
     for path in (f"/items/{iid}", "/board", "/"):
         page = call(server, "GET", path, token(hub, "jo"))[1]

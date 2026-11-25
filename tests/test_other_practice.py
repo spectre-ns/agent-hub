@@ -207,3 +207,16 @@ def test_a_reference_to_subject_is_picked_by_the_clients_title(firm):
     assert code == 303, code
     [made] = firm.records.search("Complaint")
     assert schema.ref_of(made["about"]) == f"Client/{c['id']}" and firm.subject_of(made) == f"Client/{c['id']}"
+
+
+def test_a_record_named_by_its_id_is_said_in_the_log_once_for_its_type(hub, caplog, monkeypatch):
+    """A record's last-resort name is its type and id: on a screen that says something is wrong (a type with no
+    title, pack code that is not running), so the log says it too, with why, and not once a page."""
+    import logging
+    rec = {"resourceType": "NoSuchType", "id": "abc123"}
+    monkeypatch.setattr(hub.pack, "summarize", lambda rec: None)  # as when the pack's code names nothing for it
+    with caplog.at_level(logging.WARNING, logger="practicehub.catalog"):
+        assert hub.title(rec) == "NoSuchType abc123"
+        assert hub.title({**rec, "id": "def456"}) == "NoSuchType def456"
+    said = [r.getMessage() for r in caplog.records if "named by its type and id" in r.getMessage()]
+    assert len(said) == 1 and said[0].startswith("NoSuchType/abc123 is named by its type and id: ")

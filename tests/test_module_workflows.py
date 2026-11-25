@@ -192,12 +192,13 @@ def test_the_signer_reads_the_record_and_what_changed_and_each_pass_says_how_the
     hub = docs
     i, third, ref = _three_passes(hub)
     amara = token(hub, "dr-amara")
-    page = call(server, "GET", f"/items/{i}", amara)[1]
+    page = call(server, "GET", f"/items/{i}", amara)[1]  # open work is done on its record's page: it goes there
+    assert 'id="work"' in page and "Sharps bins" in page
     assert "Pass 3" in page and "Say where the bins are" in page and "the pass before ended" in page  # how pass 2 ended
-    sign = page.split("What you sign")[1]
-    assert "Use the yellow bin by the sink." in sign  # the record, open, above Decide
+    assert "Use the yellow bin by the sink." in page  # the record is the page; beside Decide, what changed in it
+    sign = page.split('id="work"')[1]
     assert "What changed since the version in use" in sign and "Use a bin." in sign  # against the approved one
-    run_page = call(server, "GET", f"/records/{ref}", amara)[1]  # the run's page is the record's
+    run_page = page  # the run's page is the record's
     assert "pass 3" in run_page.split('class="rec-status"', 1)[1].split("</div>", 1)[0]
     hist = call(server, "GET", f"/records/{ref}?tab=history", token(hub, "rana"))[1]
     assert "Body: Use the yellow bin. → <b>Use the yellow bin by the sink.</b>" in hist

@@ -84,9 +84,12 @@ class JourneyPages:
         if j["live"]:
             live = (f'<p class="jr-live"><span class="muted small">Some of this is still going on.</span> '
                     f'<a href="{url}?tab=history#journey">Refresh</a></p>')
-        legend = ('<p class="jr-legend muted small"><span class="jr-key person" aria-hidden="true"></span> a person '
-                  '<span class="jr-key agent" aria-hidden="true"></span> an agent '
-                  '<span class="jr-key auto" aria-hidden="true">⚙</span> done by itself</p>') if body else ""
+        # the keys are the marks the lines carry: the avatar's shape for who did it, the gear for what no one did
+        key = lambda kind, word: f'<span class="jr-k"><span class="av {kind}" aria-hidden="true"></span> {word}</span>'
+        legend = ('<p class="jr-legend muted small">' + key("person", "a person") + key("agent", "an agent")
+                  + key("service", "a service")
+                  + '<span class="jr-k"><span class="jr-mark auto" aria-hidden="true">⚙\ufe0e</span> automation</span>'
+                    '</p>') if body else ""
         rec = self.hub.records.read(*ref.split("/", 1)) or {}
         # the token says when to fetch again; the version, when the page around the section has gone stale
         attrs = f' data-at="{e(j["token"])}" data-version="{e(str((rec.get("meta") or {}).get("versionId", "")))}"'
@@ -137,14 +140,22 @@ class JourneyPages:
                 if ent.get("label"):
                     how += f' (“{e(ent["label"])}”)'
             how += "</span>"
+        # on the rail, in place of a dot: who or what put it in this stage, by the legend's marks
+        by, dot = st.get("by"), ""
+        if by and by.get("kind") == "automatic":
+            dot = ('<span class="jr-dot auto" title="Moved here by automation" aria-hidden="true">'
+                   '<span class="jr-mark auto">⚙\ufe0e</span></span>')
+        elif by and by.get("id"):
+            dot = (f'<span class="jr-dot" title="{e("Made" if ent else "Moved here")} by {e(by["name"])}" '
+                   f'aria-hidden="true">{self._av(by["id"])}</span>')
         day = self._at(st["at"])[:10] if st["at"] else None
         lines = "".join(self._line_html(me, ln, day) for ln in st["lines"])
         moves = "".join(self._move_html(me, rt, m, day) for m in st["moves"])
         inner = (f'<ul class="plain jr-lines">{lines}</ul>' if lines else "") + moves
         if not inner:
             inner = '<p class="muted small jr-none">Nothing was done here.</p>' if not st["now"] else ""
-        return (f'<li class="jr-stage{" now" if st["now"] else ""}" id="jr-{e(st["key"])}">'
-                f'<details open data-key="{e(st["key"])}"><summary>{head} {when} {took} {how}</summary>'
+        return (f'<li class="jr-stage{" now" if st["now"] else ""}{" by" if dot else ""}" id="jr-{e(st["key"])}">'
+                f'<details open data-key="{e(st["key"])}"><summary>{dot}{head} {when} {took} {how}</summary>'
                 f'{inner}</details></li>')
 
     # ------------------------------------------------------------------------------------------ lines
@@ -186,6 +197,8 @@ class JourneyPages:
                     f'<span class="jr-who">{self._by(ln.get("by"))}</span>{at(ln["at"])}</li>')
         return self._work_html(ln, day)
 
+    SPIN = '<span class="jr-spin" aria-hidden="true"></span> '  # turning while something is being done right now
+
     def _work_html(self, ln: dict, day=None) -> str:
         status, what, by = ln["status"], ln["what"], ln.get("by")
         title = f'<b>{e(ln["title"])}</b>'
@@ -215,11 +228,14 @@ class JourneyPages:
             if ln.get("error"):
                 said += f' <span class="muted small">{e(str(ln["error"])[:200])}</span>'
         elif status in ("queued", "running"):
-            said = self.STEP_WORDS[status]
+            said = (self.SPIN if status == "running" else "") + self.STEP_WORDS[status]
         elif status == "open":
-            said = "to do" + (f', for the {e(ln["for"])}' if ln.get("for") else "")
+            # who it is waiting for: the one it is assigned to, else whoever of the role takes it
+            to = ln.get("assigned")
+            said = "to do" + (f', for {e(to["name"])}' if to else f', for the {e(ln["for"])}' if ln.get("for") else "")
+            said += "" if to else ", no one has taken it"
         elif status == "taken":
-            said = "being worked on" if cls == "agent" else "to do, taken"
+            said = self.SPIN + "being worked on" if cls == "agent" else "to do, taken"
         elif status == "held":
             said = "waiting for approval"
         elif status == "withdrawn":
@@ -228,15 +244,21 @@ class JourneyPages:
             said = "not done: its work was stopped"
         if status in ("open", "taken", "held") and ln.get("since"):
             said += f', open since {e(ln["since"])}'
-        mark = {"auto": '<span class="jr-mark auto" aria-hidden="true">⚙</span>'}.get(cls, "")
+        mark = {"auto": '<span class="jr-mark auto" aria-hidden="true">⚙\ufe0e</span>'}.get(cls, "")
         if what == "wait":
             mark = '<span class="jr-mark auto" aria-hidden="true">◷</span>'
         tail = f'{took}' if status == "done" else ""
         when = ln.get("done_at") or ln.get("at")
         at = f' <span class="jr-at muted small">{self._clock(when, day)}{e(tail)}</span>' if when else ""
         going = " jr-going" if status in ("queued", "running", "taken") and cls != "person" else ""
+        passed, p = "", ln.get("passed")
+        if p:  # an agent that could not do it, or someone who gave it back: said under the work it left open
+            did = "passed it up to a person" if p["up"] else "gave it back"
+            why = f': “{e(p["note"][:300])}”' if p.get("note") else ""
+            passed = (f'<span class="jr-passed muted small">{self._by(p["by"])} {did}'
+                      f' at {self._clock(p["at"], day)}{why}</span>')
         return (f'<li class="jr-line jr-work jr-{cls} jr-{e(status)}{going}">{mark}{title} '
-                f'<span class="jr-said">{said}</span> <span class="jr-who">{who}</span>{at}</li>')
+                f'<span class="jr-said">{said}</span> <span class="jr-who">{who}</span>{at}{passed}</li>')
 
     # ------------------------------------------------------------------------------------------ moves
     def _move_html(self, me, rt, m: dict, day=None, nested: bool = False) -> str:
@@ -248,11 +270,11 @@ class JourneyPages:
             name = f'<b>{e(m["label"])}</b>' if m.get("label") else "<b>Moved</b>"
             tag = '<span class="jr-tag">by hand</span>'
         elif how == "auto":
-            name, tag = "<b>Moved</b>", '<span class="jr-tag">by itself</span>'
+            name, tag = "<b>Moved</b>", '<span class="jr-tag">automation</span>'
         else:
             name = f'<b>{e(m["label"])}</b>' if m.get("label") else "<b>Moved on</b>"
             tag = ""
-        said = {"going": '<span class="jr-word going">under way</span>',
+        said = {"going": f'<span class="jr-word going">{self.SPIN}under way</span>',
                 "failed": '<span class="ra-word bad">did not go through</span>',
                 "fell-back": '<span class="jr-word">went there instead</span>'}.get(status, "")
         who = self._by(m.get("by"))
@@ -291,7 +313,7 @@ class JourneyPages:
                       f'</summary><ul>{"".join(f"<li>{e(t)}</li>" for t in m["not_taken"])}</ul></details>')
         then = "".join(self._move_html(me, rt, t, day, nested=True) for t in m.get("then") or [])
         if then:
-            then = f'<div class="jr-then"><p class="muted small">Then, by itself:</p>{then}</div>'
+            then = f'<div class="jr-then"><p class="muted small">Then, by automation:</p>{then}</div>'
         return (f'<div class="jr-move jr-{e(how)} jr-{e(status)}{" nested" if nested else ""}">'
                 f'<div class="jr-move-head"><span class="jr-rail" aria-hidden="true">↓</span> {name} {to} {tag} '
                 f'{said} <span class="jr-who">{who}</span> {at}</div>{wrote}{steps}{wrote_fold}{folds}{then}</div>')

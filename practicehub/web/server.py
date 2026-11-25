@@ -172,7 +172,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         R("GET", r"/", self.page_inbox)
         R("GET", r"/board", self.page_board)
         R("POST", r"/board/move", self.post_board_move)
-        R("GET", r"/items/(?P<iid>[\w-]+)", self.page_item)
+        R("GET", r"/items/(?P<iid>[\w-]+)", self.page_item_or_its_record)
         R("GET", r"/items/(?P<iid>[\w-]+)/decide", self.page_decide)
         R("GET", r"/items/(?P<iid>[\w-]+)/answer", self.page_answer)
         R("POST", r"/items/(?P<iid>[\w-]+)/(?P<verb>claim|complete|decide|release|ack|take-over)", self.post_item)
@@ -377,6 +377,31 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             self.hub.track.append(me, "access.denied", f"item:{iid}", data={"relation": "reader", "what": "an item"})
             raise NotFound("this item is not yours to open")
         return item, run
+
+    def page_item_or_its_record(self, req, iid):
+        """An item's own address: open work on a record goes to the record's page, where it is done; anything else
+        has the item's page."""
+        home = self._item_home(req["me"], *self._item_for(req["me"], iid))
+        if home:
+            raise Redirect(home)
+        return self.page_item(req, iid)
+
+    def _item_home(self, me, item: dict, run: dict) -> str | None:
+        """Where open work on a record is done: the record's own page, at its work, which shows the step, who has
+        it and what it asks. None when the item keeps a page of its own: a notice or an approval, one part of work
+        split between several people, work that is over, work about no record or about a record the member may not
+        open, work about a file a directive keeps from them (the item's page says so), and work about a subject or
+        a member itself, whose pages list their work and do not carry it."""
+        from ..visibility import Viewer
+        ref = run.get("record")
+        if (item["kind"] not in ("task", "gate") or item["status"] not in ("open", "claimed", "waiting")
+                or run.get("item") != item["id"] or not ref or "/" not in str(ref)):
+            return None
+        rtype = ref.split("/", 1)[0]
+        if (rtype == self.subj["type"] or rtype in self.hub.member_types() or not self._may_read(me, rtype)
+                or Viewer(self.hub, me).run_withheld(run)):
+            return None
+        return self.record_href(ref) + "#work"
 
     def may_see_item(self, me, item: dict, run: dict) -> bool:
         from ..visibility import Viewer
@@ -2029,8 +2054,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         q = urllib.parse.quote(back, safe="") if back else ""
         tail = f'&amp;_back={e(q)}' if q else ""
         if st["kind"] == "gate":
-            if not on_record:  # on the record's page, the record is the page above
-                parts.append(self._signed_record_view(me, run, step))
+            # on the record's page, the record is the page above: only what changed in it is said again
+            parts.append(self._signed_changes(me, run, step) if on_record else self._signed_record_view(me, run, step))
             # the decision leads, on the record's page and the step's own: a button for each outcome, as a record's
             # moves are, each opening a dialog for that outcome alone (what it signs, what it sets going, a comment,
             # the signature)

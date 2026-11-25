@@ -136,6 +136,19 @@ class PassPages:
         return (f'<div class="section signed-record"><h2>What you sign: {e(hub.short_title(rec) or rt.label)}, version '
                 f'{version}</h2><div class="card"><dl>{"".join(rows)}</dl></div>{diff}</div>')
 
+    def _signed_changes(self, me, run: dict, step) -> str:
+        """For a decision made on the record's own page, where the record is the page above: only what changed in it
+        since the version last in use, beside Decide."""
+        ref = run.get("record") or ""
+        rt = self.hub.record_type(ref.split("/", 1)[0]) if "/" in ref else None
+        if not step or step.kind != "gate" or rt is None:
+            return ""
+        try:
+            rec = self.hub.read_record(me, ref)
+        except Exception:  # noqa: BLE001 - not theirs to read
+            return ""
+        return self._since_in_use(me, rt, ref, rec)
+
     def _since_in_use(self, me, rt, ref: str, rec: dict) -> str:
         """What changed, line by line, since the last version in the lifecycle's ``in_use`` state (the revision staff
         work from), or since it was made, when it was never in use."""

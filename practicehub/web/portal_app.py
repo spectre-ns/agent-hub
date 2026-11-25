@@ -207,7 +207,9 @@ class PortalApp:
         req["cookies"] = {k: v.value for k, v in jar.items()}
         sec = {"Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; "
                                           "frame-ancestors 'none'; base-uri 'none'",
-               "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"}
+               # Referrers go to the portal's own pages and nowhere else. Not "no-referrer": under it a browser
+               # tells a form's origin as "null", and every form posted from these pages would be refused below.
+               "X-Frame-Options": "DENY", "Referrer-Policy": "same-origin"}
         text = {"Content-Type": "text/plain; charset=utf-8", **sec}
         if self.dev and (headers.get("x-forwarded-for") or _host(headers.get("host", "")) not in LOOPBACK):
             # a dev portal shows codes on screen: it answers this machine only, never through a proxy

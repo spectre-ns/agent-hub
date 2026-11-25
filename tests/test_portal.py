@@ -706,6 +706,23 @@ def _field(page, name):
     return re.search(rf'name="{name}" value="([^"]+)"', page).group(1)
 
 
+def test_a_form_from_the_portal_s_own_page_is_taken_as_a_browser_sends_it_and_one_from_elsewhere_is_refused(hub):
+    """A browser says where a form was posted from (``Origin``); the portal takes its own pages' forms and refuses
+    any other site's. Under ``Referrer-Policy: no-referrer`` a browser says ``Origin: null`` for every form, the
+    portal's own too, so the pages send ``same-origin``: the referrer goes to the portal itself and to no one else."""
+    app = portal_app(hub)
+    person(hub)
+    b = Browser(app)
+    status, h, _ = b.go("GET", "/sign-in")
+    assert status == 200 and h["Referrer-Policy"] == "same-origin"
+    form = {**_dob(), "identifier": CARD}
+    for origin in ("null", "https://elsewhere.example", f"http://{b.host}.elsewhere.example"):
+        status, h, page = b.go("POST", "/sign-in", form, origin=origin)
+        assert status == 403 and page == "Refused: not from this site." and h["Referrer-Policy"] == "same-origin"
+    status, h, _ = b.go("POST", "/sign-in", form, origin=f"http://{b.host}")  # what a browser sends from its page
+    assert status == 303 and "php_signin" in b.jar
+
+
 def test_the_pages_walk_from_sign_in_to_a_booking(hub):
     app = portal_app(hub)
     person(hub)

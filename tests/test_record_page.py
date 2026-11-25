@@ -538,3 +538,27 @@ def test_a_move_that_ran_nothing_shows_no_block(hub, server):
     ref = hub.engine.run(run["id"])["record"]
     page = call(server, "GET", f"/records/{ref}", token(hub, "dr-amara"))[1]
     assert 'class="rw-activity"' not in page
+
+
+def test_open_work_s_own_address_goes_to_its_record_s_page_and_work_that_is_over_keeps_its_own(hub, server):
+    from test_web import opener
+    import urllib.error
+    import urllib.request
+
+    def get(path, who):
+        req = urllib.request.Request(server + path, headers={"Authorization": f"Bearer {token(hub, who)}"})
+        try:
+            with opener.open(req) as r:
+                return r.status, ""
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers.get("Location", "")
+
+    run = hub.engine.start(M(hub, "jo"), "appointment-request", record=_ellen(hub),
+                           inputs={"reason": "a form for my employer", "kind": "forms", "urgency": "routine"})
+    run = hub.engine.run(run["id"])
+    iid = item_for(hub, run, "propose")
+    # the step, who has it and what it asks are on the record's page: one place for the work, not two
+    assert get(f"/items/{iid}", "jo") == (303, addr(hub, run["record"]) + "#work")
+    assert get(f"/items/{iid}/answer", "jo")[0] == 200  # what the step asks for still opens by the item
+    hub.engine.cancel(M(hub, "jo"), run["id"], "asked for by mistake")
+    assert get(f"/items/{iid}", "jo")[0] == 200  # over: what was done with it is told on its own page

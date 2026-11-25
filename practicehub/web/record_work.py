@@ -114,6 +114,8 @@ class RecordWork:
                 status.append(f'<span class="rs-item"><span class="muted">at</span> {where}</span>'
                               f'<span class="rs-item">{self.holder_html(item)}{self._urgency(item)}</span>')
                 stuck.append(self._blocked_html(item))
+                if visible:
+                    stuck.append(self._pass_strip(me, run))  # which pass this is, and how the one before ended
                 if visible and item["kind"] in ("task", "gate"):
                     done_by_move = step.state and step.state in by_move
                     mine = again if again.get("iid") == item["id"] else {}
@@ -267,7 +269,7 @@ class RecordWork:
                 said = ('<span class="ra-mark" aria-hidden="true">…</span> '
                         '<span class="ra-word going">in the queue</span>')
             elif state == "running":
-                said = ('<span class="ra-mark spin" aria-hidden="true">◌</span> '
+                said = ('<span class="ra-mark"><span class="jr-spin" aria-hidden="true"></span></span> '
                         '<span class="ra-word going">under way</span>'
                         + (f' <span class="muted small">since {self._at(r["since"])}</span>' if r.get("since") else ""))
             elif r.get("message"):

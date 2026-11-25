@@ -365,10 +365,11 @@ physicians", "Ask a nurse to call the patient"):
   Refresh link without JavaScript), and folds to one line once settled.
 - **History** tells the record's whole journey, nested (`Hub.record_journey`, `practicehub/journey.py`). Across
   the top are the stages it has been in, in order. Under that is one block per stage: when it got there and how
-  long it stayed; the work done there, each line marked by who did it (a person, an agent, or the workflow by
-  itself); and each move out of it (the edge's label, or the type's own words for a move made by hand) with its
-  automations nested under it. A move by hand that the workflow then followed carries what followed ("Then, by
-  itself"). Automations of the taken edge that were not needed, the other ways out that were not taken, and work
+  long it stayed; the work done there, each line marked by who did it (a person, an agent, a service, or
+  automation: the legend's marks); and each move out of it (the edge's label, or the type's own words for a move
+  made by hand) with its automations nested under it. On the rail, each stage carries the mark of whoever put the
+  record there. Open work says who it now waits on, and who passed it up or gave it back, and why. A move by hand
+  that the workflow then followed carries what followed ("Then, by automation"). Automations of the taken edge that were not needed, the other ways out that were not taken, and work
   not needed in a stage each fold to one line; nothing is listed of a state the record never reached. A move that
   did not go through stays in the stage it was tried from, with what went wrong and each retry. The section
   refreshes itself while a job is in the queue or under way, an agent has work open, or a message is on its way

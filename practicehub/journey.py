@@ -32,7 +32,7 @@ from .store import ASC
 _STEP_ACTIONS = ["run.started", "run.completed", "run.cancelled", "run.stopped", "step.activated", "step.done",
                  "step.skipped", "step.waiting", "step.failed", "step.withdrawn", "step.timed_out", "step.retried",
                  "step.queued", "step.started", "item.claimed", "item.completed", "item.held", "item.released",
-                 "gate.decided", "action.ran"]
+                 "item.escalated", "gate.decided", "action.ran"]
 _OWN_ACTIONS = ["record.created", "record.updated", "record.transitioned", "record.signed"]
 _GOING = ("queued", "running")
 LIVE_FOR = 600  # seconds an agent's open work, or a message waiting to be sent, keeps the page asking for news
@@ -65,7 +65,7 @@ class JourneyMixin:
         """The record's journey as ``{"stages", "live", "busy", "token"}``, oldest stage first::
 
             stage = {"key", "kind": "lifecycle" | "stop" | "none", "state", "label", "tone", "at", "until",
-                     "seconds", "now", "entered": {"how", "by", "label", "from"} | None, "lines", "moves"}
+                     "seconds", "now", "entered": {"how", "by", "label", "from"} | None, "by", "lines", "moves"}
             line  = {"kind": "work", "what": "task" | "decision" | "wait" | "automatic", "title", "status", "by",
                      "for", "at", "done_at", "seconds", "since", "chose", "signed", "approved_by", "via_move",
                      "error"}
@@ -82,7 +82,10 @@ class JourneyMixin:
 
         ``by`` is ``{"id", "name", "kind"}`` (a member; ``kind``: person, agent, service or automatic). ``status`` of a piece of
         work: open (no one has it), taken (someone does: an agent's is being worked on now), held (waiting for a
-        sponsor), waiting, queued, running, done, timed-out, failed, withdrawn or cancelled. ``live``: something is
+        sponsor), waiting, queued, running, done, timed-out, failed, withdrawn or cancelled. Open work says where it
+        is now, which is the item's to say and not the step's: ``for`` (the role it waits on), ``assigned`` (the one
+        person, when it has one), ``people_only``, and ``passed`` (``{"by", "at", "up", "note"}``) when whoever last
+        had it gave it back or, an agent that could not do it, passed it up to a person. ``live``: something is
         going on that will change this without anyone here doing anything (a job in the queue or under way, an agent
         with open work, a message on its way); ``busy``: a job is in the queue or under way."""
         rtype, _, rid = ref.partition("/")
@@ -143,7 +146,7 @@ class _Journey:
                 sort=[("seq", ASC)],
                 fields=["seq", "at", "actor", "actor_kind", "action", "cause", "run_id", "signature", "data.step",
                         "data.output.outcome", "data.error", "data.state", "data.reason", "data.why",
-                        "data.approved_by", "data.attested", "data.failed", "data.ms", "data.how"])
+                        "data.approved_by", "data.attested", "data.failed", "data.ms", "data.how", "data.note"])
         self.by_seq = {e["seq"]: e for e in self.events}
         self.by_step: dict = {}
         for e in self.events:
@@ -152,21 +155,43 @@ class _Journey:
                 self.by_step.setdefault((e["run_id"], sid), []).append(e)
         self.items = {i["id"]: i for i in hub.db.items.find(
             {"run_id": {"$in": [r["id"] for r in self.runs if r.get("status") == "running"]},
-             "kind": {"$ne": "notice"}}, fields=["id", "run_id", "step_id", "status", "claimed_by", "updated_at"])} \
+             "kind": {"$ne": "notice"}}, fields=["id", "run_id", "step_id", "status", "claimed_by", "updated_at", "role", "assignee",
+                                              "persons_only"])} \
             if self.runs else {}
         insts = [i for run in self.runs for i in self.edges_taken(run)]
         bounds = self.boundaries(insts)
         stages = self.stages(bounds)
         self.place_moves(stages, bounds, insts)
         self.place_lines(stages, bounds)
+        prev = None
         for n, st in enumerate(stages):
             st["key"] = f"s{n}"
             st["lines"] = self.fold([line for _, line in sorted(st.pop("_lines"), key=lambda x: x[0])])
             st.pop("_from", None)
             for m in st["moves"]:
                 self.finish(m)
+            st["by"] = self.brought(prev, st)
+            prev = st
         return {"stages": stages, "live": self.live or self.busy, "busy": self.busy,
                 "token": hub.record_journey_token(self.viewer, ref)}
+
+    @staticmethod
+    def brought(prev: dict | None, st: dict) -> dict | None:
+        """Who or what put the record in this stage: whoever made it, for its first; else whoever made the move
+        that took it there (``kind`` automatic when no one did: the workflow moved it). None when no move the
+        viewer is told of led there."""
+        if prev is None:
+            return (st.get("entered") or {}).get("by")
+
+        def flat(moves):
+            for m in moves:
+                yield m
+                yield from flat(m.get("then") or [])
+        went = [m for m in flat(prev["moves"]) if m["status"] != "failed"]
+        took = [m for m in went if m.get("to") == st["state"]] or went
+        if not took:
+            return None
+        return took[-1].get("by") or {"id": None, "name": "", "kind": "automatic"}
 
     def finish(self, m: dict) -> None:
         for k in [k for k in m if k.startswith("_")]:
@@ -529,7 +554,8 @@ class _Journey:
         claimed = next((e for e in reversed(evs) if e["action"] == "item.claimed"), None)
         item = self.items.get(st.get("item")) if st.get("item") else None
         line = {"kind": "work", "title": step.title or sid, "at": opened["at"] if opened else None,
-                "done_at": None, "seconds": None, "by": None, "for": None, "since": None, "chose": None,
+                "done_at": None, "seconds": None, "by": None, "for": None, "assigned": None, "people_only": False,
+                "passed": None, "since": None, "chose": None,
                 "signed": False, "approved_by": None, "via_move": via_move, "error": None,
                 "what": {"task": "task", "gate": "decision", "wait": "wait"}.get(step.kind, "automatic")}
         if step.kind in ("task", "gate"):
@@ -554,17 +580,30 @@ class _Journey:
             elif not running:
                 line.update(status="cancelled")
             else:
-                holder = (item or {}).get("claimed_by") if (item or {}).get("step_id") == sid else None
+                # where the work is now is the item's to say: handed on, it is no longer for the role the step names
+                mine = item if (item or {}).get("step_id") == sid else {}
+                holder = mine.get("claimed_by")
                 held = next((e for e in reversed(evs) if e["action"] == "item.held"), None)
-                line["for"] = self.hub.role_name(step.role) if step.role else None
+                role = mine.get("role") or step.role
+                people_only = bool(mine.get("persons_only") or step.persons_only)
+                line["for"] = self.hub.role_name(role) if role else None
                 if held is not None and (claimed is None or held["seq"] > claimed["seq"]):
                     line.update(status="held", by=self.who(held["actor"], held.get("actor_kind")))
                 elif holder:
                     line.update(status="taken", by=self.who(holder))
                 else:
-                    line.update(status="open")
-                fresh = (_seconds((item or {}).get("updated_at") or (opened or {}).get("at"), self.now) or 0) < LIVE_FOR
-                if fresh and ((line["by"] or {}).get("kind") == "agent" or line["status"] == "open" and step.agents_may):
+                    line.update(status="open", people_only=people_only,
+                                assigned=self.who(mine["assignee"]) if mine.get("assignee") else None)
+                    # given back or passed up since it was last taken: who did, and why, in their own words
+                    gave = next((e for e in reversed(evs) if e["action"] in ("item.released", "item.escalated")), None)
+                    if gave is not None and (claimed is None or gave["seq"] > claimed["seq"]):
+                        note = (gave.get("data") or {}).get("note")
+                        line["passed"] = {"by": self.who(gave["actor"], gave.get("actor_kind")), "at": gave["at"],
+                                          "up": gave["action"] == "item.escalated",
+                                          "note": note if isinstance(note, str) and note and not withheld else None}
+                fresh = (_seconds(mine.get("updated_at") or (opened or {}).get("at"), self.now) or 0) < LIVE_FOR
+                if fresh and ((line["by"] or {}).get("kind") == "agent"
+                              or line["status"] == "open" and step.agents_may and not people_only):
                     self.live = True
                 if where is last and opened is not None:
                     began = self.stage_at(stages, opened["seq"])

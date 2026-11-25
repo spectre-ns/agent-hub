@@ -65,6 +65,10 @@ def test_a_visit_s_journey_nests_its_work_and_moves_under_the_stages_it_was_in(h
                           "Patient stepped out"]
     assert [st["now"] for st in j["stages"]] == [False] * 7 + [True] and j["stages"][-1]["until"] is None
     assert [st["key"] for st in j["stages"]] == [f"s{n}" for n in range(8)]
+    # who put it in each stage: whoever made it, then whoever made the move there (an agent's booking among them)
+    assert [(st["by"] or {}).get("id") for st in j["stages"]] == [
+        "jo", "jo", "noor", "scheduling-agent", "jo", "jo", "dr-amara", "dr-amara"]
+    assert j["stages"][3]["by"]["kind"] == "agent"
     first = j["stages"][0]
     assert first["entered"]["how"] == "created" and first["entered"]["by"] == {"id": "jo", "name": "Jo Tremblay", "kind": "person"}
     (asked,) = first["moves"]  # the entry: what ran as the request came in, and where that put it
@@ -233,3 +237,32 @@ def test_work_an_agent_may_take_keeps_the_journey_live_and_work_a_person_holds_d
     hub.engine.claim(M(hub, "noor"), item_for(hub, run, "triage"))
     (read,) = _work(hub.record_journey(amara, ref)["stages"][-1])
     assert (read["status"], read["by"]) == ("taken", {"id": "noor", "name": "Noor Siddiqui", "kind": "person"})
+
+
+def test_work_an_agent_passed_up_says_who_it_now_waits_on_and_who_passed_it_and_is_not_live(hub):
+    run, ref = _visit(hub, upto="requested")
+    amara, agent, jo = M(hub, "dr-amara"), M(hub, "scheduling-agent"), M(hub, "jo")
+    item = next(i for i in hub.db.items.find({"run_id": run["id"]}) if i["kind"] != "notice")
+    step = item["step_id"]
+    hub.engine.claim(agent, item["id"])
+    j = hub.record_journey(amara, ref)
+    (line,) = _work(j["stages"][-1])
+    assert (line["status"], line["by"]["kind"], line["passed"]) == ("taken", "agent", None)
+    assert hub.record_journey(jo, ref)["live"]  # (jo may not see the message still on its way: only the agent's work)
+    hub.engine.release(agent, item["id"], "no slot fits what was asked", escalate=True)
+    now = hub.db.items.get(item["id"])
+    assert now["step_id"] == step and now["persons_only"] and now["claimed_by"] is None
+    j = hub.record_journey(amara, ref)
+    (line,) = _work(j["stages"][-1])
+    # the item says where the work is, not the step: with people of the role it was passed to, no one's yet
+    assert (line["status"], line["by"], line["people_only"]) == ("open", None, True)
+    assert line["for"] == hub.role_name(now["role"])
+    assert (line["assigned"] or {}).get("id") == now["assignee"]
+    assert line["passed"]["by"] == {"id": "scheduling-agent", "name": "Scheduling agent", "kind": "agent"}
+    assert (line["passed"]["up"], line["passed"]["note"]) == (True, "no slot fits what was asked")
+    assert not hub.record_journey(jo, ref)["live"]  # no agent may take it now: nothing here changes by itself
+    # taken by a person, it is theirs and the hand-up is no longer what there is to say
+    taker = next(m for m in hub.active_holders(now["role"], persons_only=True))
+    hub.engine.claim(taker, item["id"])
+    (line,) = _work(hub.record_journey(amara, ref)["stages"][-1])
+    assert (line["status"], line["by"]["id"], line["passed"]) == ("taken", taker["id"], None)
