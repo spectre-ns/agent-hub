@@ -4,8 +4,8 @@ Notes for anyone, human or agent, changing this code.
 
 ## Ground rules
 
-- **Never touch the live hub-erp** (localhost:8080, containers `hub-erp*`). Never bind ports 8080, 9980 or 11434.
-  Using Ollama on 11434 as a client is fine. Practice Hub serves on 8200.
+- **Never bind ports 8080, 9980 or 11434**, and leave whatever else runs on the machine alone: other services use
+  those ports. Using Ollama on 11434 as a client is fine. Practice Hub serves on 8200.
 - **No secrets in git or in output.** `state/`, `.env`, `deploy/.env`, `.secret` and the generated Keycloak realm are
   gitignored. Secrets come from the environment.
 - **Model output is data, never code.** There is no `eval`, `exec` or template engine over model output. Conditions

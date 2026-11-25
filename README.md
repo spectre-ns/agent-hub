@@ -11,15 +11,15 @@ medicine: `packs/accounting-office` is an accounting office that runs on the sam
 
 New here? Start with **[Getting started](docs/getting-started.md)**, then **[Customizing](docs/customizing.md)**.
 
-It uses the ideas of hub-erp:
+How it is built:
 
-| hub-erp | here |
+| Idea | Here |
 |---|---|
-| Frames: SOPs as config | **Workflows**: TOML a practice manager can read; a pack ships the first versions |
-| Cogs: agents hold roles like people | **Members**: `person`, `agent` or `service`; workflows name roles, never people |
-| Guards: deterministic checks | **Eligibility** (one function, `Engine.eligibility`), field validation, pack guards. No model in any guard |
-| Gates: decisions are e-signatures | **Gate steps**: every decision is signed with the step's meaning ("I approve this renewal") |
-| Tracks: hash-chained audit | **The track**: a hash-chained, HMAC-signed event log; every event names the event that caused it |
+| Procedures are configuration | **Workflows**: TOML a practice manager can read; a pack ships the first versions |
+| Agents hold roles like people | **Members**: `person`, `agent` or `service`; workflows name roles, never people |
+| Checks are deterministic | **Eligibility** (one function, `Engine.eligibility`), field validation, pack guards. No model in any guard |
+| Decisions are e-signatures | **Gate steps**: every decision is signed with the step's meaning ("I approve this renewal") |
+| The audit trail is hash-chained | **The track**: a hash-chained, HMAC-signed event log; every event names the event that caused it |
 
 ## Getting started
 
