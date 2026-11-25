@@ -1,8 +1,11 @@
 # Packs: setting up another kind of practice
 
 A pack is a directory that makes a hub a particular kind of practice: a family clinic, a dental office, a law firm,
-an accountancy. `packs/general-practice` is the full example. `tests/packs/accounting` is a minimal one, about 150
+an accountancy. `packs/general-practice` is the full example. `tests/packs/accounting` is a minimal one, about 300
 lines in all.
+
+[Customizing Practice Hub](customizing.md) says when to write a pack, and when an overlay (your own practice on a
+pack that ships, `base = "<pack>"`) or a module is enough.
 
 ```
 pack.toml          the practice, its subject, roles, data classes and grants, seed members, calendar

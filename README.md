@@ -6,7 +6,10 @@ sponsor and a kill switch, and leave the same signed audit trail. The practice w
 **workflows** and changes them through change control.
 
 The first practice pack is a **general practice** (family medicine, Nova Scotia). The core knows nothing about
-medicine. `tests/packs/accounting` is a small accounting practice that runs on the same core with no medical code.
+medicine: `packs/accounting-office` is an accounting office that runs on the same core with no medical code, and
+`tests/packs/accounting` is a small one to copy.
+
+New here? Start with **[Getting started](docs/getting-started.md)**, then **[Customizing](docs/customizing.md)**.
 
 It uses the ideas of hub-erp:
 
@@ -18,19 +21,30 @@ It uses the ideas of hub-erp:
 | Gates: decisions are e-signatures | **Gate steps**: every decision is signed with the step's meaning ("I approve this renewal") |
 | Tracks: hash-chained audit | **The track**: a hash-chained, HMAC-signed event log; every event names the event that caused it |
 
-## Quick start
+## Getting started
 
-Python 3.12+ with pymongo, and a MongoDB replica set to keep its data in. One node will do: `PRACTICEHUB_DATABASE` is its
-URI (by default `mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true`), and `deploy/docker-compose.yml`
-runs one beside the hub.
+You need Python 3.12 or later, and a MongoDB replica set to keep the data in. One node will do, and Docker runs one:
 
 ```sh
-python3 -m practicehub.cli init --demo          # Harbourview Family Medicine, in ./state, with demo patients
-python3 -m practicehub.cli agents run --once    # the agents work their inboxes
-python3 -m practicehub.cli serve --dev --agents # http://127.0.0.1:8200/  (dev: sign in as anyone, local only;
-                                                # --agents: agents take new work as soon as it appears)
-python3 -m practicehub.cli verify               # check the track's hash chain and signatures
+git clone https://github.com/spectre-ns/agent-hub.git && cd agent-hub
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e .                                # the hub is the standard library and pymongo
+
+docker run -d --name practicehub-mongo -p 127.0.0.1:27017:27017 mongo:7.0 --replSet rs0 --bind_ip_all
+docker exec practicehub-mongo mongosh --quiet --eval \
+  'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
+
+practicehub init --demo          # Harbourview Family Medicine, in ./state, with demo patients
+practicehub agents run --once    # the agents work their inboxes
+practicehub serve --dev --agents # http://127.0.0.1:8200/  (dev: sign in as anyone, local only;
+                                 # --agents: agents take new work as soon as it appears)
+practicehub verify               # check the track's hash chain and signatures
 ```
+
+`PRACTICEHUB_DATABASE` is the MongoDB URI (by default
+`mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true`), and `deploy/docker-compose.yml` runs the hub and
+its MongoDB together. **[docs/getting-started.md](docs/getting-started.md)** walks through each step, the other demo
+practices, giving an agent a real model, and running it for real.
 
 Sign in as **Dr. Amara Okafor** to edit and sign the scribe agent's draft note, as **Jo** (front desk) to see what a
 person without clinical access sees, as **Rana** (practice manager) to approve a workflow change, or as **Sam** to
@@ -54,7 +68,44 @@ channels with `practicehub member channel <service> page --as rana`. It lists qu
 `.../failed {"reason": ...}`. Run `practicehub tick`, or `serve`, which ticks on its own. It escalates a message
 still undelivered past its channel's deadline (`[practice.outbox.<channel>]` in pack.toml).
 
-Tests: `python3 -m venv .venv && .venv/bin/pip install pytest && .venv/bin/python -m pytest -q`.
+Tests: `pip install -e '.[dev]' && scripts/test-mongo.sh && python -m pytest -q` (the script starts the tests' MongoDB
+in Docker).
+
+## Customizing
+
+The core knows nothing about any one business. What makes a hub a clinic, an accounting office or your own practice
+is a set of definitions in TOML: record types, workflows, views, skills, roles and grants. There are four ways to
+change them, from least effort to most:
+
+| You want to | Do this |
+|---|---|
+| Change how a running practice works | Use the pages under **Settings**: workflows, record types, views, blocks, skills, the team and its agents. Nothing to write |
+| Run your own practice on a pack that ships | Write an **overlay**: a `pack.toml` that names its `base`, your practice's name and people, and the modules you run |
+| Add a capability any practice can install | Write a **module** in `modules/<id>/`: types, views, workflows and roles |
+| Set up a different kind of business | Write a **pack** in `packs/<kind>/`: the subject, roles, data classes, workflows, skills and a small `pack.py` |
+
+An overlay is a few lines:
+
+```toml
+# packs/northside/pack.toml
+base = "general-practice"
+modules = ["wiki", "crm"]
+
+[practice]
+id = "northside"
+name = "Northside Family Practice"
+timezone = "America/Toronto"
+```
+
+```sh
+practicehub init --pack northside --demo
+```
+
+Whichever way you choose, a change is a proposal that a second policy owner approves, and the rules below are not
+configurable: a pack decides what is high risk and who signs, never whether those rules apply.
+
+**[docs/customizing.md](docs/customizing.md)** is the guide: each level with a worked example, how to set up agents
+(roles, skills, risk limit, model, sponsor), connecting other systems, and upgrading what is installed.
 
 ## The rules
 
@@ -507,9 +558,11 @@ owner switch servers on and off, which is tracked. For clients that start a comm
 practicehub/          the core: hub, engine, workflows, blocks, sandbox, backends, track, authz, records, models, web, cli
   agents/runner.py    an agent's loop: inbox → context → model → answer (or escalate)
   integrations/       Keycloak; Collabora (discovery, proof keys, blank documents) and its WOPI host
-packs/general-practice/  roles, data classes, grants, members, 9 workflows, 8 skills, 5 blocks, stand-in answers
+packs/general-practice/  a family clinic: roles, data classes, grants, members, workflows, skills, blocks, stand-in answers
+packs/accounting-office/ an accounting office on the same core
+packs/harbourview/    an overlay: one clinic's name and modules on general-practice
 modules/              dms (document control), qms (quality), plm, wiki, wiki-sop, inventory, crm
 tests/                rules, web (real HTTP), another practice (accounting)
-deploy/               docker compose, LiteLLM config, env example
-docs/                 workflows and packs
+deploy/               docker compose, Helm chart, LiteLLM config, env example
+docs/                 getting started, customizing, workflows, packs, the booking portal
 ```
