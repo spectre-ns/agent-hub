@@ -1,13 +1,13 @@
 # Practice Hub
 
-A practice-management platform for professional practices (a family clinic, a law firm, an accountancy) where **AI
-agents are members of the practice**. Agents hold roles, take work from the same inbox as people, have an accountable
-sponsor and a kill switch, and leave the same signed audit trail. The practice writes down how it works as
-**workflows** and changes them through change control.
+A platform for running an organization's work, where **AI agents are members of the team**. Agents hold roles, take
+work from the same inbox as people, have an accountable sponsor and a kill switch, and leave the same signed audit
+trail. The organization (the hub calls it a **practice**) writes down how it works as **workflows** and changes them
+through change control.
 
-The first practice pack is a **general practice** (family medicine, Nova Scotia). The core knows nothing about
-medicine: `packs/accounting-office` is an accounting office that runs on the same core with no medical code, and
-`tests/packs/accounting` is a small one to copy.
+The core knows nothing about any one line of work. A **pack** makes a hub a particular kind of practice, and
+**modules** add capabilities to any of them. The packs in `packs/` are for unrelated kinds of business and run on the
+same core, and `tests/packs/accounting` is a small one to copy.
 
 New here? Start with **[Getting started](docs/getting-started.md)**, then **[Customizing](docs/customizing.md)**.
 
@@ -15,10 +15,10 @@ How it is built:
 
 | Idea | Here |
 |---|---|
-| Procedures are configuration | **Workflows**: TOML a practice manager can read; a pack ships the first versions |
+| Procedures are configuration | **Workflows**: TOML a manager can read; a pack ships the first versions |
 | Agents hold roles like people | **Members**: `person`, `agent` or `service`; workflows name roles, never people |
 | Checks are deterministic | **Eligibility** (one function, `Engine.eligibility`), field validation, pack guards. No model in any guard |
-| Decisions are e-signatures | **Gate steps**: every decision is signed with the step's meaning ("I approve this renewal") |
+| Decisions are e-signatures | **Gate steps**: every decision is signed with the step's meaning ("I approve this request") |
 | The audit trail is hash-chained | **The track**: a hash-chained, HMAC-signed event log; every event names the event that caused it |
 
 ## Getting started
@@ -34,7 +34,7 @@ docker run -d --name practicehub-mongo -p 127.0.0.1:27017:27017 mongo:7.0 --repl
 docker exec practicehub-mongo mongosh --quiet --eval \
   'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
 
-practicehub init --demo          # Harbourview Family Medicine, in ./state, with demo patients
+practicehub init --demo          # a demo practice, in ./state, with demo records and open work
 practicehub agents run --once    # the agents work their inboxes
 practicehub serve --dev --agents # http://127.0.0.1:8200/  (dev: sign in as anyone, local only;
                                  # --agents: agents take new work as soon as it appears)
@@ -46,24 +46,24 @@ practicehub verify               # check the track's hash chain and signatures
 its MongoDB together. **[docs/getting-started.md](docs/getting-started.md)** walks through each step, the other demo
 practices, giving an agent a real model, and running it for real.
 
-Sign in as **Dr. Amara Okafor** to edit and sign the scribe agent's draft note, as **Jo** (front desk) to see what a
-person without clinical access sees, as **Rana** (practice manager) to approve a workflow change, or as **Sam** to
-submit the claim that the billing agent coded.
+The sign-in page lists the demo's members. Sign in as **Rana** or **Dr. Amara Okafor**, its two policy owners, to
+change settings and to approve each other's changes; as Dr. Amara to edit and sign what an agent drafted; or as
+**Jo** to see what a member with narrower access sees.
 
 Run an agent as a separate process, with its own token, through the API:
 
 ```sh
-python3 -m practicehub.cli token scribe-agent --as dr-amara > scribe.token   # the sponsor issues it
-python3 -m practicehub.cli agents run --agent scribe-agent --url http://127.0.0.1:8200 --token-file scribe.token
+practicehub token <agent> --as <its sponsor> > agent.token      # the sponsor issues it
+practicehub agents run --agent <agent> --url http://127.0.0.1:8200 --token-file agent.token
 ```
 
 Outside dev mode, people sign in with their member id and a passphrase of their own. A member admin issues a
-one-time setup code (Team page, or `practicehub member passphrase-link dr-liam --as rana`), and the person sets
-their passphrase at `/setup`. Someone already signed in sets or changes theirs under **Your passphrase**. The first
-member admin issues their own code from the command line: `--as` is themselves.
+one-time setup code (Team page, or `practicehub member passphrase-link <member> --as <member admin>`), and the
+person sets their passphrase at `/setup`. Someone already signed in sets or changes theirs under **Your
+passphrase**. The first member admin issues their own code from the command line: `--as` is themselves.
 
-A delivery connector, such as a fax or pager gateway, is a `service` member with a token. A member admin grants it
-channels with `practicehub member channel <service> page --as rana`. It lists queued messages with
+A delivery connector, such as an email or SMS gateway, is a `service` member with a token. A member admin grants it
+channels with `practicehub member channel <service> <channel> --as <member admin>`. It lists queued messages with
 `GET /api/outbox`, claims one with `POST /api/outbox/<id>/claim`, and reports it with `.../sent` or with
 `.../failed {"reason": ...}`. Run `practicehub tick`, or `serve`, which ticks on its own. It escalates a message
 still undelivered past its channel's deadline (`[practice.outbox.<channel>]` in pack.toml).
@@ -73,7 +73,7 @@ in Docker).
 
 ## Customizing
 
-The core knows nothing about any one business. What makes a hub a clinic, an accounting office or your own practice
+The core knows nothing about any one business. What makes a hub your practice and not another
 is a set of definitions in TOML: record types, workflows, views, skills, roles and grants. There are four ways to
 change them, from least effort to most:
 
@@ -88,12 +88,12 @@ An overlay is a few lines:
 
 ```toml
 # packs/northside/pack.toml
-base = "general-practice"
+base = "general-practice"            # the pack it builds on: any pack in packs/
 modules = ["wiki", "crm"]
 
 [practice]
 id = "northside"
-name = "Northside Family Practice"
+name = "Northside"
 timezone = "America/Toronto"
 ```
 
@@ -132,13 +132,13 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
   - Medium-risk work goes ahead, and the sponsor gets a notice.
   - High-risk work is *held*: nothing happens until the sponsor approves the agent's answer. If they reject it, the
     item goes to people with the sponsor's reason.
-- **Clinicians sign; agents never do.** A gate with `signer = "person"` is never decided by an agent, even an agent
-  holding the physician role. A gate with `signer = "any"` may be decided by an agent only while its
+- **People sign; agents never do.** A gate with `signer = "person"` is never decided by an agent, even an agent
+  holding the role the gate names. A gate with `signer = "any"` may be decided by an agent only while its
   `agent_criteria` holds. The engine (not the caller) makes an agent's decision one of two things, and neither is a
   signature, whichever way the agent calls (the API, the agent runner or MCP):
   - a *proposal*, when the step is high risk or the agent calls over MCP: it waits for the sponsor, whose approval is
     their own signature on that decision (and on the record it is about);
-  - an *attestation*, for a routine decision the workflow allows (a low-risk claim under the criteria): the agent's
+  - an *attestation*, for a routine decision the workflow allows (a low-risk item within the criteria): the agent's
     own action on the track (`gate.decided` with `data.attested`, no signature), shown as "decided by <agent> (an
     agent)". It never appears among a record's signatures.
 - **A person signs with their passphrase.** Each signature, on a decision, an approval or a record, asks again for
@@ -152,20 +152,20 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
   track. A message about a file that a subject's directive keeps from someone is kept from them too, on the Outbox
   page and everywhere else it is listed: neither its words nor its subject line are shown. Whoever it is addressed
   to by name reads it, and the connector granted its channel still carries it. A message still queued past its channel's deadline goes to the escalation role. On an urgent channel (a
-  page), and after any failure, a person is also given the delivery work ("Phone the physician"). A person who reads
+  page), and after any failure, a person is also given the work of delivering it. A person who reads
   the message marks it delivered by hand, saying how.
-- **Separation of duties.** `not_by` stops whoever did an earlier step from also doing this one. The billing agent
-  codes a visit, so a person submits the claim.
-- **Data minimisation.** Records belong to data classes, and roles are granted read or write access per class. The
-  scheduling agent reads demographics and appointments, never a clinical note, and its work-item context holds no
-  clinical data.
+- **Separation of duties.** `not_by` stops whoever did an earlier step from also doing this one. An agent that
+  prepares something is not the one who submits it.
+- **Data minimisation.** Records belong to data classes, and roles are granted read or write access per class. An
+  agent whose role reads two classes reads those and nothing else, and its work-item context holds no data of any
+  other class.
 - **Workflows carry the data they read.**
-  - A draft note copied into a run is clinical data, so a member without clinical access sees the run's audit trail
-    but not its content.
+  - Data copied into a run keeps its data class, so a member without access to that class sees the run's audit
+    trail but not its content.
   - A step that takes an earlier step's whole output needs access to what that step read.
 - **Audit causality.**
-  - Every event names the event that caused it, so `/track/<seq>` shows the chain back to its root: a lab result,
-    a portal request, a visit ending.
+  - Every event names the event that caused it, so `/track/<seq>` shows the chain back to its root: a message
+    from another system, a portal request, a schedule.
   - Decisions are signed, and the chain is tamper-evident.
 - **Change control.** Anyone with standing may propose a workflow change, agents included. A *different* person who
   is a policy owner approves it, never an agent. Before approving, the approver sees the diff and what agents may now
@@ -176,7 +176,7 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
   - Retiring a workflow, block, skill or record type is a proposal too: a second policy owner approves it.
   - An event that no workflow takes is not dropped: the track records it (`event.unhandled`) and the escalation role
     gets an urgent notice. The same holds when the workflow that listens refuses to start on what the event carried
-    (a lab result its start form does not accept): the sender gets the refusal and the escalation role is told.
+    (a payload its start form does not accept): the sender gets the refusal and the escalation role is told.
 - **Verifying the track.** `practicehub verify` checks every event. The Track page (policy owners only, like
   `GET /api/track/verify`) checks the events since the last verify and builds on that kept, sealed result; the
   rows are read in chunks so a long track does not hold up the hub.
@@ -192,11 +192,11 @@ These rules are enforced in code and each one has a test (`tests/test_rules.py`)
   - A different policy owner approves and signs every block version, and the code's SHA-256 is in the track.
   - Python runs in a locked-down child process; a run keeps the block versions it started with.
   - Run data filled into a prompt stays data in the agent's context, never part of the instructions.
-- **PHIA and data residency.**
+- **Data residency.**
   - Models run on the premises: Ollama, or vLLM behind LiteLLM.
   - External model APIs are refused unless the practice sets `PRACTICEHUB_ALLOW_EXTERNAL_MODELS=1`.
-  - Agents in the general-practice pack do administrative work only: drafting, sorting, preparing and coding. They
-    never diagnose or prescribe.
+  - A pack says what its agents must never do (`agent_rules` in `[practice]`), and every agent of the practice is
+    told so in its system prompt.
 
 ## The stack
 
@@ -219,8 +219,8 @@ not yet been run against live servers:
 
 | Concern | Built in | In production |
 |---|---|---|
-| Records | MongoDB, FHIR R4 shaped | **Medplum** (`MEDPLUM_URL`); the hub checks data-class permissions before every call |
-| Back office | ChargeItem and Claim records | **ERPNext/Frappe** through an engine block (`post-claim-to-erp`, a webhook); no flow on the ERPNext side ships yet. The hub stays the system of record for work, not for accounts |
+| Records | MongoDB | An external record server, **Medplum** (`MEDPLUM_URL`); the hub checks data-class permissions before every call |
+| Back office | The practice's own records | **ERPNext/Frappe** through an engine block (a webhook); no flow on the ERPNext side ships yet. The hub stays the system of record for work, not for accounts |
 | Permissions | Local tuples, OpenFGA-shaped | **OpenFGA** (`practicehub openfga init`). The model has `agent → sponsor`, roles as usersets, data classes |
 | Identity | Passphrases for people (scrypt; sessions and setup codes kept as hashes); API tokens (hashed) for agents, services and API clients | **Keycloak**: `practicehub keycloak realm` exports every member. Each agent is a confidential client with a service account, and tokens are exchanged (RFC 8693) for the hub's audience |
 | Orchestration | The run engine; Python blocks in a sandbox | **Engine blocks** run on Kestra (`KESTRA_URL`) or any JSON webhook (`PRACTICEHUB_ENGINE_WEBHOOK_URL`: Activepieces, an in-house service); the Kestra adapter is not yet run against a live server. Engines can also call `POST /api/events` and `POST /api/runs` as a `service` member. Either way the hub keeps the gates, eligibility and the track. Where the hub is served, a block runs as a job outside the request that made it ready (queued, running, done), and the record's History shows it as it happens |
@@ -233,9 +233,9 @@ Everything else is Apache-2.0 or similarly permissive. Windmill and n8n are deli
 to `deploy/.env` first. Ports 8080, 9980 and 11434 are never bound. The track's anchors live on their own volume
 (`hub-anchors`), away from the database's, so that replacing the database shows.
 
-The hub's clock is the practice's, not the server's: "now" and "today" (a note's date, a visit's period, the calendar's
-today and free slots, `run.today`, due times) are in the practice's time zone (`[practice] timezone`, changeable on
-the practice settings page), whatever zone the container runs in. Clinical and calendar times are stored as the
+The hub's clock is the practice's, not the server's: "now" and "today" (a record's date, a booking's period, the
+calendar's today and free slots, `run.today`, due times) are in the practice's time zone (`[practice] timezone`, changeable on
+the practice settings page), whatever zone the container runs in. Record and calendar times are stored as the
 practice's wall time without an offset; the track and work items keep instants in UTC (`...Z`) and pages show them in
 the practice's zone (`practicehub/clock.py`). The image installs `tzdata`; a hub with an unknown zone, or on a machine
 without tz data, refuses to open.
@@ -246,7 +246,7 @@ without tz data, refuses to open.
 replica set on a persistent volume, and the state and the track's anchors on volumes of their own. The secret comes
 from an existing Kubernetes Secret. On first start the chart sets the practice up from its pack (`init --if-new`).
 On Nebari, add it as a `helm_extensions` entry: `deploy/nebari/practicehub.nebari-config.yaml` has the entry and the
-steps before it. Put the cluster in a Canadian region (PHIA).
+steps before it. Put the cluster in the region the practice's data must stay in.
 
 ### Backup and restore
 
@@ -354,14 +354,14 @@ most 20,000 runs of the period and says so when there were more.
   policy owner who did not write it approves it. Files with a DOCTYPE or entities, or over 2 MB, are refused.
 - **Blocks** in the sidebar lists the blocks and the engines under the hub; create or change one there.
 - `docs/workflows.md` is the reference.
-- `docs/packs.md` explains how to set up another kind of practice: its roles, data classes, subject (Patient, Client,
-  Matter...), skills and starting workflows.
+- `docs/packs.md` explains how to set up another kind of practice: its roles, data classes, subject (whoever or
+  whatever its work is about), skills and starting workflows.
 
 ## Modules
 
 A module adds record types, views, workflows and roles to any practice, without the core knowing what it is for. One
 policy owner reviews a module's code and another installs it (`practicehub module review --as rana wiki`, then
-`practicehub module install --as dr-amara wiki`, or from the Modules page). These ship in `modules/`:
+`practicehub module install --as <another policy owner> wiki`, or from the Modules page). These ship in `modules/`:
 
 - **dms**, document control: every controlled document (policies, SOPs, forms).
   - **Its text is its file:** an OpenDocument file (.odt, .ods, .odp) is written together in Collabora Online while the
@@ -404,10 +404,10 @@ policy owner reviews a module's code and another installs it (`practicehub modul
     stock, a location that only groups others) goes back to its author with the reason. A signature covers only the
     stock it was checked against: if the lot changed in the meantime, the move goes back too.
   - **Control levels:** a signed inventory policy sets how much is signed. With none signed, the hub runs at basic.
-    - **basic** (a corner store): nothing is signed.
-    - **tracked** (a small clinic): adjustments, write-offs, returns, releases and counts beyond tolerance are
+    - **basic**: nothing is signed.
+    - **tracked**: adjustments, write-offs, returns, releases and counts beyond tolerance are
       signed by an inventory manager other than the writer, or by the writer when the policy says so.
-    - **regulated** (ISO 13485): always a second person; parts are approved before use, and the first lot to expire
+    - **regulated**: always a second person; parts are approved before use, and the first lot to expire
       is issued first.
     - **Changing it:** a switch may be set stricter than its level, never looser. A change that loosens a control
       the practice signs with a second person is signed by someone other than its author.
@@ -420,8 +420,7 @@ policy owner reviews a module's code and another installs it (`practicehub modul
 
 Each module, and the practice pack, names its **shortcuts** (`shortcuts = ["Part", "StockMove"]` in
 `[module]`, or in `[practice]`). These are the record types people work in most, listed in the sidebar and first in
-Start work. An entry `"start:<workflow>"` puts that workflow on the top bar as a button: the clinic pack's
-appointment request is one.
+Start work. An entry `"start:<workflow>"` puts that workflow on the top bar as a button.
 
 These core rules came with inventory, and any module can use them:
 
@@ -452,11 +451,11 @@ The wiki rests on three core features that any module can use:
   views. A record never sits under itself. With `[navigator]` (`tops`, and lifecycle states to `hide`), a tree type
   gets a second navigation column: the wiki's spaces and the plm module's product lines both use it.
 - **Parts and links**: a record either is part of another or links to it.
-  - **Part of** (`part_of = "<field>"`): the record exists only inside its owner. An allergy is part of its patient;
-    a visit note is part of its visit. It is reached and added through its owner, has no list or create of its own,
-    and never moves to another owner. The field must be a required reference to one record of another type.
-  - **Link** (`rel` on a reference field): both records stand on their own. A visit links to its patient the way it
-    links to its practitioner, and the patient's page shows its visits from the other side.
+  - **Part of** (`part_of = "<field>"`): the record exists only inside its owner. An order line is part of its
+    order; a meeting's notes are part of the meeting. It is reached and added through its owner, has no list or
+    create of its own, and never moves to another owner. The field must be a required reference to one record of another type.
+  - **Link** (`rel` on a reference field): both records stand on their own. A meeting links to its client the way it
+    links to its host, and the client's page shows its meetings from the other side.
 - **Links written in the text**: they become links like a reference field's, including links to a page created after
   the text that named it.
 - **Trees of several types:** a parent field may point at more than one type (`target = ["Folder", "Page"]`).
@@ -558,11 +557,10 @@ owner switch servers on and off, which is tracked. For clients that start a comm
 practicehub/          the core: hub, engine, workflows, blocks, sandbox, backends, track, authz, records, models, web, cli
   agents/runner.py    an agent's loop: inbox → context → model → answer (or escalate)
   integrations/       Keycloak; Collabora (discovery, proof keys, blank documents) and its WOPI host
-packs/general-practice/  a family clinic: roles, data classes, grants, members, workflows, skills, blocks, stand-in answers
-packs/accounting-office/ an accounting office on the same core
-packs/harbourview/    an overlay: one clinic's name and modules on general-practice
+packs/                practice packs (general-practice, accounting-office): roles, data classes, grants, members,
+                      workflows, skills, blocks, stand-in answers; and an overlay on one of them (harbourview)
 modules/              dms (document control), qms (quality), plm, wiki, wiki-sop, inventory, crm
-tests/                rules, web (real HTTP), another practice (accounting)
+tests/                rules, web (real HTTP), a practice of another kind
 deploy/               docker compose, Helm chart, LiteLLM config, env example
 docs/                 getting started, customizing, workflows, packs, the booking portal
 ```
