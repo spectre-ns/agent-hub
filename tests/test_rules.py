@@ -8031,8 +8031,8 @@ def test_numbers_in_a_series_have_no_gaps_and_each_year_starts_again(hub):
     with pytest.raises(Invalid, match="to number a letter, fill in Sent on"):
         hub.update_record(amara, undated, {"status": "sent"})
     other = hub.db.records.find_one({"type": "Letter", "number": "L-2026-001"})
-    with pytest.raises(Exception):  # the database itself refuses a second record with one number
-        hub.db.records.update({"_id": undated}, {"$set": {"number": other["number"]}})
+    with pytest.raises(Exception):  # the database itself refuses a second record with one number in one series
+        hub.db.records.update({"_id": undated}, {"$set": {"number": other["number"], "number_of": other["number_of"]}})
     hub.db.counters.delete({"_id": "number:Letter:L-2027-{seq}"})  # a series begun before its count was kept
     assert letter("2027-02-01")[1] == "L-2027-002"
 
@@ -9017,7 +9017,8 @@ def _refused(hub, src: str) -> list[str]:
 def test_a_type_inherits_everything_and_only_adds_or_narrows(hub):
     """A type under another is its parent and more: its parent's fields, data class, key and unique keys, with its
     own fields after them; a field it names again is narrowed (required, fewer choices, a tighter bound, its own
-    label), never changed. Its own id, label and abstract are its own."""
+    label), never changed. Its own id, label and abstract are its own. A parent's screen it keeps shows the fields it
+    adds in a last tab of its own."""
     from practicehub import contract
     _in_force(hub, PARTY)
     person = _in_force(hub, PERSON)
@@ -9042,6 +9043,10 @@ def test_a_type_inherits_everything_and_only_adds_or_narrows(hub):
         hub.create_record(amara, "Person", {"name": "Di", "tier": "gold"})
     with pytest.raises(Invalid):
         hub.create_record(amara, "Person", {"name": "Ed", "email": "ed@example.org", "tier": "bronze"})
+    resident = _in_force(hub, 'id = "Resident"\nextends = "Patient"\n[[field]]\nname = "farm"\n')
+    last = resident.screen("create")[-1]
+    assert (last["label"], last["fields"]) == ("Resident", ["farm"])
+    assert hub.record_type("Patient").screen("create") == resident.screen("create")[:-1]
 
 
 def test_a_subtype_never_changes_what_is_its_parent_s(hub):

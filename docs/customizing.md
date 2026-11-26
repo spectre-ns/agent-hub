@@ -89,6 +89,10 @@ What an overlay may say:
 - **A definition replaces the base's by its id.** Put `workflows/lab-result.toml`, `skills/intake-review.toml`, a
   type, a block or a view in the overlay's directory, and it is used in place of the base's file with that id. A
   file with a new id is added.
+- **A type of its own can be a kind of one of the base's.** `types/Farmer.toml` with `extends = "Individual"` adds a
+  kind of individual: it has every field, check and lifecycle of `Individual` (and of `Client` above it), adds its
+  own fields, and is filed, listed, searched and worked on wherever an individual is. See
+  [A kind of another type](#a-kind-of-another-type).
 - **An overlay brings no `pack.py`.** The code that runs is the base's, reviewed with it.
 - **A base is not itself an overlay.** Build on the pack your base is built on.
 
@@ -210,6 +214,35 @@ Field types are `string`, `text`, `markdown`, `number`, `boolean`, `date`, `date
 `reference`, `attachment`, `list`, `object` and `json`. A type can extend one of the core's base types
 (`extends = "Subject"` for whoever the practice serves, `extends = "Booking"` for something on the calendar), so the
 core's pages and every module work with it.
+
+### A kind of another type
+
+`extends` can also name a type of the hub: a module's, the pack's or your own. The type is then a kind of that one:
+
+```toml
+# types/Farmer.toml, in an overlay on the accounting office
+id = "Farmer"
+extends = "Individual"            # itself a kind of Client
+label = "Farmer"
+
+[[field]]
+name = "farm_name"
+label = "Farm"
+
+[[field]]
+name = "sin"                      # Individual's field, narrowed: only what changes
+required = true
+```
+
+- It has everything of the types above it, and only adds fields, checks and links, or narrows a field (required,
+  fewer choices, tighter bounds). Its data class, lifecycle, `[base]` and numbering are theirs.
+- Wherever a type is named, its kinds count: a reference to an `Individual` takes a farmer, the list of individuals
+  shows farmers (with a Type column), a workflow about individuals runs on a farmer, a grant on individuals covers
+  farmers, and a view of individuals counts them.
+- A kind with no `key` of its own shares the type's key and counter: farmers and other clients are CLI-1, CLI-2...
+- `abstract = true` says only the kinds under a type have records: "New client" then asks which kind.
+- In the builder (Record types, then New or Propose a change) the same is **A kind of** and **Only its kinds have
+  records**.
 
 ### A workflow
 

@@ -142,8 +142,9 @@ required = true
 ```
 
 - **It inherits everything.** The parent's fields come first, then its own; its checks, signatures, links, unique keys
-  and screens are added to the parent's (a screen of the same id replaces the parent's). Its id, label, plural, slug
-  and `abstract` are its own.
+  and screens are added to the parent's (a screen of the same id replaces the parent's; a parent's screen it keeps
+  gets a last tab, named by its label, of the fields it adds, so its own fields are on every form). Its id, label,
+  plural, slug and `abstract` are its own.
 - **It never changes what is its parent's.** Its data class, `[base]`, lifecycle, workflow, `[number]`, `reverses`,
   `covers`, `[period]`, `[closing]`, `part_of`, `parent`, `[consent]`, `[booking]`, `standard`, `strict`, `subject`,
   `active`, `date` and `flag` are the parent's; saying another is refused. A signature or link meaning what one of the

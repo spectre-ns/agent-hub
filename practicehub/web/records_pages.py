@@ -218,8 +218,8 @@ class RecordPages:
     def page_export_subject(self, req, pid):
         """A subject's whole file: what a person asks for under PHIA, or what goes to the clinic taking over care."""
         me, hub = req["me"], self.hub
-        st = self.subj["type"]
-        ref = f"{st}/{pid}"
+        ref = self.subject_ref(pid)
+        st = ref.split("/", 1)[0]
         fmt = self._format(req)
         if fmt:
             return self._download(exportmod.subject_file(hub, me, ref, fmt))
@@ -247,11 +247,21 @@ class RecordPages:
         from .server import Redirect
         return Redirect(to)
 
+    def is_subject_type(self, t: str) -> bool:
+        """Whether records of ``t`` are the practice's subjects: the pack's subject type, or a type under it (an
+        individual, where the subject type is Client)."""
+        return bool(t) and self.hub.is_a(t, self.subj["type"])
+
+    def subject_ref(self, pid: str) -> str:
+        """A subject's ref from its id in the address (``/clients/7f3a``), as ``Type/id`` of its own type."""
+        st = self.subj["type"]
+        return self.hub.resolve_ref(f"{st}/{pid}") or f"{st}/{pid}"
+
     def record_href(self, ref: str) -> str:
         t, _, rid = ref.partition("/")
         if t in self.hub.member_types():  # a member of the practice: their page on the team
             return f"/team/{rid}"
-        if t == self.subj["type"]:
+        if self.is_subject_type(t):
             return f'/{self.subj["path"]}/{rid}'
         rt = self.hub.record_type(t)
         if rt and rt.part_of and rid != "new":  # a part lives under its owner: /patients/7f3a/lab-results/b147
@@ -269,7 +279,7 @@ class RecordPages:
                          path)
         if not m or not m.group("rest"):
             return path
-        cur = f'{self.subj["type"]}/{m.group("pid")}' if m.group("pid") else f'{m.group("t")}/{m.group("rid")}'
+        cur = self.subject_ref(m.group("pid")) if m.group("pid") else f'{m.group("t")}/{m.group("rid")}'
         segs, i = m.group("rest").split("/")[1:], 0
         while i + 1 < len(segs):
             rt = self.hub.part_slugs(cur.split("/", 1)[0]).get(segs[i])
@@ -659,7 +669,8 @@ class RecordPages:
             found = self.hub.search_records(None, t, limit=50, text=words)  # words seen by every reader
             name = lambda r: self.hub.title(r).strip().lower()
             exact = [r for r in found if r["id"] == typed or typed.lower() in (name(r), lead(name(r)))]
-            hits += [f"{t}/{r['id']}" for r in (exact or found)]
+            hits += [f"{r.get('resourceType') or t}/{r['id']}" for r in (exact or found)]
+        hits = list(dict.fromkeys(hits))  # a type and one under it are both targets: a record is found by each
         if len(hits) == 1:
             return hits[0]
         raise Invalid(f"{f['label']}: " + (f"no record is called {typed!r}" if not hits else
@@ -929,13 +940,25 @@ class RecordPages:
     # ------------------------------------------------------------------------------------------ lists
     def page_record_types(self, req):
         me, hub = req["me"], self.hub
-        rows = []
-        for t, rt in sorted(hub.record_types().items(), key=lambda kv: (kv[1].order, kv[0])):
-            if not self._may_read(me, t) or rt.part_of:  # a part is reached through its owner
-                continue
-            n = {"n": hub.db.records.count({"type": t})}
-            rows.append(f'<tr><td><a href="/records/{e(t)}">{e(rt.plural)}</a></td><td>{e(rt.summary)}</td>'
-                        f'<td class="muted">{e(rt.data_class)}</td><td>{n["n"] if n else ""}</td></tr>')
+        rows: list[str] = []
+        rts = hub.record_types()
+        under: dict[str | None, list[str]] = {}  # each type under the nearest of the hub's types above it
+        for t, rt in rts.items():
+            up = next((a for a in rt.ancestors if a in rts and a not in schema.bases()), None)
+            under.setdefault(up, []).append(t)
+
+        def walk(t: str, depth: int) -> None:
+            rt = rts[t]
+            if not self._may_read(me, t) or rt.part_of:  # a part is reached through its owner (and so are its kinds)
+                return
+            n = hub.db.records.count({"type": {"$in": hub.family(t)}})  # what its list shows: its kinds' records too
+            kinds = ' <span class="muted">(each is one of the kinds under it)</span>' if rt.abstract else ""
+            rows.append(f'<tr><td>{"&emsp;" * depth}{"↳ " if depth else ""}<a href="/records/{e(t)}">{e(rt.plural)}</a>'
+                        f'{kinds}</td><td>{e(rt.summary)}</td><td class="muted">{e(rt.data_class)}</td><td>{n}</td></tr>')
+            for c in sorted(under.get(t, []), key=lambda c: (rts[c].order, c)):
+                walk(c, depth + 1)
+        for t in sorted(under.get(None, []), key=lambda t: (rts[t].order, t)):
+            walk(t, 0)
         body = ('<div class="tablewrap"><table><tr><th>Records</th><th>What they are</th><th>Data class</th>'
                 '<th>Count</th></tr>' + "".join(rows) + "</table></div>") if rows else (
             "<p class='muted'>You may not read any record types.</p>")
@@ -974,19 +997,25 @@ class RecordPages:
         lc = rt.lifecycle
         heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
         keyed = any((r.get("meta") or {}).get("key") for r in recs)  # a store that keeps keys: a Key column
+        kinds = len(hub.family(rtype)) > 1  # a type with kinds under it lists theirs too: a Type column says which
+
+        def kind(r):
+            k = hub.record_type(r.get("resourceType") or rtype)
+            return f"<td>{e(k.label if k else r.get('resourceType') or '')}</td>" if kinds else ""
         rows = "".join(
             "<tr>" + (f'<td class="key">{e((r.get("meta") or {}).get("key") or "")}</td>' if keyed else "")
-            + f'<td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
+            + f'<td><a href="{e(self.record_href(f"{r.get("resourceType") or rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
+            + kind(r)
             + (f'<td>{self._state_loz(schema.first(r, lc["path"]), rt)}</td>' if lc else "")
             + "".join(f"<td>{self._value_html(f, r)}</td>" for f in heads) + "</tr>" for r in recs)
         table = (f'<div class="tablewrap"><table><tr>' + ("<th>Key</th>" if keyed else "") + f'<th>{e(rt.label)}</th>'
-                 + ("<th>Status</th>" if lc else "")
+                 + ("<th>Type</th>" if kinds else "") + ("<th>Status</th>" if lc else "")
                  + "".join(f"<th>{e(f['label'])}</th>" for f in heads) + f"</tr>{rows}</table></div>") if recs else (
             f"<p class='muted'>No {e(self._lower(rt.plural))} yet.</p>")
         if req["query"].get("parent"):  # the old way to add under a record: its create form now has its own page
             raise self._redirect(f"/records/{rtype}/new?parent={urllib.parse.quote(req['query']['parent'])}")
         create = (f'<a class="btn primary" href="/records/{e(rtype)}/new" data-modal>Create</a>'
-                  if hub.may_write(me, rtype) and rtype != self.subj["type"] and not rt.part_of else "")
+                  if hub.may_write(me, rtype) and not self.is_subject_type(rtype) and not rt.part_of else "")
         if rt.part_of:
             ol = self._owner_label(rt)
             table = (f'<div class="flash info"><p>Each {e(self._lower(rt.label))} is part of {e(a_an(ol))}: open one '
@@ -1028,9 +1057,10 @@ class RecordPages:
         if not hub.may_read(me, t) or not hub.redact(me, hub.records.read(t, rid)):
             raise NotFound(f"there is no record {ref}")
         out: dict = {}
+        kin = set(hub.family(rtype))
         for x in hub.linked(me, ref):
             xt, _, xid = x["ref"].partition("/")
-            if xt != rtype or xid in out:
+            if xt not in kin or xid in out:
                 continue
             r = hub.redact(me, hub.records.read(xt, xid))
             if r:
@@ -1049,6 +1079,9 @@ class RecordPages:
             raise Denied(f"{me['name']} may not add {rt.plural.lower()}")
         lc = rt.lifecycle
         q = req["query"]
+        kinds = [t for t in hub.concrete([rtype]) if self._may_write(me, t)]
+        if (rt.abstract or len(kinds) > 1) and kept is None and error is None and q.get("kind") != rtype:
+            return self._kind_pick(req, rt, kinds)
         under = q.get("parent", "") or (kept or {}).get("_parent", "")
         seed = {k: v for k, v in (kept or {}).items() if k not in ("_parent", "_owner")} or None
         if rt.parent and under.startswith(rtype + "/"):
@@ -1150,6 +1183,26 @@ class RecordPages:
                     break
         return seed
 
+    def _kind_pick(self, req, rt, kinds: list[str]) -> str:
+        """Creating a record of a type with kinds under it: which kind first, each opening its own form in the same
+        dialog (what the address named, a parent or a link, goes with it). An abstract type's records are each one
+        of its kinds."""
+        hub, q = self.hub, req["query"]
+
+        def li(t):
+            k = hub.record_type(t)
+            qs = urllib.parse.urlencode({**{a: b for a, b in q.items() if isinstance(b, str)}, "kind": t})
+            return (f'<li><a href="/records/{e(t)}/new?{e(qs)}" data-modal><b>{e(k.label)}</b>'
+                    f'<span class="muted">{e(k.summary)}</span></a></li>')
+        verb = "Add" if rt.part_of else "Create"
+        body = (f'<div data-modal-body><p class="muted">Which kind of {e(self._lower(rt.label))}?</p>'
+                + (f'<ul class="pick" id="kinds">{"".join(li(t) for t in kinds)}</ul>' if kinds else
+                   f"<p class='muted'>There is no kind of {e(self._lower(rt.label))} you may add.</p>")
+                + f'<div class="filters"><a class="btn secondary" href="/records/{e(rt.id)}" data-modal-close>Cancel'
+                  f'</a></div></div>')
+        return self.layout(req, f"{verb} {a_an(self._lower(rt.label))}", body,
+                           crumbs=[("/records", "Records"), (f"/records/{rt.id}", rt.plural), (None, verb)])
+
     def _owner_pick(self, req, rt, of, problem=None) -> str:
         """Adding a part with no owner named: which one, found as a reference picker finds it, then the form."""
         me, ol = req["me"], self._owner_label(rt)
@@ -1169,7 +1222,7 @@ class RecordPages:
         hub = self.hub
         short = self.shortcuts(me)
         rest = [t for t, rt in sorted(hub.record_types().items(), key=lambda kv: (kv[1].order, kv[0]))
-                if t not in short and t not in hub.member_types() and not rt.abstract and t != self.subj["type"]
+                if t not in short and t not in hub.member_types() and not rt.abstract and not self.is_subject_type(t)
                 and not rt.part_of and self._may_write(me, t)]
 
         def li(t):
@@ -1399,7 +1452,7 @@ class RecordPages:
                     if not (visibility.withheld(r) or {}).get("whole"):
                         hub.note_view(me, x["ref"], how=f"linked to {ref}")
         links, own = [], []
-        subject = rtype == self.subj["type"]
+        subject = self.is_subject_type(rtype)
         for t in sorted(groups, key=lambda t: (hub.record_type(t).order, t)):
             rt, g = hub.record_type(t), groups[t]
             # on a subject's chart, what is about them (their results, their prescriptions: linked by the field that
@@ -1551,12 +1604,13 @@ class RecordPages:
 
     def _subjects_of(self, rt, rec) -> list[tuple[str, str]]:
         """The subjects a record links to by its own single reference fields: (field label, ref)."""
-        st, out = self.subj["type"], []
+        out = []
         for f in rt.fields:
-            if f["type"] != "reference" or f["path"].endswith(".*") or st not in self.hub.concrete(f["target"]):
+            if (f["type"] != "reference" or f["path"].endswith(".*")
+                    or not any(self.is_subject_type(t) for t in self.hub.concrete(f["target"]))):
                 continue
             r = schema.ref_of(schema.first(rec, f["path"]))
-            if r and r.startswith(st + "/") and r not in [x for _, x in out]:
+            if r and self.is_subject_type(r.split("/", 1)[0]) and r not in [x for _, x in out]:
                 out.append((f["label"], r))
         return out
 
@@ -1576,7 +1630,7 @@ class RecordPages:
 
     def owner_banner(self, me, owner: str) -> str:
         t = owner.split("/", 1)[0]
-        if t == self.subj["type"]:
+        if self.is_subject_type(t):
             return self.subject_banner(me, owner)
         o = self.hub.redact(me, self.hub.records.read(*owner.split("/", 1)))
         return self.record_banner(me, o) if o and self._may_read(me, t) else ""
@@ -1589,7 +1643,7 @@ class RecordPages:
         info = self.hub.withheld(me, subject)
         if not info:
             return ""
-        word = self.subj["label"].lower() if subject.split("/")[0] == self.subj["type"] else "subject"
+        word = self.subj["label"].lower() if self.is_subject_type(subject.split("/")[0]) else "subject"
         over = info.get("override")
         if over:
             from .. import clock
@@ -1649,7 +1703,7 @@ class RecordPages:
         """Break the glass (``hub.break_glass``), then back to the record, now open, under the banner."""
         reason = str(self.form(req).get("reason") or "")
         got = self.hub.break_glass(req["me"], f"{rtype}/{rid}", reason)
-        raise self._redirect(self.record_href(f"{rtype}/{rid}") if rtype != self.subj["type"]
+        raise self._redirect(self.record_href(f"{rtype}/{rid}") if not self.is_subject_type(rtype)
                              else self.record_href(got["subject"]))
 
     # ------------------------------------------------------------------------------------------ one record
@@ -1683,6 +1737,10 @@ class RecordPages:
         rt = hub.record_type(rtype)
         if not rt:
             raise Invalid(f"there is no record type {rtype}")
+        if len(hub.family(rtype)) > 1 and hub.records.read(rtype, rid) is None:  # named by a type above its own
+            got = hub.resolve_ref(ref)
+            if got and got != ref:
+                raise self._redirect(self.record_href(got))
         rec = hub.read_record(me, ref)
         lc = rt.lifecycle
         st = schema.first(rec, lc["path"]) if lc else None
@@ -1719,7 +1777,7 @@ class RecordPages:
                            f"<td>{self._value_html(f, rec)}</td></tr>"
                            for f in rt.fields if f.get("advanced") and f.get("show", True) is not False
                            and f not in unseen and not covered(f) and self._has_value(f, rec))
-        if rtype == self.subj["type"] and hub.is_policy_owner(me):
+        if self.is_subject_type(rtype) and hub.is_policy_owner(me):
             fields += (f"<tr><th>Privacy</th><td><a href='/access?subject={e(urllib.parse.quote(ref))}'>Who opened or "
                        f"changed this file</a></td></tr>")
         if empty:
@@ -1859,9 +1917,9 @@ class RecordPages:
         banner = ""
         if owner:  # a part sits under its owner: the owner's banner (a patient's, with their alerts) above it
             banner = self.owner_banner(me, owner)
-        elif rtype != self.subj["type"]:  # a record about a subject (a visit): the subject, as its first fact
+        elif not self.is_subject_type(rtype):  # a record about a subject (a visit): the subject, as its first fact
             subs = self._subjects_of(rt, rec)
-            if subs and self._may_read(me, self.subj["type"]):
+            if subs and self._may_read(me, subs[0][1].split("/", 1)[0]):
                 banner = self.subject_banner(me, subs[0][1])
         nav = self.navigator(me, rtype, ref)
         if not nav and owner and not editing:  # a part is read inside its owner: the owner's sections beside it

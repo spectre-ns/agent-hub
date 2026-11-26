@@ -216,7 +216,8 @@ definition is its parent's as in force, with what it says itself merged in.
   that is under the parent's, and its own label and help. Its type, path, list, data class, by, pin, rel, with,
   live, scale, unit, required_unless and columns stay.
 - Its own when it says one, else its parent's: summary, title, short_title, order, layout, navigator, alert, its
-  screens (one of the same id replaces the parent's) and key. A type that sets no key shares its parent's, and so
+  screens (one of the same id replaces the parent's; a parent's screen it keeps gets a last tab, its label, of the
+  fields it adds) and key. A type that sets no key shares its parent's, and so
   the counter its records' keys are given from.
 - Never inherited: id, label, plural and slug (each from its own id when it says none), and abstract.
 
@@ -1971,6 +1972,14 @@ def _merge(parent: RecordType, own: dict) -> tuple[dict, list[str]]:
                 what = {"signature": "signatures", "link": "links"}[k]
                 problems.append(f"{k} {x.get(name)!r} is {parent.id}'s: a type under it adds {what}, never changes one")
         out[k] = merged
+    added = [x["name"] for x in own.get("field") or [] if isinstance(x, dict) and isinstance(x.get("name"), str)
+             and parent.field(x["name"]) is None and not x.get("advanced")]
+    if added and isinstance(out.get("screen"), list):  # a screen it takes from its parent shows its own fields too
+        mine = {x.get("id") for x in own.get("screen") or [] if isinstance(x, dict)}
+        tab = {"label": str(own.get("label") or default_label(str(own.get("id") or ""))), "fields": added}
+        out["screen"] = [{**sc, "tab": [*sc.get("tab", []), tab]}
+                         if isinstance(sc, dict) and sc.get("id") not in mine and isinstance(sc.get("tab", []), list)
+                         else sc for sc in out["screen"]]
     return out, problems
 
 

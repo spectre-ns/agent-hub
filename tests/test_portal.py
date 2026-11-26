@@ -96,6 +96,8 @@ def test_the_clinic_portal_is_valid(hub):
     (lambda c: c.update(colour="teal"), "colour"),
     (lambda c: c["identity"].update(born="shoe_size"), "shoe_size"),
     (lambda c: c["identity"].update(inputmode="emoji"), "inputmode"),
+    (lambda c: c["identity"].update(type="Observation"), "identity.type"),
+    (lambda c: c["identity"].update(type="NoSuchType"), "identity.type"),
     (lambda c: c["code"].update(minutes=600), "minutes"),
     (lambda c: c["kinds"]["forms"].update(cancel_to="no-such-state"), "cancel_to"),
     (lambda c: c["kinds"]["forms"].update(max_upcoming=0), "max_upcoming"),
@@ -133,6 +135,49 @@ def test_a_bad_portal_stops_the_pack_loading(tmp_path):
     (dst / "pack.toml").write_text(toml.replace('roles = ["physician"]', 'roles = ["astronaut"]', 1))
     with pytest.raises(ValueError, match=r"\[portal\].*astronaut"):
         load_pack(dst)
+
+
+def test_the_type_that_signs_in_may_be_one_under_the_subject_type(tmp_path, monkeypatch):
+    """``[portal.identity] type`` names a type under the practice's subject type: its fields, its ``[base]`` and the
+    workflows about the subject type are its own through the types above it. An abstract one is refused while people
+    register online, since a registration is made as the type that signs in."""
+    import shutil
+    from practicehub.pack import load as load_pack
+    dst = tmp_path / "general-practice"
+    shutil.copytree(ROOT / "packs" / "general-practice", dst)
+    (dst / "types" / "Resident.toml").write_text('id = "Resident"\nextends = "Patient"\nlabel = "Resident"\n'
+                                                 '[[field]]\nname = "farm"\nlabel = "Farm"\n')
+    toml = (dst / "pack.toml").read_text()
+    (dst / "pack.toml").write_text(toml.replace('[portal.identity]\n', '[portal.identity]\ntype = "Resident"\n', 1))
+    pack = load_pack(dst)
+    assert pack.portal["identity"]["type"] == "Resident" and check_config(pack) == []
+    real = portal_mod._type_doc
+    monkeypatch.setattr(portal_mod, "_type_doc", lambda pk, tid: {**real(pk, tid), "abstract": True}
+                        if tid == "Resident" else real(pk, tid))
+    assert any("identity.type: Resident is abstract" in p for p in check_config(pack))
+    pack.portal.pop("register")
+    pack.portal.pop("intake_workflow", None)
+    assert not any("identity.type" in p for p in check_config(pack)), "abstract is fine when no one registers online"
+
+
+def test_a_person_of_a_type_under_the_one_that_signs_in_signs_in_as_their_own_type(hub):
+    """Records of every type under the one that signs in are found by their details, signed in and shown as their
+    own type; a registration is made as the type named."""
+    from test_rules import _in_force
+    _in_force(hub, 'id = "Resident"\nextends = "Patient"\n[[field]]\nname = "farm"\nlabel = "Farm"\n')
+    rec = hub.create_record(M(hub, "jo"), "Resident", {
+        "name": [{"given": ["Ida"], "family": "Roy"}], "birthDate": BORN, "farm": "North 40",
+        "identifier": [{"system": "https://novascotia.ca/health-card", "value": CARD}],
+        "telecom": [{"system": "phone", "value": "902-555-0101"}]})
+    ref = f"Resident/{rec['id']}"
+    p = Portal(hub, dev=True)
+    assert p.subject_type == "Patient"
+    got = p.begin_sign_in(BORN, CARD, client="10.0.0.1")
+    assert code_rows(hub)[0]["recipient"] == ref
+    token = p.finish_sign_in(got["challenge"], got["dev_code"], client="10.0.0.1")
+    assert p.session(token)["record"] == ref
+    p.cfg = {**p.cfg, "identity": {**p.cfg["identity"], "type": "Resident"}}
+    assert p.subject_type == "Resident" and p._find(BORN, CARD) == ref
 
 
 # ------------------------------------------------------------------------------------------- blocker 7: in force

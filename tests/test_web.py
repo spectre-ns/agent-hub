@@ -1285,6 +1285,95 @@ def test_words_states_and_the_sidebar(hub):
     assert side.count('aria-current="page"') == 1 and 'href="/records" aria-current="page"' in side
 
 
+ERRAND = 'id = "Errand"\nkey = "ERR"\ndata_class = "clinical"\n[[field]]\nname = "what"\nrequired = true\n'
+COURIER = 'id = "Courier"\nextends = "Errand"\n[[field]]\nname = "parcel"\n'
+
+
+def _see(hub, me, path):
+    """A GET as ``me``, not followed: (status, where it goes, page)."""
+    code, head, body = App(hub, dev=False).handle("GET", path, {"authorization": f"Bearer {token(hub, me)}"}, b"")
+    return code, dict(head).get("Location", ""), body.decode()
+
+
+def test_a_type_with_kinds_under_it_lists_them_all_and_asks_which_to_add(hub, server):
+    """A type's list shows its records and those of every type under it, each with its own type; a record named by
+    the type above its own opens at its own address; Add asks which kind, and an abstract type offers only its
+    kinds; the list of types shows each kind under the type it extends."""
+    from test_rules import _in_force
+    _in_force(hub, ERRAND)
+    _in_force(hub, COURIER)
+    amara = M(hub, "dr-amara")
+    a = hub.create_record(amara, "Errand", {"what": "post a letter"})
+    c = hub.create_record(amara, "Courier", {"what": "a parcel run", "parcel": "a box"})
+    tok = token(hub, "dr-amara")
+    code, page = call(server, "GET", "/records/Errand", tok)
+    assert code == 200 and "<th>Type</th>" in page
+    assert f'/records/Courier/{c["id"]}' in page and f'/records/Errand/{a["id"]}' in page
+    assert "<th>Type</th>" not in call(server, "GET", "/records/Courier", tok)[1], "a type with no kinds has no column"
+    code, where, _ = _see(hub, "dr-amara", f"/records/Errand/{c['id']}")
+    assert code == 303 and where == f"/records/Courier/{c['id']}"
+    assert _see(hub, "dr-amara", f"/records/Errand/{a['id']}")[0] == 200
+    code, page = call(server, "GET", "/records/Errand/new", tok)
+    kinds = re.search(r'<ul class="pick" id="kinds">(.*?)</ul>', page, re.S)
+    assert code == 200 and kinds and "/records/Courier/new?kind=Courier" in kinds.group(1)
+    assert "/records/Errand/new?kind=Errand" in kinds.group(1)
+    code, page = call(server, "GET", "/records/Errand/new?kind=Errand", tok)
+    assert code == 200 and 'id="kinds"' not in page and 'name="what"' in page
+    assert 'id="kinds"' not in call(server, "GET", "/records/Courier/new", tok)[1]
+    types = call(server, "GET", "/records", tok)[1]
+    assert types.index("/records/Errand") < types.index("↳") < types.index("/records/Courier")
+    _in_force(hub, 'abstract = true\n' + ERRAND)
+    code, page = call(server, "GET", "/records/Errand/new", tok)
+    kinds = re.search(r'<ul class="pick" id="kinds">(.*?)</ul>', page, re.S)
+    assert code == 200 and kinds and "Courier" in kinds.group(1) and "kind=Errand" not in kinds.group(1)
+    assert "each is one of the kinds under it" in call(server, "GET", "/records", tok)[1]
+    assert f'/records/Errand/{a["id"]}' in call(server, "GET", "/records/Errand", tok)[1], "its records stay"
+
+
+def test_the_type_builder_says_what_a_type_is_a_kind_of_and_whether_it_is_abstract(hub, server):
+    from test_rules import _in_force
+    _in_force(hub, ERRAND)
+    _in_force(hub, COURIER)
+    rana = token(hub, "rana")
+    page = call(server, "GET", "/define/types/Courier/edit", rana)[1]
+    form = _BuilderForm(page).pairs
+    assert ("t.extends", "Errand") in form and not any(k == "t.abstract" for k, _ in form)
+    kinds = re.search(r'<select name="t.extends".*?</select>', page, re.S).group(0)
+    assert '<option value="Patient">' in kinds and '"Courier"' not in kinds, "any type but itself"
+    page = call(server, "POST", "/define/types/build", rana, form=form + [("op", "check")])[1]
+    assert "The hub accepts this" in page
+    form = [(k, v) for k, v in _BuilderForm(call(server, "GET", "/define/types/Errand/edit", rana)[1]).pairs]
+    source = _textarea(call(server, "POST", "/define/types/build", rana,
+                            form=form + [("t.abstract", "1"), ("op", "toml")])[1], "source")
+    doc = __import__("tomllib").loads(source)
+    assert doc["abstract"] is True and "extends" not in doc
+
+
+def test_a_subject_type_with_kinds_asks_which_to_register_and_opens_each_at_the_subjects_address(hub, server):
+    """The practice's subject type with a type under it: the register form asks which kind, makes that kind, and
+    every kind's page is at the subjects' address; the list shows each with its type."""
+    from test_rules import _in_force
+    _in_force(hub, 'id = "Resident"\nextends = "Patient"\nlabel = "Resident"\n[[field]]\nname = "farm"\n'
+                   'label = "Farm"\n')
+    jo = token(hub, "jo")
+    page = call(server, "GET", "/patients", jo)[1]
+    assert "Which kind of patient?" in page and "/patients?kind=Resident#register" in page
+    assert "<th>Type</th>" in page
+    page = call(server, "GET", "/patients?kind=Resident", jo)[1]
+    assert '<input type="hidden" name="_kind" value="Resident">' in page and 'name="farm"' in page
+    code, where, body = App(hub, dev=False).handle(
+        "POST", "/patients", {"authorization": f"Bearer {jo}", "content-type": "application/x-www-form-urlencoded"},
+        urllib.parse.urlencode({"_kind": "Resident", "name.0.given.0": "Ida", "name.0.family": "Roy", "birthDate": "1970-02-03",
+                                "farm": "North 40", "_different": "1"}).encode())
+    assert code == 303, re.findall(r'<li>(.*?)</li>', body.decode())[:5]
+    rid = dict(where)["Location"].rsplit("/", 1)[1]
+    assert hub.records.read("Resident", rid)["farm"] == "North 40"
+    code, page = call(server, "GET", f"/patients/{rid}", jo)
+    assert code == 200 and "Ida" in page
+    page = call(server, "GET", "/patients?kind=Patient", jo)[1]
+    assert 'name="_kind"' not in page and 'name="farm"' not in page
+
+
 def test_tabbed_ids_are_per_type_and_the_team_sponsor_is_for_agents(hub, server):
     jo = token(hub, "jo")
     new = call(server, "GET", "/records/Patient/new", jo)[1]

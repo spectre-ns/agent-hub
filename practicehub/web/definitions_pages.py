@@ -372,7 +372,8 @@ class DefinitionPages:
 # into the same document the TOML holds (``doc_from_form``), written as TOML (``toml_dumps``) and checked by the same
 # validator; what the form does not show (a field's path, a type's signatures...) rides along, unchanged, in hidden
 # inputs and is listed, so nothing is lost on the way through. Every button is a plain submit (``op``).
-TOP_FORM = ("id", "label", "plural", "key", "summary", "data_class", "order", "field", "lifecycle", "screen")
+TOP_FORM = ("id", "extends", "abstract", "label", "plural", "key", "summary", "data_class", "order", "field",
+            "lifecycle", "screen")
 FIELD_FORM = ("name", "label", "type", "required", "choices", "target", "help")
 LC_FORM = ("field", "states", "initial", "locked", "transition")
 TR_FORM = ("from", "to", "by", "label", "requires")
@@ -467,9 +468,11 @@ def doc_from_form(f: dict) -> dict:
     """The builder's form, read into a record type's document (what ``tomllib`` would read from its TOML)."""
     s = lambda k: _one(f, k).strip()  # noqa: E731
     doc: dict = {}
-    for k in ("id", "label", "plural", "summary", "data_class"):
+    for k in ("id", "extends", "label", "plural", "summary", "data_class"):
         if s(f"t.{k}"):
             doc[k] = s(f"t.{k}")
+    if s("t.abstract"):
+        doc["abstract"] = True
     if s("t.key"):
         doc["key"] = s("t.key").upper()
     if s("t.order"):
@@ -694,7 +697,7 @@ def locate(problem: str, doc: dict) -> str | None:
         i = next((k for k, sc in enumerate(screens) if f" {sc.get('id')} " in f" {problem} "
                   or repr(str(sc.get("id"))) in problem), None)
         return f"b-s{i}" if i is not None else None
-    for k in ("id", "label", "plural", "key", "summary", "data_class", "order"):
+    for k in ("id", "extends", "abstract", "label", "plural", "key", "summary", "data_class", "order"):
         if problem.startswith(f"{k}:"):
             return f"b-{k}"
     if problem.startswith("part_of:"):
@@ -808,6 +811,18 @@ def render_builder(doc: dict, *, did, types, classes, module_fields, problems, n
                 + text("b-order", "t.order", "Order", doc.get("order", ""), extra=' inputmode="numeric"',
                        help_="Where it sits on a subject's page (lower first).")
                 + '</div>')
+    tid = str(doc.get("id") or did or "")
+    form.append('<fieldset class="fb-part"><legend>Kind of</legend><div class="fb-grid">'
+                + select("b-extends", "t.extends", "A kind of", [(t, t) for t in types if t != tid],
+                         str(doc.get("extends") or ""), blank="Nothing: a type of its own",
+                         help_="Its records are records of that type too: it has that type&#39;s fields, data class, "
+                               "key and lifecycle, and adds its own fields or narrows that type&#39;s (a field it "
+                               "repeats gives only what it changes).")
+                + '<div class="field"><label class="radio"><input type="checkbox" name="t.abstract" value="1"'
+                + f'{at("b-abstract", "b-abstract-help")}{" checked" if doc.get("abstract") else ""}> Only its '
+                'kinds have records</label><small class="help" id="b-abstract-help">Abstract: a record is always one '
+                'of the types under it, and lists of it show them all.</small>' + err("b-abstract") + '</div>'
+                + '</div></fieldset>')
     form.append(f'<div class="field"><label>Summary<textarea name="t.summary" rows="2"{at("b-summary")}>'
                 f'{e(str(doc.get("summary", "")))}</textarea></label>{err("b-summary")}</div>')
     form.append('<fieldset class="fb-part"><legend>Part of</legend><div class="fb-grid">'

@@ -404,7 +404,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                 or run.get("item") != item["id"] or not ref or "/" not in str(ref)):
             return None
         rtype = ref.split("/", 1)[0]
-        if (rtype == self.subj["type"] or rtype in self.hub.member_types() or not self._may_read(me, rtype)
+        if (self.is_subject_type(rtype) or rtype in self.hub.member_types() or not self._may_read(me, rtype)
                 or Viewer(self.hub, me).run_withheld(run)):
             return None
         return self.record_href(ref) + "#work"
@@ -1722,7 +1722,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
 
     def _record_field(self, wf) -> dict:
         on = self.hub.engine.start_on(wf)  # a workflow that makes its record is started on what it is about
-        rt = self.hub.record_type(on[0]) if len(on) == 1 else None
+        named = wf.record if wf.record and not getattr(wf, "new_record", None) and wf.record != "*" else None
+        rt = self.hub.record_type(on[0] if len(on) == 1 else named or "")  # a type's kinds: the type, by its name
         return {"path": "_record", "name": "_record", "label": rt.label if rt else " or ".join(on), "type": "reference",
                 "target": on, "required": True}
 
@@ -1859,8 +1860,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                 dl.append(("Decided by", "a person, who signs" if step.signer == "person" else
                            "a person, who signs; or an agent within criteria, whose decision is its attestation, not a signature"))
         rec = ""
-        if run["record"] and run["record"].startswith(self.subj["type"] + "/"):
-            subj = self._may_read(me, self.subj["type"]) and self.hub.records.read(*run["record"].split("/", 1))
+        if run["record"] and self.is_subject_type(run["record"].split("/", 1)[0]):
+            subj = self._may_read(me, run["record"].split("/", 1)[0]) and self.hub.records.read(*run["record"].split("/", 1))
             if subj:  # who it is and how to reach them, not an id
                 self.hub.note_view(me, run["record"], how=f"work item {iid}")
                 rec = self.subject_link(run["record"], self.hub.title(subj))
@@ -2549,9 +2550,10 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                        f'</form></details>')
         dl = [("Status", self._loz(self.RUN_STATUS, run["status"])),
               ("Workflow", f'<a href="/workflows/{e(wf.id)}">{e(wf.title)}</a> v{run["version"]}')]
-        if run.get("subject") and run["subject"] != run.get("record") and run["subject"].startswith(self.subj["type"] + "/"):
+        if (run.get("subject") and run["subject"] != run.get("record")
+                and self.is_subject_type(run["subject"].split("/", 1)[0])):
             dl.append((self.subj["label"], self._ref_html(me, run["subject"]) or e(self.subj["label"])))
-        elif run.get("record") and run["record"].startswith(self.subj["type"] + "/"):
+        elif run.get("record") and self.is_subject_type(run["record"].split("/", 1)[0]):
             dl.append((self.subj["label"], self._ref_html(me, run["record"]) or e(self.subj["label"])))
         dl += [("Started by", self.who(run["started_by"])), ("Created", self._at(run["created_at"])),
                ("Updated", self._at(run["updated_at"]))]
@@ -3066,12 +3068,11 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             label = self._context_label(key, wf)
             if key.startswith("record:"):
                 pack = self.hub.pack
-                subj = pack.subject_type if pack else None
                 lines = []
                 for r in val:
                     head = e(self.hub.title(r))
                     facts = ""
-                    if pack and r.get("resourceType") == subj and hasattr(pack, "facts"):
+                    if pack and self.is_subject_type(r.get("resourceType") or "") and hasattr(pack, "facts"):
                         # who they are and how to reach them (and whom to call), in the open: an urgent task needs it
                         rows = "".join(f"<tr><th>{e(self.human(k))}</th><td>{self._fact_html(v)}</td></tr>"
                                        for k, v in self.hub.facts(r).items() if v not in (None, ""))
@@ -3339,13 +3340,19 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         more = len(subs) > SHOWN
         subs = subs[:SHOWN]
         self.hub.note_list(me, subs, how="search" if q else "list", what=f"records:{st}", text=q or None)
-        heads = list(self.hub.facts(subs[0]).keys()) if subs else []
-        rows = "".join(f'<tr><td>{self.subject_link(f"{st}/{p["id"]}", self.hub.title(p))}</td>'
-                       + "".join(f"<td>{self._fact(v)}</td>" for v in self.hub.facts(p).values()) + "</tr>"
-                       for p in subs)
-        reg = self._register_form(me) if self.hub.may_write(me, st) else ""
+        facts = [self.hub.facts(p) for p in subs]
+        heads = list(dict.fromkeys(k for fs in facts for k in fs))  # kinds may say different things: each once
+        kinds = len(self.hub.family(st)) > 1  # subjects of several kinds (individuals and businesses): which, shown
+
+        def kind(p):
+            k = self.hub.record_type(p.get("resourceType") or st)
+            return f"<td>{e(k.label if k else '')}</td>" if kinds else ""
+        rows = "".join(f'<tr><td>{self.subject_link(f"{p.get("resourceType") or st}/{p["id"]}", self.hub.title(p))}</td>'
+                       + kind(p) + "".join(f"<td>{self._fact(fs.get(h))}</td>" for h in heads) + "</tr>"
+                       for p, fs in zip(subs, facts))
+        reg = self._register_form(me, kind=req["query"].get("kind")) if self.hub.may_write(me, st) else ""
         body = (f'<form class="inline"><input name="q" value="{e(q)}" placeholder="search"><button class="secondary">'
-                f'Search</button></form><table><tr><th>{e(self.subj["label"])}</th>'
+                f'Search</button></form><table><tr><th>{e(self.subj["label"])}</th>' + ("<th>Type</th>" if kinds else "")
                 + "".join(f"<th>{e(h.capitalize())}</th>" for h in heads) + f"</tr>{rows}</table>"
                 + (f"<p class='muted'>The {SHOWN} most recently changed are shown. Search by a name, a key or "
                    f"another detail to find any other.</p>" if more else "")
@@ -3358,22 +3365,36 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             return e(self.member_name(v[7:]))
         return e("" if v is None else str(v))
 
-    def _register_form(self, me, rec: dict | None = None, form: dict | None = None, same: list | None = None) -> str:
+    def _register_form(self, me, rec: dict | None = None, form: dict | None = None, same: list | None = None,
+                       kind: str | None = None) -> str:
         """The subject type's own create form (its type extends the core's Subject), with the intake box. ``same``:
-        who this may already be; registering anyway is a choice made on purpose."""
+        who this may already be; registering anyway is a choice made on purpose. A subject type with kinds under it
+        (individuals and businesses) asks which kind first; ``kind`` is the one chosen, whose form it is."""
         st, label = self.subj["type"], self.subj["label"].lower()
-        rt = self.hub.record_type(st)
-        if rt is None:
-            return ""
+        kinds = [t for t in self.hub.concrete([st]) if self.hub.record_type(t) and self._may_write(me, t)]
+        if kind not in kinds:
+            kind = kinds[0] if len(kinds) == 1 else None
+        if kind is None:
+            if not kinds:
+                return ""
+            picks = "".join(f'<a class="btn secondary" href="/{e(self.subj["path"])}?kind={e(t)}#register">'
+                            f'{e(self.hub.record_type(t).label)}</a>' for t in kinds)
+            return (f'<h2 id="register">Register {e(a_an(label))}</h2><p class="muted">Which kind of {e(label)}?</p>'
+                    f'<div class="filters" id="kinds" role="group" aria-label="Which kind">{picks}</div>')
+        rt = self.hub.record_type(kind)
         tabs = self._on_screen(rt, "create")  # the type's create screen, when it has one
-        fields = self._tabbed(tabs, lambda f: self._input(f, rec or {}, me), f"register-{st.lower()}") if tabs is not None else \
+        fields = self._tabbed(tabs, lambda f: self._input(f, rec or {}, me), f"register-{kind.lower()}") if tabs is not None else \
             "".join(self._input(f, rec or {}, me) for f in self._editable(rt) if not f.get("advanced"))
+        if kind != st:
+            fields = f'<input type="hidden" name="_kind" value="{e(kind)}">' + fields
+            label = self._lower(rt.label)
         intake = (f'<label class="switch-row"><input type="checkbox" class="switch" name="intake" value="1"'
                   f'{" checked" if form is None or form.get("intake") else ""}> {e(self.subj["register_label"])}</label>'
                   if self.subj["registered_event"] else "")
         warn = ""
         if same:
-            rows = "".join(f'<li>{self.subject_link(f"{st}/{r["id"]}", self.hub.title(r))}</li>' for r in same)
+            rows = "".join(f'<li>{self.subject_link(f"{r.get("resourceType") or st}/{r["id"]}", self.hub.title(r))}</li>'
+                           for r in same)
             warn = (f'<div class="warn" role="alert"><strong>This may be someone already registered.</strong>'
                     f'<ul>{rows}</ul><p>Open their file instead, or, if this is a different {e(label)}, say so:</p>'
                     f'<label class="switch-row"><input type="checkbox" class="switch" name="_different" value="1" required> This is a '
@@ -3384,24 +3405,26 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
 
     def post_subject(self, req):
         me, f, st = req["me"], self.form(req), self.subj["type"]
-        rt = self.hub.record_type(st)
+        kind = str(f.get("_kind") or st)  # the kind chosen, for a subject type with kinds under it
+        rt = self.hub.record_type(kind) if self.is_subject_type(kind) else None
         if rt is None:
-            raise Invalid(f"there is no record type {st}")
+            raise Invalid(f"there is no record type {kind}")
         rec = self._from_form(rt, f, partial=False, op="create")
-        same = [] if f.get("_different") else self.hub.duplicates(st, rec)
+        same = [] if f.get("_different") else self.hub.duplicates(kind, rec)
         if same:
-            body = self._register_form(me, rec, f, same)
+            body = self._register_form(me, rec, f, same, kind=kind)
             return self.layout(req, f"Register {a_an(self.subj['label'].lower())}", body)
-        p = self.hub.create_record(me, st, rec)
+        p = self.hub.create_record(me, kind, rec)
         if f.get("intake") and self.subj["registered_event"]:
-            self.hub.engine.emit(me, self.subj["registered_event"], record=f"{st}/{p['id']}")
+            self.hub.engine.emit(me, self.subj["registered_event"], record=f"{kind}/{p['id']}")
         raise Redirect(f"/{self.subj['path']}/{p['id']}")
 
     def page_subject(self, req, pid):
         """A subject's page: their banner (facts and alerts), then what is part of them (allergies, problems), each
         kind a section with its own Add, then what links to them (visits, results), then the work about them."""
-        me, st = req["me"], self.subj["type"]
-        ref = f"{st}/{pid}"
+        me = req["me"]
+        ref = self.subject_ref(pid)  # of its own type: a subject type's kinds are found by the id alone
+        st = ref.split("/", 1)[0]
         p = self.hub.read_record(me, ref)
         chart = self.hub.chart(me, ref)  # the view of the whole file, as the access report counts it
         sections, rail, hidden = self.owner_sections(me, ref)
@@ -4348,8 +4371,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         subject = q.get("subject", "")
         st = self.subj["type"]
         owner = self.hub.is_policy_owner(me)
-        recent = self.hub.records.search(st, limit=SHOWN) if owner else []  # suggestions; any file is found by typing
-        named = {f'{self.hub.title(r)} · {r["id"]}': f'{st}/{r["id"]}' for r in recent}
+        recent = self.hub.records.search(self.hub.family(st), limit=SHOWN) if owner else []  # suggestions; any file is found by typing
+        named = {f'{self.hub.title(r)} · {r["id"]}': f'{r.get("resourceType") or st}/{r["id"]}' for r in recent}
         typed = subject.strip()
         picked = ""
         if typed and "/" not in typed and owner:

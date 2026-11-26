@@ -13,8 +13,10 @@ to say, in ``[portal]``, which is under the pack's change control (two policy ow
   the workflow it starts, the questions it asks (that workflow's own inputs) and what it says back. A kind can be
   about one of the person's own records (``about``): they choose which, from those of its type about them where its
   condition holds, and the workflow is given that record.
-* ``identity``: how a person proves who they are: the date of birth field of the practice's subject type, its
-  identifier (the core's ``Subject.identifier``) and a one-time code sent to its contact (``Subject.contact``).
+* ``identity``: how a person proves who they are: the date of birth field of the type whose records sign in (``type``:
+  the practice's subject type, or a type under it, as individuals are under clients; its records and those of every
+  type under it sign in, and a new registration is made as it), its identifier (the core's ``Subject.identifier``) and
+  a one-time code sent to its contact (``Subject.contact``).
 * ``register``: the fields a new person gives, the values that keep their record from signing in or booking until
   the practice has taken them in (``pending``), and ``intake_workflow``, the workflow that takes them in.
 
@@ -62,7 +64,7 @@ PER_MINUTE = 60            # sign-ins and registrations begun, from everyone, in
 MAX_UPCOMING = 2           # a person's open bookings (or requests) of one kind, unless the kind's max_upcoming says
 SUBMIT_HOURS = 24          # how long a form's answer is kept, so a second tap or a refresh lands on the same page
 
-IDENTITY_KEYS = {"born", "born_label", "identifier_label", "inputmode", "digits", "identifier_help", "born_help"}
+IDENTITY_KEYS = {"type", "born", "born_label", "identifier_label", "inputmode", "digits", "identifier_help", "born_help"}
 REGISTER_FIELD_KEYS = {"field", "label", "help", "required"}
 
 WORDING = {  # what the pages say, unless [portal.wording] says otherwise
@@ -134,6 +136,19 @@ def _type_doc(pack, tid: str) -> dict:
     return {}
 
 
+def _chain_docs(pack, tid: str) -> list[tuple[str, dict]]:
+    """``tid``'s source and those of the pack's types above it (``extends``), its own first: a type has its parents'
+    fields and their ``[base]``."""
+    out: list[tuple[str, dict]] = []
+    while tid and tid not in (t for t, _ in out):
+        doc = _type_doc(pack, tid)
+        if not doc:
+            break
+        out.append((tid, doc))
+        tid = doc.get("extends")
+    return out
+
+
 def _workflow(pack, wid: str):
     """The pack's workflow ``wid``, parsed; None when there is none; a list of problems when it does not parse."""
     from .workflows import DefinitionError, parse
@@ -196,12 +211,23 @@ def check_config(pack) -> list[str]:
         problems.append("session_minutes: a number of minutes")
 
     subject = (pack.subject or {}).get("type")
-    sdoc = _type_doc(pack, subject) if subject else {}
-    sfields = _fields_of(sdoc)
     ident = cfg.get("identity") or {}
     if not isinstance(ident, dict):
         problems.append("identity: a table ([portal.identity])")
         ident = {}
+    who = ident.get("type") or subject  # the type whose records sign in
+    chain = _chain_docs(pack, who) if isinstance(who, str) and who else []
+    if "type" in ident and (not chain or subject not in (t for t, _ in chain)):
+        problems.append(f"identity.type: the practice's type whose records sign in, {subject or 'the subject type'} "
+                        f"or a type under it, not {ident['type']!r}")
+        who, chain = subject, _chain_docs(pack, subject) if subject else []
+    elif chain and chain[0][1].get("abstract") and cfg.get("register"):
+        problems.append(f"identity.type: {who} is abstract, and a person who registers online is made as the type "
+                        f"that signs in: name one of the types under it ([portal.identity] type)")
+    sdoc = chain[0][1] if chain else {}
+    sfields = set().union(*(_fields_of(d) for _, d in chain)) if chain else set()
+    subject = who
+    up = [t for t, _ in chain] or ([who] if who else [])  # the type that signs in and the pack's types above it
     born = ident.get("born")
     if not born or born not in sfields:
         problems.append(f"identity.born: the field of {subject or 'the subject type'} that holds the date of birth, "
@@ -213,7 +239,7 @@ def check_config(pack) -> list[str]:
         problems.append("identity.digits: how many digits the identifier has (1 to 30), checked on the sign-in form")
     if ident.get("inputmode") not in (None, "text", "numeric"):
         problems.append("identity.inputmode: text or numeric (the keyboard a phone shows for the identifier)")
-    base = sdoc.get("base") or {}
+    base = next((d["base"] for _, d in chain if isinstance(d.get("base"), dict)), {})  # set at the top of its chain
     for need in ("identifier", "contact"):
         if sdoc and not base.get(need):
             problems.append(f"identity: {subject} keeps no {need} for the core's Subject ([base] {need}): a person "
@@ -242,10 +268,11 @@ def check_config(pack) -> list[str]:
             return None
         if portal_roles and not set(wf.starters) & portal_roles:
             problems.append(f"{where}: {mid} may not start {wid} (its trigger.starters name none of its roles)")
-        if record is not None and wf.record != record and not wf.new_record:
-            # a workflow about another type is started on the person only when it makes its own record ([new_record])
-            problems.append(f"{where}: {wid} is about a {wf.record}, not a {record}, and makes no record of its own "
-                            f"([new_record]) about one")
+        if record is not None and wf.record not in record and not wf.new_record:
+            # a workflow about another type is started on the person only when it makes its own record ([new_record]);
+            # one about a type above theirs runs on them as on any of its kinds
+            problems.append(f"{where}: {wid} is about a {wf.record}, not a {record[0]}, and makes no record of its "
+                            f"own ([new_record]) about one")
         return wf
 
     reg = cfg.get("register")
@@ -269,7 +296,7 @@ def check_config(pack) -> list[str]:
         else:
             problems += [f"register.pending: {subject} has no field {f!r}" for f in pend if f not in sfields]
     if cfg.get("intake_workflow"):
-        wf_problem("intake_workflow", cfg["intake_workflow"], subject)
+        wf_problem("intake_workflow", cfg["intake_workflow"], up)
         if reg is None:
             problems.append("register: say the fields a new person gives ([portal.register] fields), or leave out "
                             "intake_workflow")
@@ -282,7 +309,7 @@ def check_config(pack) -> list[str]:
         else:
             problems += [f"over_limit.{x}: not a setting (settings: {', '.join(sorted(OVER_LIMIT_KEYS))})"
                          for x in sorted(set(ol) - OVER_LIMIT_KEYS)]
-            wf = wf_problem("over_limit.workflow", ol.get("workflow"), subject)
+            wf = wf_problem("over_limit.workflow", ol.get("workflow"), up)
             if wf is not None:
                 problems += over_limit_problems(wf, ol.get("input"))
 
@@ -333,7 +360,7 @@ def check_config(pack) -> list[str]:
                     expr.check(str(k[key]))
                 except expr.ExprError as exc:
                     problems.append(f"{w}.{key}: {exc}")
-        wf = wf_problem(f"{w}.workflow", k.get("workflow"), subject)
+        wf = wf_problem(f"{w}.workflow", k.get("workflow"), up)
         if wf is not None:
             names = {i["name"]: i for i in wf.inputs}
             fixed = k.get("inputs") or {}
@@ -361,7 +388,7 @@ def check_config(pack) -> list[str]:
                                          for c in sorted(set(words) - set(have))]
             problems += kind_problems(w, k, wf, qs)
             given = {*fixed, *qs}
-            ab = about_problems(w, k.get("about"), pack, subject, names, given) if "about" in k else None
+            ab = about_problems(w, k.get("about"), pack, up, names, given) if "about" in k else None
             problems += ab or []
             if ab == []:
                 given.add(k["about"]["input"])
@@ -400,22 +427,23 @@ def check_config(pack) -> list[str]:
     return problems
 
 
-def about_problems(w: str, ab, pack, subject: str, names: dict, given: set) -> list[str]:
-    """A kind's ``about = { type, when, input }``: a record type about the subject type (a ``rel = "subject"``
-    reference to it), a condition over ``record.`` (and ``today``) that says which of a person's records of it the
+def about_problems(w: str, ab, pack, up: list[str], names: dict, given: set) -> list[str]:
+    """A kind's ``about = { type, when, input }``: a record type about the type that signs in (a ``rel = "subject"``
+    reference to it or to a type above it; ``up`` is that type, then the pack's types above it), a condition over ``record.`` (and ``today``) that says which of a person's records of it the
     kind is for, and the workflow's reference input the chosen one goes to (not given otherwise)."""
     if not isinstance(ab, dict):
         return [f"{w}.about: a table {{ type = ..., when = ..., input = ... }}: which of the person's own records the "
                 f"kind is about"]
     out = [f"{w}.about.{x}: not a setting (settings: {', '.join(sorted(ABOUT_KEYS))})"
            for x in sorted(set(ab) - ABOUT_KEYS)]
+    subject = up[0] if up else None
     tid = ab.get("type")
-    doc = _type_doc(pack, tid) if isinstance(tid, str) else {}
-    if not doc:
+    chain = _chain_docs(pack, tid) if isinstance(tid, str) else []
+    if not chain:
         out.append(f"{w}.about.type: there is no record type {tid!r}")
-    elif not any(f.get("rel") == "subject" and subject in ([f["target"]] if isinstance(f.get("target"), str)
-                                                           else f.get("target") or [])
-                 for f in doc.get("field") or [] if isinstance(f, dict)):
+    elif not any(f.get("rel") == "subject" and set(up) & set([f["target"]] if isinstance(f.get("target"), str)
+                                                              else f.get("target") or [])
+                 for _, doc in chain for f in doc.get("field") or [] if isinstance(f, dict)):
         out.append(f"{w}.about.type: a {tid} is not about a {subject} (no rel = \"subject\" reference to one): a "
                    f"person chooses from their own")
     when = ab.get("when")
@@ -434,7 +462,7 @@ def about_problems(w: str, ab, pack, subject: str, names: dict, given: set) -> l
     elif name in given:
         out.append(f"{w}.about.input: {name} is given by the kind already (inputs or questions); the person's choice "
                    f"gives it")
-    elif isinstance(tid, str) and i.get("target") and tid not in i["target"]:
+    elif isinstance(tid, str) and i.get("target") and not {t for t, _ in chain} & set(i["target"]):
         out.append(f"{w}.about.input: {name} takes a {' or '.join(i['target'])}, not a {tid}")
     return out
 
@@ -593,7 +621,9 @@ class Portal:
 
     @property
     def subject_type(self) -> str:
-        return self.hub.pack.subject_type
+        """The type whose records sign in (``[portal.identity] type``, else the practice's subject type); those of
+        every type under it sign in too."""
+        return (self.cfg.get("identity") or {}).get("type") or self.hub.pack.subject_type
 
     def _rt(self):
         return self.hub.record_type(self.subject_type)
@@ -765,24 +795,26 @@ class Portal:
 
     # --- identity
     def _find(self, born: str | None, identifier: str) -> str | None:
-        """The one active record of the subject type with this date of birth and identifier, as ``Type/id``. A
-        registration still pending (``[portal.register] pending``) is not active, so it is not found."""
+        """The one active record of the type that signs in (or a type under it) with this date of birth and
+        identifier, as ``Type/id`` of its own type. A registration still pending (``[portal.register] pending``) is
+        not active, so it is not found."""
         rt = self._rt()
         bf = rt.field(self.cfg["identity"]["born"])
         want = norm_identifier(identifier)
         if not born or not want or bf is None:
             return None
         path = bf["path"]
+        kin = self.hub.family(rt.id)
         if schema.FIELD_PATH.fullmatch(path) and "." not in path:
-            found = self.hub.records.search(rt.id, limit=None, field=path, since=born, until=born + "~")
+            found = self.hub.records.search(kin, limit=None, field=path, since=born, until=born + "~")
         else:
-            found = self.hub.records.search(rt.id, limit=None, text=born)
+            found = self.hub.records.search(kin, limit=None, text=born)
         hits = []
         for rec in found:
-            seen = schema.project(rt, rec, self.hub.member_types())
+            seen = schema.project(rt, rec, self.hub.member_types())  # its [base] is the one at the top of its chain
             if (norm_date(schema.first(rec, path)) == born and norm_identifier(seen.get("identifier")) == want
                     and schema.is_active(rt, rec)):
-                hits.append(f"{rt.id}/{rec['id']}")
+                hits.append(f"{rec.get('resourceType') or rt.id}/{rec['id']}")
         return hits[0] if len(hits) == 1 else None  # two records with one identifier: neither is signed into
 
     def begin_sign_in(self, born: str, identifier: str, client: str | None = None) -> dict:
@@ -1144,10 +1176,11 @@ class Portal:
             return []
         today = self.hub.engine.now().date().isoformat()
         out = []
-        for rec in self.hub.records.search(rt.id, subject=person, limit=ABOUT_LIMIT):
-            if ab.get("when") and not expr.holds(ab["when"], schema.check_context(rt, rec, today)):
+        for rec in self.hub.records.search(self.hub.family(rt.id), subject=person, limit=ABOUT_LIMIT):
+            own = self.hub.record_type(rec.get("resourceType") or rt.id) or rt  # its when reads its own fields
+            if ab.get("when") and not expr.holds(ab["when"], schema.check_context(own, rec, today)):
                 continue
-            out.append({"ref": f"{rt.id}/{rec['id']}", "title": self.hub.title(rec)})
+            out.append({"ref": f"{own.id}/{rec['id']}", "title": self.hub.title(rec)})
         return out
 
     def limits(self, person: str) -> dict[str, dict]:
