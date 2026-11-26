@@ -699,10 +699,14 @@ def act_t1_slip_filed(engine, run, step, params, actor):
         expected = ret.get("expected_slips") or []
         missing = [k for k in expected if not any(_key_matches(k, s) for s in slips)]
         income_in = any(s.get("slip_type") in INCOME_SLIPS for s in slips)
-        _set(hub, actor, ref, run, missing_slips=missing,
-             slips_complete=(not missing) if expected else income_in)
+        complete = (not missing) if expected else income_in
+        # staff were to call the client about what was missing, and it came: the return goes on to be compared,
+        # as it would have from waiting (the call's ``moves`` lets this through, and the call is withdrawn)
+        on = {"status": "comparing"} if complete and ret.get("status") == "slips-missing" else {}
+        _set(hub, actor, ref, run, missing_slips=missing, slips_complete=complete, **on)
         return {"return": ref, "missing": missing, "summary": f"{slip_key(slip)} counted on {ref}; "
-                + (f"still missing: {', '.join(missing)}." if missing else "nothing expected is missing.")}
+                + (f"still missing: {', '.join(missing)}." if missing else "nothing expected is missing.")
+                + (" It goes on to be compared and drafted." if on else "")}
     if ret.get("status") in T1_DRAFTED:
         why = f"a slip was read after the return was drafted: {slip_key(slip)}"  # a late slip, or one read again
         note = "\n".join(b for b in (str(ret.get("note") or "").strip(),
@@ -721,11 +725,15 @@ def act_t1_slip_filed(engine, run, step, params, actor):
 
 
 def act_t1_reopen(engine, run, step, params, actor):
-    """t1.reopen: the return is back to be compared and drafted again (a person reopened it for changes, or a slip
-    came after it was drafted). What the client authorised was the return as it was: the T183 is cleared, so the
-    return is reviewed, and authorised by the client, again before it can be filed."""
+    """t1.reopen: the return is back to be compared and drafted (a person reopened it for changes, or a slip came
+    after it was drafted). What the client authorised was the return as it was: the T183 is cleared, so the return
+    is reviewed, and authorised by the client, again before it can be filed. A return never drafted is here because
+    its last slip came while staff were to call about it: it is drafted for the first time, and nothing is cleared."""
     hub, ref = engine.hub, run["record"]
     ret = _read(hub, ref)
+    if not ret.get("draft_summary") and not ret.get("t183_signed_on"):
+        return {"reopened": False, "cleared_t183": False,
+                "summary": "The slips are in: it is compared with last year and drafted."}
     had = ret.get("t183_signed_on")
     _set(hub, actor, ref, run, t183_signed_on=None, t183_how=None)
     return {"reopened": True, "cleared_t183": bool(had),

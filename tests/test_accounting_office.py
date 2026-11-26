@@ -1347,6 +1347,33 @@ def test_a_slip_no_agent_can_read_goes_to_a_person(firm):
         assert item is not None and item["persons_only"], sref
 
 
+def test_the_last_slip_coming_while_staff_are_to_call_takes_the_return_on(firm):
+    """Kevin's slip had not come after the organizer and the reminder, so staff were to call him. It came (he
+    uploaded it, or someone added it): the call is withdrawn, nobody's work, and his return goes on to be compared
+    and drafted, as it would have from waiting. It was never drafted, so nothing is cleared or called reopened."""
+    from datetime import timedelta
+    cref = _signed_up(firm)
+    now = firm.engine.now()
+    for days in (22, 37):  # no slip after the organizer, then none after the reminder
+        firm.engine.tick(now + timedelta(days=days))
+        run_all_local(firm, log=quiet)
+    ret = _the_return(firm, cref)
+    ref = f"T1Return/{ret['id']}"
+    first = _run_on(firm, ref, "t1-return")
+    assert ret["status"] == "slips-missing" and first["steps"]["follow-up"]["state"] == "active"
+    sref = _slip_from(firm, firm.member("ethan"), cref, firm.pack.module.slip_pdf(T4), "t4-2025.pdf",
+                      "application/pdf")
+    run_all_local(firm, log=quiet)
+    assert firm.records.read(*sref.split("/"))["status"] == "extracted"
+    assert firm.db.runs.get(first["id"])["steps"]["follow-up"].get("withdrawn")
+    assert firm.db.events.exists({"action": "step.withdrawn", "run_id": first["id"], "data.step": "follow-up"})
+    ret = _the_return(firm, cref)
+    assert ret["slips_complete"] and ret["status"] not in ("slips-missing", "comparing"), ret["status"]
+    run = _run_on(firm, ref, "t1-return")
+    assert run["id"] != first["id"] and run["ctx"]["reopen"]["reopened"] is False
+    assert run["steps"]["compare"]["state"] == "done"
+
+
 def test_the_organizer_expects_only_the_client_s_slips_on_file_from_last_year(firm):
     """The organizer's list is the client's slips from last year, by type and issuer: an example in the instructions,
     or a slip from another year, is no slip this client is expected to send; a slip still missing is one expected."""

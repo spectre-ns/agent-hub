@@ -62,8 +62,9 @@
 # 1.9: a slip is read from its file. A PDF's words are its text, read by the hub when it is attached (anyone who adds
 #  a slip attaches the file, on the new-slip form too); a photo is shown to the documents agent's model for pictures
 #  (gemma4), which writes its words as printed, and what it read is checked against them. A slip no agent can read
-#  goes to a person. The organizer expects only the client's slips on file from last year. The upgrade proposes the
-#  documents agent's model for pictures, for a policy owner to approve (1.9-documents-agent-sees).
+#  goes to a person. The organizer expects only the client's slips on file from last year. A return whose last slip
+#  comes while staff are to call the client about it goes on to be compared and drafted (the call is withdrawn). The
+#  upgrade proposes the documents agent's model for pictures, for a policy owner to approve (1.9-documents-agent-sees).
 version = "1.9"
 
 [practice]

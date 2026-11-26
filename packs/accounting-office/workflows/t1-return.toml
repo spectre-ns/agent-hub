@@ -36,11 +36,12 @@ escalate_to = "partner"
 to = "organizer"
 label = "Opened"
 
-# A return reopened for changes is back at comparing, and this is its next pass: it is compared and drafted again.
-# What the client authorised was the return as it was, so their authorisation (T183) is cleared.
+# A return back at comparing is on its next pass: reopened for changes, it is compared and drafted again (what the
+# client authorised was the return as it was, so their authorisation, T183, is cleared); or its last slip came while
+# staff were to call the client about it, and it is compared and drafted for the first time.
 [[start.do]]
 id = "reopen"
-title = "Reopened: the client's authorisation no longer stands"
+title = "Back to be compared and drafted"
 action = "t1.reopen"
 when = "record.status == 'comparing'"
 to = "comparing"
@@ -173,6 +174,8 @@ title = "Call the client about the missing slips"
 kind = "task"
 role = "staff"
 persons_only = true
+when = "record.status == 'slips-missing'"   # the last slip came before the call: nothing to call about
+moves = ["comparing"]
 due = "3d"
 escalate_to = "manager"
 context = ["record:tax", "record:client-documents", "chase"]
