@@ -352,7 +352,7 @@ Everything is optional. These module-level names are picked up:
 | `facts(rec) -> dict` | the headline facts on a subject's page; a value `"member:<id>"` shows that member's name |
 | `ACTIONS = {"name": fn(engine, run, step, params, actor)}` | deterministic actions for automation steps |
 | `PROVIDERS = {"name": fn(engine, run, step, member)}` | computed context (`provider:<name>`) |
-| `GUARDS = {"skill-id": fn(values, ctxview) -> [problems]}` | extra checks on any answer for that skill, from a person or an agent. A prompt block is guarded by `"block:<id>"`, or by its `extends` skill's guard |
+| `GUARDS = {"skill-id": fn(values, ctxview) -> [problems]}` | extra checks on any answer for that skill, from a person or an agent. `ctxview` is what the answerer was shown (`context`, `run`, `step`, `item`), and `by`: who answers (`id`, and `kind`, `person` or `agent`), for a rule that holds an agent only. A prompt block is guarded by `"block:<id>"`, or by its `extends` skill's guard |
 | `STANDINS = {"skill-id": fn(ctx) -> {answer, escalate, reason}}` | deterministic answers, so tests and a demo's past need no model (`ModelGateway(hub, scripted=True)`). `"block:<id>"` answers a prompt block |
 | `demo(hub)` | demo records and runs, for `init --demo` |
 

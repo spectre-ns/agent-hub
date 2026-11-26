@@ -806,14 +806,28 @@ T1_PROVIDERS = {"t1-last-year": prov_t1_last_year}
 FINAL = re.compile(r"\b(filed|final|signed|approved by)\b", re.I)
 
 
+DRAFT_FIGURES = ("total_income", "taxable_income", "tax_deducted", "net_refund")
+
+
 def guard_t1_draft(values, ctxview):
     """Every reason the comparison gave is in the flags (the reviewer sees each), and a draft never says it is filed,
-    final or signed."""
+    final or signed. An agent's figures are the comparison's estimate, worked out from the slips read so far: it copies
+    them, as it copies a slip's amount, and never adds up a document's text itself, so a document not read yet is not
+    counted. With nothing estimated (no rates for the year), an agent does not draft. A person drafts from the firm's
+    tax software, and may differ."""
     cmp = (ctxview.get("context") or {}).get("compare") or {}
     flags = str(values.get("flags") or "")
     problems = [f"flags must name: {r}" for r in cmp.get("reasons") or [] if r not in flags]
     problems += [f"{k} calls the draft filed, final or signed; it is a draft for review"
                  for k in ("draft_summary", "summary") if FINAL.search(str(values.get(k) or ""))]
+    if (ctxview.get("by") or {}).get("kind") == "agent":
+        est = cmp.get("estimate")
+        if not est:
+            problems.append("nothing was estimated (no rates on file for the year): escalate; a person drafts it")
+        else:
+            problems += [f"{k} is {_money(values.get(k))}; the slips read so far give {_money(est.get(k))} "
+                         f"(compare.estimate): copy that figure; a document not read yet is not counted"
+                         for k in DRAFT_FIGURES if _dec(values.get(k)) != _dec(est.get(k))]
     return problems + guard_no_identifiers(values, ctxview)
 
 

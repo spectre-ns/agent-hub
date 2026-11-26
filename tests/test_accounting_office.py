@@ -83,7 +83,8 @@ def _sign(firm, cref, ref, answer="approve"):
 
 
 def _run_on(firm, ref, wid):
-    return firm.db.runs.find_one({"workflow_id": wid, "record": ref}, sort=[("started_at", -1)])
+    """The latest run of ``wid`` on ``ref`` (a run has no started_at: sorting on it picked either of two)."""
+    return firm.db.runs.find_one({"workflow_id": wid, "record": ref}, sort=[("created_at", -1), ("root_event", -1)])
 
 
 def _by(firm, ref, wid, step):
@@ -568,10 +569,10 @@ def test_a_client_has_one_return_a_year_and_one_engagement_for_a_service_a_year(
 
 # ------------------------------------------------------------------ slips counted, and who did what (accounting 1.7)
 def _open(firm, ref, *steps):
-    """The open work of the return's current pass at one of ``steps``."""
+    """The open work of the return's current pass at one of ``steps`` (not a notice about it, nor a hold)."""
     run = _run_on(firm, ref, "t1-return")
     return firm.db.items.find_one({"run_id": run["id"], "step_id": {"$in": list(steps)},
-                                   "status": {"$in": ["open", "claimed"]}})
+                                   "kind": {"$nin": ["notice", "hold"]}, "status": {"$in": ["open", "claimed"]}})
 
 
 def _the_slip(firm, cref):
@@ -727,6 +728,48 @@ def test_whoever_drafted_a_return_does_not_review_it(firm):
     assert firm.engine.eligibility(morgan, firm.engine.item(iid))[1].startswith("whoever did 'Draft the return")
     with pytest.raises(Denied, match="whoever did 'Draft the return"):
         firm.move_record(morgan, ref, "client-approval", {"review_notes": "Checked."}, signature=REVIEW)
+
+
+def test_an_agent_drafts_the_figures_worked_out_from_the_slips_read_and_never_counts_one_not_read(firm):
+    """An agent's draft copies the comparison's estimate, from the slips read so far. A model that adds up a
+    document still waiting to be read, from its text, is refused (found running qwen3 on the demo), and so is an
+    agent's draft when nothing was estimated. A person drafts from the firm's tax software and may differ."""
+    anne, agent, portal = firm.member("anne"), firm.member("tax-agent"), firm.member("client-portal")
+    firm.set_status(anne, "tax-agent", "disabled", "held while the slips are read")
+    cref = _signed_up(firm)
+    firm.create_record(portal, "TaxSlip", {"client": cref, "status": "received", "source": "portal", "text": T4})
+    firm.create_record(portal, "TaxSlip", {"client": cref, "status": "received", "source": "portal",
+                                           "text": "Photo of a pay slip, cut off: Atlantic Ferries Ltd., "
+                                                   "48,250.00 earned, 7,120.00 withheld"})
+    run_all_local(firm, log=quiet)  # the T4 is read; the photo goes to a person, unread
+    ref = f"T1Return/{_the_return(firm, cref)['id']}"
+    assert sorted(s["status"] for s in firm.records.search("TaxSlip", subject=cref, limit=None)
+                  if s.get("year") != 2024) == ["extracted", "received"]
+    assert _the_return(firm, cref)["status"] == "preparing"
+    firm.set_status(anne, "tax-agent", "active")
+    draft = _open(firm, ref, "draft", "draft-flagged")
+    cmp = _run_on(firm, ref, "t1-return")["ctx"]["compare"]
+    est = {k: Decimal(str(cmp["estimate"][k])) for k in ("total_income", "taxable_income", "tax_deducted",
+                                                          "net_refund")}
+    assert est["total_income"] == Decimal("64500.00")  # the T4 read, and not the photo
+    words = {"flags": "\n".join(cmp["reasons"]) + "\nA pay slip from Atlantic Ferries is not read yet.",
+             "draft_summary": "Drafted from the T4 read.", "summary": "Drafted."}
+    firm.engine.claim(agent, draft["id"])
+    with _refused("total_income is $112,750.00; the slips read so far give $64,500.00 (compare.estimate)"):
+        firm.engine.complete(agent, draft["id"], {**est, "total_income": est["total_income"] + Decimal("48250"),
+                                                  "taxable_income": est["taxable_income"] + Decimal("48250"),
+                                                  **words})
+    firm.engine.complete(agent, draft["id"], {**est, **words})  # the estimate's figures, copied: taken (held)
+    assert firm.engine.item(draft["id"])["status"] != "open"
+    # nothing estimated (no rates for the year): an agent does not draft; a person may, with their own figures
+    guard = firm.pack.guards["t1-draft"]
+    view = {"context": {"compare": {"reasons": [], "estimate": None}}}
+    answer = {**est, "net_refund": Decimal("100.00"), "flags": "", "draft_summary": "x", "summary": "x"}
+    assert guard(answer, {**view, "by": {"id": "tax-agent", "kind": "agent"}}) == \
+        ["nothing was estimated (no rates on file for the year): escalate; a person drafts it"]
+    assert guard(answer, {**view, "by": {"id": "morgan", "kind": "person"}}) == []
+    assert guard({**answer, "flags": "\n".join(cmp["reasons"])},
+                 {"context": {"compare": cmp}, "by": {"id": "morgan", "kind": "person"}}) == []
 
 
 def test_filing_waits_for_the_client_s_authorisation_and_never_writes_it(firm):

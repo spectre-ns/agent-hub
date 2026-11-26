@@ -3,8 +3,11 @@ title = "Draft a T1 return"
 instructions = """
 If the return came back with review points (review_points, on the return), answer each of them first, at the start of
 the summary for the reviewer: what you changed for it, or why nothing needed to change. Then draft the return from
-this year's slips: total income (line 15000), taxable income after RRSP contributions (line 26000), the tax deducted
-at source, and the refund (negative: a balance owing). Then say, plainly, what changed from
+this year's slips. Copy its four figures from the comparison's estimate (compare.estimate), which the hub worked out
+from the slips read so far with the year's rates: total income (line 15000), taxable income after RRSP contributions
+(line 26000), the tax deducted at source, and the refund (negative: a balance owing). Never add up a document
+yourself: one that is not read yet (its status is not extracted) is not counted; name it in flags. With no estimate
+(no rates on file), or with self-employment income, escalate: a person drafts it. Then say, plainly, what changed from
 last year: each new kind of income, each slip from last year that did not come, a large change in the refund. Every
 reason the comparison (compare) gave for being over the risk line must be in flags. An answer that leaves one out is
 refused. Your draft is reviewed by a manager and filed by a partner: never call it final, filed or signed.

@@ -3187,8 +3187,8 @@ class Engine:
                     if why:
                         raise Invalid("the answer cannot be checked now, so it is not taken: the code that checks "
                                       f"this step is not running ({why})")
-            if guard:
-                problems = guard(values, ctxview) or []
+            if guard:  # it sees what the answerer was shown, and who answers (a person or an agent)
+                problems = guard(values, {**ctxview, "by": {"id": member["id"], "kind": member["kind"]}}) or []
                 if problems:
                     raise Invalid("the answer does not pass the step's checks", problems)
             refused = self._refused_move(run, step, values, member)
