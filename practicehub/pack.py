@@ -10,7 +10,10 @@ A pack is a directory:
     blocks/*.toml      reusable, parameterised steps: python code, injected prompts, external engine calls
     views/*.toml       screens and dashboards (``practicehub/views.py``)
     pack.py            optional: deterministic actions, context providers, stand-in answers, summaries, and
-                       ``UPGRADES``: what a new version does to the records an older one left (``Hub.run_pack_upgrades``)
+                       ``UPGRADES``: what a new version does to the records an older one left (``Hub.run_pack_upgrades``).
+                       A ``facts``, ``summarize`` or stand-in that takes an ``is_a`` argument is given the hub's
+                       ``is_a(type, base)``, so it treats a record by its type's family (an overlay's own kind of a
+                       pack's type is that type) rather than by its exact type
 
 A **custom overlay** is a practice pack that names another as its ``base = "<pack>"``: one client's practice built on a
 shared pack. It gets the base's code and every definition, and replaces what it has itself: a ``[practice]`` key at a
@@ -52,6 +55,17 @@ class Skill:
     instructions: str
     output: list[dict]
     source: str = ""
+
+
+def taken(fn, **offered) -> dict:
+    """Of ``offered``, the arguments ``fn`` (a pack's code) takes, by name and given a value: the core offers its code
+    more as it grows (``today``, ``is_a``), and code written before takes what it always took."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {k: v for k, v in offered.items() if v is not None and k in params}
 
 
 @dataclass
@@ -124,27 +138,26 @@ class Pack:
     def subject_type(self) -> str:
         return self.subject["type"]
 
-    def facts(self, rec: dict, today=None) -> dict | None:
+    def facts(self, rec: dict, today=None, is_a=None) -> dict | None:
         """The headline facts on a subject's page, when the pack's code says (``facts``); else None, and the core
-        shows the type's ``fact = true`` fields. ``today`` (the practice's date) goes to a ``facts`` that takes it."""
+        shows the type's ``fact = true`` fields. ``today`` (the practice's date) and ``is_a`` (the hub's) go to a
+        ``facts`` that takes them."""
         fn = getattr(self.module, "facts", None) if self.module else None
         if fn:
             try:
-                import inspect
-                takes = "today" in inspect.signature(fn).parameters
-                return fn(rec, today=today) if takes else fn(rec)
+                return fn(rec, **taken(fn, today=today, is_a=is_a))
             except Exception:  # cosmetic, like summaries
                 pass
         return None
 
-    def summarize(self, rec: dict) -> str | None:
+    def summarize(self, rec: dict, is_a=None) -> str | None:
         """A record's name, when a module's or the practice's code gives one (``summarize``); else None, and the
-        core names it from its type's ``title``."""
+        core names it from its type's ``title``. ``is_a`` (the hub's) goes to a ``summarize`` that takes it."""
         for part in [*self.modules, self]:  # a module summarizes its own types; the practice the rest
             fn = getattr(part.module, "summarize", None) if part.module else None
             if fn:
                 try:
-                    text = fn(rec)
+                    text = fn(rec, **taken(fn, is_a=is_a))
                     if text:
                         return text
                 except Exception:  # a summary is cosmetic; never let it break a page

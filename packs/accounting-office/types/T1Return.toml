@@ -37,7 +37,7 @@ workflow = { id = "t1-return", when = "record.status in ['gathering', 'comparing
 name = "client"
 label = "Client"
 type = "reference"
-target = ["Client"]
+target = ["Individual"]      # a T1 is an individual's personal tax
 rel = "subject"
 required = true
 

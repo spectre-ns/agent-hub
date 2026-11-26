@@ -439,6 +439,14 @@ Everything is optional. These module-level names are picked up:
 | `STANDINS = {"skill-id": fn(ctx) -> {answer, escalate, reason}}` | deterministic answers, so tests and a demo's past need no model (`ModelGateway(hub, scripted=True)`). `"block:<id>"` answers a prompt block |
 | `demo(hub)` | demo records and runs, for `init --demo` |
 
+`summarize`, `facts` and a stand-in may take more arguments by name, and are given those they name:
+
+- `today`: the practice's date (`facts` only).
+- `is_a`: the hub's `is_a(type, base)`. With it, the code treats a record by its type's family and not its exact type,
+  so a type under one of the pack's types counts as its parent. In the accounting office, `facts(rec, is_a=None)`
+  gives an age to any `Individual`, an overlay's `Farmer` under it included. Without it, the code sees only
+  `rec["resourceType"]`.
+
 Guards are where a practice's hard rules live. A guard is code, and a pack's code runs only as reviewed: while a
 changed `pack.py` waits for its review and upgrade, the hub runs none of it, and every step whose skill or block came
 with that pack or module takes no answer until it does (its guard cannot run, so the answer is not taken unchecked).

@@ -194,11 +194,19 @@ def test_a_type_s_key_is_its_own_or_one_taken_from_its_label():
 
 def test_every_shipped_type_has_a_key_no_other_shipped_type_has():
     """Shipped types set their keys, unlike in any pack and module they may be installed beside: a module installs
-    into any practice. (Two packs are never in one hub, so a pack's type may share a key with another pack's.)"""
+    into any practice. (Two packs are never in one hub, so a pack's type may share a key with another pack's.) A type
+    under one of its own pack's types shares its parent's key, as a family does (an Individual is a CLI, as a Business
+    is)."""
+    import tomllib
     owners = {}
     for p in sorted(glob.glob(str(ROOT / "packs/*/types/*.toml")) + glob.glob(str(ROOT / "modules/*/types/*.toml"))):
-        assert "\nkey = " in Path(p).read_text(), f"{p}: no key of its own"
-        owners.setdefault(schema.parse(Path(p).read_text()).key, set()).add(Path(p).parts[-3])
+        doc = tomllib.loads(Path(p).read_text())
+        parent = Path(p).parent / f"{doc.get('extends')}.toml"
+        if "key" not in doc and parent.exists():
+            assert tomllib.loads(parent.read_text()).get("key") or "extends" in tomllib.loads(parent.read_text()), p
+            continue
+        assert "key" in doc, f"{p}: no key of its own"
+        owners.setdefault(doc["key"], set()).add(Path(p).parts[-3])
     modules = {d.name for d in (ROOT / "modules").iterdir()}
     clash = {k: o for k, o in owners.items() if len(o) > 1 and o & modules}
     assert clash == {}

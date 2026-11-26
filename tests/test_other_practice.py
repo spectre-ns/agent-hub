@@ -214,7 +214,7 @@ def test_a_record_named_by_its_id_is_said_in_the_log_once_for_its_type(hub, capl
     title, pack code that is not running), so the log says it too, with why, and not once a page."""
     import logging
     rec = {"resourceType": "NoSuchType", "id": "abc123"}
-    monkeypatch.setattr(hub.pack, "summarize", lambda rec: None)  # as when the pack's code names nothing for it
+    monkeypatch.setattr(hub.pack, "summarize", lambda rec, is_a=None: None)  # as when the pack's code names nothing
     with caplog.at_level(logging.WARNING, logger="practicehub.catalog"):
         assert hub.title(rec) == "NoSuchType abc123"
         assert hub.title({**rec, "id": "def456"}) == "NoSuchType def456"

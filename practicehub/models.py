@@ -125,8 +125,9 @@ class Standin:
 
     external = False
 
-    def __init__(self, standins: dict):
+    def __init__(self, standins: dict, is_a=None):
         self.standins = standins
+        self.is_a = is_a  # the hub's, for a stand-in that takes it (``pack.taken``)
 
     def __call__(self, model: str, system: str, prompt: str, schema: dict, ctx: dict) -> dict:
         step = ctx["step"]
@@ -134,7 +135,8 @@ class Standin:
             or self.standins.get(step.get("skill") or "") or self.standins.get(f"{step['kind']}:{step['id']}")
         if fn is None:
             return {"answer": {}, "escalate": True, "reason": "No agent can do this step; a person must"}
-        out = fn(ctx)
+        from .pack import taken
+        out = fn(ctx, **taken(fn, is_a=self.is_a))
         if "answer" not in out:
             out = {"answer": out, "escalate": False, "reason": "stand-in answer"}
         return {"answer": out["answer"], "escalate": bool(out.get("escalate")), "reason": out.get("reason", "")}
@@ -248,7 +250,7 @@ class ModelGateway:
     def backend(self, spec: str):
         name, _, model = (spec or "standin").partition("/")
         if name == "standin":
-            return Standin(self.standins()), ""
+            return Standin(self.standins(), getattr(self.hub, "is_a", None)), ""
         if name not in self.backends:
             raise ModelError(f"unknown model backend {name!r} (standin, ollama, litellm, anthropic)")
         b = self.backends[name]

@@ -53,7 +53,13 @@
 #    (TW-0001), and a client carried over keeps the number it has.
 #  - Four dashboards: work in progress, receivables by age, billing by month and partner, and the partners'
 #    sign-offs.
-version = "1.7"
+# 1.8: a client is an Individual or a Business, each its own type under Client (now abstract), in place of one Client
+#  with a "person or business" choice. An individual has a date of birth, marital status, self-employment and a SIN; a
+#  business its type, business number and year end. Both are clients wherever Client is named (lists, engagements,
+#  invoices, messages, grants), and share the CLI key and the TW- client numbers. A T1 return is an individual's; the
+#  portal signs in individuals. An overlay's own kind of client extends Individual or Business. The upgrade moves each
+#  client to its kind, keeping its id, key and number, and points everything at it (1.8-clients-by-kind).
+version = "1.8"
 
 [practice]
 requires_core = "1.1"
@@ -193,7 +199,7 @@ record_types = []
 [[data_classes]]
 id = "payroll"
 name = "Payroll and identity numbers: pay, SINs, business numbers"
-record_types = []      # fields of their own class: Client.sin, Client.bn
+record_types = []      # fields of their own class: Individual.sin, Business.bn
 
 [[data_classes]]
 id = "engagement"
@@ -313,6 +319,7 @@ requested = "Thank you: we have your answer. If you asked a question, we will co
 request_next = "We will contact you within one working day."
 
 [portal.identity]
+type = "Individual"           # individuals sign in (a business has no date of birth); registering online makes one
 born = "birth_date"
 identifier_label = "Client number"
 identifier_help = "On every letter from us, for example TW-0042."
@@ -344,6 +351,8 @@ max_upcoming = 3
 
 [record_labels]
 Client = "Client"
+Individual = "Individual"
+Business = "Business"
 Relationship = "Relationship"
 Engagement = "Engagement"
 TaxSlip = "Slip or document"

@@ -1,0 +1,30 @@
+# A client that is a business: a corporation, a partnership, a sole proprietorship or a not-for-profit, whose books,
+# year-end (T2), GST/HST and payroll the firm keeps. It is a kind of Client, so it has everything a client has and its
+# CLI key and TW number, and it adds what only a business has. Who owns it is a Relationship.
+id = "Business"
+extends = "Client"
+label = "Business"
+plural = "Businesses"
+summary = "A business the firm works for: its books, its year-end, GST/HST and payroll."
+
+[[field]]
+name = "business_type"
+label = "Business type"
+type = "choice"
+choices = ["ccpc", "corporation", "partnership", "sole-proprietor", "non-profit"]
+labels = { ccpc = "Canadian-controlled private corporation", sole-proprietor = "Sole proprietor", non-profit = "Not-for-profit" }
+fact = true
+
+[[field]]
+name = "bn"
+label = "Business number"
+type = "string"
+data_class = "payroll"
+help = "The nine-digit CRA business number"
+
+[[field]]
+name = "fiscal_year_end"
+label = "Fiscal year end (MM-DD)"
+type = "string"
+fact = true
+help = "As month and day: 12-31"

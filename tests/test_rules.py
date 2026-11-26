@@ -2230,6 +2230,31 @@ def _strip_seals(where):
     _raw_db().events.update(where, {"$set": {"mac": None}}, many=True)
 
 
+def test_pack_code_is_given_only_the_arguments_it_names():
+    """``summarize``, ``facts`` and a stand-in take more as the core offers more (``today``, ``is_a``): each is given
+    what it names, so a pack written before an argument existed runs as it always did."""
+    from practicehub.models import Standin
+    from practicehub.pack import taken
+
+    def old(rec):
+        return rec
+
+    def new(rec, is_a=None):
+        return rec
+
+    def is_a(t, base):
+        return t == base or (t, base) == ("Farmer", "Individual")
+    assert taken(old, today="2025-01-01", is_a=is_a) == {}
+    assert taken(new, today="2025-01-01", is_a=is_a) == {"is_a": is_a}
+    assert taken(new, is_a=None) == {} and taken(len, is_a=is_a) == {}
+    seen = []
+    s = Standin({"s": lambda ctx, is_a=None: seen.append(is_a("Farmer", "Individual")) or {"answer": {}},
+                 "t": lambda ctx: seen.append("old") or {"answer": {}}}, is_a)
+    for skill in ("s", "t"):
+        s("standin", "", "", {}, {"context": {}, "step": {"id": "x", "kind": "task", "skill": skill}})
+    assert seen == [True, "old"]
+
+
 def test_pack_code_never_runs_without_a_sealed_record_of_it(tmp_path, monkeypatch):
     """Strip the seals from the pack's events and delete its pinned settings: changed pack code still never runs,
     on this start or the next, and nothing is pinned from the files on disk."""
@@ -4928,9 +4953,7 @@ def test_every_shipped_type_fits_its_workflow_and_lists_only_values_a_record_can
     from practicehub.workflows import parse
     types, flows = {}, {}
     for part in sorted(d for top in (packmod.PACKS_DIR, packmod.MODULES_DIR) for d in top.iterdir() if d.is_dir()):
-        for f in sorted(part.glob("types/*.toml")):
-            rt = schema.parse(f.read_text())
-            types[rt.id] = rt
+        types.update(schema.parse_all({f.name: f.read_text() for f in sorted(part.glob("types/*.toml"))}))
         for f in sorted(part.glob("workflows/*.toml")):
             wf = parse(f.read_text())
             flows[wf.id] = wf

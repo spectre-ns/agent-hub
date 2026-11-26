@@ -406,7 +406,7 @@ class CatalogMixin:
             text = schema.render_title(rt.title, values)
             if text:
                 return text
-        text = self.pack.summarize(rec) if self.pack else None
+        text = self.pack.summarize(rec, is_a=self.is_a) if self.pack else None
         if text:
             return text
         base = schema.bases().get(rt.base or "") if rt is not None else None
@@ -454,7 +454,7 @@ class CatalogMixin:
         if rt is not None and rt.classed_fields:
             from .visibility import strip
             rec = strip(rec, rt.classed_fields)
-        got = self.pack.facts(rec, today=self.engine.now().date()) if self.pack else None
+        got = self.pack.facts(rec, today=self.engine.now().date(), is_a=self.is_a) if self.pack else None
         if got is not None:
             return got
         if rt is None:

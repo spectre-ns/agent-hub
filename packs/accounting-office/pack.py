@@ -83,8 +83,15 @@ def _today(engine) -> date:
     return engine.now().date()
 
 
-def _summary_client(rec):
-    if rec.get("kind") == "business":
+def _kind(rec, is_a=None) -> str | None:
+    """Which kind of client a record is, Individual or Business, by its type's family (``is_a``, the hub's): an
+    overlay's own kind of individual is an individual. Without ``is_a``, by the record's own type alone."""
+    t = str((rec or {}).get("resourceType") or "")
+    return next((k for k in ("Individual", "Business") if (is_a(t, k) if is_a else t == k)), None)
+
+
+def _summary_client(rec, is_a=None):
+    if _kind(rec, is_a) == "Business":
         what = {"ccpc": "CCPC", "corporation": "corporation", "partnership": "partnership",
                 "sole-proprietor": "sole proprietor", "non-profit": "non-profit"}.get(rec.get("business_type"), "business")
         bits = [what, f"year end {rec['fiscal_year_end']}" if rec.get("fiscal_year_end") else ""]
@@ -144,12 +151,16 @@ def _communication(engine, run, actor, client_ref, *, channel, subject, body, ab
     return {**out, "communication": f"Communication/{rec['id']}"}
 
 
+def _is_client_ref(hub, ref) -> bool:
+    return "/" in str(ref or "") and hub.is_a(str(ref).split("/", 1)[0], "Client")
+
+
 def _subject_of_run(engine, run) -> str:
-    """The client a run is about: its subject, else its record when that is a client."""
-    if str(run.get("subject") or "").startswith("Client/"):
+    """The client a run is about: its subject, else its record when that is a client (of either kind)."""
+    if _is_client_ref(engine.hub, run.get("subject")):
         return run["subject"]
     rec = _read(engine.hub, run.get("record"))
-    if rec and rec.get("resourceType") == "Client":
+    if rec and _is_client_ref(engine.hub, run.get("record")):
         return run["record"]
     return _ref((rec or {}).get("client"))
 
@@ -342,14 +353,22 @@ def guard_no_identifiers(values, ctxview):
 FOUNDATION_GUARDS = {"engagement-letter": guard_no_identifiers}
 
 
-def _recs(ctx, data_class, rtype=None):
+def _recs(ctx, data_class, rtype=None, is_a=None):
+    """The records of ``data_class`` in a step's context; with ``rtype``, those of that type or a type under it."""
     return [r for r in (ctx["context"].get(f"record:{data_class}") or [])
-            if not rtype or r.get("resourceType") == rtype]
+            if not rtype or (is_a(str(r.get("resourceType") or ""), rtype) if is_a else r.get("resourceType") == rtype)]
 
 
-def _first_name(client: dict) -> str:
+def _client_in(ctx, is_a=None) -> dict | None:
+    """The client a step's context is about: an individual or a business, or a kind of either."""
+    return next(iter(_recs(ctx, "profile", "Client", is_a) if is_a else
+                     [r for k in ("Individual", "Business") for r in _recs(ctx, "profile", k)]), None)
+
+
+def _first_name(client: dict, is_a=None) -> str:
+    """What a letter calls the client: a business by its name, a person by their first name."""
     name = str(client.get("name") or "")
-    return name if client.get("kind") == "business" else (name.split() or ["there"])[0]
+    return name if _kind(client, is_a) == "Business" else (name.split() or ["there"])[0]
 
 
 SERVICE_WORDS = {"t1": "prepare and file your personal income tax return (T1)",
@@ -358,9 +377,9 @@ SERVICE_WORDS = {"t1": "prepare and file your personal income tax return (T1)",
                  "payroll": "run your payroll and file the remittances, T4s and the T4 summary"}
 
 
-def standin_engagement_letter(ctx):
+def standin_engagement_letter(ctx, is_a=None):
     eng = next(iter(_recs(ctx, "engagement", "Engagement")), None)
-    client = next(iter(_recs(ctx, "profile", "Client")), None)
+    client = _client_in(ctx, is_a)
     if not eng or not client:
         return {"answer": {}, "escalate": True, "reason": "the engagement or the client's file is not readable"}
     service, year = eng.get("service"), eng.get("year")
@@ -372,7 +391,7 @@ def standin_engagement_letter(ctx):
         "the accuracy of what you give us. We file only once you have approved what we prepared.",
         f"Fee: {_money(fee)} ({eng.get('fee_basis') or 'fixed'}), plus HST.",
         (eng.get("scope") or "").strip()])
-    body = (f"Hello {_first_name(client)},\n\nThis year's engagement letter for {SERVICE_WORDS.get(service, service)} "
+    body = (f"Hello {_first_name(client, is_a)},\n\nThis year's engagement letter for {SERVICE_WORDS.get(service, service)} "
             f"({year}) is ready. Please read it and sign it on our client portal so we can start.\n\n{FIRM}")
     return {"letter": letter.strip(), "subject": f"Your {year} engagement letter", "body": body,
             "summary": f"Engagement letter for {service} {year}, fee {_money(fee)}."}
@@ -607,9 +626,12 @@ def _due_dates(pack, year: int, self_employed: bool) -> dict:
 
 
 def start_t1(engine, run, eng, actor) -> str:
-    """A signed T1 engagement opens the year's T1 return (gathering), which its workflow then walks."""
+    """A signed T1 engagement opens the year's T1 return (gathering), which its workflow then walks. A T1 is an
+    individual's: a business's engagement for one opens nothing, and says why."""
     hub = engine.hub
     client_ref = _ref(eng["client"])
+    if not hub.is_a(str(client_ref).split("/", 1)[0], "Individual"):
+        raise ValueError(f"a T1 return is an individual's personal tax: {client_ref} is not an individual")
     have = [r for r in _client_records(hub, client_ref, "T1Return")
             if r.get("year") == eng["year"] and r.get("status") != "withdrawn"]
     if have:
@@ -882,8 +904,8 @@ def _the_return(ctx):
     return next(iter(_recs(ctx, "tax", "T1Return")), None)
 
 
-def standin_t1_organizer(ctx):
-    ret, client = _the_return(ctx), next(iter(_recs(ctx, "profile", "Client")), None)
+def standin_t1_organizer(ctx, is_a=None):
+    ret, client = _the_return(ctx), _client_in(ctx, is_a)
     if not ret or not client:
         return {"answer": {}, "escalate": True, "reason": "the return or the client's file is not readable"}
     year = ret.get("year")
@@ -892,7 +914,7 @@ def standin_t1_organizer(ctx):
     have = _year_slips(slips, year)
     missing = [k for k in expected if not any(_key_matches(k, s) for s in have)]
     lines = "\n".join(f"- {k}" for k in expected) or "- every slip and receipt you received for the year"
-    body = (f"Hello {_first_name(client)},\n\nIt is time to prepare your {year} return. Last year we had:\n{lines}\n\n"
+    body = (f"Hello {_first_name(client, is_a)},\n\nIt is time to prepare your {year} return. Last year we had:\n{lines}\n\n"
             "Please send this year's, and anything new: a new job, investments, a property sold, RRSP contributions, "
             "childcare, medical expenses or donations. Upload them on our portal or reply to this email.\n\n"
             f"Your filing deadline is {ret.get('due_date') or 'April 30'}.\n\n{FIRM}")
@@ -901,15 +923,15 @@ def standin_t1_organizer(ctx):
                                      f"{len(missing)} not in yet."}
 
 
-def standin_slip_chase(ctx):
-    ret, client = _the_return(ctx), next(iter(_recs(ctx, "profile", "Client")), None)
+def standin_slip_chase(ctx, is_a=None):
+    ret, client = _the_return(ctx), _client_in(ctx, is_a)
     missing = list((ret or {}).get("missing_slips") or [])
     if not ret or not client:
         return {"answer": {}, "escalate": True, "reason": "the return or the client's file is not readable"}
     if not missing:
         return {"answer": {}, "escalate": True, "reason": "nothing is listed as missing, yet the slips are not complete"}
     lines = "\n".join(f"- {k}" for k in missing)
-    body = (f"Hello {_first_name(client)},\n\nWe are still waiting for these for your {ret.get('year')} return:\n"
+    body = (f"Hello {_first_name(client, is_a)},\n\nWe are still waiting for these for your {ret.get('year')} return:\n"
             f"{lines}\n\nIf one of them does not exist this year (a job that ended, an account closed), just tell us. "
             f"Your filing deadline is {ret.get('due_date') or 'April 30'}.\n\n{FIRM}")
     return {"missing_slips": missing, "subject": f"Still needed for your {ret.get('year')} return", "body": body,
@@ -1016,14 +1038,14 @@ def standin_t1_draft(ctx):
             "flags": flags, "draft_summary": summary, "summary": summary}
 
 
-def standin_t1_client_letter(ctx):
-    ret, client = _the_return(ctx), next(iter(_recs(ctx, "profile", "Client")), None)
+def standin_t1_client_letter(ctx, is_a=None):
+    ret, client = _the_return(ctx), _client_in(ctx, is_a)
     if not ret or not client or ret.get("net_refund") is None:
         return {"answer": {}, "escalate": True, "reason": "the reviewed return is not readable"}
     refund = _dec(ret["net_refund"])
     what = (f"a refund of {_money(refund)}" if refund >= 0 else
             f"a balance owing of {_money(-refund)}, due {ret.get('balance_due_date') or 'April 30'}")
-    body = (f"Hello {_first_name(client)},\n\nYour {ret.get('year')} return is ready for your approval. Your total "
+    body = (f"Hello {_first_name(client, is_a)},\n\nYour {ret.get('year')} return is ready for your approval. Your total "
             f"income is {_money(ret.get('total_income'))}, and the return shows {what}.\n\n"
             + (f"What changed from last year: {ret.get('flags')}\n\n" if ret.get("flags") else "")
             + "Please review it and approve it on our client portal: approving authorises us to file it "
@@ -1110,23 +1132,63 @@ def upgrade_rates_are_records(hub, actor):
     return {"rates_made": seed_rates(hub, actor)}
 
 
-UPGRADES = {"1.7-rates-are-records": upgrade_rates_are_records}
+def upgrade_clients_by_kind(hub, actor):
+    """1.8: each client an older version left (a Client, a person or a business by its ``kind``) becomes an Individual
+    or a Business, keeping its id, its CLI key and its TW client number, and everything that named it (returns,
+    engagements, invoices, messages, open work) names it. It keeps the fields its kind has; ``kind``, and anything it
+    held of the other kind's, go (``fields_dropped``); a client that cannot move stays a Client, read as it was, until
+    a person moves it (``clients_not_moved``). None until Client's 1.8 version (abstract) is in force;
+    then ``hub.UPGRADE_BATCH`` clients a call, in id order from where the call before stopped."""
+    rt = hub.record_type("Client")
+    kinds = {k: hub.record_type(k) for k in ("Individual", "Business")}
+    if rt is None or not rt.abstract or None in kinds.values():
+        return None
+    rows = hub.db.records.find({"type": "Client", "_id": {"$gt": hub.upgrade_state.get("after") or ""}},
+                               sort="_id", limit=hub.UPGRADE_BATCH, fields=["_id"])
+    moved, dropped, kept, refs = [], [], [], {}
+    for row in rows:
+        hub.upgrade_state["after"] = row["_id"]
+        rec = hub.records.read(*row["_id"].split("/", 1)) or {}
+        into = "Business" if rec.get("kind") == "business" else "Individual"
+        names = {f["name"] for f in kinds[into].fields}
+        data = {k: v for k, v in rec.items() if k in names}
+        gone = sorted(k for k, v in rec.items() if k not in names and k not in ("resourceType", "id", "meta", "kind")
+                      and v not in (None, "", []))
+        try:
+            hub.convert_record(actor, row["_id"], into, data, repoint=False)
+        except Exception as exc:  # it stays a Client, read as it was, and is named: a person moves it
+            kept.append(f"{row['_id']}: {exc}")
+            continue
+        new = f"{into}/{row['_id'].split('/', 1)[1]}"
+        moved.append(new)
+        refs[row["_id"]] = new
+        if gone:
+            dropped.append(f"{new}: {', '.join(gone)}")
+    hub.repoint_work(refs)
+    return {"clients_moved": moved, **({"fields_dropped": dropped} if dropped else {}),
+            **({"clients_not_moved": kept} if kept else {}), "more": len(rows) == hub.UPGRADE_BATCH}
 
 
-def summarize(rec: dict) -> str | None:
-    fn = SUMMARIES.get(rec.get("resourceType"))
+UPGRADES = {"1.7-rates-are-records": upgrade_rates_are_records, "1.8-clients-by-kind": upgrade_clients_by_kind}
+
+
+def summarize(rec: dict, is_a=None) -> str | None:
+    """A record's summary, by its type or the nearest type above it the pack summarizes (an overlay's own kind of
+    individual is summarized as a client)."""
+    t = str(rec.get("resourceType") or "")
+    fn = SUMMARIES.get(t) or next((f for k, f in SUMMARIES.items() if is_a and is_a(t, k)), None)
+    if fn is _summary_client:
+        return fn(rec, is_a)
     return fn(rec) if fn else None
 
 
-def facts(rec: dict, today: date | None = None) -> dict:
-    """What a client's file says at a glance, for conditions and lists."""
-    if rec.get("resourceType") != "Client":
-        return {}
-    out = {"is_business": rec.get("kind") == "business"}
-    if rec.get("birth_date") and len(str(rec["birth_date"])) == 10:
-        b, t = date.fromisoformat(rec["birth_date"]), today or date.today()
-        out["age"] = t.year - b.year - ((t.month, t.day) < (b.month, b.day))
-    return out
+def facts(rec: dict, today: date | None = None, is_a=None) -> dict | None:
+    """What an individual's file says at a glance: their age. A business's, or an individual's with no date of birth,
+    is the core's (its type's ``fact = true`` fields)."""
+    if _kind(rec, is_a) != "Individual" or not rec.get("birth_date") or len(str(rec["birth_date"])) != 10:
+        return None
+    b, t = date.fromisoformat(rec["birth_date"]), today or date.today()
+    return {"age": t.year - b.year - ((t.month, t.day) < (b.month, b.day))}
 
 # =====================================================================================================================
 # Demo (init --demo): each section's step, run in order (DEMO_STEPS). The foundation makes the clients and keeps
@@ -1149,7 +1211,7 @@ def _agents_work(hub):
     run_all_local(hub, ModelGateway(hub, scripted=True), log=_quiet)
 
 
-# name, kind, birth date or year end, email, extra fields
+# name, birth date, email, extra fields: each an Individual
 DEMO_PEOPLE = [
     ("Margaret Doucette", "1951-07-19", "margaret.doucette@example.ca", {"marital_status": "widowed"}),
     ("Sarah MacNeil", "1980-02-03", "sarah.macneil@example.ca", {"marital_status": "single"}),
@@ -1162,6 +1224,7 @@ DEMO_PEOPLE = [
     ("Daniel Boudreau", "1996-01-22", "daniel.boudreau@example.ca", {"marital_status": "single"}),
     ("Robert Langille", "1960-05-05", "bob.langille@example.ca", {"marital_status": "divorced"}),
 ]
+# name, year end, email, services: each a Business
 DEMO_BUSINESSES = [
     ("Harbourview Bakery Ltd.", "12-31", "accounts@harbourviewbakery.example.ca",
      ["bookkeeping", "t2", "gst-hst", "payroll"]),
@@ -1173,26 +1236,27 @@ DEMO_OWNERS = [("Sarah MacNeil", "Harbourview Bakery Ltd.", "owner", 100), ("Mei
 
 
 def demo_foundation(hub):
-    """The firm's rates (seed_rates), and its clients: people and their companies, imported from the practice's old
-    system. Each is given the next client number as it is made (Client.toml [number]: TW-0001 on)."""
+    """The firm's rates (seed_rates), and its clients: people (Individual) and their companies (Business), imported
+    from the practice's old system. Each is given the next client number as it is made (Client.toml [number]: TW-0001
+    on), one series for both kinds."""
     DEMO_CLIENTS.clear()
     seed_rates(hub, IMPORTER)
     n = 0
     for name, born, email, extra in DEMO_PEOPLE:
         n += 1
-        rec = hub.create_record(IMPORTER, "Client", {
-            "kind": "person", "name": name, "email": email, "birth_date": born,
+        rec = hub.create_record(IMPORTER, "Individual", {
+            "name": name, "email": email, "birth_date": born,
             "phone": f"902-555-{140 + n:04d}", "address": f"{10 + 7 * n} Spring Garden Road, Halifax NS",
             "services": ["t1"], "partner_in_charge": "anne", "active": True, **extra})
-        DEMO_CLIENTS[name] = f"Client/{rec['id']}"
+        DEMO_CLIENTS[name] = f"Individual/{rec['id']}"
     for name, year_end, email, services in DEMO_BUSINESSES:
         n += 1
-        rec = hub.create_record(IMPORTER, "Client", {
-            "kind": "business", "name": name, "email": email,
+        rec = hub.create_record(IMPORTER, "Business", {
+            "name": name, "email": email,
             "business_type": "ccpc", "fiscal_year_end": year_end, "services": services,
             "phone": f"902-555-{140 + n:04d}", "address": f"{100 + n} Hollis Street, Halifax NS",
             "partner_in_charge": "anne", "active": True})
-        DEMO_CLIENTS[name] = f"Client/{rec['id']}"
+        DEMO_CLIENTS[name] = f"Business/{rec['id']}"
     for who, of, kind, pct in DEMO_OWNERS:
         hub.create_record(IMPORTER, "Relationship", {"client": DEMO_CLIENTS[who], "other": DEMO_CLIENTS[of],
                                                      "kind": kind, **({"percent": pct} if pct else {})})

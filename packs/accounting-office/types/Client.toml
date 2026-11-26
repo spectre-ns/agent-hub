@@ -1,6 +1,10 @@
-# A client of the firm: a person or a business. It extends the core's Subject, so the core's pages, pickers and any
-# module (crm, dms) see it. Who owns a company, and who is married to whom, are Relationships.
+# A client of the firm: what every client has, a person or a business. It is abstract: each client is an Individual or
+# a Business (or an overlay's own kind of either), and those types add what only a person or a business has. Naming
+# Client (a reference, a list, a grant, a workflow) takes in both. It extends the core's Subject, so the core's pages,
+# pickers and any module (crm, dms) see every kind. Both kinds share its key (CLI-n) and its client numbers (one TW-
+# series). Who owns a company, and who is married to whom, are Relationships.
 id = "Client"
+abstract = true
 key = "CLI"
 label = "Client"
 plural = "Clients"
@@ -14,7 +18,7 @@ order = 0
 # a client number names one client: it is on their letters, and how they sign in to the portal. The hub gives it, the
 # next in its series (TW-0001), when the client is made; clients carried over from an older version keep theirs.
 unique = ["client_number"]
-summary = "A person or a business the firm works for."
+summary = "Someone the firm works for: an individual or a business."
 
 [base]
 identifier = "client_number"
@@ -26,16 +30,7 @@ field = "client_number"
 pattern = "TW-{seq:04}"
 
 [[field]]
-name = "kind"
-label = "Person or business"
-type = "choice"
-choices = ["person", "business"]
-labels = { person = "Person", business = "Business" }
-required = true
-fact = true
-
-[[field]]
-name = "name"                 # the Subject's name: a person's full name, or a business's legal name
+name = "name"                 # the Subject's name: an individual's full name, or a business's legal name
 label = "Name"
 type = "string"
 required = true
@@ -64,54 +59,6 @@ fact = true
 name = "address"
 label = "Mailing address"
 type = "text"
-
-[[field]]
-name = "birth_date"
-label = "Date of birth"
-type = "date"
-match = true
-help = "A person's; how they sign in to the portal"
-
-[[field]]
-name = "marital_status"
-label = "Marital status (as of December 31)"
-type = "choice"
-choices = ["single", "married", "common-law", "separated", "divorced", "widowed"]
-
-[[field]]
-name = "self_employed"
-label = "Self-employed (files by June 15)"
-type = "boolean"
-fact = true
-help = "A person with business or professional income, or their spouse: the T1 is due June 15, the balance April 30"
-
-[[field]]
-name = "sin"
-label = "Social insurance number"
-type = "string"
-data_class = "payroll"       # only those who read payroll and identity numbers see it
-help = "A person's; never written in a message"
-
-[[field]]
-name = "business_type"
-label = "Business type"
-type = "choice"
-choices = ["ccpc", "corporation", "partnership", "sole-proprietor", "non-profit"]
-labels = { ccpc = "Canadian-controlled private corporation", sole-proprietor = "Sole proprietor", non-profit = "Not-for-profit" }
-
-[[field]]
-name = "bn"
-label = "Business number"
-type = "string"
-data_class = "payroll"
-help = "A business's nine-digit CRA business number"
-
-[[field]]
-name = "fiscal_year_end"
-label = "Fiscal year end (MM-DD)"
-type = "string"
-fact = true
-help = "A business's, as month and day: 12-31"
 
 [[field]]
 name = "services"

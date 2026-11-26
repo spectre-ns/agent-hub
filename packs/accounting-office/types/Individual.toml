@@ -1,0 +1,35 @@
+# A client who is a person: what the firm files for them is their personal tax (T1). It is a kind of Client, so it has
+# everything a client has (its name, client number, contacts, services and partner) and its CLI key and TW number, and
+# it adds what only a person has. An overlay's own kind of person (a farmer, a student) extends this type.
+id = "Individual"
+extends = "Client"
+label = "Individual"
+plural = "Individuals"
+summary = "A person the firm works for: their personal tax, and their part in a business."
+
+[[field]]
+name = "birth_date"
+label = "Date of birth"
+type = "date"
+match = true
+help = "How they sign in to the portal"
+
+[[field]]
+name = "marital_status"
+label = "Marital status (as of December 31)"
+type = "choice"
+choices = ["single", "married", "common-law", "separated", "divorced", "widowed"]
+
+[[field]]
+name = "self_employed"
+label = "Self-employed (files by June 15)"
+type = "boolean"
+fact = true
+help = "With business or professional income, or their spouse has: the T1 is due June 15, the balance April 30"
+
+[[field]]
+name = "sin"
+label = "Social insurance number"
+type = "string"
+data_class = "payroll"       # only those who read payroll and identity numbers see it
+help = "Never written in a message"

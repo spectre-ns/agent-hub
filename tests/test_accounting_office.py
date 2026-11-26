@@ -47,10 +47,10 @@ def firm(monkeypatch):
 def _client(firm):
     """A client with last year's return assessed, and this year's engagement accepted and sent to them."""
     sophie = firm.member("sophie")
-    c = firm.create_record(sophie, "Client", {"kind": "person", "name": "Sarah MacNeil",
+    c = firm.create_record(sophie, "Individual", {"name": "Sarah MacNeil",
                                               "email": "sarah@example.ca", "birth_date": "1980-02-03",
                                               "services": ["t1"], "partner_in_charge": "anne"})
-    cref = f"Client/{c['id']}"
+    cref = f"Individual/{c['id']}"
     firm.create_record(IMPORTER, "TaxSlip", {"client": cref, "year": 2024, "status": "extracted", "slip_type": "T4",
                                              "issuer": "Harbour Logistics Ltd.", "amount": 62000.0,
                                              "tax_deducted": 11800.0})
@@ -447,10 +447,10 @@ def test_a_return_that_was_assessed_is_not_started_again_and_its_page_does_not_o
 def _first_year_client(firm):
     """A client with nothing on file from last year, their engagement signed: this year's return is open."""
     sophie = firm.member("sophie")
-    c = firm.create_record(sophie, "Client", {"kind": "person", "name": "Daniel Boudreau",
+    c = firm.create_record(sophie, "Individual", {"name": "Daniel Boudreau",
                                               "email": "daniel@example.ca", "birth_date": "1991-06-12",
                                               "services": ["t1"], "partner_in_charge": "anne"})
-    cref = f"Client/{c['id']}"
+    cref = f"Individual/{c['id']}"
     eng = firm.create_record(sophie, "Engagement", {"client": cref, "client_name": "Daniel Boudreau", "service": "t1",
                                                     "year": 2025, "fee": 350, "status": "acceptance"})
     _accept(firm, f"Engagement/{eng['id']}")
@@ -859,10 +859,10 @@ def test_an_approval_of_a_record_not_the_client_s_or_not_waiting_for_them_writes
     one that is not theirs, not waiting for them, or signed already: the answer goes to the office."""
     mod, sophie = firm.pack.module, firm.member("sophie")
     cref, ref = _in_review(firm)
-    other = firm.create_record(sophie, "Client", {"kind": "person", "name": "Kevin Thibodeau",
+    other = firm.create_record(sophie, "Individual", {"name": "Kevin Thibodeau",
                                                   "email": "kevin@example.ca", "services": ["t1"],
                                                   "partner_in_charge": "anne"})
-    kref = f"Client/{other['id']}"
+    kref = f"Individual/{other['id']}"
     with _refused("is about someone else"):
         _sign(firm, kref, ref)
     out = mod.act_client_sign(firm.engine, {"id": "r-1", "subject": kref, "record": kref}, None,
@@ -886,9 +886,9 @@ def _new_engagement(firm, *, status="acceptance"):
     """A new client and this year's T1 engagement for them, opened by the office; or ``planned``, as the engagement
     workflow makes next year's (no person opens one past acceptance)."""
     sophie = firm.member("sophie")
-    c = firm.create_record(sophie, "Client", {"kind": "person", "name": "Noah Gallant", "email": "noah@example.ca",
+    c = firm.create_record(sophie, "Individual", {"name": "Noah Gallant", "email": "noah@example.ca",
                                               "services": ["t1"], "partner_in_charge": "anne"})
-    cref = f"Client/{c['id']}"
+    cref = f"Individual/{c['id']}"
     e = firm.create_record(sophie if status == "acceptance" else IMPORTER, "Engagement",
                            {"client": cref, "client_name": "Noah Gallant", "service": "t1", "year": 2025, "fee": 350,
                             "status": status})
@@ -976,15 +976,15 @@ def test_next_year_s_engagement_is_accepted_again_when_its_season_comes(firm):
 
 def test_a_client_is_given_the_next_client_number_and_none_is_written_by_hand(firm):
     sophie = firm.member("sophie")
-    one = firm.create_record(sophie, "Client", {"kind": "person", "name": "Sarah MacNeil", "email": "s@example.ca"})
-    two = firm.create_record(IMPORTER, "Client", {"kind": "person", "name": "Noah Gallant", "email": "n@example.ca"})
+    one = firm.create_record(sophie, "Individual", {"name": "Sarah MacNeil", "email": "s@example.ca"})
+    two = firm.create_record(IMPORTER, "Individual", {"name": "Noah Gallant", "email": "n@example.ca"})
     assert (one["client_number"], two["client_number"]) == ("TW-0001", "TW-0002")
     assert firm.find_key(sophie, "tw-0002")["number"] == "TW-0002"
     with pytest.raises(Invalid, match="the hub gives"):
-        firm.create_record(sophie, "Client", {"kind": "person", "name": "Ava Pike", "client_number": "TW-0900"})
+        firm.create_record(sophie, "Individual", {"name": "Ava Pike", "client_number": "TW-0900"})
     with pytest.raises(Invalid, match="the hub gives"):
-        firm.update_record(sophie, f"Client/{one['id']}", {"client_number": "TW-0007"})
-    assert firm.records.read("Client", one["id"])["client_number"] == "TW-0001"
+        firm.update_record(sophie, f"Individual/{one['id']}", {"client_number": "TW-0007"})
+    assert firm.records.read("Individual", one["id"])["client_number"] == "TW-0001"
 
 
 def test_rates_are_records_partners_and_managers_enter_and_staff_read(firm):
@@ -1079,10 +1079,105 @@ def test_an_upgrade_to_1_7_enters_the_rates_the_pack_had_in_its_code_once(monkey
     hub = snapshot_hub("accounting_office_without_rates", PACK, lambda h: h.install(PACK))
     assert not hub.records.search("TaxRate", limit=None)  # a firm installing the pack enters its own
     hub.db.set_setting("pack_upgrades_done", [])  # as a hub on 1.6 has it
-    (done,) = hub.run_pack_upgrades()
-    assert done["upgrade"] == "1.7-rates-are-records"
+    done, clients = hub.run_pack_upgrades()  # and 1.8's, which finds no client to move
+    assert (done["upgrade"], clients["upgrade"], clients["clients_moved"]) == \
+        ("1.7-rates-are-records", "1.8-clients-by-kind", 0)
     assert len(hub.records.search("TaxRate", limit=None)) == len(hub.pack.module.SEED_RATES)
     assert hub.run_pack_upgrades() == [] and hub.pack.module.seed_rates(hub, IMPORTER) == []
+
+
+# ------------------------------------------------------------------ a client is an individual or a business (accounting 1.8)
+def _client_as_1_7(hub) -> str:
+    """Client as 1.7 had it: one type records were made as, a person or a business by its kind, with both kinds'
+    fields."""
+    types = hub.pack.dir / "types"
+
+    def fields(t):
+        return "[[field]]" + (types / f"{t}.toml").read_text().split("[[field]]", 1)[1]
+    kind = ('[[field]]\nname = "kind"\nlabel = "Person or business"\ntype = "choice"\nchoices = ["person", "business"]\n'
+            'required = true\n\n')
+    return (types / "Client.toml").read_text().replace("abstract = true\n", "") + kind + fields("Individual") + \
+        "\n" + fields("Business")
+
+
+def _in_force(firm, src):
+    import tomllib
+    tid = tomllib.loads(src)["id"]
+    p = firm.propose("type", firm.member("anne"), src)
+    firm.approve(firm.member("rob"), "type", tid, p["version"])
+    return firm.record_type(tid)
+
+
+def test_an_upgrade_to_1_8_moves_each_client_to_its_kind_keeping_its_key_and_number(firm):
+    """A 1.7 hub's clients are each a Client, a person or a business by its kind. Once Client's 1.8 version (abstract)
+    is in force, the upgrade makes each an Individual or a Business with its id, its CLI key and its client number;
+    what named it names it, and the other kind's fields, and kind, go."""
+    now = firm.record_type("Client").source
+    assert not _in_force(firm, _client_as_1_7(firm)).abstract
+    firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records"])  # as a hub on 1.7 has it
+    person = firm.create_record(IMPORTER, "Client", {"kind": "person", "name": "Sarah MacNeil", "birth_date": "1980-02-03",
+                                                     "sin": "046454286", "services": ["t1"]})
+    company = firm.create_record(IMPORTER, "Client", {"kind": "business", "name": "Harbourview Bakery Ltd.",
+                                                      "business_type": "ccpc", "fiscal_year_end": "12-31",
+                                                      "marital_status": "single", "services": ["t2"]})
+    owns = firm.create_record(IMPORTER, "Relationship", {"client": f"Client/{person['id']}",
+                                                         "other": f"Client/{company['id']}", "kind": "owner",
+                                                         "percent": 100})
+    keys = {r["id"]: (r["meta"]["key"], r["client_number"]) for r in (person, company)}
+    assert firm.run_pack_upgrades() == []  # Client is not abstract yet: the upgrade waits
+
+    assert _in_force(firm, now).abstract  # approving it runs the upgrade
+    assert firm.db.records.count({"type": "Client"}) == 0
+    sarah, bakery = firm.records.read("Individual", person["id"]), firm.records.read("Business", company["id"])
+    assert (sarah["meta"]["key"], sarah["client_number"]) == keys[person["id"]]
+    assert (bakery["meta"]["key"], bakery["client_number"]) == keys[company["id"]]
+    assert "kind" not in sarah and sarah["sin"] == "046454286" and "marital_status" not in bakery
+    rel = firm.records.read("Relationship", owns["id"])
+    assert (rel["client"], rel["other"]) == (f"Individual/{person['id']}", f"Business/{company['id']}")
+    assert firm.resolve_ref(f"Client/{person['id']}") == f"Individual/{person['id']}"
+    (done,) = [e for e in firm.track.trusted({"action": "practice.upgrade_applied"})
+               if e["data"]["upgrade"] == "1.8-clients-by-kind"]
+    assert (done["data"]["clients_moved"], done["data"]["fields_dropped"]) == (2, 1)
+    assert firm.run_pack_upgrades() == []
+
+
+def test_a_t1_is_an_individual_s_and_a_business_s_engagement_opens_none(firm):
+    sophie = firm.member("sophie")
+    biz = firm.create_record(sophie, "Business", {"name": "Harbourview Bakery Ltd.", "business_type": "ccpc",
+                                                  "fiscal_year_end": "12-31", "services": ["t2"]})
+    bref = f"Business/{biz['id']}"
+    with pytest.raises(Invalid):
+        firm.create_record(IMPORTER, "T1Return", {"client": bref, "client_name": biz["name"], "year": 2025,
+                                                  "status": "gathering"})
+    with pytest.raises(ValueError, match="T1 return is an individual's"):
+        firm.pack.module.start_t1(firm.engine, {"id": "r"}, {"id": "e", "client": bref, "year": 2025}, IMPORTER)
+    with _refused("Client is abstract"):
+        firm.create_record(sophie, "Client", {"name": "Somebody"})
+    # both kinds are clients: one list, one key, one series of client numbers
+    ind = firm.create_record(sophie, "Individual", {"name": "Noah Gallant", "birth_date": "1990-01-01"})
+    assert {r["id"] for r in firm.search_records(sophie, "Client")} >= {biz["id"], ind["id"]}
+    assert biz["meta"]["key"].split("-")[0] == ind["meta"]["key"].split("-")[0] == "CLI"
+    assert int(ind["client_number"][3:]) == int(biz["client_number"][3:]) + 1
+
+
+def test_an_overlay_s_own_kind_of_individual_is_filed_like_any_individual(firm):
+    """A practice's own type under Individual (an overlay's Farmer) is an individual everywhere the pack asks: a T1
+    is opened for one, the pack summarizes and greets one as a person, and the portal signs one in."""
+    farmer = _in_force(firm, 'id = "Farmer"\nextends = "Individual"\n[[field]]\nname = "farm"\nlabel = "Farm"\n'
+                              'type = "string"\n')
+    assert farmer.is_a("Client") and farmer.key == "CLI"
+    jean = firm.create_record(firm.member("sophie"), "Farmer", {
+        "name": "Jean Arsenault", "birth_date": "1970-05-05", "self_employed": True, "farm": "Arsenault Orchards",
+        "services": ["t1"], "partner_in_charge": "anne"})
+    ref = f"Farmer/{jean['id']}"
+    firm.create_record(IMPORTER, "T1Return", {"client": ref, "client_name": jean["name"], "year": 2024,
+                                              "status": "assessed", "filed_on": "2025-04-10"})
+    mod = firm.pack.module
+    assert mod._first_name(jean, firm.is_a) == "Jean" and mod._kind(jean, firm.is_a) == "Individual"
+    assert "self-employed" in firm.pack.summarize(jean, is_a=firm.is_a)
+    assert firm.facts(jean)["age"] >= 50
+    from practicehub.portal import Portal
+    assert Portal(firm)._find("1970-05-05", jean["client_number"]) == ref
 
 
 def _numbers(firm, who, vid):
@@ -1131,9 +1226,9 @@ def test_the_firm_s_receivables_are_totalled_to_the_cent_in_their_ageing_bands(f
 
 def test_the_firm_s_billing_is_drawn_month_by_month_for_each_partner_and_its_work_by_partner(firm):
     cref = _client(firm)
-    rob_client = firm.create_record(firm.member("sophie"), "Client", {"kind": "person", "name": "Noah Gallant",
+    rob_client = firm.create_record(firm.member("sophie"), "Individual", {"name": "Noah Gallant",
                                                                       "email": "n@example.ca", "partner_in_charge": "rob"})
-    nref = f"Client/{rob_client['id']}"
+    nref = f"Individual/{rob_client['id']}"
     _billed(firm, cref, "Sarah MacNeil", "350.00", -40)
     _billed(firm, cref, "Sarah MacNeil", "0.10", -40)
     _billed(firm, nref, "Noah Gallant", "650.00", 0)
