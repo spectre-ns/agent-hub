@@ -2645,11 +2645,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         policy owner other than whoever proposed it approves it. A newer proposal replaces one still waiting.
         A pure reduction (a lower ``max_risk``, skills taken away, direct writes taken away, the vision model taken
         away, the model as it is) only ever lets the agent do less: it is in force at once, as a version on the track
-        (``status`` active). A vision model set or changed is an addition: pictures go to a model they did not."""
+        (``status`` active). A vision model set or changed is an addition: pictures go to a model they did not.
+        A practice pack's upgrade (its ``UPGRADES``, run by the hub) may propose one too, for the reviewed pack: a
+        policy owner approves it as any other."""
         target = self.member(mid)
         if target["kind"] != "agent":
             raise Invalid("only agents have a profile")
-        if not (self.can(actor, "member_admin", "practice:main") or target["sponsor"] == actor["id"]):
+        by_upgrade = getattr(self, "_upgrading", False) and actor.get("id") == "hub"
+        if not (by_upgrade or self.can(actor, "member_admin", "practice:main") or target["sponsor"] == actor["id"]):
             self.require(actor, "member_admin", "practice:main", "propose a change to an agent's profile")
         extra = sorted(set(changes) - set(self.PROFILE_KEYS))
         if extra:

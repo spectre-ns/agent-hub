@@ -1079,9 +1079,11 @@ def test_an_upgrade_to_1_7_enters_the_rates_the_pack_had_in_its_code_once(monkey
     hub = snapshot_hub("accounting_office_without_rates", PACK, lambda h: h.install(PACK))
     assert not hub.records.search("TaxRate", limit=None)  # a firm installing the pack enters its own
     hub.db.set_setting("pack_upgrades_done", [])  # as a hub on 1.6 has it
-    done, clients = hub.run_pack_upgrades()  # and 1.8's, which finds no client to move
+    # and 1.8's, which finds no client to move, and 1.9's, the agent having the model for pictures the pack names
+    done, clients, sees = hub.run_pack_upgrades()
     assert (done["upgrade"], clients["upgrade"], clients["clients_moved"]) == \
         ("1.7-rates-are-records", "1.8-clients-by-kind", 0)
+    assert sees == {"upgrade": "1.9-documents-agent-sees", "profiles_proposed": 0}
     assert len(hub.records.search("TaxRate", limit=None)) == len(hub.pack.module.SEED_RATES)
     assert hub.run_pack_upgrades() == [] and hub.pack.module.seed_rates(hub, IMPORTER) == []
 
@@ -1114,7 +1116,8 @@ def test_an_upgrade_to_1_8_moves_each_client_to_its_kind_keeping_its_key_and_num
     what named it names it, and the other kind's fields, and kind, go."""
     now = firm.record_type("Client").source
     assert not _in_force(firm, _client_as_1_7(firm)).abstract
-    firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records"])  # as a hub on 1.7 has it
+    # as a hub on 1.7 has it (1.9's, which is not about clients, done)
+    firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records", "1.9-documents-agent-sees"])
     person = firm.create_record(IMPORTER, "Client", {"kind": "person", "name": "Sarah MacNeil", "birth_date": "1980-02-03",
                                                      "sin": "046454286", "services": ["t1"]})
     company = firm.create_record(IMPORTER, "Client", {"kind": "business", "name": "Harbourview Bakery Ltd.",
@@ -1254,3 +1257,126 @@ def test_the_partners_sign_offs_are_listed_and_counted(firm):
     assert [(r["by"], r["meaning"]) for r in w["Latest sign-offs"]["rows"]] == [("anne", ACCEPT)]
     assert w["Sign-offs by person"]["counts"] == {firm.member("anne")["name"]: 1}
     assert firm.view("firm-sign-offs").roles == ["partner"]
+
+
+# ------------------------------------------------------------------ a slip read from its file (accounting 1.9)
+def _slip_from(firm, member, cref, data, name, ctype):
+    f = firm.add_file(member, "TaxSlip", data, name, ctype)
+    return "TaxSlip/" + firm.create_record(member, "TaxSlip", {"client": cref, "status": "received",
+                                                                "source": "portal", "file": f})["id"]
+
+
+def test_a_slip_uploaded_as_a_pdf_is_read_from_its_words_and_the_return_goes_on(firm):
+    """Kevin's slip came as a PDF: whoever adds the slip attaches it, the hub reads its words (its text layer) into
+    the slip, the documents agent reads the slip from them, and the return is drafted from it."""
+    mod = firm.pack.module
+    cref = _signed_up(firm)
+    sref = _slip_from(firm, firm.member("ethan"), cref, mod.slip_pdf(T4), "t4-2025.pdf", "application/pdf")
+    words = firm.records.read(*sref.split("/"))["text"]
+    assert "Employer: Harbour Logistics Ltd." in words and "Box 14: 64,500.00" in words
+    ret = _draft(firm, cref)
+    slip = firm.records.read(*sref.split("/"))
+    assert (slip["status"], slip["slip_type"], slip["year"], slip["amount"], slip["tax_deducted"]) == \
+        ("extracted", "T4", 2025, 64500.0, 12400.0)
+    assert _by(firm, sref, "slip-intake", "extract") == "documents-agent"
+    assert ret["total_income"] == 64500.0
+
+
+def test_a_slip_photo_is_read_by_the_model_that_can_see_it_and_checked_against_the_words_it_wrote(firm):
+    """A client's phone photo of their T4: the hub reads no words from a picture, so the documents agent's model for
+    pictures is shown it. It writes the slip's words as printed and reads the slip from them: an answer with no words
+    is refused, and so is an amount that is not in them. What it wrote is the slip's text from then on."""
+    from practicehub.models import ModelGateway
+    mod = firm.pack.module
+    cref = _signed_up(firm)
+    photo = mod.blurred_photo()
+    sref = _slip_from(firm, firm.member("client-portal"), cref, photo, "IMG_0412.png", "image/png")
+    assert not firm.records.read(*sref.split("/")).get("text")  # a photo has no words for the hub to read
+    read = {**mod.read_slip(T4), "summary": "T4 2025: $64,500.00."}
+    answers = [{**read, "text": ""}, {**read, "text": T4}]
+    shown = []
+
+    class Eyes:  # stands for gemma4 on Ollama: what it is shown, and what it answers
+        external = False
+
+        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+            shown.append((model, [p["data"] for p in pictures]))
+            return {"answer": answers.pop(0), "escalate": False, "reason": "read from the photo"}
+
+    gw = ModelGateway(firm)
+    gw.backends["ollama"] = Eyes()
+    run_all_local(firm, gw, log=quiet)
+    assert shown == [("gemma4:12b-it-qat", [photo])] * 2  # refused once (no words), taken the second time
+    slip = firm.records.read(*sref.split("/"))
+    assert (slip["status"], slip["amount"], slip["text"]) == ("extracted", 64500.0, T4)
+    assert firm.db.events.exists({"action": "record.viewed", "actor": "documents-agent", "subject": sref,
+                                  "data.how": "file"})
+    # what it read is checked against what it wrote; a slip with words of its own takes none from an agent
+    guard, agent = firm.pack.guards["slip-extract"], {"id": "documents-agent", "kind": "agent"}
+    pic = {"context": {"record:client-documents": [{"text": ""}], "file:file": {"picture": "image/png"}}, "by": agent}
+    assert guard({**read, "text": T4}, pic) == []
+    assert guard({**read, "amount": Decimal("64800.00"), "text": T4}, pic) == [
+        "the amount 64800.00 is not in the document's text; copy it as printed"]
+    assert guard({**read, "text": ""}, pic) == [
+        "the slip is a picture: write its words in text, as printed, line by line, or escalate"]
+    pdf = {"context": {"record:client-documents": [{"text": T4}], "file:file": {"picture": None}}, "by": agent}
+    assert guard({**read, "text": T4}, pdf) == ["the slip's text was read from its file; leave text empty"]
+
+
+def test_a_slip_no_agent_can_read_goes_to_a_person(firm):
+    """A scan (a PDF with no words) and a photo the documents agent is not shown (its model for pictures taken away):
+    the agent escalates each, and the slip waits for a person, who sees the document itself."""
+    import io
+    from pypdf import PdfWriter
+    mod, portal = firm.pack.module, firm.member("client-portal")
+    cref = _signed_up(firm)
+    scan = io.BytesIO()
+    w = PdfWriter()
+    w.add_blank_page(612, 792)
+    w.write(scan)
+    # taking the model for pictures away only lets the agent do less: its sponsor does it, in force at once
+    assert firm.propose_agent_profile(firm.member("sophie"), "documents-agent",
+                                      {"vision_model": ""})["status"] == "active"
+    refs = [_slip_from(firm, portal, cref, scan.getvalue(), "scan.pdf", "application/pdf"),
+            _slip_from(firm, portal, cref, mod.blurred_photo(), "IMG_0412.png", "image/png")]
+    run_all_local(firm, log=quiet)
+    for sref in refs:
+        assert firm.records.read(*sref.split("/"))["status"] == "received"
+        item = firm.db.items.find_one({"run_id": _run_on(firm, sref, "slip-intake")["id"], "step_id": "extract",
+                                       "status": {"$in": ["open", "claimed"]}})
+        assert item is not None and item["persons_only"], sref
+
+
+def test_the_organizer_expects_only_the_client_s_slips_on_file_from_last_year(firm):
+    """The organizer's list is the client's slips from last year, by type and issuer: an example in the instructions,
+    or a slip from another year, is no slip this client is expected to send; a slip still missing is one expected."""
+    guard = firm.pack.guards["t1-organizer"]
+    view = {"context": {"record:tax": [{"resourceType": "T1Return", "year": 2025}], "record:client-documents": [
+        {"resourceType": "TaxSlip", "year": 2024, "status": "extracted", "slip_type": "T5", "issuer": "Scotiabank"},
+        {"resourceType": "TaxSlip", "year": 2023, "status": "extracted", "slip_type": "T4",
+         "issuer": "Irving Shipbuilding"}]}}
+    ok = {"expected_slips": ["T5 · Scotiabank"], "missing_slips": ["T5 · Scotiabank"], "subject": "s", "body": "b"}
+    assert guard(ok, view) == []
+    assert guard({**ok, "expected_slips": ["T5 · Scotiabank", "T4 · Harbour Logistics Ltd."]}, view) == [
+        "T4 · Harbour Logistics Ltd. is not one of the client's slips on file for last year; list only those, as "
+        "'<slip type> · <issuer>'"]
+    assert guard({**ok, "expected_slips": ["T4 · Irving Shipbuilding"], "missing_slips": []}, view) == [
+        "T4 · Irving Shipbuilding is not one of the client's slips on file for last year; list only those, as "
+        "'<slip type> · <issuer>'"]
+    assert guard({**ok, "missing_slips": ["RRSP · Tangerine"]}, view) == [
+        "RRSP · Tangerine is listed as missing but not as expected; a missing slip is one expected"]
+
+
+def test_an_upgrade_to_1_9_proposes_the_documents_agent_s_model_for_pictures_and_nothing_changes_until_approved(firm):
+    """A 1.8 hub's documents agent has no model for pictures. The upgrade proposes the one the pack names, in the
+    hub's name: until a policy owner approves it, no picture goes to that model."""
+    want = "ollama/gemma4:12b-it-qat"
+    firm.propose_agent_profile(firm.member("sophie"), "documents-agent", {"vision_model": ""})  # as 1.8 had it
+    firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records", "1.8-clients-by-kind"])  # a hub on 1.8
+    assert firm.run_pack_upgrades() == [{"upgrade": "1.9-documents-agent-sees", "profiles_proposed": 1}]
+    waiting = firm.agent_profile_proposal("documents-agent")
+    assert (waiting["profile"]["vision_model"], waiting["author"]) == (want, "hub")
+    assert "vision_model" not in firm.member("documents-agent")["profile"]
+    assert firm.run_pack_upgrades() == []
+    firm.approve_agent_profile(firm.member("anne"), "documents-agent", waiting["version"])
+    assert firm.member("documents-agent")["profile"]["vision_model"] == want

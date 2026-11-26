@@ -85,12 +85,14 @@ type = "date"
 name = "file"
 label = "File"
 type = "attachment"
+help = "A PDF or a photo of the slip"
 
 [[field]]
 name = "text"
 label = "Text of the document"
 type = "text"
-help = "What could be read from the file: what the documents agent reads it from"
+from_file = "file"
+help = "The file's words, read when it is attached (a PDF's text); a photo's, as the documents agent or a person read them"
 
 [[field]]
 name = "note"
@@ -110,7 +112,7 @@ abandoned = { received = "rejected" }
 from = ["received"]
 to = "extracted"
 label = "Record what it says"
-asks = ["slip_type", "year", "issuer", "amount", "tax_deducted", "boxes"]
+asks = ["slip_type", "year", "issuer", "amount", "tax_deducted", "boxes", "text"]
 requires = ["slip_type", "year"]
 
 [[lifecycle.transition]]

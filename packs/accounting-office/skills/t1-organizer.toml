@@ -2,9 +2,9 @@ id = "t1-organizer"
 title = "Write a client's T1 organizer"
 instructions = """
 Write the organizer for this client's return: the list of slips and receipts to send for the tax year, and a short,
-plain email asking for them. Base the list on what came last year (last year's slips on file, as slip type and issuer,
-e.g. "T4 · Harbour Logistics Ltd."), and say which of them are already in for this year (missing_slips are those not
-yet received). Ask also for anything new: a new job, a new investment account, a property sold, RRSP contributions,
+plain email asking for them. Base the list on what came last year: last year's slips on file for this client, each as its slip type and its
+issuer as they are on file, joined by " · " (a T5 from a bank is "T5 · " and the bank's name), and only those. Say which
+of them are already in for this year (missing_slips are those not yet received). Ask also for anything new: a new job, a new investment account, a property sold, RRSP contributions,
 childcare, medical, donations. Never quote a SIN or a business number. Do not estimate a refund or give tax advice.
 A client in their first year with the firm has nothing on file from last year: the list is then empty, and the email
 asks for every slip and receipt they received for the year.
@@ -15,7 +15,7 @@ asks for every slip and receipt they received for the year.
 name = "expected_slips"
 label = "Slips expected"
 type = "list"
-help = "what came last year, one per slip: 'T4 · Issuer'; empty for a client with nothing on file from last year"
+help = "last year's slips on file, one per slip: '<slip type> · <issuer>'; empty for a client with nothing on file from last year"
 
 [[output]]
 name = "missing_slips"

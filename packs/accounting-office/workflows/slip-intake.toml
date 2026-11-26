@@ -12,7 +12,9 @@ goes to the office.
 starters = ["partner", "manager", "senior", "staff", "bookkeeper", "admin", "client-portal"]
 
 # Written as the slip's states and the edges between them (see practicehub/states.py). Received, the documents agent
-# reads it (or a person records what it says, on the slip's page); read, it counts on the client's return.
+# reads it (or a person records what it says, on the slip's page); read, it counts on the client's return. A slip's
+# words are read from its file when it is attached (a PDF's text); a photo is shown to the agent's model for pictures,
+# which writes its words as printed, and what it read is checked against them.
 [start]
 to = "received"
 label = "Received"
@@ -31,7 +33,7 @@ skill = "slip-extract"
 risk = "low"
 due = "1d"
 people_role = "staff"
-context = ["record:client-documents"]
+context = ["record:client-documents", "file:file"]
 
 [[edge]]
 id = "read"

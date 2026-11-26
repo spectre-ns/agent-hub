@@ -458,6 +458,7 @@ Everything is optional. These module-level names are picked up:
 | `GUARDS = {"skill-id": fn(values, ctxview) -> [problems]}` | extra checks on any answer for that skill, from a person or an agent. `ctxview` is what the answerer was shown (`context`, `run`, `step`, `item`), and `by`: who answers (`id`, and `kind`, `person` or `agent`), for a rule that holds an agent only. A prompt block is guarded by `"block:<id>"`, or by its `extends` skill's guard |
 | `STANDINS = {"skill-id": fn(ctx) -> {answer, escalate, reason}}` | deterministic answers, so tests and a demo's past need no model (`ModelGateway(hub, scripted=True)`). `"block:<id>"` answers a prompt block |
 | `demo(hub)` | demo records and runs, for `init --demo` |
+| `UPGRADES = {"id": fn(hub, actor) -> dict \| None}` | what a new version does to what an older one left, each once, in batches (`Hub.run_pack_upgrades`). It runs as the hub, and may also propose a change to an agent's profile (`hub.propose_agent_profile`): a policy owner approves it as any other, so a pack never puts more in an agent's hands by itself |
 
 `summarize`, `facts` and a stand-in may take more arguments by name, and are given those they name:
 

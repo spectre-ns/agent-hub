@@ -854,18 +854,27 @@ def guard_t1_draft(values, ctxview):
 
 
 def guard_slip_extract(values, ctxview):
-    """The amount read is in the document's text, as printed: an agent copies numbers, never computes them. An agent
-    reads only the text, so its slip and year are in it too: a document that does not say which slip it is, or for
-    which year, goes to a person, who sees the document itself."""
-    slip = next(iter((ctxview.get("context") or {}).get("record:client-documents") or []), {})
-    text = str(slip.get("text") or "").replace(",", "")
-    amt = values.get("amount")
+    """The amount read is in the document's words, as printed: an agent copies numbers, never computes them. The words
+    are the slip's text, read from its file when it was attached (a PDF's text); a photo has none, and an agent shown
+    it writes them (``text``), as printed, before reading the slip from them: what it read is checked against what it
+    wrote. An agent reads only the words, so its slip and year are in them too: a document that does not say which
+    slip it is, or for which year, goes to a person, who sees the document itself."""
+    ctx = ctxview.get("context") or {}
+    slip = next(iter(ctx.get("record:client-documents") or []), {})
+    own, typed = str(slip.get("text") or "").strip(), str(values.get("text") or "").strip()
+    agent = (ctxview.get("by") or {}).get("kind") == "agent"
     problems = []
+    if agent and own and typed:
+        problems.append("the slip's text was read from its file; leave text empty")
+    if agent and not own and not typed and (ctx.get("file:file") or {}).get("picture"):
+        problems.append("the slip is a picture: write its words in text, as printed, line by line, or escalate")
+    text = (own if agent and own else typed or own).replace(",", "")
+    amt = values.get("amount")
     if text and _dec(amt) is not None:  # as printed: 1234.50 or 1234.5, never a sum of other boxes
         forms = {f"{abs(_dec(amt)):.2f}", _plain(abs(_dec(amt)))}
         if not any(f in text for f in forms):
             problems.append(f"the amount {amt} is not in the document's text; copy it as printed")
-    if text and (ctxview.get("by") or {}).get("kind") == "agent":
+    if text and agent:
         kind, year = values.get("slip_type"), values.get("year")
         said = dict(SLIP_PATTERNS).get(kind)
         if said and not said.search(text):
@@ -896,8 +905,27 @@ def guard_t1_client_letter(values, ctxview):
     return problems
 
 
+def guard_t1_organizer(values, ctxview):
+    """The organizer expects only what came last year: each slip it lists is one of the client's slips on file for
+    last year, by its type and issuer (an example in the instructions is no client's slip), and each one still missing
+    is one it expects. Never a SIN or a business number."""
+    problems = guard_no_identifiers(values, ctxview)
+    view = {"context": ctxview.get("context") or {}}
+    year = (_the_return(view) or {}).get("year")
+    last = _year_slips(_recs(view, "client-documents", "TaxSlip"), int(year) - 1) if year else []
+    expected = [str(k) for k in values.get("expected_slips") or []]
+    for k in expected:
+        if not any(_key_matches(k, s) for s in last):
+            problems.append(f"{k} is not one of the client's slips on file for last year; list only those, as "
+                            f"'<slip type> · <issuer>'")
+    for k in values.get("missing_slips") or []:
+        if str(k) not in expected:
+            problems.append(f"{k} is listed as missing but not as expected; a missing slip is one expected")
+    return problems
+
+
 T1_GUARDS = {"t1-draft": guard_t1_draft, "slip-extract": guard_slip_extract, "t1-client-letter": guard_t1_client_letter,
-             "t1-organizer": guard_no_identifiers, "slip-chase": guard_no_identifiers}
+             "t1-organizer": guard_t1_organizer, "slip-chase": guard_no_identifiers}
 
 
 def _the_return(ctx):
@@ -1005,6 +1033,9 @@ def read_slip(text: str) -> dict | None:
 def standin_slip_extract(ctx):
     slip = next(iter(_recs(ctx, "client-documents", "TaxSlip")), None)
     got = read_slip(str((slip or {}).get("text") or ""))
+    if not got and (ctx["context"].get("file:file") or {}).get("picture"):  # the stand-in sees no picture
+        return {"answer": {}, "escalate": True, "reason": "the slip is a picture, with no words to read: a person "
+                                                          "(or a model that can see it) reads it"}
     if not got:
         return {"answer": {}, "escalate": True, "reason": "the document could not be read: a person must look at it"}
     return {**got, "summary": f"{slip_key(got)} {got['year']}: {_money(got['amount'])}."}
@@ -1169,7 +1200,27 @@ def upgrade_clients_by_kind(hub, actor):
             **({"clients_not_moved": kept} if kept else {}), "more": len(rows) == hub.UPGRADE_BATCH}
 
 
-UPGRADES = {"1.7-rates-are-records": upgrade_rates_are_records, "1.8-clients-by-kind": upgrade_clients_by_kind}
+def upgrade_documents_agent_sees(hub, actor):
+    """1.9: the documents agent reads a slip that is a photo with a model that can see it (its profile's
+    ``vision_model``, as the pack names it). A hub on an older version has the agent without one: the upgrade proposes
+    it, and a policy owner approves it, as any change to what an agent may do; a model shown clients' documents is
+    never put in force by the pack alone. A proposal already waiting keeps what it changes. Nothing to propose when
+    the agent is not here or has a model for pictures."""
+    want = next(((m.get("profile") or {}).get("vision_model") for m in hub.pack.members
+                 if m.get("id") == "documents-agent"), None)
+    row = hub.db.members.get("documents-agent")
+    if not want or row is None or (row.get("profile") or {}).get("vision_model"):
+        return {"profiles_proposed": 0}
+    waiting = (hub.agent_profile_proposal("documents-agent") or {}).get("profile") or {}
+    if waiting.get("vision_model"):
+        return {"profiles_proposed": 0}
+    hub.propose_agent_profile(actor, "documents-agent", {**waiting, "vision_model": want},
+                              "Accounting office 1.9: a slip that is a photo is read by a model that can see it")
+    return {"profiles_proposed": 1}
+
+
+UPGRADES = {"1.7-rates-are-records": upgrade_rates_are_records, "1.8-clients-by-kind": upgrade_clients_by_kind,
+            "1.9-documents-agent-sees": upgrade_documents_agent_sees}
 
 
 def summarize(rec: dict, is_a=None) -> str | None:
@@ -1263,6 +1314,26 @@ def demo_foundation(hub):
 
 
 # ---- T1: last year filed and assessed; this year in every state the T1 goes through
+def slip_pdf(text: str) -> bytes:
+    """A slip as the bank or employer sends it: a PDF of its words, its first line the title, one line a paragraph.
+    The hub reads its text when the slip is attached (the slip's ``text`` is ``from_file``)."""
+    from practicehub import pdf
+    head, *rest = text.split("\n")
+    return pdf.render(head, "\n\n".join(rest))
+
+
+def blurred_photo(w: int = 96, h: int = 64) -> bytes:
+    """A photo of a slip too blurred to read (demo data): a PNG of soft grey, as a phone out of focus takes one."""
+    import struct
+    import zlib
+    rows = b"".join(b"\x00" + bytes(200 - (x * 7 + y * 3) % 40 for x in range(w)) for y in range(h))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
 def slip_text(kind: str, year: int, issuer: str, amount: float, tax: float = 0.0) -> str:
     """The text of a slip as a scanner reads it (what the documents agent reads)."""
     head = {"T4": ("T4 Statement of Remuneration Paid", "Employer", "14"),
@@ -1377,9 +1448,10 @@ def _upload(hub, name, year, slips, *, only=None):
     for kind, issuer, _, _, amount, tax in sorted(slips, key=lambda s: s[2] is not None):
         if amount is None or (only is not None and kind not in only):
             continue
+        f = hub.add_file(portal, "TaxSlip", slip_pdf(slip_text(kind, year, issuer, amount, tax or 0.0)),
+                         f"{kind.lower()}-{year}.pdf", "application/pdf")
         hub.create_record(portal, "TaxSlip", {"client": DEMO_CLIENTS[name], "status": "received", "source": "portal",
-                                              "received_on": hub.engine.now().date().isoformat(),
-                                              "text": slip_text(kind, year, issuer, amount, tax or 0.0)})
+                                              "received_on": hub.engine.now().date().isoformat(), "file": f})
     _agents_work(hub)
 
 
@@ -1428,8 +1500,9 @@ def _notice(hub, name, year, refund, taxable, date_on):
                       f"Date: {date_on}",
                       f"Refund: {refund:.2f}" if refund >= 0 else f"Balance owing: {-refund:.2f}",
                       f"Box 26000: {taxable:.2f}"])
+    f = hub.add_file(portal, "TaxSlip", slip_pdf(text), f"notice-of-assessment-{year}.pdf", "application/pdf")
     hub.create_record(portal, "TaxSlip", {"client": DEMO_CLIENTS[name], "status": "received", "source": "portal",
-                                          "received_on": date_on, "text": text})
+                                          "received_on": date_on, "file": f})
     _agents_work(hub)
 
 
@@ -1498,9 +1571,11 @@ def demo_t1(hub):
     # Daniel: a new client: the letter is out, not signed yet; he uploaded a photo the agent could not read
     # (Ethan types it in). Robert asked a question on the portal instead of signing (Sophie calls him back).
     _engage(hub, "Daniel Boudreau", year, sign=False)
-    hub.create_record(hub.member("client-portal"), "TaxSlip", {
+    portal = hub.member("client-portal")
+    hub.create_record(portal, "TaxSlip", {
         "client": DEMO_CLIENTS["Daniel Boudreau"], "status": "received", "source": "portal",
-        "received_on": hub.engine.now().date().isoformat(), "text": "IMG_2291.jpg (photo, blurred)"})
+        "received_on": hub.engine.now().date().isoformat(),
+        "file": hub.add_file(portal, "TaxSlip", blurred_photo(), "IMG_2291.png", "image/png")})
     _agents_work(hub)
     _engage(hub, "Robert Langille", year, sign=False, answer="question")
     return {"kevin": kevin, "margaret": margaret, "sarah": sarah, "liam": liam, "mei": mei, "james": james,

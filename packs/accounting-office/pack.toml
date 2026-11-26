@@ -59,7 +59,12 @@
 #  invoices, messages, grants), and share the CLI key and the TW- client numbers. A T1 return is an individual's; the
 #  portal signs in individuals. An overlay's own kind of client extends Individual or Business. The upgrade moves each
 #  client to its kind, keeping its id, key and number, and points everything at it (1.8-clients-by-kind).
-version = "1.8"
+# 1.9: a slip is read from its file. A PDF's words are its text, read by the hub when it is attached (anyone who adds
+#  a slip attaches the file, on the new-slip form too); a photo is shown to the documents agent's model for pictures
+#  (gemma4), which writes its words as printed, and what it read is checked against them. A slip no agent can read
+#  goes to a person. The organizer expects only the client's slips on file from last year. The upgrade proposes the
+#  documents agent's model for pictures, for a policy owner to approve (1.9-documents-agent-sees).
+version = "1.9"
 
 [practice]
 requires_core = "1.1"
@@ -422,7 +427,9 @@ name = "Documents agent"
 title = "Sends organizers, reads slips, chases what is missing"
 sponsor = "sophie"
 roles = ["document-clerk"]
-profile = { max_risk = "low", skills = ["engagement-letter", "t1-organizer", "slip-extract", "slip-chase"] }
+# a slip that is a photo is shown to a model that can see it (gemma4 reads a slip's boxes); anything else is read with
+# the hub's default model
+profile = { max_risk = "low", skills = ["engagement-letter", "t1-organizer", "slip-extract", "slip-chase"], vision_model = "ollama/gemma4:12b-it-qat" }
 
 [[members]]
 id = "tax-agent"
