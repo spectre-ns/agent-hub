@@ -869,13 +869,22 @@ UNSURE = re.compile(r"\[[^\]\n]*\]|\b(?:blurr(?:y|ed)|unclear|illegible|unreadab
                     r"seems? to (?:be|read|say)|i think)\b", re.I)
 
 
+# a line of a document that says who issued it (its name after it, or on the next line): a reading of it names them
+ISSUED_BY = re.compile(r"^[ \t]*(payer|employer|issuer|issued by)(?:'s name)?\b[ \t]*:?[ \t]*(?:\n[ \t]*)?\w",
+                       re.I | re.M)
+# a reading's own field names, never printed on a document: in what an agent wrote of a picture, they are its own words
+OWN_FIELD = re.compile(r"^[ \t]*(?:slip_type|tax_deducted|summary)[ \t]*:", re.I | re.M)
+
+
 def guard_slip_extract(values, ctxview):
     """The amount read is in the document's words, as printed: an agent copies numbers, never computes them. The words
     are the slip's text, read from its file when it was attached (a PDF's text); a photo has none, and an agent shown
     it writes them (``text``), as printed, before reading the slip from them: what it read is checked against what it
     wrote, and what it wrote holds nothing of its own (a note that the picture was blurred, a guess): a picture it
-    could not read clearly is escalated. An agent reads only the words, so its slip and year are in them too: a document that does not say which
-    slip it is, or for which year, goes to a person, who sees the document itself."""
+    could not read clearly is escalated, and the fields it read are in their own fields, never in what it wrote. An
+    agent reads only the words, so its slip and year are in them too: a document that does not say which slip it is,
+    or for which year, goes to a person, who sees the document itself. A document that says who issued it is read
+    with its issuer, as a return's expected slips are named by it ('T5 · Scotiabank')."""
     ctx = ctxview.get("context") or {}
     slip = next(iter(ctx.get("record:client-documents") or []), {})
     own, typed = str(slip.get("text") or "").strip(), str(values.get("text") or "").strip()
@@ -889,6 +898,15 @@ def guard_slip_extract(values, ctxview):
     if unsure:
         problems.append(f"text is the document's words as printed, nothing of your own, and you wrote "
                         f"{unsure.group(0)!r}: a picture you cannot read clearly is escalated, and a person reads it")
+    dump = OWN_FIELD.search(typed) if agent and typed and not own else None
+    if dump:
+        problems.append(f"text is the document's words as printed, and you wrote {dump.group(0).strip()!r}, the name "
+                        f"of a field: put what you read in its own field (slip_type, year, issuer, amount, "
+                        f"tax_deducted, boxes), never in text")
+    named = ISSUED_BY.search(own if agent and own else typed) if agent else None
+    if named and not str(values.get("issuer") or "").strip():
+        problems.append(f"the document says who issued it (its {named.group(1)!r} line), and issuer is empty: copy "
+                        f"that name into issuer")
     text = (own if agent and own else typed or own).replace(",", "")
     amt = values.get("amount")
     if text and _dec(amt) is not None:  # as printed: 1234.50 or 1234.5, never a sum of other boxes
