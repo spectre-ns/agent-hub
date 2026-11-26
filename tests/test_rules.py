@@ -8563,6 +8563,21 @@ def test_an_exact_number_reaches_every_surface_as_its_exact_text(hub):
     assert fhir["priceOverride"]["value"] == 12.3 and type(fhir["priceOverride"]["value"]) is float
 
 
+def test_a_decimal_is_asked_of_a_model_as_a_number_and_kept_exact_at_its_places():
+    """A model is asked for a decimal as a JSON number (a local model's structured output leaves a string with a
+    pattern empty); what it answers is kept exactly at the field's places, to the 15 digits a decimal may have."""
+    from practicehub import fields as fieldmod
+    spec = [{"name": "amount", "label": "Amount", "type": "decimal", "scale": 2, "required": True},
+            {"name": "rate", "label": "Rate", "type": "decimal", "scale": 4}]
+    schema = fieldmod.json_schema(spec)
+    assert schema["properties"]["amount"] == {"type": "number"} and schema["required"] == ["amount"]
+    got = fieldmod.coerce(spec, json.loads('{"amount": 48250.00, "rate": 0.1400}'))
+    assert got == {"amount": Decimal("48250.00"), "rate": Decimal("0.1400")}
+    assert str(got["amount"]) == "48250.00" and str(got["rate"]) == "0.1400"
+    assert fieldmod.coerce(spec, {"amount": 1234567890123.45})["amount"] == Decimal("1234567890123.45")
+    assert fieldmod.coerce(spec, {"amount": "48,250.00"})["amount"] == Decimal("48250.00")
+
+
 def test_a_condition_adds_multiplies_and_totals_exactly():
     """Conditions do + - * / exactly (0.1 + 0.2 is 0.3), in brackets too; a whole number with a whole number stays
     one. Anything over a missing value or text is null, and so is dividing by zero. sum, min, max and count read

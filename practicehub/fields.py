@@ -138,8 +138,8 @@ def json_schema(fields: list[dict], ctx: dict | None = None) -> dict:
         typ = f["type"]
         if typ == "number":
             p = {"type": "number"}
-        elif typ == "decimal":  # as text, so no digit is lost on the way
-            p = {"type": "string", "pattern": r"^-?\d+(\.\d+)?$"}
+        elif typ == "decimal":  # a number, which a model fills (a string with a pattern it can leave empty);
+            p = {"type": "number"}  # read back exactly: at most 15 digits, which a float keeps (decimals.to_decimal)
         elif typ == "boolean":
             p = {"type": "boolean"}
         elif typ == "list":
