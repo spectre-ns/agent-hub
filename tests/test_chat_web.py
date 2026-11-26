@@ -7,7 +7,7 @@ import time
 from practicehub.chat import chat_of
 from practicehub.models import ModelGateway
 from practicehub.web.server import App
-from test_portal import Browser, _sign_in, portal_app
+from test_portal import Browser, _sign_in, person, portal_app
 from test_rules import _ellen_and_her_result
 from test_web import token
 
@@ -44,6 +44,7 @@ def test_the_chat_button_is_on_a_person_s_pages_only(hub):
     rx = hub.records.search("MedicationRequest")[0]
     st, page = _get(app, f"/records/MedicationRequest/{rx['id']}/export?format=print", amara)
     assert st == 200 and "window.print()" in page and DOCK not in page
+    person(hub)
     b = Browser(portal_app(hub))
     _sign_in(b)
     assert DOCK not in b.go("GET", "/me")[2]  # the portal: a patient talks with the practice, not its agents

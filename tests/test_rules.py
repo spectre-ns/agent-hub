@@ -9371,7 +9371,7 @@ def test_the_runtime_is_the_standard_library_pymongo_and_pypdf():
     assert pdf_users == {"practicehub/filetext.py"}, pdf_users
 
 
-LETTER = """id = "Letter"
+FILED_LETTER = """id = "Letter"
 key = "LTX"
 data_class = "visits"
 [[field]]
@@ -9385,15 +9385,15 @@ type = "text"
 from_file = "file"
 max_length = 40
 """
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
 
-def _letters(hub):
-    hub.approve(M(hub, "dr-amara"), "type", "Letter", hub.propose("type", M(hub, "rana"), LETTER)["version"])
+def _filed_letters(hub):
+    hub.approve(M(hub, "dr-amara"), "type", "Letter", hub.propose("type", M(hub, "rana"), FILED_LETTER)["version"])
 
 
 def test_a_field_from_a_file_is_filled_with_the_file_s_words_when_the_file_is_attached(hub):
-    _letters(hub)
+    _filed_letters(hub)
     jo = M(hub, "jo")
     read = lambda ref: hub.records.read(*ref.split("/"))
     first = hub.add_file(jo, "Letter", b"Dear Dr. Okafor,\r\nplease see Mr. Lee.\n", "letter.txt", "text/plain")
@@ -9411,13 +9411,13 @@ def test_a_field_from_a_file_is_filled_with_the_file_s_words_when_the_file_is_at
     hub.update_record(jo, ref, {**read(ref), "file": third, "words": "typed with it"})
     assert read(ref)["words"] == "typed with it"
     # a file with no words here (a photo): nothing is read, and the field is the writer's to fill
-    photo = hub.add_file(jo, "Letter", PNG, "letter.png", "image/png")
+    photo = hub.add_file(jo, "Letter", PNG_BYTES, "letter.png", "image/png")
     other = "Letter/" + hub.create_record(jo, "Letter", {"subject": "Photo", "file": photo})["id"]
     assert not read(other).get("words")
     # the type says which file: one attachment field of its own, filling a text field
-    for bad, says in ((LETTER.replace('from_file = "file"', 'from_file = "subject"'), "not one of this type's attachment"),
-                      (LETTER.replace('from_file = "file"', 'from_file = "nowhere"'), "not one of this type's attachment"),
-                      (LETTER.replace('type = "text"\nfrom_file', 'type = "number"\nfrom_file')
+    for bad, says in ((FILED_LETTER.replace('from_file = "file"', 'from_file = "subject"'), "not one of this type's attachment"),
+                      (FILED_LETTER.replace('from_file = "file"', 'from_file = "nowhere"'), "not one of this type's attachment"),
+                      (FILED_LETTER.replace('type = "text"\nfrom_file', 'type = "number"\nfrom_file')
                        .replace("max_length = 40\n", ""), "from_file is for a text field")):
         with pytest.raises(Invalid) as exc:
             hub.propose("type", M(hub, "rana"), bad)
@@ -9450,10 +9450,10 @@ id = "done"
 
 
 def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(hub):
-    _letters(hub)
+    _filed_letters(hub)
     jo, rana, amara, agent = M(hub, "jo"), M(hub, "rana"), M(hub, "dr-amara"), "scheduling-agent"
     hub.approve_workflow(rana, "letter-look", hub.propose_workflow(jo, LOOK, "a look")["version"])
-    photo = hub.add_file(jo, "Letter", PNG, "letter.png", "image/png")
+    photo = hub.add_file(jo, "Letter", PNG_BYTES, "letter.png", "image/png")
     ref = "Letter/" + hub.create_record(jo, "Letter", {"subject": "Referral", "file": photo})["id"]
     asked = []
 
@@ -9483,7 +9483,7 @@ def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(h
     assert look()[0] == "words"
     hub.approve_agent_profile(amara, agent, out["version"])
     model, prompt, shown = look()
-    assert model == "eyes" and [p["data"] for p in shown] == [PNG] and shown[0]["contentType"] == "image/png"
+    assert model == "eyes" and [p["data"] for p in shown] == [PNG_BYTES] and shown[0]["contentType"] == "image/png"
     assert "You are shown 1 picture with this step, in order: letter.png (image/png)" in prompt
     assert hub.db.events.exists({"action": "record.viewed", "actor": agent, "subject": ref, "data.how": "file"})
     # taking it away only lets the agent do less: in force at once
