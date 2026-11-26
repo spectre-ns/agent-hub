@@ -1,9 +1,10 @@
 id = "plm-change"
-title = "Change a product"
+title = "Change parts"
 summary = """A change order from draft to released: its author writes it and sends it for review; the change board
-reviews and signs it. An approved change opens each product and document it names at the next revision; the documents
-go through document control again; once every one is approved, a product owner signs the release and the products are
-released at their new revision. Rejected or returned, it goes back to its author and the next pass walks it again."""
+reviews and signs it. An approved change holds each part it names in draft (stock and builds keep using the revision
+last released) and opens each document it names for revision; the documents go through document control again; once
+every one is approved, a product owner signs the release and the parts go back in use at their next revision. Rejected
+or returned, it goes back to its author and the next pass walks it again."""
 record = "ChangeOrder"
 
 # The ChangeOrder type names this workflow: making a change order starts it, and its status is this work's position.
@@ -67,6 +68,11 @@ from = "rejected"
 to = "cancelled"
 when = "record.status == 'cancelled'"
 
+[[edge.do]]
+id = "let-go-rejected"
+title = "Let go of the parts it holds, as they were"
+action = "plm.unhold"
+
 [[state]]
 id = "draft"
 label = "Draft"
@@ -77,7 +83,7 @@ id = "submit"
 title = "Write the change and send it for review"
 kind = "wait"
 until = "record.status != 'draft'"   # sent for review (or cancelled)
-instructions = """Say why it changes, which products and documents it changes and what else it touches, then send it
+instructions = """Say why it changes, which parts and documents it changes and what else it touches, then send it
 for review on its page. Rejected, the board's note says what is missing: revise it and send it again, or cancel it.
 Whoever writes it does not review it."""
 
@@ -95,6 +101,11 @@ from = "draft"
 to = "cancelled"
 when = "record.status == 'cancelled'"
 
+[[edge.do]]
+id = "let-go"
+title = "Let go of the parts it holds, as they were"   # returned at release, it still holds them
+action = "plm.unhold"
+
 [[state]]
 id = "review"
 label = "Review"
@@ -109,11 +120,11 @@ signer = "person"
 not_by = ["record.editors"]   # whoever wrote the change does not approve it
 meaning = "I approve this change order"
 meanings = { reject = "I reject this change order and return it to its author" }
-context = ["record:products", "record:documents", "record:quality"]
+context = ["record:products", "record:inventory", "record:documents", "record:quality"]
 due = "5d"
 escalate_to = "change-board"
-instructions = """Read why it changes and what else it touches. Approve it, and its products and documents open at
-their next revision; or reject it with what is missing, and it goes back to its author. Your comment is written on the
+instructions = """Read why it changes and what else it touches. Approve it, and its parts are held in draft for their
+next revision and its documents open for revision; or reject it with what is missing, and it goes back to its author. Your comment is written on the
 change order as the board's note."""
 
 [[edge]]
@@ -122,9 +133,17 @@ label = "Approve"
 from = "review"
 to = "approved"
 
+# The parts are held first: a part another change holds (or one in its own review) refuses the approval, holding
+# nothing, and the change goes back to its author with why. Held, a part waits in draft for this change alone.
+[[edge.do]]
+id = "hold"
+title = "Hold each part for its next revision"
+action = "plm.hold"   # holds each part it names; lets go, as they were, of any it held and no longer names
+
 [[edge.do]]
 id = "approve"
 title = "Record the approval"
+when = "hold.ok"
 action = "record.update"
 [edge.do.params]
 ref = "{{run.record}}"
@@ -132,22 +151,26 @@ ref = "{{run.record}}"
 decision = "Approved: {{review.comment}}"
 
 [[edge.do]]
-id = "open-products"
-title = "Open each released product at its next revision"
-when = "record.opened != true"   # a change returned and sent again does not open its products a second time
+id = "not-free"
+title = "Write why on the change: a part it names is not free to change"
+when = "not hold.ok"
 action = "record.update"
-for_each = "{{record.products}}"
-where = "each_record.status == 'released'"   # one still in concept or design is changed as it is
 [edge.do.params]
-ref = "{{each}}"
-increment = ["revision"]
+ref = "{{run.record}}"
 [edge.do.params.set]
-status = "design"
+decision = "Not approved: {{hold.problem}}"
+
+[[edge.do]]
+id = "refused"
+title = "Return the change to its author"
+when = "not hold.ok"
+after = ["not-free"]
+to = "rejected"               # back with its author: the next pass is the next run's
 
 [[edge.do]]
 id = "revise-documents"
 title = "Open each approved document for revision"
-when = "record.opened != true"   # nor revise its documents again
+when = "hold.ok and record.opened != true"   # a change returned and sent again does not revise its documents again
 action = "record.update"
 for_each = "{{record.documents}}"
 where = "each_record.status == 'approved'"
@@ -158,8 +181,8 @@ status = "draft"   # a move the document's own workflow waits on: its author rev
 
 [[edge.do]]
 id = "mark-opened"
-title = "Note that the products and documents are open"
-when = "open-products.each != null and revise-documents.each != null"   # once both have opened theirs
+title = "Note that the documents are open"
+when = "hold.ok and revise-documents.each != null"
 action = "record.update"
 [edge.do.params]
 ref = "{{run.record}}"
@@ -213,15 +236,17 @@ title = "Release the new revisions"
 kind = "gate"
 role = "product-owner"
 signer = "person"
-not_by = ["review"]    # the board member who approved it (in this pass or one before) does not release it
-meaning = "I release these products at their new revision"
+# the board member who approved it (in this pass or one before) does not release it, nor whoever revised a part it
+# names since that part was last in use: the release is a second person's check of the new revision
+not_by = ["review", "record.parts.editors"]
+meaning = "I release these parts at their new revision"
 meanings = { return = "I return this change order without releasing it" }
-context = ["record:products", "record:documents"]
+context = ["record:products", "record:inventory", "record:documents"]
 due = "7d"
 escalate_to = "product-owner"
-instructions = """Check each product's parts and specifications are right at the new revision: the documents are
-approved again. Releasing makes the new revision the one in use. Return it, and the change order goes back to its author
-with the products still in design."""
+instructions = """Check each part's bill of materials and specifications are right at the new revision: the
+documents are approved again. Releasing puts the new revision in use, for stock and builds. Return it, and the change
+order goes back to its author with the parts still held in draft."""
 
 [[edge]]
 id = "release"
@@ -230,15 +255,9 @@ from = "releasing"
 to = "implemented"
 
 [[edge.do]]
-id = "release-products"
-title = "Release the products"
-action = "record.update"
-for_each = "{{record.products}}"
-where = "each_record.status == 'design'"
-[edge.do.params]
-ref = "{{each}}"
-[edge.do.params.set]
-status = "released"
+id = "release-parts"
+title = "Put the parts back in use at their next revision"
+action = "plm.release"   # the parts this change holds: in use, revision up by one
 
 [[edge]]
 id = "return"

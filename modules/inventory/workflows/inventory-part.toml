@@ -2,7 +2,8 @@ id = "inventory-part"
 title = "Bring a part into use"
 summary = """A new or revised part is in use at once, unless the policy in force asks for parts to be approved first
 (regulated): then its author submits it and quality signs it, never its author, and its revision goes up. While it is
-revised, stock of it is received as it was last approved."""
+revised, stock of it is received and built as it was last approved. A part a change holds (held_by: a change order
+that names it) waits in draft until that change puts it back in use; it is not approved on its own."""
 record = "Part"
 
 # The Part type names this workflow: a part in draft or in review is walked by it, and its status is this work's
@@ -22,8 +23,8 @@ action = "inventory.policy"
 [[start.do]]
 id = "open"
 title = "Put the part in use"
-when = "not policy.part_approval"   # the policy, not the part's status: moving it cannot change this
-to = "active"
+when = "not policy.part_approval and not record.held_by"   # the policy, not the part's status: moving it cannot
+to = "active"                                               # change this; a part a change holds waits for that change
 
 [[state]]
 id = "draft"
@@ -34,8 +35,18 @@ tone = "active"
 id = "submit"
 title = "Describe the part and submit it for approval"
 kind = "wait"
-until = "record.status != 'draft'"
-instructions = """Say what the part is, how it is tracked and its shelf life, then submit it on its page."""
+# held by a change: only that change moves it (back into use), so it is never submitted on its own
+until = "record.status == 'active' or (record.status != 'draft' and not record.held_by)"
+instructions = """Say what the part is, how it is tracked, its shelf life and (for an assembly) its bill of materials,
+then submit it on its page. A part a change order holds is changed under that change: it is put back in use when the
+change is released."""
+
+[[edge]]
+id = "released"
+label = "Put in use by the change that held it"
+from = "draft"
+to = "active"
+when = "record.status == 'active'"
 
 [[edge]]
 id = "submit"

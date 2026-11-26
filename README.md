@@ -390,12 +390,23 @@ policy owner reviews a module's code and another installs it (`practicehub modul
     or to ask for a revision, which the document's own workflow opens. Staff sign that they have read it.
 - **qms**, quality: corrective and preventive actions that send the documents they change back for review. It needs
   dms.
-- **plm**, product lifecycle: products at revisions, what each is made of, and the controlled documents that
-  specify it. It needs qms and dms.
-  - **Change orders:** a released product changes only through one. The change board signs to approve it, and its
-    author never does. The products and documents it names then open at their next revision, and the documents go
-    through document control again. A product owner other than the approver signs the release.
+- **plm**, product lifecycle: change control over the parts the practice makes, assembles or supplies. The item is
+  inventory's part, with its bill of materials and the controlled documents that specify it. It needs inventory, qms
+  and dms.
+  - **Change orders:** the change board signs to approve one, and its author never does. Each part it names is then
+    held in draft (`held_by`): stock and builds keep using the revision last released, and the part is not approved
+    on its own. One change at a time holds a part: when one it names is held by another change, or is in its own
+    review, the approval is refused and the change goes back to its author with why. Each document it names opens for
+    revision and goes through document control again. A product owner signs the release, which puts the parts back in
+    use at their next revision: not the board member who approved it, nor anyone who revised a part it names since
+    that part was last in use. Cancelled, a change lets go of its parts as they were before it held them (edits made
+    under it stay in each part's history). A part dropped from the change before it is approved again is let go the
+    same way. Documents opened by an earlier pass are not opened again.
   - **CAPAs:** a change order may answer a CAPA, which then lists it on its Linked tab.
+  - **From version 6:** the Product type is gone (a product's number, family, parts and specifications are a part's
+    code, category, bill of materials and specifications). Products are not carried over. Upgrade inventory to 6
+    first (plm 6 requires it), then remove plm and install it again: an upgrade that would remove a type that still
+    has records, or a workflow with work under way, is refused.
 - **wiki**: pages of formatted text in a tree. A page with nothing above it is a space's home page.
   - **Links:** a page links another by its title (`[[On-call guide]]`), any record as `[[Type/id]]`, and a piece of
     work as `[[work:<id>]]`. The record shows the page on its Linked tab, so a controlled document or a CAPA lists the
@@ -412,11 +423,28 @@ policy owner reviews a module's code and another installs it (`practicehub modul
   filed in document control as a new draft that links back to the page, and `dms-review` walks it from there. The
   page is not changed. It needs dms and wiki.
 
-- **inventory** (after InvenTree): parts, the lots that hold them (stock items, with lot, serial and expiry), the
-  storage locations they are kept in (a tree: site, room, cupboard or fridge), and the ledger of stock moves. It
-  installs alone.
-  - **The ledger:** a lot changes only when a stock move posts, and nobody writes a lot by hand. The move keeps each
-    lot it changed, before and after, so a lot's quantity is always the sum of its posted moves.
+- **inventory** (after InvenTree): parts and their bills of materials, the lots that hold them (stock items, with
+  lot, serial and expiry), the storage locations they are kept in (a tree: site, room, cupboard or fridge), and the
+  ledger of stock moves and builds. It installs alone.
+  - **The ledger:** a lot changes only when a stock move or a build posts, and nobody writes a lot by hand. The move
+    or build keeps each lot it changed, before and after, so a lot's quantity is always the sum of what posted.
+  - **Bills of materials:** a part's bill lists the parts that go into one and how many (with designators and a
+    note). It is approved with the part, and the part's page shows it indented, every level down, with "Used in"
+    every level up. A bill that would lead back to its own part, at any depth, is refused.
+  - **Builds:** a build makes an assembly's lot or serials from component stock, as one posting. It uses the bill
+    last approved and copies it onto the build. The lots it names (and, per row, the serial each goes into) are used
+    as named; the rest comes from the lots that expire first. Short of anything, it is refused with every part it is
+    short of. Builds are signed as moves are; when the policy inspects what comes into stock, the build is signed
+    before what it made is used.
+  - **Tracing:** each lot or serial a build makes knows the build and what went into it (`contains`). A component lot
+    shows every unit it went into ("Went into") and a unit everything in it ("Made from"), at every level. A lot split
+    from another is traced through the split, and the split keeps the build that made it. A serial that goes in is
+    `built-in`, and counts as gone. What a build makes expires no later than the first of the lots that went into it:
+    with no expiry given it takes that date, and a later one is refused. When a build makes several serials, a
+    component serial with no unit named would go into each of them. Under regulated (the policy's **exact
+    genealogy** switch) that is refused: name the unit for each, or build one at a time. At the other levels it is
+    allowed, and a recall over-includes and never misses. Each lot a build takes from has its count baseline lowered by
+    what it took, as an issue's is.
   - **Check, sign, post:** submitting a move checks it first. One that is refused (more than is there, expired
     stock, a location that only groups others) goes back to its author with the reason. A signature covers only the
     stock it was checked against: if the lot changed in the meantime, the move goes back too.
@@ -424,8 +452,8 @@ policy owner reviews a module's code and another installs it (`practicehub modul
     - **basic**: nothing is signed.
     - **tracked**: adjustments, write-offs, returns, releases and counts beyond tolerance are
       signed by an inventory manager other than the writer, or by the writer when the policy says so.
-    - **regulated**: always a second person; parts are approved before use, and the first lot to expire
-      is issued first.
+    - **regulated**: always a second person; parts are approved before use, builds are signed (inspection),
+      and the first lot to expire is issued first.
     - **Changing it:** a switch may be set stricter than its level, never looser. A change that loosens a control
       the practice signs with a second person is signed by someone other than its author.
   - **Holds:** a hold is free and immediate. Holding part of a lot splits off a child lot with the same lot number,
@@ -435,7 +463,7 @@ policy owner reviews a module's code and another installs it (`practicehub modul
   - **Parts:** each code is unique. When the policy asks for part approval, someone with the stock quality role,
     other than the writer, approves each revision.
 
-Each module, and the practice pack, names its **shortcuts** (`shortcuts = ["Part", "StockMove"]` in
+Each module, and the practice pack, names its **shortcuts** (`shortcuts = ["Part", "StockMove", "Build"]` in
 `[module]`, or in `[practice]`). These are the record types people work in most, listed in the sidebar and first in
 Start work. An entry `"start:<workflow>"` puts that workflow on the top bar as a button.
 
@@ -455,6 +483,33 @@ These core rules came with inventory, and any module can use them:
   - **Older records:** on a change, the key is checked only if it changed. Two records that already shared a key
     before the type said unique can still be edited.
 
+Assemblies brought two more, for any module (invoice lines and order lines can use them too):
+
+- **Rows** (`rows = true` on a `list` field whose items are objects, each column a field with `path = "bom.*.part"`):
+  - **The form** edits them as a table, with blank rows to add and a box to remove one, without script. Blank rows
+    are dropped on save.
+  - **Checks:** each row is checked as its fields say, and a reference in a row makes a link like any other. A
+    record holds at most 1,000 rows in one list.
+  - **Data classes:** a column has its rows' data class: `data_class` on a column is refused.
+  - **Dates and times:** a date-and-time cell shows the minute; one left as it was keeps its seconds and time zone.
+- **Graphs** (`graph = { down = "Bill of materials", up = "Used in" }` on a reference to the field's own type, in rows
+  or not):
+  - **Loops:** a write that would make a record reach itself through what it adds is refused, naming the path. So is
+    one that would lead more than 50 levels down.
+  - **The record's page** shows two panels, every level down and every level up, with each row's other values.
+    Records the reader may not see are counted once each, not shown. Past 500 rows the page says how many it shows,
+    and links to the whole trace as CSV (up to 20,000 rows; the export is on the track like any other).
+  - **Fields that share words** (`down` and `up`) are one graph: a lot's parts and the lot it was split from are
+    walked together. Two graph fields of a type may not use the same word for different graphs.
+  - **No data class:** a graph is traced for whoever reads its records, so `data_class` on a graph field is
+    refused.
+- **More than** (`above = 0` on a number field): the value must be more than that, as a bill of materials quantity
+  must. `min` is that number or more; a field takes one of the two.
+- **Addresses typed by hand** (a reference to any record, `target = ["*"]`): a person or an agent adds only a record
+  they may read. A record they may not read is refused in the same words whether or not it exists. An integration
+  (a lab feed filing results) files the records it was given. A reference to a member must name a member the hub
+  has, or one of the hub's own actors (a workflow that asked for a follow-up).
+
 The wiki rests on three core features that any module can use:
 
 - **Formatted text** (`type = "markdown"`): a safe subset of Markdown. Raw HTML is shown as text, and only http(s),
@@ -466,7 +521,7 @@ The wiki rests on three core features that any module can use:
   - **Documents:** the dms module's Documents use it.
 - **Trees** (`parent = "<field>"` on a record type): breadcrumbs, the records under one, and the `tree` widget for
   views. A record never sits under itself. With `[navigator]` (`tops`, and lifecycle states to `hide`), a tree type
-  gets a second navigation column: the wiki's spaces and the plm module's product lines both use it.
+  gets a second navigation column: the wiki's spaces and inventory's locations both use it.
 - **Parts and links**: a record either is part of another or links to it.
   - **Part of** (`part_of = "<field>"`): the record exists only inside its owner. An order line is part of its
     order; a meeting's notes are part of the meeting. It is reached and added through its owner, has no list or
@@ -477,6 +532,8 @@ The wiki rests on three core features that any module can use:
   the text that named it.
 - **Trees of several types:** a parent field may point at more than one type (`target = ["Folder", "Page"]`).
   The types are then one tree, with one navigator, and the page of each says what kind of record its children are.
+- **A reference to any record** (`target = ["*"]`, as a part's specifications): a form cannot list every record, so
+  it gives a box for the record's address (`Type/id`, as its page's address ends), several separated by commas.
 
 ### Writing together
 

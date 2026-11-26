@@ -1,7 +1,8 @@
-# Product lifecycle (PLM): what the practice makes, assembles or supplies (kits, devices, compounded products), each
-# at a revision, with what it is made of and the controlled documents (dms) that specify it. A released product only
-# changes through a change order: reviewed and signed by the change board, then each product and document it names is
-# opened at its next revision, the documents go through document control again, and a product owner releases them.
+# Product lifecycle (PLM): change control over what the practice makes, assembles or supplies. The item is
+# inventory's part, with its bill of materials and the controlled documents (dms) that specify it; PLM adds the change
+# order: reviewed and signed by the change board, then each part it names is held in draft (stock and builds keep using
+# the revision last released) and each document is opened for revision; the documents go through document control
+# again, and a product owner releases the change, putting the parts back in use at their next revision.
 # A sub-module of quality (qms): a change order may come from a CAPA, and the CAPA shows it on its Linked tab.
 # It knows nothing about any one practice.
 
@@ -17,17 +18,25 @@ id = "plm"
 name = "Product lifecycle"
 # 5: each record is keyed in its type, as an issue is in its project (ECO...): ECO-12 is the 12th, and work on
 #  it shows that key.
-version = "5"
-changes = """The change order's workflow is written as its states and edges; the moves it makes are its edges, no longer
-listed on the change order type."""
-summary = "Products at revisions, their parts and specifications, and change orders that release new revisions."
-shortcuts = ["Product", "ChangeOrder"]
-requires = ["dms", "qms"]
+# 6: the product is inventory's part. The Product type is removed: a change order changes parts, whose bill of
+#  materials is the product's structure; approved, it holds them in draft, and its release puts them back in use.
+version = "6"
+changes = """The item is inventory's part: PLM now requires inventory, and its Product type is removed (a product's
+number, family, parts and specifications are a part's code, category, bill of materials and specifications). A change
+order names the parts it changes; approved, it holds them in draft (stock and builds keep using the revision last
+released), and its release puts them back in use at their next revision. One change at a time holds a part: a part
+another change holds, or one in its own review, refuses the approval and the change goes back to its author. A
+cancelled change lets go of its parts as they were before it held them. Whoever revised a part under the change does
+not also release it. Products made under version 5 are not carried over: remove the module and install it again
+(install inventory 6 first)."""
+summary = "Change orders that take parts and their bills of materials to a new revision, with their documents."
+shortcuts = ["ChangeOrder", "Part"]
+requires = ["dms", "qms", "inventory>=6"]   # inventory 6 has the bill of materials and the held part
 
 [[roles]]
 id = "product-owner"
 name = "Product owner"
-description = "Owns products: proposes changes to them, and releases a new revision once its documents are approved."
+description = "Owns parts and their bills of materials: proposes changes to them, revises them while a change holds them, and releases the new revision once its documents are approved."
 
 [[roles]]
 id = "change-board"
@@ -36,15 +45,15 @@ description = "Reviews change orders and signs to approve or reject them. Never 
 
 [[data_classes]]
 id = "products"
-name = "Products"
-description = "Products, their parts and specifications, and the changes made to them. No patient information."
+name = "Product changes"
+description = "Change orders: the changes made to parts and their documents. No patient information."
 
-[grants.everyone]   # everyone who works here may see what a product is, and at which revision
+[grants.everyone]   # everyone who works here may see what is changing, and why
 read = ["products"]
 
-[grants.product-owner]
-read = ["products", "documents", "quality"]
-write = ["products", "documents"]
+[grants.product-owner]   # parts are inventory's: the product owner revises them while a change holds them
+read = ["products", "documents", "quality", "inventory"]
+write = ["products", "documents", "inventory"]
 
 [grants.change-board]
 read = ["products", "documents", "quality"]

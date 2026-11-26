@@ -116,6 +116,7 @@ class RecordPages:
         R("GET", r"/create", self.page_create)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/export", self.page_export_list)  # before a record's own page
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/export", self.page_export_record)
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/trace", self.get_trace)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)", self.page_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/activity", self.page_record_activity)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/journey", self.page_record_journey)
@@ -183,6 +184,13 @@ class RecordPages:
         return self._export_page(req, "Export", f"Export <b>{e(hub.short_title(rec))}</b> ({e(self._lower(rt.label))}):",
                                  picks, [("/records", "Records"), (f"/records/{rtype}", rt.plural),
                                          (self.record_href(ref), hub.short_title(rec)), (None, "Export")])
+
+    def get_trace(self, req, rtype, rid):
+        """A graph's whole reach from a record, as CSV (``?graph=<field>&way=down|up``): every level, past the rows
+        its page shows (export.trace)."""
+        q = req["query"]
+        return self._download(exportmod.trace(self.hub, req["me"], f"{rtype}/{rid}", q.get("graph") or "",
+                                              q.get("way") or "down"))
 
     def page_export_list(self, req, rtype):
         me, hub, q = req["me"], self.hub, req["query"]
@@ -363,6 +371,8 @@ class RecordPages:
         return schema.form_fields(rt)
 
     def _value_html(self, f, rec) -> str:
+        if f.get("rows"):
+            return self._rows_html(f, rec)
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "", [], {})]
         out = []
         for v in vals:
@@ -533,6 +543,10 @@ class RecordPages:
         targets = self.hub.concrete(f["target"])  # a base type's target (Subject) takes each type extending it
         if "/" in typed and typed.split("/", 1)[0] in (set(targets) | self.hub.member_types()):
             return typed
+        if "*" in targets and "/" in typed and self.hub.record_type(typed.split("/", 1)[0]):
+            return typed  # a reference to any record: its address, of a type the hub has
+        if all(t == "*" for t in targets):
+            raise Invalid(f"{f['label']}: {typed!r} is not a record's address (Type/id, as its page's address ends)")
         hits = []
         if " · " in typed:  # picked from the suggestions: the id after the dot decides
             rid = typed.rsplit(" · ", 1)[1].strip()
@@ -554,10 +568,40 @@ class RecordPages:
                                            f"{len(hits)} records are called {typed!r}: type more of it (a date of "
                                            f"birth or number), or open the one you mean and link it from there"))
 
+    def _ref_options(self, f, refs: list[str], me) -> tuple[list[tuple[str, str]], bool]:
+        """The records a reference field may be set to, as (Type/id, title), and whether there are too many to list
+        (then a name is typed). What it points at now (``refs``) is always one, even beyond the list or not readable
+        by this member: saving the form never drops a link the member did not touch."""
+        options, many = [], False
+        members = self.hub.member_types()
+        for t in self.hub.concrete(f["target"]):
+            if t in members and f.get("roles"):  # only the people who hold one of the field's roles
+                held = {f"{t}/{m['id']}": m["name"] for rid in f["roles"]
+                        for m in self.hub.active_holders(rid, persons_only=True)}
+                options += sorted(held.items(), key=lambda o: o[1])
+            elif t in members:  # a reference to a member of the practice: the people on the team
+                options += [(f"{t}/{m['id']}", m["name"]) for m in self.hub.members("person")
+                            if m["status"] == "active"]
+            elif t != "*" and self.hub.record_type(t) and self._may_read(me, t):
+                found = self.hub.records.search(t, limit=PICK + 1)
+                many = many or len(found) > PICK
+                options += [(f"{t}/{r['id']}", self.hub.title(r)) for r in found[:PICK]]
+        have = {v for v, _ in options}
+
+        def shown(r):
+            t, _, rid = r.partition("/")
+            if t in members:
+                m = self.hub.db.members.find_one({"_id": rid}, fields=["name"])
+                return m["name"] if m else r
+            return (self.hub.title(self.hub.records.read(t, rid) or {}) or r) if self._may_read(me, t) else r
+        return [(r, shown(r)) for r in refs if r not in have] + options, many
+
     def _input(self, f, rec, me) -> str:
         """A form control for a field, filled from the record (none for a field of a class they may not write)."""
         if not visibility.may_field(self.hub, me, f, write=True):
             return ""
+        if f.get("rows"):
+            return self._rows_input(f, rec, me)
         name = f["path"].removesuffix(".*")
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "")] \
             if rec else []
@@ -566,34 +610,20 @@ class RecordPages:
         spec = {**f, "name": name}
         if f["type"] == "reference":
             refs = [schema.ref_of(v) for v in vals if schema.ref_of(v)]
-            options, many = [], False
-            members = self.hub.member_types()
-            for t in self.hub.concrete(f["target"]):
-                if t in members and f.get("roles"):  # only the people who hold one of the field's roles
-                    held = {f"{t}/{m['id']}": m["name"] for rid in f["roles"]
-                            for m in self.hub.active_holders(rid, persons_only=True)}
-                    options += sorted(held.items(), key=lambda o: o[1])
-                elif t in members:  # a reference to a member of the practice: the people on the team
-                    options += [(f"{t}/{m['id']}", m["name"]) for m in self.hub.members("person")
-                                if m["status"] == "active"]
-                elif t != "*" and self.hub.record_type(t) and self._may_read(me, t):
-                    found = self.hub.records.search(t, limit=PICK + 1)
-                    many = many or len(found) > PICK
-                    options += [(f"{t}/{r['id']}", self.hub.title(r)) for r in found[:PICK]]
-            # what the record points at now is always an option, even beyond the list or not readable by this
-            # member: saving the form never drops a link the member did not touch
-            have = {v for v, _ in options}
-            def shown(r):
-                t, _, rid = r.partition("/")
-                if t in members:
-                    m = self.hub.db.members.find_one({"_id": rid}, fields=["name"])
-                    return m["name"] if m else r
-                return (self.hub.title(self.hub.records.read(t, rid) or {}) or r) if self._may_read(me, t) else r
-            options = [(r, shown(r)) for r in refs if r not in have] + options
+            multi = f["path"].endswith(".*")
+            if all(t == "*" for t in f["target"]):  # any record: nothing to list, so its address is typed
+                req = " required" if f.get("required") else ""
+                cid, ids = self._control_id(name, True)
+                ctl = (f'<input name="{e(name)}"{ids} value="{e(", ".join(refs))}" autocomplete="off" '
+                       f'spellcheck="false" placeholder="Type/id"{req}>')
+                helps = ([f["help"]] if f.get("help") else []) + [
+                    "Its address, Type/id, as its page's address ends" + (": several, separated by commas." if multi
+                                                                          else ".")]
+                return self._labelled(f, ctl, cid, helps)
+            options, many = self._ref_options(f, refs, me)
             own = self.hub.record_type((rec or {}).get("resourceType", ""))
             if own and own.parent == f["path"] and rec.get("id"):  # a record is never its own parent
                 options = [(v, lbl) for v, lbl in options if v != f"{own.id}/{rec['id']}"]
-            multi = f["path"].endswith(".*")
             if many and not multi:  # too many to list: type a name; the store is searched when the form is saved
                 dl = f"dl-{abs(hash(name)) % 10**8}"
                 cur = refs[0] if refs else ""
@@ -646,6 +676,211 @@ class RecordPages:
             if rt and self._may_read(me, rt.id):
                 spec["_titles"] = sorted({self.hub.title(r) for r in self.hub.records.search(rt.id, limit=300)})
         return self._field(spec, choices, val)
+
+    ROWS_BLANK = 3  # blank rows a rows editor offers; saved, three more are offered
+    ROW_DIGITS = 4  # a row's number in a form: past schema.ROWS_MAX it is refused, and a longer one is not a row
+
+    @staticmethod
+    def _column_key(c) -> str:
+        return c["path"].rsplit(".", 1)[1]
+
+    def _rows_input(self, f, rec, me) -> str:
+        """A list of rows (``rows``) as a table to edit: a row per item, a column per field at ``<list>.*.<key>``,
+        a box to remove each row, and blank rows to add. Each row names the item it came from (``._row``), so what
+        the form does not show of it (a column this member may not write, a value the type has no column for) is
+        kept. No script needed: more rows are offered each time it is saved."""
+        name = f["path"]
+        rows = [x for x in (schema.first(rec or {}, name) or []) if isinstance(x, dict)] if rec else []
+        cols = [c for c in f["columns"] if c.get("show", True) is not False and c.get("by") != "workflow"
+                and visibility.may_field(self.hub, me, c, write=True)]
+        own = self.hub.record_type((rec or {}).get("resourceType", "")) if rec else None
+        own_ref = f"{own.id}/{rec['id']}" if own and rec.get("id") else None
+        lists, extra = {}, []
+        for c in cols:  # a reference column's choices are listed once, for every row
+            if c["type"] == "reference":
+                refs = [r for r in (schema.ref_of(x.get(self._column_key(c))) for x in rows) if r]
+                options, many = self._ref_options(c, refs, me)
+                options = [(v, lbl) for v, lbl in options if v != own_ref]  # a record is never a row of its own
+                lists[c["name"]] = (options, many)
+                if many:
+                    extra.append(f'<datalist id="dl-{e(name)}-{e(c["name"])}">' + "".join(
+                        f'<option value="{e(lbl)} · {e(v.split("/", 1)[1])}">' for v, lbl in options) + "</datalist>")
+        head = "".join(f"<th scope='col'>{self._label_words(c)}</th>" for c in cols) + "<th scope='col'>Remove</th>"
+        body = []
+        for i, row in enumerate(rows + [None] * self.ROWS_BLANK):
+            cells = "".join(f"<td>{self._rows_cell(c, f'{name}.{i}.{self._column_key(c)}', row, i, lists)}</td>"
+                            for c in cols)
+            if row is not None:
+                came = row["_row"] if "_row" in row else i  # a form shown again: the stored row it came from, if any
+                tail = ((f'<td><input type="hidden" name="{e(name)}.{i}._row" value="{came}">' if came is not None
+                         else "<td>") + f'<input type="checkbox" name="{e(name)}.{i}._remove" value="1" '
+                        f'aria-label="Remove row {i + 1}"></td>')
+            else:
+                tail = "<td></td>"
+            body.append(f"<tr>{cells}{tail}</tr>")
+        helps = [f["help"]] if f.get("help") else []
+        helps.append(f"Fill in a blank row to add one; tick Remove to take one out. Saved, {self.ROWS_BLANK} more "
+                     f"blank rows are offered.")
+        return (f'<fieldset class="rows-edit"><legend>{self._label_words(f)}</legend>'
+                f'<input type="hidden" name="{e(name)}" value="rows">'
+                f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table>'
+                f'</div>{"".join(extra)}<small class="help">{" · ".join(e(h) for h in helps)}</small></fieldset>')
+
+    def _rows_cell(self, c, name: str, row: dict | None, i: int, lists: dict) -> str:
+        """One cell of a rows editor: the column's control, labelled by its column and row. Never ``required`` in
+        the page (a blank row is left blank); a row missing a required value is refused when saved."""
+        val = (row or {}).get(self._column_key(c))
+        label = f' aria-label="{e(c["label"])}, row {i + 1}"'
+        n = e(name)
+        if c["type"] == "reference":
+            options, many = lists[c["name"]]
+            cur = schema.ref_of(val) or ""
+            if many:
+                shown = dict(options).get(cur, cur)
+                typed = f"{shown} · {cur.split('/', 1)[1]}" if cur else ""
+                return (f'<input name="{n}"{label} list="dl-{e(name.split(".", 1)[0])}-{e(c["name"])}" '
+                        f'value="{e(typed)}" autocomplete="off" placeholder="type a name or number">')
+            opts = "".join(f'<option value="{e(v)}"{" selected" if v == cur else ""}>{e(lbl)}</option>'
+                           for v, lbl in options)
+            return f'<select name="{n}"{label}><option value=""></option>{opts}</select>'
+        if c["type"] == "member":
+            cur = str(val or "").removeprefix("member:")
+            opts = "".join(f'<option value="{e(m["id"])}"{" selected" if m["id"] == cur else ""}>{e(m["name"])}</option>'
+                           for m in self.hub.members("person") if m["status"] == "active")
+            return f'<select name="{n}"{label}><option value=""></option>{opts}</select>'
+        if c["type"] == "choice":
+            opts = "".join(f'<option value="{e(v)}"{" selected" if str(val) == str(v) else ""}>'
+                           f'{e(self._choice_label(c, v))}</option>' for v in c["choices"])
+            return f'<select name="{n}"{label}><option value=""></option>{opts}</select>'
+        if c["type"] == "boolean":
+            cur = "" if val is None else ("true" if val else "false")
+            opts = "".join(f'<option value="{v}"{" selected" if v == cur else ""}>{w}</option>'
+                           for v, w in (("", ""), ("true", "Yes"), ("false", "No")))
+            return f'<select name="{n}"{label}>{opts}</select>'
+        kind = {"number": "number", "date": "date", "datetime": "datetime-local"}.get(c["type"], "text")
+        more = ' step="any" inputmode="decimal"' if kind == "number" else ""
+        for k in ("min", "max"):
+            if kind == "number" and c.get(k) is not None:
+                more += f' {k}="{c[k]}"'
+        if kind == "datetime-local" and isinstance(val, str) and "T" in val:
+            val = val[:16]
+        shown = "" if val is None else (str(int(val)) if isinstance(val, float) and val.is_integer() else str(val))
+        return f'<input type="{kind}" name="{n}"{label} value="{e(shown)}"{more}>'
+
+    def _rows_from_form(self, f, form: dict, before: dict | None, lenient: bool) -> list[dict]:
+        """The rows a rows editor sent: each as the item it came from with its columns as typed; a row ticked to
+        remove, or with every column empty, is left out. A column the form did not send keeps its value."""
+        pre = f["path"] + "."
+        index = lambda v: int(v) if v.isdecimal() and len(v) <= self.ROW_DIGITS else None  # 0-9 only, short
+        idx = sorted({n for n in (index(k[len(pre):].split(".", 1)[0]) for k in form if k.startswith(pre))
+                      if n is not None})
+        if idx and idx[-1] >= schema.ROWS_MAX:
+            raise Invalid(f"{f['label']}: a form holds at most {schema.ROWS_MAX} rows")
+        old = [x for x in ((before or {}).get(f["path"]) or [])]
+        last = lambda v: (v[-1] if isinstance(v, list) and v else v) or ""
+        out = []
+        for i in idx:
+            if last(form.get(f"{pre}{i}._remove")):
+                continue
+            src = index(str(last(form.get(f"{pre}{i}._row"))))
+            came = src if src is not None and src < len(old) and isinstance(old[src], dict) else None
+            row = dict(old[came]) if came is not None else {}
+            for c in f["columns"]:
+                key = self._column_key(c)
+                if f"{pre}{i}.{key}" not in form:
+                    continue
+                sent = last(form[f"{pre}{i}.{key}"])
+                if (c["type"] == "datetime" and isinstance(row.get(key), str) and isinstance(sent, str)
+                        and sent and row[key][:16] == sent[:16] and len(sent) <= 16):
+                    continue  # shown to the minute: unchanged, it keeps its seconds and zone
+                try:
+                    val = self._coerce(c, form[f"{pre}{i}.{key}"])
+                except Invalid as exc:
+                    if lenient:
+                        continue
+                    raise Invalid(f"{f['label']}, row {len(out) + 1}: {exc}") from None
+                if val in (None, ""):
+                    row.pop(key, None)
+                else:
+                    row[key] = val
+            if any(row.get(self._column_key(c)) not in (None, "", [], {}) for c in f["columns"]):
+                if lenient:  # shown again after a refusal: each row still says which stored row it came from
+                    row["_row"] = came
+                out.append(row)
+        return out
+
+    @staticmethod
+    def _same_rows(new: list, old) -> bool:
+        """Whether rows as sent are the rows the record holds (a reference held as {reference} or Type/id alike)."""
+        flat = lambda rows: [{k: (schema.ref_of(v) or v) if isinstance(v, dict) else v for k, v in x.items()}
+                             if isinstance(x, dict) else x for x in (rows or [])]
+        return flat(new) == flat(old)
+
+    def _rows_html(self, f, rec) -> str:
+        """A list of rows (``rows``) read: a table, a column per field that holds something in some row."""
+        rows = [x for x in (schema.first(rec, f["path"]) or []) if isinstance(x, dict)]
+        if not rows:
+            return "<span class='muted'>—</span>"
+        cols = [c for c in f["columns"] if c.get("show", True) is not False
+                and any(x.get(self._column_key(c)) not in (None, "", [], {}) for x in rows)]
+        head = "".join(f"<th scope='col'>{e(c['label'])}</th>" for c in cols)
+        body = "".join("<tr>" + "".join(
+            f"<td>{self._value_html({**c, 'path': self._column_key(c), 'with': {}}, x)}</td>" for c in cols)
+            + "</tr>" for x in rows)
+        return f"<div class='tablewrap'><table class='rows'><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+
+    def _graph_panels(self, me, rt, rec, ref: str) -> str:
+        """For each graph (``graph``; fields sharing the same words are one, as a lot's parts and what it was split
+        from), where it leads from this record at every level, both ways: down (what it points at, and what those
+        point at), shown when it goes deeper than the record's own fields; up (everything that leads here). A row's
+        other values (how many, which positions) go beside each record, and the field it came by when the graph has
+        several. Past ``TRACE_ROWS`` the rest are counted, and the trace export has them all."""
+        out = []
+        held = {ref: rec}
+        for g in rt.graph_groups:
+            by_rel = {f["rel"]: f for f in g["fields"]}
+            for way in ("down", "up"):
+                got = self.hub.reach(me, ref, g["rels"], way)
+                rows, hidden, more = got["rows"], got["hidden"], got["more"]
+                if way == "down" and not more and not any(d > 1 for d, *_ in rows):
+                    continue  # one level: the record's own fields show it already
+                if not rows and not hidden:
+                    continue
+                for _, r, x, _, _ in rows:
+                    held[r] = x
+                items = []
+                for d, r, x, via, rel in rows:
+                    f = by_rel.get(rel) or g["fields"][0]
+                    whole = rt.field(f["row_of"]) if f.get("row_of") else None
+                    holder, target = (held.get(via), r) if way == "down" else (x, via)
+                    words = [f["label"]] if len(g["fields"]) > 1 and not whole else []
+                    if whole and holder:
+                        key = self._column_key(f)
+                        for item in schema.first(holder, whole["path"]) or []:
+                            if isinstance(item, dict) and schema.ref_of(item.get(key)) == target:
+                                words += [f"{c['label']} {self._plain_words(item.get(self._column_key(c)))}"
+                                          for c in whole["columns"] if c is not f and c.get("show", True) is not False
+                                          and item.get(self._column_key(c)) not in (None, "", [], {})]
+                    items.append(f'<li style="--depth:{d - 1}">{self.record_link(r)}'
+                                 + (f' <span class="muted">{e(" · ".join(words))}</span>' if words else "") + "</li>")
+                notes = []
+                if more:
+                    href = (f"{self.record_href(ref)}/trace?graph={urllib.parse.quote(g['fields'][0]['name'])}"
+                            f"&amp;way={way}")
+                    notes.append(f"And more: the first {len(rows)} are shown. <a href=\"{href}\">Download the whole "
+                                 f"trace</a> (CSV).")
+                if hidden:
+                    notes.append(f"And {hidden} you may not see.")
+                note = "".join(f"<p class='muted'>{n}</p>" for n in notes)
+                out.append(f"<section class='section graph'><h2>{e(g[way])}</h2>"
+                           + (f"<ul class='tree'>{''.join(items)}</ul>" if items else "") + note + "</section>")
+        return "".join(out)
+
+    @staticmethod
+    def _plain_words(v) -> str:
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v)
 
     def _on_screen(self, rt, op: str) -> list[dict] | None:
         """The tabs of the type's screen for ``op``, each with the editable fields it shows (None: no screen)."""
@@ -703,6 +938,8 @@ class RecordPages:
         """A form value as the field's type; None clears it."""
         if f["type"] == "reference":
             vals = raw if isinstance(raw, list) else [raw]
+            if all(t == "*" for t in f["target"]):  # addresses typed into one box, several to it
+                vals = [x for v in vals if v for x in re.split(r"[,\s]+", str(v)) if x]
             vals = [self._resolve_ref(f, v) for v in vals if v]
             if f["path"].endswith(".*"):
                 return vals
@@ -755,6 +992,14 @@ class RecordPages:
         # whole values first, then the plain values inside them, so a field for name.0.family edits the name
         fields = [f for f in fields if not NESTED.fullmatch(f["path"])] + [f for f in fields if NESTED.fullmatch(f["path"])]
         for f in fields:
+            if f.get("rows"):  # a table of rows: its marker says the form showed it
+                if f["path"] not in form:
+                    continue
+                val = self._rows_from_form(f, form, before, lenient)
+                if before is not None and self._same_rows(val, before.get(f["path"])):
+                    continue
+                data[f["path"]] = val
+                continue
             key = f["path"].removesuffix(".*")
             if NESTED.fullmatch(f["path"]):
                 if key not in form:
@@ -1539,7 +1784,7 @@ class RecordPages:
         empty: list = []  # read, a field with nothing in it is not a row: they are named once, below
 
         def row(f):
-            if f in prose or f in unseen:
+            if f in prose or f in unseen or f.get("row_of"):
                 return ""
             if not self._has_value(f, rec) and not req["query"].get("edit"):
                 empty.append(f["label"])
@@ -1598,12 +1843,14 @@ class RecordPages:
         if editable and not editing and rt.is_a("Booking") and schema.is_active(rt, rec):  # another time, member
             edit_btn = (f'<a class="btn secondary" href="{url}/reschedule" data-modal>Move</a>' + edit_btn)
         rail: list = []
+        if tab == "details" and rt.graphs and not (gone and gone.get("whole")):
+            main.append(self._graph_panels(me, rt, rec, ref))
         if tab == "details":
             used = hub.in_use_version(me, ref) if not is_page else None  # a page says so in its banner
             if used:
                 d = used["data"]
                 body = "".join(f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, d)}</td></tr>"
-                               for f in rt.fields if f.get("show", True) is not False
+                               for f in rt.fields if f.get("show", True) is not False and not f.get("row_of")
                                and not (lc and f["path"] == lc["path"]) and schema.first(d, schema.locate(d, f["path"], f.get("with"))) not in (None, ""))
                 main.append(f'<section class="card in-use"><h3>In use: the {e(lc["in_use"])} version</h3>'
                             f'<p class="muted">This {e(rt.label.lower())} is being revised ({e(rt.state_label(st).lower())}). Until the '
@@ -2441,7 +2688,7 @@ class RecordPages:
             adds = sorted(m.type_sources) + [f"+ {did}" for (_, did) in m.extensions]
             rows.append(f'<tr><td><b>{e(m.practice.get("name", m.id))}</b><br><span class="muted">{e(m.id)} '
                         f'v{e(str(m.version))}</span></td><td>{e(m.practice.get("summary", ""))}</td>'
-                        f'<td>{e(", ".join(adds))}</td><td>{e(", ".join(m.requires) or "—")}</td><td>{act}</td></tr>')
+                        f'<td>{e(", ".join(adds))}</td><td>{e(", ".join(packmod.needs_words(m)) or "—")}</td><td>{act}</td></tr>')
         warn = (f'<div class="card error" role="alert"><b>The practice pack</b>: {e(hub.pack_problem)}</div>'
                 if hub.pack_problem and may else "")
         body = (warn + "<p class='muted'>A module adds roles, record types, workflows and views, and may add fields to "

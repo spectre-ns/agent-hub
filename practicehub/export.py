@@ -534,6 +534,54 @@ def record(hub, member, ref: str, fmt: str) -> Export:
     return Export(body, fmt, safe_filename(base, FORMATS[fmt][2]), 1, 0)
 
 
+TRACE_ROWS = 20000  # rows a trace export holds at most: a recall's whole reach, past what a page shows
+
+
+def trace(hub, member, ref: str, graph: str, way: str) -> Export:
+    """Where one of a record's graphs leads from it, every level (``hub.reach``), as CSV: a row per record reached,
+    with its level, what it was reached from and by which reference, and the row's other values where the graph is a
+    list of rows (how many). ``graph``: the name of a graph field of the record's type (the group it shares words with
+    is walked whole); ``way``: down or up. Records the member may not read are left out and counted; each one in the
+    file is a read on the track, and the trace an export of its own."""
+    rtype, _, rid = ref.partition("/")
+    rt = hub.record_type_for_reading(rtype)
+    if rt is None or rtype in hub.member_types():
+        raise NotFound(f"there is no {ref}")
+    hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
+    rec = hub.redact(member, hub.records.read(rtype, rid))
+    if not rec:
+        raise NotFound(f"there is no {ref}")
+    group = next((g for g in rt.graph_groups if any(f["name"] == graph for f in g["fields"])), None)
+    if group is None or way not in ("down", "up"):
+        raise NotFound(f"{a_label(rt)} has no graph {graph!r} to trace {way}")
+    got = hub.reach(member, ref, group["rels"], way, limit=TRACE_ROWS)
+    label = {f["rel"]: f["label"] for f in group["fields"]}
+    header = ["level", "record", "title", "status", "reached from", "by", "with"]
+    rows, refs = [], []
+    for depth, r, x, came, rel in got["rows"]:
+        holder = hub.redact(member, hub.records.read(*came.split("/", 1))) if way == "down" else x  # as they see it
+        target = r if way == "down" else came
+        words = []
+        for f in group["fields"]:
+            whole = rt.field(f["row_of"]) if f.get("row_of") else None
+            if not whole or f["rel"] != rel or not holder:
+                continue
+            key = f["path"].rsplit(".", 1)[1]
+            for item in schema.first(holder, whole["path"]) or []:
+                if isinstance(item, dict) and schema.ref_of(item.get(key)) == target:
+                    words += [f"{c['label']} {item.get(c['path'].rsplit('.', 1)[1])}" for c in whole["columns"]
+                              if c is not f and item.get(c["path"].rsplit(".", 1)[1]) not in (None, "", [], {})]
+        flag = (hub.record_type(r.split("/", 1)[0]) or rt).flag
+        rows.append([depth, r, hub.title(x), x.get(flag, "") if flag else "", came, label.get(rel, rel),
+                     " · ".join(words)])
+        refs.append(r)
+    if got["more"]:
+        rows.append(["", "", f"and more: only the first {TRACE_ROWS} are in this file", "", "", "", ""])
+    _log(hub, member, refs, "csv", what=ref, data={"trace": graph, "way": way, "left_out": got["hidden"]})
+    name = safe_filename(f"{rtype}-{rid}-{group[way]}", FORMATS["csv"][2])
+    return Export(csv_bytes(header, rows), "csv", name, len(refs), got["hidden"])
+
+
 def a_label(rt) -> str:
     return f"{rt.label} ({rt.id})" if rt.label != rt.id else rt.id
 

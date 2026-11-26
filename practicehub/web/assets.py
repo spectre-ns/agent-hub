@@ -502,6 +502,10 @@ label.radio{font-weight:400;color:var(--fg);display:inline-flex;align-items:cent
 textarea.code{font:13px/20px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 fieldset.choices{border:0;margin:12px 0 0;padding:0;min-width:0}
 fieldset.slot-picker{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.rows-edit{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.rows-edit>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
+fieldset.rows-edit .tablewrap{margin:0 0 4px}fieldset.rows-edit td{padding:4px;vertical-align:middle}
+fieldset.rows-edit td input:not([type=checkbox]),fieldset.rows-edit td select{width:100%;min-width:6em;margin:0}
 fieldset.slot-picker>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
 .slot-filters{display:flex;flex-wrap:wrap;gap:0 12px}.slot-filters label{flex:1 1 160px;margin-top:0}
 /* a screen's tabs: every part stays in the form (a required field is never hidden); the tab links jump to a part */

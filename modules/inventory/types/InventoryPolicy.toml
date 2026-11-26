@@ -52,6 +52,12 @@ label = "Held stock leaves only by a nonconformance"
 type = "boolean"
 
 [[field]]
+name = "exact_genealogy"
+label = "Each serial built names exactly what went into it"
+type = "boolean"
+help = "a build making several serials must say which each component serial goes into; off, an unnamed one is linked to every serial the build made (a recall over-includes)"
+
+[[field]]
 name = "fefo"
 label = "First expiry, first out"
 type = "choice"

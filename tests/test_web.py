@@ -1190,24 +1190,54 @@ def test_a_wiki_has_a_second_column_of_spaces_and_the_open_spaces_page_tree(hub,
     assert '<nav class="subnav"' not in call(server, "GET", "/records/Document", amara)[1]
 
 
-def test_products_have_product_lines_beside_them_and_show_their_changes(hub, server):
+def test_an_assembly_shows_its_bill_and_where_it_is_used_and_its_changes(hub, server):
     rana, amara = token(hub, "rana"), token(hub, "dr-amara")
-    for name in ("dms", "qms", "plm"):
+    for name in ("dms", "qms", "inventory", "plm"):
         assert call(server, "POST", f"/modules/{name}/review-code", amara)[0] == 303
         assert call(server, "POST", "/modules", rana, form={"name": name})[0] == 303
     for m in hub.pack.modules:
         m.module.demo(hub)
-    kit = next(p for p in hub.records.search("Product", limit=None) if p["number"] == "WC-100")
+    parts = {p["code"]: p for p in hub.records.search("Part", limit=None)}
+    kit, gauze = parts["WC-100"], parts["WC-201"]
     co = next(iter(hub.records.search("ChangeOrder", limit=None)))
-    page = call(server, "GET", f"/records/Product/{kit['id']}", rana)[1]
-    nav = re.search(r'<nav class="subnav".*?</nav>', page, re.S).group(0)
-    assert "Product lines" in nav
-    assert ">WC Wound care</a>" in nav and 'aria-current="page"' in nav
-    linked = call(server, "GET", f"/records/Product/{kit['id']}?tab=links", rana)[1]
+    page = call(server, "GET", f"/records/Part/{kit['id']}", rana)[1]
+    assert "Bill of materials" in page and f"/records/Part/{gauze['id']}" in page and "left pouch" in page
+    assert "Used in" in call(server, "GET", f"/records/Part/{gauze['id']}", rana)[1]
+    linked = call(server, "GET", f"/records/Part/{kit['id']}?tab=links", rana)[1]
     assert f"/records/ChangeOrder/{co['id']}" in linked                   # the change order, on its Linked tab
-    assert "Products" in call(server, "GET", "/views/plm-products", rana)[1]
-    # sam reads products but is not given change orders' quality context; the product page still opens
-    assert call(server, "GET", f"/records/Product/{kit['id']}", token(hub, "sam"))[0] == 200
+    view = call(server, "GET", "/views/plm-products", rana)[1]
+    assert "Assemblies" in view and "WC-100" in view and "WC-201" not in view   # a part with a bill only
+    # sam reads parts but is not given change orders' quality context; the part page still opens
+    assert call(server, "GET", f"/records/Part/{kit['id']}", token(hub, "sam"))[0] == 200
+
+
+def test_a_reference_to_any_record_is_typed_as_its_address(hub, server):
+    """A reference field whose target is any record (a part's specifications, which inventory names without
+    needing document control) cannot list every record: the form gives a box for addresses (Type/id), several
+    separated by commas, and refuses what is not one."""
+    rana, amara = token(hub, "rana"), token(hub, "dr-amara")
+    assert call(server, "POST", "/modules/inventory/review-code", amara)[0] == 303
+    assert call(server, "POST", "/modules", rana, form={"name": "inventory"})[0] == 303
+    for m in hub.pack.modules:   # inventory alone
+        m.module.demo(hub)
+    part = next(p for p in hub.records.search("Part", limit=None) if p["code"] == "GZ-10")
+    where = next(iter(hub.records.search("Location", limit=None)))
+    patient = hub.db.records.find_one({"type": "Patient"})["_id"]
+    form = call(server, "GET", "/records/Part/new", rana)[1]
+    assert re.search(r'<input name="specs"[^>]*placeholder="Type/id"', form) and '<select name="specs"' not in form
+    two = f"Location/{where['id']}, {patient}"
+    code, _ = call(server, "POST", f"/records/Part/{part['id']}/edit", rana, form={"code": "GZ-10", "specs": two})
+    assert code == 303
+    from practicehub import schema
+    assert [schema.ref_of(x) for x in hub.records.read("Part", part["id"])["specs"]] == [f"Location/{where['id']}",
+                                                                                          patient]
+    assert {x["to_ref"] for x in hub.db.links.find({"from_ref": f"Part/{part['id']}", "rel": "specified-by"})} == {
+        f"Location/{where['id']}", patient}
+    page = call(server, "GET", f"/records/Part/{part['id']}?edit=1", rana)[1]
+    assert re.search(r'<input name="specs"[^>]*value="Location/', page)   # shown again as addresses
+    for typed in ("SPEC-101", "Nothing/abc"):
+        code, page = call(server, "POST", f"/records/Part/{part['id']}/edit", rana, form={"specs": typed})
+        assert code == 422 and "is not a record&#x27;s address" in page, typed
 
 
 def test_start_work_picks_a_record_type_and_settings_live_in_the_practice_menu(hub, server):
@@ -2855,3 +2885,90 @@ def test_a_keys_own_address_and_the_search_box_open_what_it_names_for_who_may_se
         assert code == 404 and "nothing you may open has the key" in page, path
     code, _, _ = _get_with(server, f"/{hub.pack.subject['path']}?q=Ellen", amara)
     assert code == 200  # a name is searched as before
+
+
+def test_rows_are_edited_in_a_table_and_a_graph_is_shown_both_ways(hub, server, monkeypatch, tmp_path):
+    """A list of rows is a table in the form: each row's cells, a box to remove it, and blank rows to add one; saved,
+    the rows and their links are what the form said. The record page shows the rows as a table, the levels below
+    (Bill of materials) when there is more than one, and every record that uses it (Used in)."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = token(hub, "rana")
+    e_ = kit(hub, "KE")
+    b, c, d = kit(hub, "KB"), kit(hub, "KC", (e_, 4)), kit(hub, "KD")
+    a = kit(hub, "KA", (b, 1), (c, 2))
+    code, page = call(server, "GET", f"/records/Kit/{a['id']}?edit=1", rana)
+    assert code == 200
+    assert re.search(rf'<select name="bom\.0\.part"[^>]*>.*?<option value="Kit/{b["id"]}" selected', page, re.S)
+    assert 'name="bom.1._remove"' in page and 'name="bom.4.part"' in page and 'name="bom.5.part"' not in page
+    assert 'aria-label="quantity, row 1"' in page.lower()
+    code, _ = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana, form=[
+        ("code", "KA"), ("bom", "rows"),
+        ("bom.0._row", "0"), ("bom.0.part", f"Kit/{b['id']}"), ("bom.0.quantity", "1"), ("bom.0._remove", "1"),
+        ("bom.1._row", "1"), ("bom.1.part", f"Kit/{c['id']}"), ("bom.1.quantity", "5"),
+        ("bom.2.part", f"Kit/{d['id']}"), ("bom.2.quantity", "2"),
+        ("bom.3.part", ""), ("bom.3.quantity", "")])
+    assert code == 303
+    from practicehub import schema
+    rec = hub.records.read("Kit", a["id"])
+    assert [(schema.ref_of(x["part"]), x["quantity"]) for x in rec["bom"]] == [(f"Kit/{c['id']}", 5),
+                                                                              (f"Kit/{d['id']}", 2)]
+    assert {x["to_ref"] for x in hub.db.links.find({"from_ref": f"Kit/{a['id']}", "rel": "made-of"})} == {
+        f"Kit/{c['id']}", f"Kit/{d['id']}"}
+    code, page = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana, form=[
+        ("bom", "rows"), ("bom.0._row", "0"), ("bom.0.part", f"Kit/{c['id']}"), ("bom.0.quantity", "5"),
+        ("bom.0._remove", "1"), ("bom.1._row", "1"), ("bom.1.part", f"Kit/{d['id']}"), ("bom.1.quantity", "")])
+    assert code == 422 and "row 1" in page  # a row missing a required value is refused, by its row
+    # shown again as typed, the row left is the first, and still names the stored row it came from
+    assert 'name="bom.0._row" value="1"' in page and 'name="bom.1._row"' not in page
+    page = call(server, "GET", f"/records/Kit/{a['id']}", rana)[1]
+    assert "<table class='rows'>" in page and "Bill of materials" in page and "KE" in page
+    assert "Quantity 4" in page  # a row's other values beside the record it names
+    page = call(server, "GET", f"/records/Kit/{e_['id']}", rana)[1]
+    assert "Used in" in page and "KA" in page and "KC" in page and "Bill of materials" not in page
+
+
+def test_a_trace_downloads_whole_and_a_page_says_when_it_shows_only_the_first(hub, server, monkeypatch, tmp_path):
+    """A graph's trace downloads as CSV, every level, with each row's other values; a record's page shows the first
+    ``TRACE_ROWS`` and links the download for the rest. A graph the type does not have is not there."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = token(hub, "rana")
+    c = kit(hub, "KC")
+    b = kit(hub, "KB", (c, 3))
+    a = kit(hub, "KA", (b, 2))
+    code, body = call(server, "GET", f"/records/Kit/{a['id']}/trace?graph=part&way=down", rana)
+    lines = body.strip().splitlines()
+    assert code == 200 and lines[0].startswith("level,record,title,status,reached from,by,with"), body
+    assert lines[1].startswith(f"1,Kit/{b['id']},KB,") and lines[1].endswith("Quantity 2")
+    assert lines[2].startswith(f"2,Kit/{c['id']},KC,") and lines[2].endswith("Quantity 3")
+    code, body = call(server, "GET", f"/records/Kit/{c['id']}/trace?graph=part&way=up", rana)
+    assert code == 200 and [x.split(",")[2] for x in body.strip().splitlines()[1:]] == ["KB", "KA"]
+    assert call(server, "GET", f"/records/Kit/{a['id']}/trace?graph=code&way=down", rana)[0] == 404
+    assert call(server, "GET", f"/records/Kit/{a['id']}/trace?graph=part&way=sideways", rana)[0] == 404
+    monkeypatch.setattr(type(hub), "TRACE_ROWS", 1)
+    page = call(server, "GET", f"/records/Kit/{a['id']}", rana)[1]
+    assert "And more: the first 1 are shown." in page
+    assert f'href="/records/Kit/{a["id"]}/trace?graph=part&amp;way=down"' in page
+
+
+def test_a_rows_form_holds_a_bounded_number_of_rows_and_keeps_what_it_shows_to_the_minute(
+        hub, server, monkeypatch, tmp_path):
+    """A rows form numbers its rows below ``ROWS_MAX``: a higher number is refused, and a longer one is not a row. A
+    time a row holds is shown to the minute; sent back unchanged, it keeps its seconds and zone."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = token(hub, "rana")
+    b = kit(hub, "KB")
+    a = hub.create_record(M(hub, "rana"), "Kit", {"code": "KA", "bom": [
+        {"part": f"Kit/{b['id']}", "quantity": 1, "checked": "2026-11-20T09:15:42+00:00"}]})
+    row = [("code", "KA"), ("bom", "rows"), ("bom.0._row", "0"), ("bom.0.part", f"Kit/{b['id']}"),
+           ("bom.0.quantity", "2"), ("bom.0.checked", "2026-11-20T09:15")]
+    code, page = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana,
+                      form=row + [("bom.1000.part", f"Kit/{b['id']}"), ("bom.1000.quantity", "1")])
+    assert code == 422 and "a form holds at most 1000 rows" in page
+    code, _ = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana,
+                   form=row + [("bom.10000.part", f"Kit/{b['id']}"), ("bom.10000.quantity", "1")])
+    assert code == 303
+    rec = hub.records.read("Kit", a["id"])
+    assert [(x["quantity"], x["checked"]) for x in rec["bom"]] == [(2, "2026-11-20T09:15:42+00:00")]

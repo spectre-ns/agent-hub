@@ -1,6 +1,6 @@
 id = "inventory-stock"
 title = "Stock"
-summary = "What is in stock and where, what is held, and the latest moves."
+summary = "What is in stock and where, what is held, and the latest moves and builds."
 
 [[widget]]
 kind = "table"
@@ -21,8 +21,9 @@ columns = ["part", "lot", "serial", "quantity", "location", "expiry"]
 kind = "table"
 title = "Running low"
 type = "Part"
-where = "record.status == 'active' and record.minimum_stock != null and record.available <= record.minimum_stock"
-columns = ["code", "name", "available", "minimum_stock", "reorder_quantity"]
+# a part being revised, or held by a change, is still stocked as last approved: it runs low all the same
+where = "record.status != 'obsolete' and record.minimum_stock != null and record.available <= record.minimum_stock"
+columns = ["code", "name", "available", "minimum_stock", "reorder_quantity", "status"]
 
 [[widget]]
 kind = "table"
@@ -33,7 +34,21 @@ limit = 20
 
 [[widget]]
 kind = "table"
+title = "Recent builds"
+type = "Build"
+columns = ["part", "quantity", "makes", "built", "status", "reject_reason"]
+limit = 20
+
+[[widget]]
+kind = "table"
 source = "items"
-title = "Waiting for a signature"
+title = "Moves waiting for a signature"
 workflow = "inventory-post"
+status = ["open", "claimed"]
+
+[[widget]]
+kind = "table"
+source = "items"
+title = "Builds waiting for a signature"
+workflow = "inventory-build"
 status = ["open", "claimed"]

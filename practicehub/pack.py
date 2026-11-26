@@ -86,6 +86,7 @@ class Pack:
     skills_fn: object = None         # set by the hub: the skills the practice runs now (under change control)
     types_fn: object = None          # set by the hub: the record types the practice has now
     requires: list = field(default_factory=list)  # modules this one builds on (a CAPA points at a controlled Document)
+    requires_version: dict = field(default_factory=dict)  # the least version of each it needs ("inventory>=6"): id → "6"
     extensions: dict = field(default_factory=dict)  # (kind, id) -> TOML that adds to another part's type or view
     portal: dict = field(default_factory=dict)      # [portal]: the online booking portal (``practicehub/portal.py``)
 
@@ -426,6 +427,7 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
             raise ValueError(f"the practice {pack_dir.name}: [practice] timezone: say the practice's time zone "
                              "(a name like America/Halifax)")
         zone(doc["practice"]["timezone"])
+    needs = [parse_require(f"the {kind} {pack_dir.name}", r) for r in doc["practice"].get("requires", []) or []]
     mod = _load_module(code_dir, pack_id, code) if run_code else None
     pack = Pack(id=pack_id, dir=pack_dir, practice=doc["practice"], roles=doc.get("roles", []),
                 data_classes=doc.get("data_classes", []), grants=doc.get("grants", {}), members=doc.get("members", []),
@@ -434,7 +436,8 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
                 block_sources=blocks, type_sources={k: v for d in layers for k, v in _sources(d / "types").items()},
                 view_sources={k: v for d in layers for k, v in _sources(d / "views").items()},
                 events=list(doc.get("events", [])), version=str(doc.get("version") or doc["practice"].get("version", "0")),
-                kind=kind, module_sha256=mod_sha, digest=digest(pack_dir), requires=list(doc["practice"].get("requires", []) or []),
+                kind=kind, module_sha256=mod_sha, digest=digest(pack_dir), requires=[r for r, _ in needs],
+                requires_version={r: v for r, v in needs if v},
                 extensions=_merged_ext(layers), portal=dict(doc.get("portal") or {}))
     if any(r.get("id") == "everyone" for r in pack.roles):
         raise ValueError("roles: 'everyone' is reserved: [grants.everyone] gives every member read access")
@@ -470,6 +473,35 @@ def _load(pack_dir: Path, kind: str, expect_sha256: str | None, run_code: bool,
     return pack
 
 
+REQUIRE = re.compile(r"\s*([a-z][a-z0-9-]*)\s*(?:>=\s*(\d+(?:\.\d+)*))?\s*")
+
+
+def parse_require(where: str, text) -> tuple[str, str | None]:
+    """One of a module's ``requires``: a module id, and the least version of it this one needs (``inventory>=6``)."""
+    m = REQUIRE.fullmatch(str(text))
+    if not m:
+        raise ValueError(f"{where}: requires = {text!r}: a module id, or one with the least version it needs "
+                         f"(\"inventory>=6\")")
+    return m.group(1), m.group(2)
+
+
+def version_key(v) -> tuple:
+    """A module version to compare: "6" < "6.1" < "10"; words in it count as nothing."""
+    return tuple(int(x) if x.isdigit() else 0 for x in str(v or "0").split("."))
+
+
+def needs_words(m: Pack) -> list[str]:
+    """What a module builds on, as its module.toml says it: "dms", "inventory 6 or later"."""
+    return [f"{r} {m.requires_version[r]} or later" if r in m.requires_version else r for r in m.requires]
+
+
+def too_old(m: Pack, versions: dict) -> list[str]:
+    """Of what ``m`` builds on, those installed at a version older than it needs (``versions``: id → version), each
+    as "inventory 5 (needs 6 or later)"."""
+    return [f"{r} {versions[r]} (needs {want} or later)" for r, want in m.requires_version.items()
+            if r in versions and version_key(versions[r]) < version_key(want)]
+
+
 def add_module(pack: Pack, m: Pack) -> None:
     """Merge an overlay module's code (actions, providers, guards, stand-ins) into the practice. Its definitions stay
     in the module; lookups span every part. A module may not replace what the practice or another module defines."""
@@ -478,6 +510,9 @@ def add_module(pack: Pack, m: Pack) -> None:
     if missing:
         raise ValueError(f"module {m.id} builds on {', '.join(missing)}: install {'it' if len(missing) == 1 else 'them'}"
                          f" first")
+    old = too_old(m, {x.id: x.version for x in pack.modules if x is not m})
+    if old:
+        raise ValueError(f"module {m.id} builds on {', '.join(old)}: upgrade {'it' if len(old) == 1 else 'them'} first")
     # check everything before changing anything, so a refused module leaves the practice as it was
     for what in ("actions", "providers", "standins", "guards"):
         mine, theirs = getattr(pack, what), getattr(m, what)

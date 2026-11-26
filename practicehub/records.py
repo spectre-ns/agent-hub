@@ -93,6 +93,7 @@ def _prefix(word: str) -> dict:
 class RecordStore(Protocol):
     def create(self, rtype: str, data: dict) -> dict: ...
     def read(self, rtype: str, rid: str) -> dict | None: ...
+    def read_many(self, refs: list[str]) -> dict[str, dict]: ...
     def update(self, rtype: str, rid: str, data: dict) -> dict: ...
     def search(self, rtype: str | None = None, *, subject: str | None = None, limit: int | None = 200,
                text: str | None = None, field: str | None = None, since: str | None = None,
@@ -171,6 +172,15 @@ class LocalRecordStore:
     def read(self, rtype, rid):
         row = self.db.records.get(f"{rtype}/{rid}")
         return row["data"] if row else None
+
+    def read_many(self, refs):
+        """The records at these addresses ("Type/id"), by address, in one read; one that does not exist is left out."""
+        out = {}
+        refs = sorted(set(refs))
+        for i in range(0, len(refs), 1000):
+            for row in self.db.records.find({"_id": {"$in": refs[i:i + 1000]}}, fields=["_id", "data"]):
+                out[row["_id"]] = row["data"]
+        return out
 
     def update(self, rtype, rid, data):
         with self.db:
@@ -265,6 +275,14 @@ class MedplumRecordStore:
 
     def read(self, rtype, rid):
         return self._call("GET", f"{rtype}/{urllib.parse.quote(rid)}")
+
+    def read_many(self, refs):
+        out = {}
+        for ref in sorted(set(refs)):
+            rec = self.read(*ref.split("/", 1))
+            if rec is not None:
+                out[ref] = rec
+        return out
 
     def update(self, rtype, rid, data):
         rec = {k: v for k, v in data.items() if k != "meta"}

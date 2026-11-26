@@ -2584,6 +2584,12 @@ class Engine:
             elif prior == "record.editors":
                 if run["record"] and member["id"] in hub.revision_authors(run["record"]):
                     return False, "whoever wrote or changed this record does not also approve it"
+            elif wfmod.NAMED_EDITORS.fullmatch(prior):
+                name = wfmod.NAMED_EDITORS.fullmatch(prior).group(1)
+                wrote = [r for r in hub.named_refs(run["record"], name) if member["id"] in hub.revision_authors(r)]
+                if wrote:
+                    return False, (f"whoever wrote or changed {hub.title(hub.records.read(*wrote[0].split('/', 1)))} (in its "
+                                   f"{name.replace('_', ' ')}) does not also do this")
             elif self._did(run, prior, member["id"]):  # who did which step: the run's step history
                 return False, f"whoever did '{wf.step(prior).title}' does not also do this"
         for c in step.context:

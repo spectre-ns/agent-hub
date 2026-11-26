@@ -41,6 +41,9 @@ APPROVAL_WORKFLOW = "approval-notice"  # the home of a notice that a change wait
 APPROVAL_SOURCE = wfmod.acts_only_source(
     APPROVAL_WORKFLOW, "Waiting for a policy owner",
     "A change someone asked for waits for a second policy owner to approve it.", "look", "Approve or decline it")
+# the hub's own actors (a workflow, a module, a pack, a record type, a trigger, the command line): who did the work,
+# named as a member is, though no member is kept for them
+BUILT_IN_ACTORS = ("workflow:", "module:", "pack:", "type:", "trigger:", "cli:")
 
 
 class HubError(Exception):
@@ -732,6 +735,56 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                              if problem else "restart the hub to load it")}
         return {"state": "available", "installed": False, "running": False, "why": "", "next": ""}
 
+    def module_version(self, mid: str) -> str | None:
+        """The version of a module installed here: as loaded, else as its last install or upgrade signed it."""
+        m = next((x for x in (self.pack.modules if self.pack else []) if x.id == mid), None)
+        if m is not None:
+            return m.version
+        rows = self.track.trusted({"action": {"$in": ["module.installed", "module.upgraded"]},
+                                   "subject": f"module:{mid}"}, sort=[("seq", DESC)], limit=1)
+        return str(rows[0]["data"].get("version")) if rows and rows[0]["data"].get("version") is not None else None
+
+    def _check_builds_on(self, m: packmod.Pack, verb: str) -> None:
+        """What a module builds on is installed here at the version it needs (``requires = ["inventory>=6"]``)."""
+        old = packmod.too_old(m, {r: self.module_version(r) for r in m.requires_version if r in self.installed_modules()})
+        if old:
+            raise Invalid(f"the {m.id} module builds on {', '.join(old)}: upgrade "
+                          f"{'it' if len(old) == 1 else 'them'} first, then {verb} {m.id}")
+
+    def _check_upgrade_keeps(self, m: packmod.Pack, plan: dict) -> None:
+        """An upgrade that drops a record type still holding records, or a workflow with work under way, is refused:
+        an upgrade retires what the new version no longer ships, and records of a retired type, or runs of a
+        retired workflow, would be stranded. Removing the module and installing it again keeps them readable."""
+        problems = []
+        running = None
+        for label in plan["removed"]:
+            kind, did = label.split(" ", 1)
+            if kind == "type" and self.records.search(did, limit=1):
+                problems.append(f"it no longer has the record type {did}, and there are {did} records")
+            elif kind == "workflow":
+                if running is None:
+                    running = [r for r in self.engine.runs(status="running", limit=10000) if not r.get("resting")]
+                n = sum(1 for r in running if r["workflow_id"] == did)
+                if n:
+                    problems.append(f"it no longer has the workflow {did}, and {n} of its runs are under way")
+        users = [f"{x} (needs {m.id} {want} or later)" for x in self.installed_modules() if x != m.id
+                 for want in [self._requires_version(x).get(m.id)]
+                 if want and packmod.version_key(m.version) < packmod.version_key(want)]
+        problems += [f"{u} builds on it" for u in users]
+        if problems:
+            raise Invalid(f"the {m.id} module {m.version} cannot be put in place over this one: remove the module "
+                          f"(its records stay readable) and install it again, after finishing the work under way",
+                          problems)
+
+    def _requires_version(self, mid: str) -> dict:
+        m = next((x for x in (self.pack.modules if self.pack else []) if x.id == mid), None)
+        if m is None:
+            try:
+                m = packmod.load_module(mid, run_code=False)
+            except (FileNotFoundError, ValueError):
+                return {}
+        return dict(m.requires_version)
+
     def module_requires(self, mid: str) -> list[str]:
         """What a module builds on, from its module.toml: the loaded one, else as it is on disk."""
         m = next((x for x in (self.pack.modules if self.pack else []) if x.id == mid), None)
@@ -1036,6 +1089,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             raise Invalid(f"the {m.id} module builds on {', '.join(stopped)}, which "
                           f"{'is' if len(stopped) == 1 else 'are'} installed but not running here ("
                           + "; ".join(self.module_status(r)["why"] for r in stopped) + "): fix that first")
+        self._check_builds_on(m, "install")
         self._require_code_review(actor, m, None)
         m = self._load_reviewed(name, m)
         try:
@@ -1291,6 +1345,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         plan = self.module_plan(name)
         if plan["clashes"]:
             raise Invalid(f"the {new.id} module would take over definitions it does not own", plan["clashes"])
+        absent = [r for r in new.requires if r not in self.installed_modules()]
+        if absent:
+            raise Invalid(f"the {new.id} module {new.version} builds on {', '.join(absent)}: install "
+                          f"{'it' if len(absent) == 1 else 'them'} first, then upgrade {new.id}")
+        self._check_builds_on(new, "upgrade")
+        self._check_upgrade_keeps(new, plan)
         self._require_code_review(actor, new, self._module_digest(new.id))
         new = self._load_reviewed(name, new)
         if old is not None:
@@ -3141,6 +3201,21 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         return [{**{k: v for k, v in r.items() if k not in ("_id", "refs")}, "data": self.redact(member, r["data"])}
                 for r in rows]
 
+    def named_refs(self, ref: str | None, name: str) -> list[str]:
+        """The records a record names in one of its reference fields (``name``: the field, or the list it sits in,
+        as a change order's ``parts``), in order, each once."""
+        if not ref or "/" not in ref:
+            return []
+        rtype, rid = ref.split("/", 1)
+        rt, rec = self.record_type(rtype), self.records.read(rtype, rid)
+        if not rt or not rec:
+            return []
+        out: list[str] = []
+        for f in rt.references:
+            if f["name"] == name or f["path"].split(".")[0] == name:
+                out += [r for r in (schema.ref_of(v) for v in schema.get(rec, f["path"])) if r and r not in out]
+        return out
+
     def revision_authors(self, ref: str) -> set[str]:
         """Who wrote what the record says now: whoever created it or changed a field other than its lifecycle state,
         since it was last in its lifecycle's ``in_use`` state (the approved revision others reviewed). Moving a
@@ -3500,15 +3575,45 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     out.append(f"{f['label']}: only someone who is a {' or '.join(names).lower()} may be chosen")
         return out
 
+    def _check_refs_readable(self, member: dict, rt: schema.RecordType, rec: dict, before: dict | None) -> None:
+        """A person or an agent adds a reference only to a record they may read: its type's data class, and not one a
+        restriction withholds from them whole. Said the same way whether or not there is such a record, and before
+        anything says whether there is, so a write never tells someone what they may not read (a reference to any
+        record takes an address typed by hand). What the record had before, and what a workflow writes, are kept. A
+        service (an integration a policy owner set up, such as a lab feed filing results into a patient's file) may
+        write what it may not read: it names records it was given, not ones it types."""
+        if member.get("kind") in ("automation", "service") or getattr(self, "_upgrading", False):
+            return
+        had = {to for _, to in schema.links(rt, before)} if before else set()
+        members, problems = self.member_types(), []
+        for rel, to in schema.links(rt, rec):
+            t, _, tid = to.partition("/")
+            if to in had or t in members or not self.record_type(t):
+                continue
+            ok = self.may_read(member, t)
+            if ok:
+                there = self.records.read(t, tid)
+                seen = self.redact(member, there) if there else None
+                ok = not (seen and (visibility.withheld(seen) or {}).get("whole"))
+            if not ok:
+                problems.append(f"{rt.label}: {rel} names {to}, which is not a record you may read")
+        if problems:
+            raise Invalid(f"the {rt.label.lower()} has problems", problems)
+
     def _check_record(self, rt: schema.RecordType, rec: dict, before: dict | None = None) -> None:
         problems = schema.validate(rt, rec, members=self._member_ids(), is_a=self.is_a)
         problems += self._role_problems(rt, rec, before) if not problems else []
         for a in _files_in(rec):  # a file is added first (``add_file``); a record names only one the hub has
             if self.db.file_meta(a["blob"]) is None:
                 problems.append(f"{rt.label}: no file {a['blob'][:12]}… was added to this hub")
+        had = {to for _, to in schema.links(rt, before)} if before else set()
+        members = self.member_types()
         for rel, to in schema.links(rt, rec) if not problems else []:  # a reference points at a record that exists
             t, _, tid = to.partition("/")
-            if self.record_type(t) and not self.records.read(t, tid):
+            if t in members:  # a member, by its id: one the write adds is one the hub has, or the hub's own actor
+                if to not in had and not tid.startswith(BUILT_IN_ACTORS) and tid not in self._member_ids():
+                    problems.append(f"{rt.label}: {rel} points at {to}: there is no such member")
+            elif self.record_type(t) and not self.records.read(t, tid):
                 problems.append(f"{rt.label}: {rel} points at {to}, which does not exist")
         up = self.parent_of(rt, rec) if rt.parent and not problems else None
         me, hops = f"{rt.id}/{rec.get('id')}", 0
@@ -3518,10 +3623,123 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 break
             above = self.records.read(*up.split("/", 1))
             up, hops = (self.parent_of(rt, above) if above else None), hops + 1
+        for g in rt.graph_groups if rec.get("id") and not problems else []:  # a new record: nothing points at it yet
+            problem = self._graph_problem(rt, g, rec, before)
+            if problem:
+                problems.append(problem)
         if rt.is_a("Restriction") and not problems:
             problems += self.restrictions.problems(rt, rec)
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
+
+    GRAPH_DEPTH = 50  # how far a graph reference is followed: past any real part made of parts
+    TRACE_ROWS = 500  # the rows a record's page shows of a trace; the rest are counted, and the export has them all
+
+    def _graph_problem(self, rt: schema.RecordType, g: dict, rec: dict, before: dict | None) -> str | None:
+        """Why the record, as it would be written, may not be: a reference it adds through a graph (``g``, one of
+        ``graph_groups``) leads back round to it (each record's title on the way, from it round to it again), or
+        leads more than ``GRAPH_DEPTH`` levels down. None when neither. Only what the write adds is walked: a loop
+        through the record must leave it by one of its references, and one it already had was checked when it was
+        added. Breadth first, one read of the links a level; what the others point at is read from the links they
+        made, never the record's own stored ones (reaching it ends the walk)."""
+        me = f"{rt.id}/{rec['id']}"
+
+        def refs(r) -> set:
+            return {x for f in g["fields"] for x in (schema.ref_of(v) for v in schema.get(r or {}, f["path"])) if x}
+
+        new = sorted(refs(rec) - refs(before))
+        came: dict[str, str] = {}
+
+        def loop(last: str) -> str:
+            way = [last]
+            while way[-1] != me:
+                way.append(came[way[-1]])
+            way = way[::-1] + [me]    # from it, down the way it came, round to it again
+            titles = {x: self.title(rec) if x == me else
+                      self.title(self.records.read(*x.split("/", 1)) or {}) or x for x in way}
+            return f"{rt.label}: {g['down']} would lead back to itself: " + " → ".join(titles[x] for x in way)
+
+        if me in new:  # straight to itself
+            return f"{rt.label}: {g['down']} would lead back to itself: {self.title(rec)} → {self.title(rec)}"
+        frontier = []
+        for r in new:
+            came[r] = me
+            frontier.append(r)
+        depth = 1
+        while frontier:
+            if depth > self.GRAPH_DEPTH:
+                return (f"{rt.label}: {g['down']} would go more than {self.GRAPH_DEPTH} levels deep from it: no real "
+                        f"{rt.label.lower()} goes that deep, so a level is likely named twice")
+            nxt = []
+            for x in self.db.links.find({"from_ref": {"$in": frontier}, "rel": {"$in": g["rels"]}},
+                                        fields=["from_ref", "to_ref"]):
+                to = x["to_ref"]
+                if to == me:
+                    return loop(x["from_ref"])
+                if to not in came:
+                    came[to] = x["from_ref"]
+                    nxt.append(to)
+            frontier, depth = nxt, depth + 1
+        return None
+
+    def reach(self, member: dict, ref: str, rels, way: str = "down", limit: int | None = None) -> dict:
+        """Where a graph's references lead from a record, every level: ``down``, what it points at and what those
+        point at; ``up``, what points at it, and at those. ``rels``: the graph's rels (one, or the several a type
+        shows under the same words: ``graph_groups``), only between records of the record's own type. ``rows``:
+        (depth, ref, record as the member may see it, the ref it was reached from, the rel it was reached by), each
+        under the one it was reached from, each level by title; a record is walked once on any one way down (a loop
+        in older data ends there). ``limit`` rows at most (``TRACE_ROWS``; None: every one), and ``more`` says
+        whether some were left out (past the limit, or below ``GRAPH_DEPTH``). ``hidden``: how many records the
+        member may not read, each counted once, never shown and not walked past. A record's links are read in one
+        go, and the records they lead to in another (each record once)."""
+        rels = [rels] if isinstance(rels, str) else list(rels)
+        limit = self.TRACE_ROWS if limit is None else limit
+        family = ref.split("/", 1)[0]
+        near, far = ("from_ref", "to_ref") if way == "down" else ("to_ref", "from_ref")
+        out: list = []
+        hidden: set = set()
+        more = False
+        seen_ok: dict[str, dict | None] = {}  # each record read and judged once
+
+        def kin(t: str) -> bool:  # a graph is between records of one type (or types of one family)
+            return t == family or self.is_a(t, family) or self.is_a(family, t)
+
+        def visible(refs: list[str]) -> None:
+            todo = [r for r in refs if r not in seen_ok]
+            readable = [r for r in todo if self.record_type(r.split("/", 1)[0])
+                        and self.may_read(member, r.split("/", 1)[0])]
+            got = self.records.read_many(readable) if readable else {}
+            for r in todo:
+                rec = self.redact(member, got.get(r)) if r in got else None
+                seen_ok[r] = None if not rec or (visibility.withheld(rec) or {}).get("whole") else rec
+
+        def walk(cur: str, depth: int, path: frozenset) -> None:
+            nonlocal more
+            links = [x for x in self.db.links.find({near: cur, "rel": {"$in": rels}}, fields=[far, "rel"])
+                     if kin(x[far].split("/", 1)[0])]
+            if not links:
+                return
+            if depth > self.GRAPH_DEPTH:
+                more = True
+                return
+            visible([x[far] for x in links])
+            kids = []
+            for x in links:
+                rec = seen_ok[x[far]]
+                if rec is None:
+                    hidden.add(x[far])
+                    continue
+                kids.append((self.title(rec).lower(), x[far], rec, x["rel"]))
+            for _, r, rec, rel in sorted(kids, key=lambda k: (k[0], k[1], k[3])):
+                if len(out) >= limit:
+                    more = True
+                    return
+                out.append((depth, r, rec, cur, rel))
+                if r not in path:
+                    walk(r, depth + 1, path | {r})
+
+        walk(ref, 1, frozenset({ref}))
+        return {"rows": out, "hidden": len(hidden), "more": more}
 
     def _check_unique(self, rt: schema.RecordType, rec: dict, before: dict | None = None) -> None:
         """No two records of a type share one of its ``unique`` keys (a part's code; a serial within its part). Called
@@ -4063,6 +4281,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         over = overbook.strip() if overbook and overbook.strip() and rt.is_a("Booking") else None
         if over and self.may_overbook(member, rt):
             data = self._overbooked(rt, data, over)
+        self._check_refs_readable(member, rt, {"resourceType": rtype, **data}, None)
         self._check_record(rt, {"resourceType": rtype, **data})
         named = self._check_files_named(member, data, None)
         with self.db:  # the clash check and the write are one step: two people booking one time are never both told yes
@@ -4196,6 +4415,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     after = self._overbooked(rt, after, over)
                     now_held = self._held_time(rt, after)
             after = self._take_number(rt, before, after)
+            self._check_refs_readable(member, rt, after, before)
             self._check_record(rt, after, before)
             named = self._check_files_named(member, after, before, _files)
             self._check_unique(rt, after, before)

@@ -1,8 +1,8 @@
-# Inventory (after InvenTree): parts, the lots that hold them, where they are kept, and the ledger of stock moves. A
-# lot's quantity is never typed in: only a posted stock move changes it, and the move keeps what it changed, so every
-# number has its history. How much is signed is the practice's inventory policy: basic for a corner store (nothing),
-# tracked for a small clinic (adjustments, write-offs and releases), regulated for ISO 13485 (parts approved too).
-# It installs alone and knows nothing about any one practice.
+# Inventory (after InvenTree): parts and their bills of materials, the lots that hold them, where they are kept, and
+# the ledger of stock moves and builds. A lot's quantity is never typed in: only a posted stock move or build changes
+# it, and it keeps what it changed, so every number has its history. How much is signed is the practice's inventory
+# policy: basic for a corner store (nothing), tracked for a small clinic (adjustments, write-offs and releases),
+# regulated for ISO 13485 (parts approved, builds signed). It installs alone and knows nothing about any one practice.
 
 [module]
 requires_core = "1.0"
@@ -10,18 +10,23 @@ id = "inventory"
 name = "Inventory"
 # 5: each record is keyed in its type, as an issue is in its project (STK...): STK-12 is the 12th, and work on
 #  it shows that key.
-version = "5"
-changes = """Rebuilt on InvenTree's model: parts, lots (stock items) with lot, serial and expiry, locations with a
-purpose, and a ledger whose moves keep each lot before and after. Three control levels set by a signed inventory
-policy. Version 3's stock items and moves do not carry over: remove the module and install it again."""
-summary = "Parts, the lots that hold them, where they are kept, and the moves that receive, issue, hold and count them."
+# 6: assemblies. A part's bill of materials, and builds that make an assembly's stock from its components' lots.
+version = "6"
+changes = """Assemblies: a part may have a bill of materials (the parts that go into one, and how many), approved with
+the part. A build makes an assembly's lot or serials from component stock, posted through the same ledger and
+sign-off as a stock move, and each lot it makes knows what went into it: a component lot traces forward to every unit
+it went into, and a unit back to everything in it; a lot split from another traces through the split. What a build
+makes expires no later than the first of what went into it. Under the regulated level a build making several serials
+says which each component serial goes into (exact genealogy, a switch on the policy). Parts also gain a description, an
+owner and the documents that specify them. Nothing is removed: version 5's records carry over."""
+summary = "Parts and what they are made of, the lots that hold them, where they are kept, and the moves and builds that change them."
 requires = []
-shortcuts = ["Part", "StockMove"]
+shortcuts = ["Part", "StockMove", "Build"]
 
 [[roles]]
 id = "stock-keeper"
 name = "Stock keeper"
-description = "Receives deliveries, issues stock, moves and counts it, and holds what should not be used."
+description = "Receives deliveries, issues stock, moves and counts it, builds assemblies, and holds what should not be used."
 
 [[roles]]
 id = "purchaser"
@@ -31,7 +36,7 @@ description = "Orders stock when a part runs low."
 [[roles]]
 id = "inventory-manager"
 name = "Inventory manager"
-description = "Signs adjustments, write-offs, returns, releases and counts beyond tolerance, and the inventory policy. Under a policy that asks for a second person, never the one who wrote it."
+description = "Signs adjustments, write-offs, returns, releases, counts beyond tolerance and builds (when the policy inspects), and the inventory policy. Under a policy that asks for a second person, never the one who wrote it."
 
 [[roles]]
 id = "stock-quality"
@@ -41,12 +46,12 @@ description = "Approves parts for use (when the policy asks for it). A practice 
 [[data_classes]]
 id = "inventory"
 name = "Inventory"
-description = "Parts, storage locations, stock moves and the inventory policy. No patient information."
+description = "Parts, storage locations, stock moves, builds and the inventory policy. No patient information."
 
 [[data_classes]]
 id = "stock-ledger"
 name = "Stock ledger"
-description = "The lots: how much of each part is where. Nobody writes them; only a posted stock move does."
+description = "The lots: how much of each part is where, and what went into each. Nobody writes them; only a posted stock move or build does."
 
 [grants.everyone]   # everyone who works here may see what is in stock and where
 read = ["inventory", "stock-ledger"]

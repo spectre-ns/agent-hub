@@ -1,0 +1,171 @@
+id = "inventory-build"
+title = "Post a build"
+summary = """A submitted build is checked against the stock and the policy in force, and posted: the component lots
+it uses go down, and the lot or serials it makes come into stock knowing what went into them. Under a policy that
+inspects what comes into stock, it is signed first (by someone other than its author when the policy says second).
+A build that cannot post goes back to its author with every reason."""
+record = "Build"
+
+# The Build type names this workflow, as StockMove names inventory-post, and it has the same shape: the same actions
+# (inventory.check and inventory.post take whichever record the run walks), the same states and the same sign-off.
+# A build sent back (refused by the check, not signed, or the stock changed since it was checked) goes to rejected,
+# which ends the pass; the next run walks it again once revised. A build that needs no signature under the policy in
+# force posts on the way out of draft, so a one-person shop never waits on anyone.
+
+[start]
+to = "draft"
+label = "Written"
+
+[[start.do]]
+id = "from-rejected"
+title = "Walk it from rejected"
+when = "record.status == 'rejected'"
+to = "rejected"
+
+[[state]]
+id = "rejected"
+label = "Sent back"
+tone = "attention"
+
+[[state.work]]
+id = "revise"
+title = "Revise the build that was sent back"
+kind = "wait"
+until = "record.status != 'rejected'"
+instructions = """Not posted: why is on the build (Why it was sent back). Revise it on its page, then submit it
+again."""
+
+[[edge]]
+id = "revised"
+label = "Revised"
+from = "rejected"
+to = "draft"
+
+[[state]]
+id = "draft"
+label = "Draft"
+tone = "active"
+
+[[state.work]]
+id = "submit"
+title = "Write the build and submit it for posting"
+kind = "wait"
+until = "record.status != 'draft'"
+instructions = """Say what it makes and how many, and which component lots to use (or leave it to the lots that
+expire first), then submit it on its page."""
+
+# Submitted: checked against the stock and the policy in force. Refused, it goes back; with no signature needed it
+# posts at once; otherwise it waits in submitted for one.
+[[edge]]
+id = "submit"
+label = "Submit for posting"
+from = "draft"
+to = "submitted"
+
+[[edge.do]]
+id = "policy"
+title = "Read the inventory policy in force"
+action = "inventory.policy"
+
+[[edge.do]]
+id = "check"
+title = "Check the build against the stock"
+after = ["policy"]
+action = "inventory.check"
+
+[[edge.do]]
+id = "refused"
+title = "Send the build back: it cannot post"
+when = "not check.ok"           # inventory.check wrote why on the build
+to = "rejected"                 # back with its author: the next pass is the next run's
+
+[[edge.do]]
+id = "post-now"
+title = "Post the build"
+when = "check.ok and check.signoff == ''"
+action = "inventory.post"
+
+[[edge.do]]
+id = "stale-now"
+title = "Send the build back: the stock changed"
+when = "check.ok and check.signoff == '' and not post-now.ok"
+to = "rejected"
+
+[[edge.do]]
+id = "posted-now"
+title = "Mark the build posted"
+when = "post-now.ok"
+to = "posted"
+
+[[state]]
+id = "submitted"
+label = "Submitted"
+tone = "attention"
+
+# Two alternative pieces of work, one per sign-off setting: the policy says whether its author may sign it (self) or
+# only someone else (second). A gate nobody may take would block for good, so not_by rides only on the second.
+[[state.work]]
+id = "sign-own"
+title = "Sign the build"
+kind = "gate"
+role = "inventory-manager"
+signer = "person"
+when = "check.ok and check.self"
+meaning = "I have checked this build: what went into it and what it made"
+context = ["record:inventory"]
+due = "2d"
+instructions = """The build says why it needs a signature, the bill it was built to, and each lot before and
+after. Check that what went in is what was used: post it, or reject it and it goes back to whoever wrote it."""
+
+[[state.work]]
+id = "sign-other"
+title = "Sign the build"
+kind = "gate"
+role = "inventory-manager"
+signer = "person"
+when = "check.ok and check.second"
+not_by = ["record.editors"]
+meaning = "I have checked this build: what went into it and what it made"
+context = ["record:inventory"]
+due = "2d"
+escalate_to = "inventory-manager"
+instructions = """The build says why it needs a signature, the bill it was built to, and each lot before and
+after. Check that what went in is what was used: post it, or reject it and it goes back to whoever wrote it. Someone
+other than its author signs it."""
+
+[[edge]]
+id = "post"
+label = "Post"
+from = "submitted"
+to = "posted"
+
+[[edge.do]]
+id = "post-signed"
+title = "Post the build"
+action = "inventory.post"
+
+[[edge.do]]
+id = "stale"
+title = "Send the build back: the stock changed"
+when = "not post-signed.ok"     # inventory.post wrote why on the build
+to = "rejected"
+
+[[edge]]
+id = "reject"
+label = "Reject"
+from = "submitted"
+to = "rejected"                 # back with its author: the next pass is the next run's
+
+[[edge.do]]
+id = "not-signed"
+title = "Return the build to its author"
+action = "record.update"
+[edge.do.params]
+ref = "{{run.record}}"
+[edge.do.params.set]
+reject_reason = "Not signed: {{sign-own.comment}}{{sign-other.comment}}"
+
+[[state]]
+id = "posted"
+label = "Posted"
+tone = "done"
