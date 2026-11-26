@@ -1417,6 +1417,36 @@ def test_a_photo_s_reading_names_its_issuer_in_its_own_field(firm):
         {"text": "T5 2025\nBox 13: 325.40"}]}})  # a document that names nobody is read without one
 
 
+def test_a_reading_the_slip_would_refuse_is_sent_back_to_the_agent(firm):
+    """gemma4 read a T5 photo with -1.00 tax deducted (a T5 has none): the slip keeps its tax deducted at 0 or more,
+    which the skill does not say. The answer is refused as it is given, with why, and the agent reads it again; the
+    slip is filed, never left with a step done and its move failed."""
+    from practicehub.models import ModelGateway
+    mod = firm.pack.module
+    cref = _signed_up(firm)
+    sref = _slip_from(firm, firm.member("client-portal"), cref, mod.blurred_photo(), "IMG_0415.png", "image/png")
+    words = "T5 Statement of Investment Income\nYear: 2025\nPayer: Scotiabank\nBox 13: 325.40"
+    read = {"slip_type": "T5", "year": 2025, "issuer": "Scotiabank", "amount": 325.40, "text": words,
+            "summary": "T5 2025."}
+    tries = []
+
+    class Eyes:
+        external = False
+
+        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+            tries.append(prompt)
+            fixed = "Tax deducted is below 0" in prompt
+            return {"answer": {**read, "tax_deducted": 0 if fixed else -1}, "escalate": False, "reason": "read"}
+
+    gw = ModelGateway(firm)
+    gw.backends["ollama"] = Eyes()
+    run_all_local(firm, gw, log=quiet)
+    assert len(tries) == 2 and "Tax deducted is below 0" in tries[1]
+    slip = firm.records.read(*sref.split("/"))
+    assert slip["status"] == "extracted" and slip["tax_deducted"] == 0
+    assert not firm.db.items.find_one({"run_id": _run_on(firm, sref, "slip-intake")["id"], "kind": "notice"})
+
+
 def test_the_last_slip_coming_while_staff_are_to_call_takes_the_return_on(firm):
     """Kevin's slip had not come after the organizer and the reminder, so staff were to call him. It came (he
     uploaded it, or someone added it): the call is withdrawn, nobody's work, and his return goes on to be compared

@@ -1156,9 +1156,10 @@ class Engine:
         return (rt.label, rt.state_label(step.state).lower(), t["sign"]) if t and t.get("sign") else None
 
     def _refused_move(self, run: dict, step, values: dict, member: dict | None = None) -> str | None:
-        """Why the move a person's step with ``state`` makes as it is done would be refused by the move's checks
-        (``[[lifecycle.transition.check]]``), for the record as it would be with what the answer gives the fields the
-        move asks for; None when it would not. The task is then not finished: the move would fail after it."""
+        """Why the move a step with ``state`` makes as it is done would be refused, for the record as it would be
+        with what the answer gives the fields the move asks for: a value those fields' rules refuse (a bound, a
+        choice: an agent's skill may not state the record's), or the move's checks (``[[lifecycle.transition.check]]``);
+        None when it would not. The step is then not finished: the move would fail after it."""
         ref = run.get("record") or ""
         if not step.state or "/" not in ref:
             return None
@@ -1168,13 +1169,20 @@ class Engine:
             return None
         now = schema.first(rec, rt.lifecycle["path"])
         t = rt.transition(now, step.state) if now != step.state else None
-        if not t or not t.get("check"):
+        if not t:
             return None
-        moved = schema.put(dict(rec), rt.lifecycle["path"], step.state)
+        moved, given = schema.put(dict(rec), rt.lifecycle["path"], step.state), []
         for n in t.get("asks", []):
             f = rt.field(n)
             if f and values.get(n) not in (None, ""):
                 moved = schema.put(moved, f["path"], values[n])
+                given.append(n)
+        bad = schema.field_problems(rt, schema.exact(rt, moved), given, members=self.hub._member_ids(),
+                                    is_a=self.hub.is_a)
+        if bad:
+            return "; ".join(bad)
+        if not t.get("check"):
+            return None
         moved = self.hub.stamped(rt, t, moved, member or {})  # as the move would stamp it, made by whoever does it
         return self.hub.move_check_refusal(rt, ref, t, schema.exact(rt, moved))
 
@@ -1193,7 +1201,8 @@ class Engine:
                 run["steps"][step.id]["moved"] = "failed"
                 seq = self.hub.track.append(actor, "step.failed", f"step:{step.id}", run_id=run["id"], cause=cause,
                                             data={"step": step.id, "state": step.state, "error": str(exc)})
-                self.alert(run, step, f"{step.title}: the record did not move to {step.state!r}: {exc}",
+                why = "; ".join(getattr(exc, "problems", None) or [str(exc)])  # what was wrong, not only that it was
+                self.alert(run, step, f"{step.title}: the record did not move to {step.state!r}: {why}",
                            role=self.hub.practice.get("escalation_role"), cause=seq, priority="urgent")
             self._save(run)
         return bool(due)

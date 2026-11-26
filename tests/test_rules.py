@@ -9405,6 +9405,26 @@ def test_a_task_that_would_make_a_refused_move_is_not_finished(hub):
     assert hub.records.read(*ref.split("/"))["status"] == "done"
 
 
+def test_a_step_whose_answer_its_record_would_refuse_is_not_finished(hub):
+    """A step's form, or an agent's skill, need not state the record's own rules for the fields its move writes (Hours
+    worked is at least 0): an answer those rules refuse is refused as it is given, the step stays open and the record
+    where it was, rather than the step finishing and its move failing after it."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    hub.approve(amara, "type", "Job", hub.propose("type", rana, JOB.format(top=""), "jobs")["version"])
+    hub.approve_workflow(amara, "job-flow", hub.propose_workflow(rana, JOB_FLOW, "jobs")["version"])
+    walked = JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }')
+    hub.approve(amara, "type", "Job", hub.propose("type", rana, walked, "walked")["version"])
+    ref, run = _job(hub)
+    hub.move_record(amara, ref, "doing")
+    assert hub.record_type("Job").field("hours")["min"] == 0
+    with pytest.raises(Invalid, match=re.escape("Do the work is not done yet: Job: Hours worked is below 0")):
+        hub.engine.complete(amara, run["item"], {"outcome": "Fixed", "hours": -2})
+    assert hub.engine.run(run["id"])["steps"]["work"]["state"] == "active"
+    assert hub.records.read(*ref.split("/"))["status"] == "doing"
+    hub.engine.complete(amara, run["item"], {"outcome": "Fixed", "hours": 0})
+    assert hub.records.read(*ref.split("/"))["status"] == "done"
+
+
 def test_every_row_of_a_table_is_checked_rounded_and_its_reference_column_links(hub):
     """A table's rows are each checked against its columns (a missing required cell, a cell that is no column, a
     reference to nothing), its decimal columns rounded in every row, and a reference column links its record."""

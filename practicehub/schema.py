@@ -2562,6 +2562,26 @@ def is_required(f: dict, rec: dict | None) -> bool:
     return not (unless and rec is not None and expr.holds(unless, {"record": rec}))
 
 
+def _field_problem(rt: RecordType, f: dict, rec: dict, partial_ok: bool, members, is_a) -> str | None:
+    """The first problem with field ``f`` of ``rec``: missing when required, or a value its rules refuse."""
+    vals = [v for v in get(rec, f["path"]) if v not in (None, "", [], {})]
+    if not vals:
+        return f"{rt.label}: {f['label']} is required" if is_required(f, rec) and not partial_ok else None
+    for v in vals:
+        for item in (v if (f.get("list") and isinstance(v, list)) else [v]):
+            p = _check_value(f, item, members, is_a)
+            if p:
+                return f"{rt.label}: {p}"
+    return None
+
+
+def field_problems(rt: RecordType, rec: dict, names, *, members=None, is_a=None) -> list[str]:
+    """What the rules of the fields ``names`` (a value's type, bounds, choices, target) refuse of their values in
+    ``rec``; one left empty is not checked here (what must be filled is the write's own check)."""
+    return [p for f in rt.fields if f["name"] in set(names)
+            for p in [_field_problem(rt, f, rec, True, members, is_a)] if p]
+
+
 def validate(rt: RecordType, rec: dict, *, partial_ok: bool = False, members=None, is_a=None) -> list[str]:
     """Every problem with ``rec`` as a record of type ``rt``. ``is_a(type, target)``: whether a type stands for a
     reference's target (a ``Subject`` target takes a Patient when Patient extends Subject)."""
@@ -2572,19 +2592,9 @@ def validate(rt: RecordType, rec: dict, *, partial_ok: bool = False, members=Non
             problems.append(f"{rt.label}: {', '.join(extra)} {'is not a field' if len(extra) == 1 else 'are not fields'}"
                             f" of this record type")
     for f in rt.fields:
-        vals = get(rec, f["path"])
-        vals = [v for v in vals if v not in (None, "", [], {})]
-        if not vals:
-            if is_required(f, rec) and not partial_ok:
-                problems.append(f"{rt.label}: {f['label']} is required")
-            continue
-        for v in vals:
-            items = v if (f.get("list") and isinstance(v, list)) else [v]
-            for item in items:
-                p = _check_value(f, item, members, is_a)
-                if p:
-                    problems.append(f"{rt.label}: {p}")
-                    break
+        p = _field_problem(rt, f, rec, partial_ok, members, is_a)
+        if p:
+            problems.append(p)
     if rt.lifecycle:
         st = first(rec, rt.lifecycle["path"])
         if st is not None and st not in rt.lifecycle["states"]:
