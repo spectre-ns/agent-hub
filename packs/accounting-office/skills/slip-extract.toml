@@ -5,7 +5,8 @@ Read the document (its text, from the file): which slip it is (T4, T5, an RRSP r
 the tax year, who issued it, the main amount (employment income on a T4, box 14; interest on a T5, box 13; the
 contribution or donation; on a notice of assessment, the refund, negative if the client owes), the income tax deducted,
 and every other box by its number. Copy numbers exactly as printed; never compute or guess one. The slip and the
-year are read from the text too, never guessed: a document that does not say which slip it is, or for which year, one
+year are read from the text too, never guessed (the main box, and box 22 on a T4, T4A or T4E, the income tax deducted,
+go in the amount and the tax deducted, not in the other boxes): a document that does not say which slip it is, or for which year, one
 you cannot read, or one that is for someone else, is escalated to a person.
 """
 

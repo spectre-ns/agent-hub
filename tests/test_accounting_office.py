@@ -795,6 +795,22 @@ def test_an_agent_reads_a_slip_s_type_and_year_from_its_text_and_never_guesses_t
         "the year 2024 is not in the document's text; copy it as printed, or escalate"]
 
 
+def test_a_slip_s_main_and_tax_boxes_are_its_amount_and_tax_deducted_never_left_in_other_boxes(firm):
+    """qwen3 read a T4's boxes 14 and 22 into "other boxes" and left the tax deducted empty: the estimate would have
+    counted no tax withheld, and the draft, which copies the estimate, a refund that is wrong. Box 22 of a T4 is the
+    tax deducted, for whoever reads it; the same boxes, agreeing, are let through."""
+    guard = firm.pack.guards["slip-extract"]
+    t4 = {"context": {"record:client-documents": [{"text": T4}]}, "by": {"id": "documents-agent", "kind": "agent"}}
+    read = {"slip_type": "T4", "year": 2025, "issuer": "Harbour Logistics Ltd.", "amount": Decimal("64500.00"),
+            "tax_deducted": None, "boxes": "14: 64500.00\n22: 12400.00"}
+    assert guard(read, t4) == ["box 22 of a T4 is the income tax deducted: tax_deducted is empty but box 22 reads "
+                               "$12,400.00; put it in tax_deducted"]
+    assert guard({**read, "tax_deducted": Decimal("12400.00")}, t4) == []
+    assert guard({**read, "tax_deducted": Decimal("12400.00"), "boxes": "Box 14: 64,500.00"}, t4) == []
+    assert guard({**read, "tax_deducted": Decimal("12400.00"), "boxes": "14: 6450.00"}, {**t4, "by": None}) == [
+        "box 14 of a T4 is its amount: amount is $64,500.00 but box 14 reads $6,450.00; put it in amount"]
+
+
 def test_filing_waits_for_the_client_s_authorisation_and_never_writes_it(firm):
     """The client's T183 is a precondition of the filing move, not something it asks for: the filing cannot record
     one, nor overwrite the one on the return."""

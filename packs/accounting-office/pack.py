@@ -851,6 +851,14 @@ def guard_slip_extract(values, ctxview):
                             f"escalated to a person")
         if year is not None and not re.search(rf"\b{int(year)}\b", text):
             problems.append(f"the year {year} is not in the document's text; copy it as printed, or escalate")
+    kind = values.get("slip_type")  # the main and tax boxes are the amount and the tax deducted, not other boxes
+    boxes = {re.sub(r"(?i)^box\s*", "", k): v for k, v in parse_boxes(values.get("boxes")).items()}
+    for box, field, what in ((MAIN_BOX.get(kind), "amount", "its amount"),
+                             (TAX_BOX.get(kind), "tax_deducted", "the income tax deducted")):
+        if box in boxes and _dec(values.get(field)) != _dec(boxes[box]):
+            have = _money(values.get(field)) if _dec(values.get(field)) is not None else "empty"
+            problems.append(f"box {box} of a {kind} is {what}: {field} is {have} but box {box} reads "
+                            f"{_money(boxes[box])}; put it in {field}")
     return problems
 
 
@@ -918,6 +926,7 @@ SLIP_PATTERNS = [
     ("business-income", re.compile(r"business income|statement of business", re.I))]
 MAIN_BOX = {"T4": "14", "T5": "13", "T4A": "16", "T4A-P": "20", "T4A-OAS": "18", "T4E": "14", "T3": "26",
             "T5008": "21"}
+TAX_BOX = {k: "22" for k in ("T4", "T4A", "T4E", "T4A-P", "T4A-OAS")}  # income tax deducted
 
 
 def parse_boxes(text) -> dict:
@@ -959,8 +968,8 @@ def read_slip(text: str) -> dict | None:
         out["amount"] = _dec(amount.group(1))
     else:
         return None
-    if "22" in boxes and kind in ("T4", "T4A", "T4E", "T4A-P", "T4A-OAS"):
-        out["tax_deducted"] = boxes.pop("22")
+    if TAX_BOX.get(kind) in boxes:
+        out["tax_deducted"] = boxes.pop(TAX_BOX[kind])
     elif "28" in boxes and kind == "T4A":
         out["tax_deducted"] = boxes.pop("28")
     dated = re.search(r"date\s*:?\s*(20\d\d-\d\d-\d\d)", text, re.I)
