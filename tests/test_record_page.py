@@ -591,3 +591,53 @@ def test_a_pin_behind_its_record_offers_use_version_m(hub, server):
     assert "version 1 (now 2)" in page and "Use version 2</button>" in page
     code, _ = call(server, "POST", f"/records/{ref}/repin", amara, form={"field": "counted", "target": chit})
     assert code == 303 and hub.read_record(amara_m, ref)["counted"][0]["version"] == 2
+
+
+def _posted_to(server, path, tok, form):  # noqa: F811
+    """Where a form posted to ``path`` sends the browser back to."""
+    import urllib.error
+    import urllib.request
+    from test_web import opener
+    req = urllib.request.Request(server + path, data=urllib.parse.urlencode(form).encode(), method="POST",
+                                 headers={"Authorization": f"Bearer {tok}",
+                                          "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        opener.open(req)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 303, exc.read().decode()
+        return exc.headers["Location"]
+    raise AssertionError("a comment's form goes back to a page")
+
+
+def test_every_record_page_has_its_comments_and_a_comment_comes_back_to_that_page(hub, server):
+    """Any record's page, not only a page of text, has its comments: a plain record's, a part's under its owner and
+    a subject's own page. Anyone who reads it comments there, mentioning a person or an agent, and comes back to the
+    page they were on, at the thread."""
+    from tests.test_clinic_records import LAB, _pat
+    tok = token(hub, "dr-amara")
+    job = _job(hub)
+    url = f"/records/{job}"
+    page = call(server, "GET", url, tok)[1]
+    assert 'class="page-comments record-comments"' in page and f'action="{url}/comments"' in page
+    assert f'data-at="{job}"' in page  # the @ picker, for this record
+    back = _posted_to(server, f"{url}/comments", tok, {"body": "Parts are on order, @dr-amara."})
+    c = hub.db.live_comments.find_one({"ref": job})
+    assert back == f"{url}#{c['id']}" and c["mentions"] == ["dr-amara"]
+    page = call(server, "GET", url, tok)[1]
+    assert f'id="{c["id"]}"' in page and "Parts are on order" in page
+    assert _posted_to(server, f"{url}/comments/{c['id']}/reply", tok, {"body": "Thanks."}) == f"{url}#{c['id']}"
+    # a part: read under its owner, and back there
+    run = hub.engine.start(M(hub, "lab-feed"), "lab-result-review", record=_pat(hub),
+                           inputs={**LAB, "value": "131", "flag": "abnormal"})
+    lab = hub.engine.run(run["id"])["record"]
+    pid = hub.owner_of(hub.records.read(*lab.split("/", 1))).split("/", 1)[1]
+    nested = f"/patients/{pid}/lab-results/{lab.split('/', 1)[1]}"
+    assert 'class="page-comments record-comments"' in call(server, "GET", nested, tok)[1]
+    back = _posted_to(server, f"/records/{lab}/comments", tok, {"body": "Repeat in a week."})
+    assert back.split("#", 1)[0] == nested
+    # a subject's own page
+    pref = f"Patient/{pid}"
+    assert 'class="page-comments record-comments"' in call(server, "GET", f"/patients/{pid}", tok)[1]
+    back = _posted_to(server, f"/records/{pref}/comments", tok, {"body": "Prefers mornings."})
+    assert back.split("#", 1)[0] == f"/patients/{pid}"
+    assert "Prefers mornings." in call(server, "GET", f"/patients/{pid}", tok)[1]

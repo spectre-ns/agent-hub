@@ -492,7 +492,9 @@ A markdown field with `live = true` is edited by several people at once, on the 
 - **Comments:** anyone who may read the page may comment on it. There is no separate grant, because a comment changes
   nothing the record says. A comment is made on words selected on the page, or on the whole page. It stays with its
   words while they are there; once they are gone, it shows as "on text that was removed". A thread is resolved by the
-  person who started it, or by someone who may change the page. An `@id` in a comment records a mention.
+  person who started it, or by someone who may change the page. An `@id` in a comment records a mention. Every other
+  record's page has comments too, below what it says: a plain record's, a part's under its owner, and a subject's own
+  page. A comment there is on the record as a whole, and the form comes back to the page it was made on.
 - **History:** any two versions can be compared word by word. "Restore" makes an old version's text the page's text
   again, as a new version.
 - **Editor:**

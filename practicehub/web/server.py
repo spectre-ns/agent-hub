@@ -3451,6 +3451,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             tools += (f'<a class="btn secondary" href="/access?subject={urllib.parse.quote(ref)}">'
                       f'Who opened or changed this file</a>')
         parts.insert(1, f'<div class="file-tools" role="group" aria-label="This file">{tools}</div>')
+        parts.append(self.comments_section(me, self.hub.record_type(st), p, ref))
         runs = self.hub.engine.runs(record=ref)
         parts.append(f"<h2 id='work'>Work about this {e(self.subj['label'].lower())}</h2>" + (
             "<table>" + "".join(f'<tr><td><a href="{e(self.run_href(r))}">{e(self.hub.run_title(req["me"], r))}</a></td><td>{self._loz(self.RUN_STATUS, r["status"])}</td>'

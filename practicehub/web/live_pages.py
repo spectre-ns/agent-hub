@@ -1,7 +1,8 @@
 """Pages and calls for writing a record's text together: the live editor on the page, comments, and versions.
 
-Generic: a type opts in with ``live = true`` on a markdown field (see README, "Writing together"). Nothing here knows
-any module's types. The editor's script is ``assets.LIVE_JS``; the merging is ``practicehub.live``.
+Generic: a type opts in with ``live = true`` on a markdown field (see README, "Writing together"). Every other record's
+page has its comments too, below what it says (:meth:`LivePages.comments_section`). Nothing here knows any module's
+types. The editor's script is ``assets.LIVE_JS``; the merging is ``practicehub.live``.
 
 Permissions are the hub's: joining, every change, and every comment are checked as the signed-in member. Anyone who
 may read a record may comment on it (no grant of its own: a comment changes nothing the record says); a thread is
@@ -170,6 +171,8 @@ class LivePages:
                              f'{sign}</section>')
         out["banner"] += live_now
         if not lf or tab != "details" or out.get("reading_used"):
+            if tab == "details" and not out.get("reading_used"):  # a page with no live text: its comments below it
+                out["after"] = self.comments_section(me, rt, rec, ref)
             return out
         f = lf[0]
         why = None
@@ -277,6 +280,38 @@ class LivePages:
                                   else "") + new + '</section>')
         return side, bottom
 
+    def comments_section(self, me, rt, rec, ref) -> str:
+        """The comments on any record's page (a subject's included) that has no live text: its threads, oldest
+        first, those resolved folded away, and a box to start one. For a person who may read the record: anyone who
+        reads it may comment, and mention a person or an agent. Threads on a file are beside that file."""
+        from .. import visibility
+        if me.get("kind") != "person" or (visibility.withheld(rec) or {}).get("whole"):
+            return ""
+        try:
+            cs = self.live.comments(me, ref, file="")
+        except (Denied, NotFound):
+            return ""
+        plain = " ".join(markup.plain(v, 10 ** 7) for f in rt.fields if f["type"] == "markdown"
+                         for v in schema.get(rec, f["path"]) if isinstance(v, str))
+        url = f"/records/{e(rt.id)}/{e(rec['id'])}"
+        may_write = self.hub.may_write(me, rt.id)
+        opened = [c for c in cs if not c["resolved"]]
+        done = [c for c in cs if c["resolved"]]
+
+        def threads(some):
+            return ('<ul class="plain threads">' + "".join(
+                self._thread_html(me, c, ref=ref, url=url, may_write=may_write, plain=plain) for c in some) + "</ul>")
+        return (f'<section class="page-comments record-comments" aria-labelledby="c-rec-h"><h2 id="c-rec-h">'
+                f'Comments <span class="muted">{len(opened)}</span></h2>'
+                + (threads(opened) if opened else "")
+                + (f'<details><summary>Resolved ({len(done)})</summary>{threads(done)}</details>' if done else "")
+                + f'<form method="post" action="{url}/comments" class="stack c-new">'
+                  f'<label>Comment<textarea name="body" rows="3" required data-at="{e(ref)}" '
+                  f'aria-describedby="c-rec-help"></textarea></label><small id="c-rec-help">Write @ to mention a '
+                  f'person or an agent: they are told in their inbox, and an agent answers here. Anyone who may read '
+                  f'this record may comment.</small><div class="filters"><button class="primary">Comment</button>'
+                  f'</div></form></section>')
+
     def _agent_mark(self, x) -> str:
         # who() marks an agent by name already; an agent's words that its member row no longer says are marked here
         return "" if not x.get("agent") or self._kind(x["by"]) == "agent" else ' <span class="badge agent">agent</span>'
@@ -344,11 +379,12 @@ class LivePages:
         return self.mention_text(body)
 
     def _back(self, rtype, rid, anchor="", req=None) -> None:
-        """Back to the record page, or to ``next`` when it is a page of the same record (the office editor)."""
+        """Back to the record's page where it is read (a subject's page, a part's under its owner), or to ``next``
+        when it is a page of the same record (the office editor)."""
         base = f"/records/{rtype}/{rid}"
         nxt = str(self.form(req).get("next") or "") if req is not None else ""
         if not (nxt.startswith(base + "/") and __import__("re").fullmatch(r"/[\w./%=?&-]*", nxt)):
-            nxt = base
+            nxt = self.record_href(base[len("/records/"):])
         raise self._redirect(nxt + (f"#{anchor}" if anchor else ""))
 
     def post_comment(self, req, rtype, rid):

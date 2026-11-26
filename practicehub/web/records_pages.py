@@ -1916,6 +1916,8 @@ class RecordPages:
                 main.append(sections)
                 if hidden:
                     main.append('<p class="muted">Some records are kept from your role and are not shown.</p>')
+                if not is_page:  # a page's comments are with its text (``live_parts``)
+                    main.append(self.comments_section(me, rt, rec, ref))
         elif tab == "signatures":
             main.append(self._signatures_panel(me, rt, rec, ref, st, None if typed else kept, error))
         elif tab == "links":
