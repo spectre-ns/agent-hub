@@ -512,7 +512,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         written is checked as any other, every record that pointed at the old one points at it instead, and the old one
         is gone from the store (its versions stay, for the history). Nothing is left pointing nowhere: open workflow
         runs, work items and queued messages that name it name the new record (``repoint_work``; ``repoint=False``
-        leaves that to a caller converting many records, which repoints them all at once)."""
+        leaves that to a caller converting many records, which repoints them all at once).
+
+        A record moved to another type of its family (the same top of the chain: a client become an individual) keeps
+        its key, when the new type has the same, and its number, whose series the family shares. Into another
+        family, it is given its new type's key, and a numbered record is not moved."""
         old_type, rid = ref.split("/", 1)
         rt = self._creatable(rtype)
         new_id = into.split("/", 1)[1] if into else rid
@@ -521,8 +525,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             before = self.records.read(old_type, rid)
             if not before:
                 raise NotFound(f"there is no {ref}")
+            old_rt = self.record_type_for_reading(old_type)
+            kin = not into and old_rt is not None and self.root_of(old_rt) == self.root_of(rt)
             numbered = self._number_of(old_type, before)
-            if numbered:  # it would leave its series with a gap, or be given a second number
+            if numbered and not kin:  # it would leave its series with a gap, or be given a second number
                 raise Invalid(f"{ref} has a number of its own ({numbered}): it keeps its type and is not converted")
             there = self.records.read(rtype, new_id)
             if bool(there) != bool(into):
@@ -534,8 +540,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                   f"it, so it keeps its type and is not converted")
             body = schema.exact(rt, {k: v for k, v in data.items() if k not in ("resourceType", "meta")})
             body["id"] = new_id
+            if numbered:  # moved within its family: the same series, so the same number
+                body = schema.put(body, rt.number["path"], numbered)
+                self._check_number_kept(rt, before, body)
             self._check_record(rt, {"resourceType": rtype, **body})
-            rec = self.records.update(rtype, new_id, body) if into else self.records.create(rtype, body)
+            key = (before.get("meta") or {}).get("key")
+            kept = key if kin and key and rt.key and key.rsplit("-", 1)[0] == rt.key else None
+            self.db.records.delete({"_id": ref})  # first: what the new record keeps (its id, key, number) is free
+            if not into:
+                self._check_id_free(rt, new_id)
+            rec = self.records.update(rtype, new_id, body) if into else self.records.create(rtype, body, key=kept)
             self._write_version(rt, rec, actor, None)
 
             def swap(v):
@@ -557,13 +571,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     upd = self.records.update(ft, fid, fixed)
                     if ort is not None:
                         self._write_version(ort, upd, actor, None)
-            self.db.records.delete({"_id": ref})
-            self._keys.pop(ref, None)  # its key went with it: the new record has one of its own type
+            self._keys.pop(ref, None)  # the ref is gone: the new record has its key under its own
             self.db.links.delete({"from_ref": ref})
             self.db.titles.delete({"_id": ref})
             if repoint:
                 self.repoint_work({ref: new_ref})
-            keys = {"key": (rec.get("meta") or {}).get("key"), "from_key": (before.get("meta") or {}).get("key")}
+            keys = {"key": (rec.get("meta") or {}).get("key"), "from_key": key if key != kept else None}
             self.track.append(actor, "record.converted", new_ref,
                               data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec),
                                     **{k: v for k, v in keys.items() if v}})
@@ -776,7 +789,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if hasattr(self.records, "key_fn"):
             self.records.key_fn = self._type_key
         if hasattr(self.records, "number_fn"):
-            self.records.number_fn = self._number_of
+            self.records.number_fn = self._numbered
         self._indexed_types: dict[str, str] = {}
         self._keys: dict[str, str] = {}  # record ref -> its key: a key never changes, so it is kept once read
 
@@ -792,12 +805,23 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         v = schema.first(rec, n["path"]) if n else None
         return v if isinstance(v, str) and v else None
 
+    def _numbered(self, rtype: str, rec: dict) -> tuple[str, str] | None:
+        """A record's own number and the type whose series it is in: the one that numbers (``[number]`` is fixed, so
+        it is the top of the record's chain; the types under it number in its series)."""
+        v = self._number_of(rtype, rec)
+        return (v, self.root_of(self.record_type_for_reading(rtype))) if v else None
+
     def _keys_ready(self) -> None:
-        """Records made before records had keys are given theirs, once, oldest first."""
+        """Records made before records had keys are given theirs, once, oldest first; numbered records kept before
+        numbers were kept with their series are given theirs."""
         if hasattr(self.records, "give_keys") and not self.db.get_setting("records_keyed"):
             with self.db:
                 self.records.give_keys()
                 self.db.set_setting("records_keyed", 1)
+        if hasattr(self.records, "give_series") and not self.db.get_setting("records_series"):
+            with self.db:
+                self.records.give_series()
+                self.db.set_setting("records_series", 1)
 
     def resolve_ref(self, ref: str | None) -> str | None:
         """The record a reference names, as ``Type/id`` of its own type: one naming a type above it (``Party/7f3a``
@@ -2845,6 +2869,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                           + (f" ({', '.join(under)})" if under else " (it has none yet)"))
         return rt
 
+    def _check_id_free(self, rt: schema.RecordType, rid: str) -> None:
+        """A record's id is its own in its family (the types from the top of its chain down): a ref naming a type
+        above it (``Client/7f3a``) finds one record."""
+        for t in self.family(self.root_of(rt)):
+            if self.records.read(t, rid) is not None:
+                raise Invalid(f"there is a {t}/{rid} already: no two records of {self.root_of(rt)}'s types share "
+                              f"an id")
+
     def class_of(self, rtype: str) -> str:
         """The data class a record belongs to; a retired type's records keep theirs, so they can still be read."""
         rt = self.record_type_for_reading(rtype)
@@ -3314,18 +3346,28 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     # ------------------------------------------------------------------ formatted text and trees of records
     def mention_ref(self, rt: schema.RecordType, target: str) -> str | None:
-        """The record a ``[[target]]`` in a record of ``rt`` points at: ``Type/id`` as written, or the record of the
-        same type titled ``target`` (case and accents aside). None when there is none: a link not yet made."""
+        """The record a ``[[target]]`` in a record of ``rt`` points at: ``Type/id`` as written (a type above the
+        record's own finds it), or the record of the same family (the types from the top of ``rt``'s chain down)
+        titled ``target`` (case and accents aside). None when there is none: a link not yet made."""
         from .records import fold
         if target.startswith("work:"):
             return None
         if schema.REF_TEXT.fullmatch(target):
-            t, _, rid = target.partition("/")
-            return target if self.record_type(t) and self.records.read(t, rid) else None
+            return self.resolve_ref(target) if self.record_type(target.partition("/")[0]) else None
         key = fold(target).strip()
-        self._index_titles(rt)
-        row = self.db.titles.find_one({"type": rt.id, "key": key}, sort=[("_id", 1)]) if key else None
+        kin = self._titled_family(rt)
+        row = self.db.titles.find_one({"type": {"$in": kin}, "key": key}, sort=[("_id", 1)]) if key else None
         return row["_id"] if row else None
+
+    def _titled_family(self, rt: schema.RecordType, skip: str | None = None) -> list[str]:
+        """The types whose titles a ``[[title]]`` in a record of ``rt`` is looked up among (its family, from the top
+        of its chain), each with its titles indexed."""
+        kin = self.family(self.root_of(rt))
+        for t in kin:
+            krt = rt if t == rt.id else self.record_type(t)
+            if krt is not None:
+                self._index_titles(krt, skip=skip)
+        return kin
 
     def _index_titles(self, rt: schema.RecordType, skip: str | None = None) -> None:
         """Fill the title index, and the titles each record names, for a type whose records were written before it
@@ -3585,8 +3627,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         A key is checked when every field of it is filled in and, on a change, when one of them changed: two records
         that already shared one before the type said unique are not stopped from being edited otherwise. Text is
         compared as a search compares it (no case, no accents, no surrounding spaces); a reference by the record it
-        names, whatever else it carries (a display, a pin). Records carried over by a pack upgrade are taken as they
-        were."""
+        names, whatever else it carries (a display, a pin). A key is the type's that names it first (the top of the
+        chain that has it): it is checked across that type's records and those of every type under it. Records
+        carried over by a pack upgrade are taken as they were."""
         if not rt.unique or getattr(self, "_upgrading", False):
             return
         from .records import fold
@@ -3608,15 +3651,18 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 continue
             text = " ".join(str(v) for v, f in zip(values, fs)
                             if isinstance(v, (str, int, float)) and not isinstance(v, bool) and f["type"] != "reference")
-            for other in self.records.search(rt.id, text=text or None, limit=None):
+            home = next((t for t in (*reversed(rt.ancestors), rt.id)
+                         if key in getattr(rt if t == rt.id else self.record_type(t), "unique", ())), rt.id)
+            for other in self.records.search(self.family(home), text=text or None, limit=None):
                 if other.get("id") == rec.get("id"):
                     continue
                 if [as_key(schema.first(other, f["path"]), f) for f in fs] == mine:
                     labels = " and ".join(rt.field(n)["label"] for n in key)
                     shown = ", ".join(v["reference"] if isinstance(v, dict) and "reference" in v else str(v)
                                       for v in values)
-                    problems.append(f"{labels}: another {rt.label.lower()} already has {shown} "
-                                    f"({self.title(other) or rt.id + '/' + str(other.get('id'))})")
+                    kind = (self.record_type(home) or rt).label.lower()
+                    named = self.title(other) or f"{other.get('resourceType', rt.id)}/{other.get('id')}"
+                    problems.append(f"{labels}: another {kind} already has {shown} ({named})")
                     break
         if problems:
             raise Invalid(f"the {rt.label.lower()} is not unique", problems)
@@ -3760,7 +3806,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         """``after`` with its number, when this write is the one that numbers it: the write that makes it, or, for a
         type that numbers its records in some states (``when``), the write that moves it into one. The number is the
         next in its series (a year's, for a pattern with {year}), taken in this write's transaction: a write undone
-        gives it back."""
+        gives it back. The series is the numbering type's, which the types under it share."""
         n = rt.number
         if not n or getattr(self, "_upgrading", False) or schema.first(after, n["path"]):
             return after
@@ -3775,12 +3821,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if d is None and schema.number_reads_date(n["pattern"]):
             raise Invalid(f"to number a {rt.label.lower()}, fill in {df['label'] if df else 'its date'}")
         series = schema.number_series(n["pattern"], d)
-        name = f"number:{rt.id}:{series}"
+        root = self.root_of(rt)  # the type that numbers: the types under it number in its series
+        name = f"number:{root}:{series}"
         if not self.db.counters.exists({"_id": name}):  # a series goes on after the numbers its records already carry
             head = series.partition("{seq}")[0]
             top = 0
-            for row in self.db.records.find({"type": rt.id, f"data.{n['path']}": {"$regex": "^" + re.escape(head)}},
-                                            fields=["data"]):
+            for row in self.db.records.find({"type": {"$in": self.family(root)},
+                                             f"data.{n['path']}": {"$regex": "^" + re.escape(head)}}, fields=["data"]):
                 top = max(top, schema.number_in_series(series, schema.first(row["data"], n["path"])) or 0)
             if top:
                 self.db.counters.replace({"_id": name, "n": top})
@@ -4066,7 +4113,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         or the new one link afresh."""
         from .records import fold
         ref = f"{rt.id}/{rec['id']}"
-        self._index_titles(rt, skip=ref)
+        kin = self._titled_family(rt, skip=ref)
         key = fold(self.title(rec)).strip()
         row = self.db.titles.get(ref)
         before = row["key"] if row else None
@@ -4074,11 +4121,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             return
         self.db.titles.replace({"_id": ref, "type": rt.id, "key": key})
         names = [k for k in (before, key) if k]
-        for m in self.db.mention_names.find({"type": rt.id, "key": {"$in": names}}):
+        for m in self.db.mention_names.find({"type": {"$in": kin}, "key": {"$in": names}}):
             if m["from_ref"] != ref:
-                other = self.records.read(rt.id, m["from_ref"].split("/", 1)[1])
-                if other:
-                    self._relink(rt, other)
+                ot, oid = m["from_ref"].split("/", 1)
+                ort, other = self.record_type_for_reading(ot), self.records.read(ot, oid)
+                if ort is not None and other:
+                    self._relink(ort, other)
 
     def _relink(self, rt: schema.RecordType, rec: dict) -> None:
         """The record's links, from what it holds now: its references, and the ``[[...]]`` in its formatted text.
@@ -4139,6 +4187,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             self._check_part_lock(rt, None, data, member, run_id)
             self._check_period(rt, None, {"resourceType": rtype, **data})
             self._check_unique(rt, {"resourceType": rtype, **data})
+            if data.get("id"):
+                self._check_id_free(rt, str(data["id"]))
             clashes = self._check_clashes(rt, {"resourceType": rtype, **data}, member, over)
             rec = self.records.create(rtype, data)
             for blob in named:
@@ -4199,6 +4249,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         nothing writes nothing (``schema.sealed``)."""
         rtype, rid = ref.split("/", 1)
         rt = self._type(rtype)
+        if rt.abstract:  # records from before it was: kept as they are, each moved to a type under it (convert)
+            raise Invalid(f"{rt.label} is abstract: its records are kept as they are, and change only by moving each "
+                          f"to a type under it")
         if member.get("kind") != "automation" and _signature is None:
             self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
         with self.db:  # read, check and write as one step: a change made in between is never lost or skipped

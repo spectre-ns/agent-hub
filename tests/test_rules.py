@@ -9216,3 +9216,106 @@ def test_naming_a_type_takes_in_every_type_under_it(hub):
     with pytest.raises(DefinitionError) as exc:
         hub.check_workflow(makes + '[new_record]\nname = "x"\n')
     assert any("new_record: Party is abstract" in x for x in exc.value.problems), exc.value.problems
+
+
+NUMBERED = PARTY.replace('unique = ["code"]\n', 'unique = ["code"]\ntitle = "{name}"\n') + '''[[field]]
+name = "ref_no"
+label = "Reference"
+[[field]]
+name = "notes"
+type = "markdown"
+[number]
+field = "ref_no"
+pattern = "P-{seq:03}"
+'''
+ORG = 'id = "Org"\nextends = "Party"\nunique = ["email"]\n'
+
+
+def test_a_family_shares_its_key_counter_numbers_and_unique_keys(hub):
+    """The types under one share what makes a record one of a kind: its key and counter (when they set no key of
+    their own), its number's series, each unique key across the family of the type that set it, and the ids. A
+    ``[[title]]`` finds a record of any type of the family."""
+    amara = M(hub, "dr-amara")
+    _in_force(hub, NUMBERED)
+    _in_force(hub, PERSON)
+    _in_force(hub, ORG)
+    ann = hub.create_record(amara, "Person", {"name": "Ann", "email": "ann@example.org", "code": "A1"})
+    acme = hub.create_record(amara, "Org", {"name": "Acme", "email": "info@acme.example", "code": "X1"})
+    bob = hub.create_record(amara, "Person", {"name": "Bob", "email": "bob@example.org"})
+    assert [(r["meta"]["key"], r["ref_no"]) for r in (ann, acme, bob)] == \
+        [("PTY-1", "P-001"), ("PTY-2", "P-002"), ("PTY-3", "P-003")]
+    assert hub.db.records.get(f"Org/{acme['id']}")["number_of"] == "Party"
+    # a unique key the parent set holds across the family; one a type under it set, across its own records only
+    with pytest.raises(Invalid, match="not unique") as e:
+        hub.create_record(amara, "Person", {"name": "Cy", "email": "cy@example.org", "code": "x1"})
+    assert any("another party already has x1 (Acme)" in p for p in e.value.problems), e.value.problems
+    with pytest.raises(Invalid, match="not unique"):
+        hub.create_record(amara, "Org", {"name": "Acme 2", "email": "INFO@acme.example"})
+    hub.create_record(amara, "Person", {"name": "Info", "email": "info@acme.example"})
+    # an id is one record's in the family, so a ref naming the parent finds one
+    hub.create_record(amara, "Person", {"id": "same", "name": "Di", "email": "di@example.org"})
+    with pytest.raises(Invalid, match="there is a Person/same already"):
+        hub.create_record(amara, "Org", {"id": "same", "name": "Same Ltd", "email": "x@same.example"})
+    assert hub.resolve_ref("Party/same") == "Person/same"
+    # a mention by title finds a record of any type of the family
+    memo = hub.create_record(amara, "Org", {"name": "Memo Co", "email": "m@memo.example", "notes": "see [[Ann]]"})
+    assert ("mentions", f"Person/{ann['id']}") in hub.mention_links(hub.record_type("Org"), memo)
+    assert hub.db.links.exists({"from_ref": f"Org/{memo['id']}", "to_ref": f"Person/{ann['id']}"})
+    late = hub.create_record(amara, "Org", {"name": "Late", "email": "l@late.example", "notes": "and [[Eve]]"})
+    eve = hub.create_record(amara, "Person", {"name": "Eve", "email": "eve@example.org"})
+    assert hub.db.links.exists({"from_ref": f"Org/{late['id']}", "to_ref": f"Person/{eve['id']}"}), \
+        "a record given a title later is linked from the ones that named it"
+
+
+def test_a_record_moved_within_its_family_keeps_its_key_and_number(hub):
+    """A record converted into another type of its family keeps its id, its key (when the new type has the same)
+    and its number (the family's series): it is the same record, filed more exactly. Into a type with a key of its
+    own it is given that type's key, and its old key finds it. Out of the family a numbered record is not moved."""
+    amara = M(hub, "dr-amara")
+    _in_force(hub, NUMBERED)
+    _in_force(hub, PERSON)
+    _in_force(hub, ORG)
+    _in_force(hub, 'id = "Vendor"\nextends = "Party"\nkey = "VND"\n')
+    ann = hub.create_record(amara, "Person", {"name": "Ann", "email": "ann@example.org"})
+    body = {k: v for k, v in ann.items() if k not in ("resourceType", "id", "meta", "birth_date")}
+    org = hub.convert_record(amara, f"Person/{ann['id']}", "Org", body)
+    assert (org["id"], org["meta"]["key"], org["ref_no"]) == (ann["id"], "PTY-1", "P-001")
+    assert hub.records.read("Person", ann["id"]) is None and hub.resolve_ref(f"Party/{ann['id']}") == f"Org/{ann['id']}"
+    assert hub.find_key(None, "PTY-1")["ref"] == f"Org/{ann['id']}"
+    ev = hub.db.events.find_one({"action": "record.converted"}, sort=[("seq", -1)])
+    assert ev["data"]["key"] == "PTY-1" and "from_key" not in ev["data"]
+    # a number is the hub's: the one it had, whatever the conversion is given
+    vendor = hub.convert_record(amara, f"Org/{ann['id']}", "Vendor", {**body, "ref_no": "P-999"})
+    assert (vendor["meta"]["key"], vendor["ref_no"]) == ("VND-1", "P-001")
+    assert hub.find_key(None, "PTY-1") == {"key": "VND-1", "ref": f"Vendor/{ann['id']}", "was": "PTY-1"}
+    nxt = hub.create_record(amara, "Person", {"name": "Bob", "email": "bob@example.org"})
+    assert (nxt["meta"]["key"], nxt["ref_no"]) == ("PTY-2", "P-002"), "nothing given twice, nothing skipped"
+    # out of the family, a numbered record keeps its type
+    _in_force(hub, 'id = "Contact"\ndata_class = "clinical"\n[[field]]\nname = "name"\n')
+    with pytest.raises(Invalid, match="has a number of its own"):
+        hub.convert_record(amara, f"Person/{nxt['id']}", "Contact", {"name": "Bob"})
+
+
+def test_records_of_a_type_made_abstract_stay_and_change_only_by_moving_under_it(hub):
+    """A type with records may become abstract: its records stay, are read and found as before, and change only
+    by moving each to a type under it, keeping its key. The approval note counts them."""
+    amara = M(hub, "dr-amara")
+    account = 'id = "Account"\ndata_class = "clinical"\nkey = "ACC"\n[[field]]\nname = "name"\n'
+    _in_force(hub, account)
+    old = hub.create_record(amara, "Account", {"name": "Old one"})
+    p = hub.propose("type", M(hub, "rana"), account.replace('key = "ACC"\n', 'key = "ACC"\nabstract = true\n'))
+    assert any(n.startswith("1 accounts exist, and it becomes abstract") for n in
+               hub.impact("type", "Account", p["version"])), hub.impact("type", "Account", p["version"])
+    hub.approve(amara, "type", "Account", p["version"])
+    _in_force(hub, 'id = "Savings"\nextends = "Account"\n')
+    ref = f"Account/{old['id']}"
+    assert hub.records.read("Account", old["id"]) and [r["id"] for r in hub.search_records(amara, "Account")] \
+        == [old["id"]]
+    with pytest.raises(Invalid, match="Account is abstract: its records are kept as they are"):
+        hub.update_record(amara, ref, {"name": "Renamed"})
+    with pytest.raises(Invalid, match="Account is abstract"):
+        hub.create_record(amara, "Account", {"name": "New one"})
+    moved = hub.convert_record(amara, ref, "Savings", {"name": "Old one"})
+    assert (moved["id"], moved["meta"]["key"]) == (old["id"], old["meta"]["key"])
+    hub.update_record(amara, f"Savings/{old['id']}", {**moved, "name": "Renamed"})
+    assert hub.records.read("Savings", old["id"])["name"] == "Renamed"

@@ -154,7 +154,9 @@ required = true
   data class, `by`, `pin`, scale and unit stay. A field of the core base the parent did not write is the base's.
 - **Its key is its parent's** unless it sets its own: a family shares one count (`PTY-1` a person, `PTY-2` another).
 - **Any type may be abstract** (`abstract = true`): nothing creates a record of it, whoever asks (a person, an agent, a
-  workflow, a conversion). Its records are of the types under it, and a reference to it takes any of them.
+  workflow, a conversion). Its records are of the types under it, and a reference to it takes any of them. A type
+  that had records before it became abstract keeps them: they are read and found as before, and change only by
+  moving each to a type under it (the approval note counts them).
 - **A parent's change holds for its family.** A new version is checked with every type under it read again under it,
   and refused if one would no longer hold ("Person would no longer hold: ..."). A type with types under it is not
   retired. A chain has no loops.
@@ -175,6 +177,22 @@ required = true
 A reference that names a type above a record's own (`Party/7f3a` for a person) finds it. A record is stored, and its
 page is, as its own type. An abstract type has no `create_` tool, and a workflow whose `record` is abstract works only
 on records that exist (`new_record` is refused).
+
+**A family shares what makes a record one of a kind.**
+
+- **Its key and counter**, for the types that set no key of their own.
+- **Its number.** `[number]` is the top type's, so its series is too: a person and an organisation under `Party` take
+  `P-001`, `P-002` from one count, and no two records of the family have the same number.
+- **Each unique key**, across the family of the type that set it: `unique = ["code"]` on `Party` holds between a
+  person and an organisation; `unique = ["email"]` on `Org` only between organisations.
+- **Its ids.** No two records of the family share an id, so `Party/7f3a` names one record. Duplicates at registration,
+  and a `[[title]]` in formatted text, are looked for across the family.
+
+**A record moved within its family is the same record.** Converting it into another type of the family (a party filed
+as the person it is) keeps its id, its key (when the new type has the same) and its number. Into a type of the family
+with a key of its own, it is given that key, and its old key still finds it. Into another family, it is given its new
+type's key, and a numbered record is not moved.
+
 ### Sign-off that holds
 
 A state can be **final**: once a record is in it, nothing changes it, not a person, its workflow, a pack upgrade or a

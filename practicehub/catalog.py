@@ -469,7 +469,9 @@ class CatalogMixin:
 
     def duplicates(self, rtype: str, rec: dict) -> list[dict]:
         """Subjects that may be this one already: the same identifier, or the same name and the same values in
-        every ``match = true`` field both have. Accents and case aside (Côté is Cote)."""
+        every ``match = true`` field both have. Accents and case aside (Côté is Cote). They are looked for among the
+        records of its family (the types from the top of its chain down: a business may be the client an individual
+        was filed as)."""
         rt = self.record_type(rtype)
         if rt is None or not rt.base:
             return []
@@ -479,13 +481,14 @@ class CatalogMixin:
             return []
         matchers = [f for f in rt.fields if f.get("match")]
         out = []
-        # by identifier, a text search finds them; by name, every one of the type is read (accents are spelled many
-        # ways, so no text search finds Côté from cote). Registration is rare; the type's records are not many.
+        # by identifier, a text search finds them; by name, every one of the family is read (accents are spelled many
+        # ways, so no text search finds Côté from cote). Registration is rare; the family's records are not many.
         for word in ([ident] if ident else []) + ([None] if name else []):
-            for other in self.records.search(rtype, limit=None, text=word):
+            for other in self.records.search(self.family(self.root_of(rt)), limit=None, text=word):
                 if other.get("id") == rec.get("id") or any(o.get("id") == other.get("id") for o in out):
                     continue
-                theirs = schema.project(rt, other, self.member_types())
+                theirs = schema.project(self.record_type(other.get("resourceType") or rtype) or rt, other,
+                                        self.member_types())
                 if ident and _plain(theirs.get("identifier")) == ident:
                     out.append(other)
                     continue
@@ -912,7 +915,10 @@ class CatalogMixin:
                 if (old.lifecycle or {}) != (new.lifecycle or {}):
                     notes.append("Its lifecycle changes: check which moves only a workflow may make.")
             n = self.db.records.count({"type": did})
-            if n:
+            if n and new.abstract:
+                notes.append(f"{n} {new.plural.lower()} exist, and it becomes abstract: they are kept as they are, and "
+                             f"change only by moving each to a type under it.")
+            elif n:
                 bad = sum(1 for r in self.records.search(did, limit=None) if schema.validate(new, r))
                 notes.append(f"{n} {new.plural.lower()} exist" + (f"; {bad} of them would not pass this version"
                                                                    if bad else ", and all of them pass this version") + ".")

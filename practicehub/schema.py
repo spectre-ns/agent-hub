@@ -220,8 +220,11 @@ definition is its parent's as in force, with what it says itself merged in.
   the counter its records' keys are given from.
 - Never inherited: id, label, plural and slug (each from its own id when it says none), and abstract.
 
-``abstract = true``: nothing creates a record of the type; the types under it have the records. Naming a type (a
-reference's target, a view, a data class, a workflow's record) takes in every type under it, its family.
+``abstract = true``: nothing creates a record of the type; the types under it have the records (those it had before
+it became abstract stay, and change only by moving under it). Naming a type (a reference's target, a view, a data
+class, a workflow's record) takes in every type under it, its family. A family shares its key and counter, its
+number's series (``[number]`` is the top type's), each unique key across the family of the type that set it, and
+its ids; a record moved to another type of its family keeps its key and number.
 """
 
 from __future__ import annotations

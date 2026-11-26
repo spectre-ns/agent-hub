@@ -94,7 +94,7 @@ def _prefix(word: str) -> dict:
 
 
 class RecordStore(Protocol):
-    def create(self, rtype: str, data: dict) -> dict: ...
+    def create(self, rtype: str, data: dict, *, key: str | None = None) -> dict: ...
     def read(self, rtype: str, rid: str) -> dict | None: ...
     def update(self, rtype: str, rid: str, data: dict) -> dict: ...
     def search(self, rtype: str | None = None, *, subject: str | None = None, limit: int | None = 200,
@@ -119,7 +119,8 @@ class LocalRecordStore:
         self.parts_fn = lambda rec: ([], "")
         # and this: the key of a type's records (T1), or None for a type whose records have none
         self.key_fn = lambda rtype: None
-        # and this: a record's own number, for a type that numbers its records ([number]): kept beside it, unique
+        # and this: a record's own number, for a type that numbers its records ([number]), and the type whose series
+        # it is in (the one that numbers them: a type under it numbers in its series), kept beside it, unique there
         self.number_fn = lambda rtype, rec: None
 
     def _indexed(self, rec: dict) -> dict:
@@ -136,20 +137,38 @@ class LocalRecordStore:
             n += 1
         return n
 
-    def create(self, rtype, data):
+    def create(self, rtype, data, *, key=None):
         """A new record. It is given its key here (T1-12: its type's key and the next number in that type, never
-        reused), in the transaction of the write that makes it: a write undone gives its number back."""
+        reused), in the transaction of the write that makes it: a write undone gives its number back. ``key``: the
+        key it keeps instead (a record moved to another type of its family, which shares its key and counter)."""
         rec = {**data, "resourceType": rtype, "id": data.get("id") or new_id()}
         rec["meta"] = {"versionId": "1", "lastUpdated": utcnow()}
         code, kn = self.key_fn(rtype), None
-        if code:
+        if key:
+            kn = int(key.rsplit("-", 1)[1])
+            rec["meta"]["key"] = key
+        elif code:
             kn = self.db.next_seq(f"key:{code}")
             rec["meta"]["key"] = f"{code}-{kn}"
         self.db.records.insert({"_id": f"{rtype}/{rec['id']}", "type": rtype, "id": rec["id"],
-                                "key": rec["meta"].get("key"), "kn": kn, "number": self.number_fn(rtype, rec),
+                                "key": rec["meta"].get("key"), "kn": kn, **self._numbered(rtype, rec),
                                 "subject": self.subject_fn(rec), "data": rec, "version": 1,
                                 "updated_at": rec["meta"]["lastUpdated"], **self._indexed(rec)})
         return rec
+
+    def _numbered(self, rtype: str, rec: dict) -> dict:
+        number, of = self.number_fn(rtype, rec) or (None, None)
+        return {"number": number, "number_of": of}
+
+    def give_series(self) -> int:
+        """Name the series of each numbered record kept before numbers were kept with their series (``number_of``).
+        Returns how many were named."""
+        n = 0
+        for row in self.db.records.find({"number": {"$type": "string"}, "number_of": {"$exists": False}},
+                                        fields=["type", "data"]):
+            self.db.records.set(row["_id"], self._numbered(row["type"], row["data"]))
+            n += 1
+        return n
 
     def by_key(self, key: str) -> dict | None:
         """The record with this key (T1-12), or None."""
@@ -184,7 +203,7 @@ class LocalRecordStore:
             rec = {**data, "resourceType": rtype, "id": rid, "meta": {"versionId": str(version), "lastUpdated": utcnow(),
                                                                       **({"key": row["key"]} if row.get("key") else {})}}
             self.db.records.set(row["_id"], {"data": rec, "subject": self.subject_fn(rec), "version": version,
-                                             "number": self.number_fn(rtype, rec),
+                                             **self._numbered(rtype, rec),
                                              "updated_at": rec["meta"]["lastUpdated"], **self._indexed(rec)})
             return rec
 
@@ -262,7 +281,7 @@ class MedplumRecordStore:
                 return None
             raise
 
-    def create(self, rtype, data):
+    def create(self, rtype, data, *, key=None):  # a FHIR server keys no records: there is no key to keep
         rec = {k: v for k, v in data.items() if k not in ("id", "meta")}
         return self._call("POST", rtype, {**rec, "resourceType": rtype})
 
