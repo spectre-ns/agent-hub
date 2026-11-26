@@ -111,6 +111,59 @@ that date, and a numbered record is never converted into another type: no number
 goes on after the highest number its records already carry. Numbers are unique within the type, and find the record
 as its key does (not in the address). Only the hub's own record store numbers records.
 
+### Sign-off that holds
+
+A state can be **final**: once a record is in it, nothing changes it, not a person, its workflow, a pack upgrade or a
+signature's move, and no move leaves it (`from = ["*"]` does not match it). A final state is locked too. A record in
+one is corrected by another record of its type that reverses it:
+
+```toml
+reverses = "reversal_of"        # a reference field to this same type, not required
+[lifecycle]
+final = ["posted"]
+```
+
+The reversing record reverses one that is final, that no other record reverses, and which one it reverses never
+changes. The record page offers "Reverse it": the new record's form holds a copy of the final one's values. What the
+reversal changes (a sign, say) is the pack's to say, in its form or its workflow; the core copies.
+
+A reference can **pin** what it refers to: it keeps the record's version and hash as they were when it was given.
+
+```toml
+[[field]]
+name = "counted"
+type = "reference"
+target = ["Slip"]
+list = true
+pin = true                      # one field (list = true for several), not a path through a list
+```
+
+A later write keeps the pin whatever it says; only "Use version M" on the record page (`Hub.repin`) moves it on. A
+signature on the record covers what it pins, and the parts its type **covers** (`covers = ["Line"]`, part types whose
+`part_of` points here): a change to either leaves the signature not current. The record is not signed while a pin is
+behind. While the record is locked people do not add or change the parts it covers (its workflow still does); while
+it is final no one does. A type with no pins and no `covers` is signed exactly as before.
+
+A **closed period** keeps everything dated in it as it was. One type says what closes it, another closes it:
+
+```toml
+# on the dated type
+[period]
+closed_by = "PeriodClose"       # a type with [closing]
+date = "posted_on"              # a required date or datetime (default: the type's date)
+scope = "book"                  # optional: a reference; a close reaches only records with its own
+
+# on the closing type
+[closing]
+through = "through"             # its required date: the last day it closes
+states = ["closed"]             # it closes while in these
+scope = "book"                  # names the same type as the period's scope
+```
+
+While a close is in one of its closing states, nothing dated on or before its `through` is written, moved into the
+period or out of it, by anyone. A closing state is locked, nothing changes a close in it, and every transition out
+of one carries `sign`: only a signed move reopens a period.
+
 ## Skills
 
 ```toml

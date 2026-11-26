@@ -39,6 +39,9 @@ Notes for anyone, human or agent, changing this code.
 | Consent to commercial messages (CASL: express, implied for 2 years, withdrawn), checked at queue and at delivery | `Hub.consent_problem` in `practicehub/outbox.py`, a type's `[consent]` (`practicehub/schema.py`) |
 | A record's key (its type's, given once, never reused by another type) and who is told what a key names | `LocalRecordStore.create` in `practicehub/records.py`, `CatalogMixin._key_problems` in `practicehub/catalog.py`, `Hub.find_key` |
 | A type's own number (`[number]`): given once by the hub, in a series with no gaps, never written by hand | `Hub._check_number_kept`, `Hub._take_number` in `practicehub/hub.py` |
+| A record in a final state: nothing changes it, no move leaves it; it is corrected by one record that reverses it | `Hub._sealed_write`, `Hub._check_reversal` in `practicehub/hub.py`; `schema.leaves`, `catalog.lifecycle_fit` |
+| What a signature covers (its pins and the parts its type covers), and the parts locked with their record | `Hub._record_digest`, `Hub._pinned`, `Hub._check_part_lock` in `practicehub/hub.py` |
+| A closed period: nothing dated in it is written; only a signed move reopens it | `Hub._check_period`, `Hub.closed_through`, `Hub._sealed_write` in `practicehub/hub.py` |
 
 If you change one of these, add or update a test in `tests/test_rules.py` that states the rule (the rules the
 2026-11-24 review panel found broken are stated in `tests/test_panel_fixes.py`).

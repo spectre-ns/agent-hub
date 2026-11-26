@@ -125,6 +125,7 @@ class RecordPages:
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/link", self.page_link)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>link|unlink)", self.post_link)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/override", self.post_override)
+        R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/repin", self.post_repin)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
         R("GET", r"/api/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
         R("POST", r"/api/files/(?P<rtype>[A-Za-z][\w]*)", self.api_add_file)
@@ -372,7 +373,7 @@ class RecordPages:
                 elif f["type"] == "markdown" and isinstance(item, str):
                     out.append(self.markdown_html(item, rec))
                 elif f["type"] == "reference" and schema.ref_of(item):
-                    out.append(self.record_link(schema.ref_of(item)))
+                    out.append(self.record_link(schema.ref_of(item)) + self._pin_html(f, rec, item))
                 elif f["type"] == "member" and isinstance(item, str):
                     out.append(self.who(item.removeprefix("member:")))
                 elif f["type"] == "datetime" and isinstance(item, str) and self._datetime_words(item):
@@ -389,6 +390,25 @@ class RecordPages:
                 else:
                     out.append(e(str(item)))
         return "<br>".join(out) if out else "<span class='muted'>—</span>"
+
+    def _pin_html(self, f, rec, item) -> str:
+        """A pinned reference's version, and, when its record has changed since, the version now and a button that
+        moves the pin on ("Use version M") for someone who may change the record."""
+        if not f.get("pin") or not isinstance(item, dict) or "version" not in item:
+            return ""
+        ref = schema.ref_of(item)
+        now = self.hub.record_version(ref)
+        out = f' <span class="muted">version {e(str(item["version"]))}'
+        if now == item["version"]:
+            return out + "</span>"
+        out += f" (now {e(str(now))})</span>"
+        me = self.reader()
+        if rec.get("id") and rec.get("resourceType") and self.hub.may_write(me, rec["resourceType"]):
+            out += (f'<form method="post" action="/records/{e(rec["resourceType"])}/{e(rec["id"])}/repin" class="inline">'
+                    f'<input type="hidden" name="field" value="{e(f["name"])}">'
+                    f'<input type="hidden" name="target" value="{e(ref)}">'
+                    f'<button class="btn subtle">Use version {e(str(now))}</button></form>')
+        return out
 
     @staticmethod
     def _datetime_words(v: str) -> str:
@@ -951,6 +971,7 @@ class RecordPages:
                    f'<p class="part-of">Part of <a href="{e(href)}">{e(self.hub.short_title(o))}</a></p>')
             cancel, back = e(href), ""
             crumbs = [(href, self.hub.short_title(o)), (f"{href}#part-{rtype}", rt.plural), (None, "Add")]
+        seed = self._reversal_seed(me, rt, q, seed, kept)
         seed = self._seed_from_links(me, rt, seed, kept)
         start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
         inputs = self._inputs(rt, seed, me, "create", skip=skip)
@@ -960,6 +981,25 @@ class RecordPages:
                 f'<div class="filters"><button class="primary">{verb}</button>'
                 f'<a class="btn secondary" href="{cancel}" data-modal-close>Cancel</a>{back}</div></form></div>')
         return self.layout(req, f"{verb} {a_an(self._lower(rt.label))}", body, crumbs=crumbs)
+
+    def _reversal_seed(self, me, rt, q, seed: dict | None, kept: dict | None) -> dict | None:
+        """"Reverse it": the new record's form holds what the record it reverses says (as the member may read it),
+        to change as the pack's practice is (amounts the other way, say): the core copies, never negates. Not its
+        state, number or what only a workflow writes."""
+        rv = rt.reverses
+        got = q.get(rv["field"]) if rv else None
+        if not rv or kept or not isinstance(got, str) or not got.startswith(rt.id + "/"):
+            return seed
+        try:
+            src = self.hub.read_record(me, got)
+        except (Invalid, Denied, HubError):
+            return seed
+        copy = {k: v for k, v in src.items() if k not in ("id", "meta")}
+        for f in rt.fields:
+            if f.get("by") == "workflow" or (rt.lifecycle and f["path"] == rt.lifecycle["path"]) \
+                    or f["type"] == "attachment":
+                copy = schema.put(copy, f["path"], None)
+        return {**{k: v for k, v in copy.items() if v is not None}, **(seed or {}), "resourceType": rt.id}
 
     def _seed_from_links(self, me, rt, seed: dict | None, kept: dict | None) -> dict | None:
         """What a new record's links already say, filled in: a link left empty (the note's patient) takes what a record
@@ -1488,6 +1528,13 @@ class RecordPages:
         return (f'<div class="flash info" role="status"><p>{e(gone["note"])}: '
                 f'{e(", ".join(gone.get("fields") or []))}.</p></div>')
 
+    def post_repin(self, req, rtype, rid):
+        """"Use version M": a pinned reference moved on to the version of its record now (``hub.repin``)."""
+        form = self.form(req)
+        ref = f"{rtype}/{rid}"
+        self.hub.repin(req["me"], ref, str(form.get("field") or ""), str(form.get("target") or "") or None)
+        raise self._redirect(self.record_href(ref))
+
     def post_override(self, req, rtype, rid):
         """Break the glass (``hub.break_glass``), then back to the record, now open, under the banner."""
         reason = str(self.form(req).get("reason") or "")
@@ -1609,7 +1656,17 @@ class RecordPages:
                             f'<p class="muted">This {e(rt.label.lower())} is being revised ({e(rt.state_label(st).lower())}). Until the '
                             f'revision is {e(lc["in_use"])}, work from this version (saved {self._at(used["at"])}).'
                             f'</p><table class="kv">{body}</table></section>')
-            if locked:
+            if locked and schema.sealed(rt, st):
+                reverse = (f' <a class="btn secondary" href="/records/{e(rtype)}/new?{e(rt.reverses["field"])}='
+                           f'{e(urllib.parse.quote(ref, safe=""))}" data-modal>Reverse it</a>'
+                           if rt.reverses and rt.is_final(st) and may_write else "")
+                main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is '
+                            f'<b>{e(rt.state_label(st))}</b> is '
+                            + ("final: nothing changes it." + (" A record that reverses it corrects it." if rt.reverses
+                                                               else "")
+                               if rt.is_final(st) else "closing a period: a signed move reopens it.")
+                            + f'{reverse}</p></div>')
+            elif locked:
                 by_hand = "; ".join(t["label"] for t in lc["transition"] if st in t["from"] and t["by"] != "workflow")
                 on = any(st in t["from"] and t["by"] == "workflow" and not t.get("entry") for t in lc["transition"])
                 main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(rt.state_label(st))}</b> is not edited.'
@@ -1677,7 +1734,7 @@ class RecordPages:
             if starts:
                 main.append(f"<div class='starts' role='group' aria-label='Start work'>{starts}</div>")
 
-        moves = [t for t in lc.get("transition", []) if (st in t["from"] or "*" in t["from"]) and t["to"] != st] \
+        moves = [t for t in lc.get("transition", []) if schema.leaves(lc, t, st) and t["to"] != st] \
             if lc else []
         # where its workflow moves it from here: not where it goes only if that work is cancelled (``abandoned``),
         # and not where the workflow begins (``entry``): a workflow starting on it again is no way on from here
@@ -2384,7 +2441,7 @@ class RecordPages:
         st = schema.first(rec, rt.lifecycle["path"])
         out = {}
         for t in rt.lifecycle.get("transition", []):
-            if t["by"] == "workflow" or t["to"] == st or not (st in t["from"] or "*" in t["from"]) or t["to"] in out:
+            if t["by"] == "workflow" or t["to"] == st or not schema.leaves(rt.lifecycle, t, st) or t["to"] in out:
                 continue
             asks = bool(t["asks"] or t["comment"])
             out[t["to"]] = {"how": "screen" if asks else "post",

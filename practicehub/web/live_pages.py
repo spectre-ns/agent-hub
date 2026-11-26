@@ -116,7 +116,7 @@ class LivePages:
         if not lc or st != lc.get("initial"):
             return None
         for t in lc.get("transition", []):
-            if (st in t["from"] or "*" in t["from"]) and t["to"] != st and t["by"] != "workflow" \
+            if schema.leaves(rt.lifecycle, t, st) and t["to"] != st and t["by"] != "workflow" \
                     and not t["asks"] and not t["comment"] and not self._undoing(t):
                 return {"to": t["to"], "label": t["label"]}
         return None

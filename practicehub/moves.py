@@ -225,7 +225,7 @@ class MovesMixin:
         raw = self.records.read(rtype, rid)
         cur = schema.first(raw, rt.lifecycle["path"])
         opened = self.open_step(rt, ref) or False
-        exits = [t for t in rt.lifecycle["transition"] if (cur in t["from"] or "*" in t["from"]) and t["to"] != cur
+        exits = [t for t in rt.lifecycle["transition"] if schema.leaves(rt.lifecycle, t, cur) and t["to"] != cur
                  and not t.get("entry")]  # a workflow starting on the record again is no way on from here
         made = opened[2].state if opened and opened[2].kind == "task" and opened[2].state else None
         forward = made or next((t["to"] for t in exits if "*" not in t["from"] and t["by"] != "workflow"), None)

@@ -65,8 +65,19 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
         problems += [f"lifecycle.transition to {t['to']!r}: the {wf.id} workflow already moves a record from {f!r} "
                      f"to {t['to']!r} (its edge {made[f, t['to']]}); leave it out"
                      for f in t["from"] if (f, t["to"]) in made]
+    final = lc.get("final") or []
+    closing = (rt.closing or {}).get("states") or []
+    for e in shape.get("edges") or []:  # nothing moves a record out of a final state, its own workflow included
+        if e["from"] in final and any(to != e["from"] for to in e.get("lands") or []):
+            problems.append(f"lifecycle.final: the {wf.id} workflow's edge {e['id']} moves a record out of "
+                            f"{e['from']!r}, which is final")
+        elif e["from"] in closing and any(to not in closing for to in e.get("lands") or []):
+            problems.append(f"closing.states: the {wf.id} workflow's edge {e['id']} moves a record out of "
+                            f"{e['from']!r}, where it closes a period: only a signed move reopens it")
     for st in lc["states"]:
-        by = [t["by"] for t in rows if (st in t["from"] or "*" in t["from"]) and t["to"] != st]
+        if st in final:
+            continue
+        by = [t["by"] for t in rows if schema.leaves(lc, t, st) and t["to"] != st]
         by += ["workflow" for f, to in made if f == st and to in lc["states"]]
         if by and all(x == "workflow" for x in by) and st not in lc["abandoned"]:
             problems.append(f"lifecycle.abandoned: only the {wf.id} workflow moves a record out of {st!r}; say where "
@@ -203,8 +214,8 @@ class CatalogMixin:
         written = list(lc.get("transition") or [])
         moves = [t for t in written if not t.get("abandon")]
 
-        def uncovered(frm, to):
-            return [f for f in frm if f in states and f != to
+        def uncovered(frm, to):  # a final state is left by no move, nor a closing one by a workflow's: not its entry
+            return [f for f in frm if f in states and f != to and not schema.sealed(rt, f)
                     and not any(t["to"] == to and f in t["from"] for t in moves)]
 
         def edge_moves(e):
@@ -224,7 +235,8 @@ class CatalogMixin:
         edge_moves(wf.shape["start"])
         lc.update(transition=moves, labels=labels, tones=tones,
                   # a workflow starting on the record again (its entry) is no way back into use
-                  revising=schema.revising_states(states, [t for t in moves if not t.get("entry")], lc.get("in_use")))
+                  revising=schema.revising_states(states, [t for t in moves if not t.get("entry")], lc.get("in_use"),
+                                                  lc.get("final") or []))
         merged.lifecycle = lc
         self._defs[key] = merged
         return merged
@@ -504,6 +516,7 @@ class CatalogMixin:
                         problems.append(f"base.{bname}: {base.id}'s {bname} is a {' or '.join(bf['target'])}; "
                                         f"{t} does not extend it")
         problems += self._key_problems(rt)
+        problems += self._part_problems(rt, known)
         if rt.number and not hasattr(self.records, "number_fn"):
             problems.append("number: this hub keeps its records in a store of their own (a FHIR server), which numbers "
                             "nothing: a type numbers its records ([number]) only in the hub's own store")
@@ -511,6 +524,38 @@ class CatalogMixin:
         if wf is not None:
             problems += lifecycle_fit(rt, wf)
         return problems
+
+    def _part_problems(self, rt: schema.RecordType, known: set) -> list[str]:
+        """What ``covers`` and ``[period]`` name must be so: a covered type is part of this one (its ``part_of``
+        points here), and a period is closed by a type that closes one (``[closing]``) over the same scope. A type
+        named but not readable yet (a pack installing its types one by one) is checked when it is."""
+        out = []
+        for t in rt.covers:
+            prt = self.record_type(t) if t != rt.id else None
+            if t not in known:
+                out.append(f"covers: there is no record type {t!r}")
+            elif prt is not None and not (prt.part_of and any(x == rt.id or rt.is_a(x) for x in prt.part_of["target"])):
+                out.append(f"covers: a {prt.label.lower()} is not part of a {rt.label.lower()} (its part_of says "
+                           f"{(prt.part_of or {}).get('field') or 'nothing'})")
+        for o in self.record_types().values():  # a part a type covers stays part of it
+            if o.id != rt.id and rt.id in o.covers and not (rt.part_of and o.id in rt.part_of["target"]):
+                out.append(f"part_of: {o.label} covers it (covers = [\"{rt.id}\"]): it stays part of a "
+                           f"{o.label.lower()}")
+        p = rt.period
+        if p:
+            crt = self.record_type(p["closed_by"])
+            if p["closed_by"] not in known:
+                out.append(f"period.closed_by: there is no record type {p['closed_by']!r}")
+            elif crt is not None and not crt.closing:
+                out.append(f"period.closed_by: a {crt.label.lower()} closes nothing (it has no [closing])")
+            elif crt is not None and bool(p["scope"]) != bool(crt.closing["scope"]):
+                out.append(f"period.scope: a {crt.label.lower()} closes "
+                           + (f"one {crt.closing['scope']} at a time; say which field of it is that (scope = ...)"
+                              if crt.closing["scope"] else "every record at once; leave scope out"))
+            elif crt is not None and p["scope"] and not set(p["scope_target"]) & set(crt.closing["scope_target"]):
+                out.append(f"period.scope: {p['scope']} refers to {' or '.join(p['scope_target'])}, and a "
+                           f"{crt.label.lower()} closes a {' or '.join(crt.closing['scope_target'])}")
+        return out
 
     # ------------------------------------------------------------------ views
     def check_view(self, v: viewmod.View) -> list[str]:

@@ -260,3 +260,25 @@ def test_a_number_is_counted_in_its_series():
     assert schema.number_in_series("TW-2026-{seq}", "TW-2026-0012") == 12
     assert schema.number_in_series("TW-2026-{seq}", "TW-2025-0012") is None
     assert schema.number_series("C-{seq:05}", None) == "C-{seq}" and schema.render_number("C-{seq:05}", None, 7) == "C-00007"
+
+
+def test_final_states_pins_and_covers_are_declared_soundly():
+    """``final`` names states (locked too); ``pin`` is for one reference field; ``covers`` names other types; a
+    reversing field is the type's own and not required; a type reverses only what can be final."""
+    rt = ok(HEAD + STATUS.replace('initial = "draft"\n', 'initial = "draft"\nfinal = ["final"]\n'))
+    assert rt.is_final("final") and "final" in rt.lifecycle["locked"] and not rt.is_final("draft")
+    assert any("lifecycle.final: 'done' is not one of its states" in p for p in
+               problems(HEAD + STATUS.replace('initial = "draft"\n', 'initial = "draft"\nfinal = ["done"]\n')))
+    pin = '[[field]]\nname = "ref"\ntype = "{t}"\ntarget = ["Part"]\npin = true\n'
+    assert ok(HEAD + pin.format(t="reference")).fields[0]["pin"] is True
+    assert any("pin" in p and "reference" in p for p in problems(HEAD + pin.format(t="string").replace('target = ["Part"]\n', '')))
+    assert any("not a path through a list" in p for p in problems(
+        HEAD + '[[field]]\nname = "ref"\npath = "rows.*.ref"\ntype = "reference"\ntarget = ["Part"]\npin = true\n'))
+    for bad, want in (('covers = ["Part"]\n', "not part of itself"), ('covers = "Line"\n', "each once"),
+                      ('covers = ["Line", "Line"]\n', "each once")):
+        assert any(want in p for p in problems(HEAD + bad)), (bad, problems(HEAD + bad))
+    rev = '[[field]]\nname = "of"\ntype = "reference"\ntarget = ["Part"]\n'
+    final = STATUS.replace('initial = "draft"\n', 'initial = "draft"\nfinal = ["final"]\n')
+    assert ok('reverses = "of"\n' + HEAD + rev + final).reverses["field"] == "of"
+    assert any("required" in p for p in problems('reverses = "of"\n' + HEAD + rev + 'required = true\n' + final))
+    assert any("a record is reversed once it is final" in p for p in problems('reverses = "of"\n' + HEAD + rev + STATUS))

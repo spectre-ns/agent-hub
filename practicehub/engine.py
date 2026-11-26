@@ -849,6 +849,9 @@ class Engine:
             return None
         rec = self.hub.records.read(*record.split("/", 1))
         state = schema.first(rec, rt.lifecycle["path"]) if rec else None
+        if schema.sealed(rt, state):
+            return (f"a {rt.label.lower()} that is {rt.state_label(state).lower()} is final: no work is started on "
+                    f"it, and {wf.title} would change it")
         if state not in rt.lifecycle.get("locked", []) or schema.starts_workflow(rt, rec) == wf.id:
             return None
         return (f"a {rt.label.lower()} that is {rt.state_label(state).lower()} is not started again: it is kept as "
@@ -1665,7 +1668,7 @@ class Engine:
         if not lc:
             return False
         at = schema.first(rec, lc["path"])
-        return not any(at in t["from"] or "*" in t["from"] for t in lc.get("transition", []))
+        return not any(schema.leaves(lc, t, at) for t in lc.get("transition", []))
 
     def _end_wait(self, run, step, cause, output: dict, action: str) -> bool:
         run["ctx"][step.id] = output

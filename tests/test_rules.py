@@ -7988,3 +7988,365 @@ def test_numbers_in_a_series_have_no_gaps_and_each_year_starts_again(hub):
         hub.db.records.update({"_id": undated}, {"$set": {"number": other["number"]}})
     hub.db.counters.delete({"_id": "number:Letter:L-2027-{seq}"})  # a series begun before its count was kept
     assert letter("2027-02-01")[1] == "L-2027-002"
+
+
+# ------------------------------------------------------------------------------------- sign-off that holds
+POSTING = '''id = "Posting"
+key = "PST"
+data_class = "clinical"
+reverses = "reversal_of"
+[[link]]
+rel = "see"
+to = ["Posting"]
+[[field]]
+name = "memo"
+type = "string"
+[[field]]
+name = "amount"
+type = "number"
+[[field]]
+name = "reversal_of"
+type = "reference"
+target = ["Posting"]
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "posted"]
+[lifecycle]
+field = "status"
+initial = "draft"
+final = ["posted"]
+[[lifecycle.transition]]
+from = ["draft"]
+to = "posted"
+label = "Post"
+'''
+
+
+def _type(hub, src, tid):
+    hub.approve(M(hub, "dr-amara"), "type", tid, hub.propose("type", M(hub, "rana"), src)["version"])
+
+
+def _posted(hub, who, **data):
+    rec = hub.create_record(who, "Posting", {"memo": "fees", "amount": 120, **data})
+    ref = f"Posting/{rec['id']}"
+    hub.update_record(who, ref, {"status": "posted"})
+    return ref
+
+
+def test_nothing_changes_a_final_record_not_its_workflow_nor_a_signature(hub):
+    """A record in a final state (lifecycle.final) is changed by no one: not a person, not a workflow or the hub's own
+    automation, not an upgrade; it is not linked, converted or started on again. A write that changes nothing
+    writes nothing; a signature on it stays current."""
+    _type(hub, POSTING, "Posting")
+    amara = M(hub, "dr-amara")
+    ref = _posted(hub, amara)
+    versions = hub.record_version(ref)
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises(Invalid, match="a posting that is posted is final: nothing changes it; make a posting "
+                                          "that reverses it"):
+            hub.update_record(who, ref, {"amount": 121})
+        with pytest.raises(Invalid, match="does not move|final"):
+            hub.update_record(who, ref, {"status": "draft"})
+    hub._upgrading = True
+    try:
+        with pytest.raises(Invalid, match="is final"):
+            hub.update_record(HUB_ITSELF, ref, {"memo": "rewritten by an upgrade"})
+    finally:
+        hub._upgrading = False
+    same = hub.update_record(HUB_ITSELF, ref, dict(hub.read_record(amara, ref)))
+    assert same["amount"] == 120 and hub.record_version(ref) == versions  # nothing changed: nothing written
+    hub.sign_record(amara, ref, "I checked it")
+    assert [s["current"] for s in hub.signatures(amara, ref)] == [True]
+    assert hub.engine.start_over_refusal(type("W", (), {"id": "x", "title": "Work"})(), ref) is None  # not its own
+    with pytest.raises(Invalid, match="nothing links or unlinks it"):
+        hub.link(amara, ref, "see", f"Posting/{hub.create_record(amara, 'Posting', {'memo': 'other'})['id']}")
+
+
+def test_no_move_leaves_a_final_state():
+    """A final state is left by no move: a transition from it is refused, one from any state ("*") does not leave it,
+    and where cancelled work leaves a record is not said of it (it stays)."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    with pytest.raises(DefinitionError) as e:
+        schema.parse(POSTING + '[[lifecycle.transition]]\nfrom = ["posted"]\nto = "draft"\n')
+    assert any("nothing moves a record out of 'posted', which is final" in p for p in e.value.problems)
+    rt = schema.parse(POSTING.replace('choices = ["draft", "posted"]', 'choices = ["draft", "posted", "void"]')
+                      + '[[lifecycle.transition]]\nfrom = ["*"]\nto = "void"\n')
+    assert rt.transition("draft", "void") and rt.transition("posted", "void") is None
+    assert "posted" in rt.lifecycle["locked"] and rt.is_final("posted")
+    with pytest.raises(DefinitionError) as e:
+        schema.parse(POSTING + '[lifecycle.abandoned]\nposted = "draft"\n')
+    assert any("'posted' is final" in p for p in e.value.problems)
+
+
+def test_a_final_record_is_corrected_by_one_record_that_reverses_it(hub):
+    """A final record is corrected by a new record of its type that reverses it (``reverses``): it reverses one
+    that is final, that no other record reverses, and which one it reverses never changes. The core copies the
+    record into the reversing one's form; what the pack's practice changes in it (the sign) is the pack's."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    _type(hub, POSTING, "Posting")
+    amara = M(hub, "dr-amara")
+    ref = _posted(hub, amara)
+    draft = f"Posting/{hub.create_record(amara, 'Posting', {'memo': 'not yet'})['id']}"
+    with pytest.raises(Invalid, match="a posting reverses one that is final"):
+        hub.create_record(amara, "Posting", {"memo": "undo", "reversal_of": {"reference": draft}})
+    rev = hub.create_record(amara, "Posting", {"memo": "undo", "amount": -120, "reversal_of": {"reference": ref}})
+    rref = f"Posting/{rev['id']}"
+    with pytest.raises(Invalid, match="is reversed already, by"):
+        hub.create_record(amara, "Posting", {"memo": "again", "reversal_of": ref})
+    with pytest.raises(Invalid, match="is said when it is made, and never changes"):
+        hub.update_record(amara, rref, {"reversal_of": None})
+    hub.update_record(amara, rref, {"status": "posted"})
+    for bad, want in ((POSTING.replace('target = ["Posting"]', 'target = ["Patient"]'), "a record reverses one of its own"),
+                      (POSTING.replace('final = ["posted"]\n', ''), "reverses: a record is reversed once it is final"),
+                      (POSTING.replace('reverses = "reversal_of"', 'reverses = "reversal"'), 'did you mean "reversal_of"')):
+        with pytest.raises(DefinitionError) as e:
+            schema.parse(bad)
+        assert any(want in p for p in e.value.problems), e.value.problems
+
+
+def test_an_upgrade_does_not_convert_a_final_record(hub):
+    """Converting a record to another type (a pack upgrade merging two) rewrites it: a final record keeps its type."""
+    _type(hub, POSTING, "Posting")
+    _type(hub, 'id = "Note3"\nkey = "NT3"\ndata_class = "clinical"\n[[field]]\nname = "memo"\n', "Note3")
+    amara = M(hub, "dr-amara")
+    ref = _posted(hub, amara)
+    with pytest.raises(Invalid, match="nothing changes it, so it keeps its type and is not converted"):
+        hub.convert_record(amara, ref, "Note3", {"memo": "fees"})
+    assert hub.read_record(amara, ref)["status"] == "posted"
+
+
+SLIP = 'id = "Chit"\nkey = "CHT"\ndata_class = "clinical"\n[[field]]\nname = "amount"\ntype = "number"\n'
+FILE = '''id = "Packet"
+key = "PKT"
+data_class = "clinical"
+covers = ["Entry"]
+[[field]]
+name = "title"
+[[field]]
+name = "counted"
+type = "reference"
+target = ["Chit"]
+list = true
+pin = true
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "reviewed", "filed"]
+[lifecycle]
+field = "status"
+initial = "open"
+locked = ["reviewed"]
+final = ["filed"]
+[[lifecycle.transition]]
+from = ["open"]
+to = "reviewed"
+[[lifecycle.transition]]
+from = ["reviewed"]
+to = "open"
+[[lifecycle.transition]]
+from = ["reviewed"]
+to = "filed"
+'''
+ENTRY = '''id = "Entry"
+key = "ENT"
+data_class = "clinical"
+part_of = "packet"
+[[field]]
+name = "packet"
+type = "reference"
+target = ["Packet"]
+required = true
+[[field]]
+name = "amount"
+type = "number"
+'''
+
+
+def _packet(hub):
+    _type(hub, SLIP, "Chit")
+    _type(hub, FILE.replace('covers = ["Entry"]\n', ''), "Packet")
+    _type(hub, ENTRY, "Entry")
+    _type(hub, FILE, "Packet")
+    amara = M(hub, "dr-amara")
+    chit = f"Chit/{hub.create_record(amara, 'Chit', {'amount': 10})['id']}"
+    pk = hub.create_record(amara, "Packet", {"title": "2025", "counted": [chit]})
+    return amara, chit, f"Packet/{pk['id']}"
+
+
+def test_a_pin_keeps_the_version_and_hash_of_the_record_it_points_at(hub):
+    """A pinned reference (pin = true) keeps the version and hash of its record as they were when it was given; a
+    later write keeps that pin whatever it says, and only "Use version M" (repin) moves it on."""
+    amara, chit, ref = _packet(hub)
+    pin = hub.read_record(amara, ref)["counted"][0]
+    assert pin["reference"] == chit and pin["version"] == 1 and len(pin["sha256"]) == 64
+    hub.update_record(amara, chit, {"amount": 11})
+    hub.update_record(amara, ref, {"title": "2025 return", "counted": [{"reference": chit, "version": 2, "sha256": "x"}]})
+    assert hub.read_record(amara, ref)["counted"][0] == pin  # kept: nobody writes a pin by hand
+    assert hub.pins_behind(hub.record_type("Packet"), hub.read_record(amara, ref)) == [
+        {"field": "counted", "reference": chit, "version": 1, "now": 2}]
+    hub.repin(amara, ref, "counted")
+    assert hub.read_record(amara, ref)["counted"][0]["version"] == 2
+
+
+def test_a_signature_goes_stale_when_a_pinned_record_or_a_covered_part_changes(hub):
+    """A signature covers what the record pins and the parts its type covers (covers): a change to either leaves it
+    not current. A part its type does not cover leaves it alone."""
+    amara, chit, ref = _packet(hub)
+    line = hub.create_record(amara, "Entry", {"packet": ref, "amount": 5})
+    hub.sign_record(amara, ref, "I reviewed it")
+    assert hub.signatures(amara, ref)[0]["current"]
+    hub.update_record(amara, f"Entry/{line['id']}", {"amount": 6})
+    assert not hub.signatures(amara, ref)[0]["current"]
+    hub.sign_record(amara, ref, "I reviewed it")
+    hub.update_record(amara, chit, {"amount": 12})
+    assert not hub.signatures(amara, ref)[0]["current"]
+
+
+def test_signing_is_refused_while_a_pin_is_behind(hub):
+    """A record is not signed while a record it pins has changed since: its pin is moved on first."""
+    amara, chit, ref = _packet(hub)
+    hub.update_record(amara, chit, {"amount": 11})
+    with pytest.raises(Invalid, match=r"Packet pins CHT-1 at version 1; it is at version 2: update the pin, then sign"):
+        hub.sign_record(amara, ref, "I reviewed it")
+    hub.repin(amara, ref, "counted", chit)
+    assert hub.sign_record(amara, ref, "I reviewed it")["version"]
+
+
+def test_a_covered_part_is_not_added_or_changed_while_its_record_is_locked(hub):
+    """While a record is locked, people do not add or change the parts it covers (its workflow still does); while it
+    is final, no one does."""
+    amara, chit, ref = _packet(hub)
+    line = f"Entry/{hub.create_record(amara, 'Entry', {'packet': ref, 'amount': 5})['id']}"
+    hub.update_record(amara, ref, {"status": "reviewed"})
+    with pytest.raises(Invalid, match="PKT-1 is reviewed: its entries are not added or changed while it is"):
+        hub.update_record(amara, line, {"amount": 6})
+    with pytest.raises(Invalid, match="its entries are not added"):
+        hub.create_record(amara, "Entry", {"packet": ref, "amount": 1})
+    hub.update_record(HUB_ITSELF, line, {"amount": 6})  # a workflow's step still writes it
+    hub.update_record(amara, ref, {"status": "filed"})
+    with pytest.raises(Invalid, match="PKT-1 is filed: its entries"):
+        hub.update_record(HUB_ITSELF, line, {"amount": 7})
+
+
+ACCT = 'id = "Ledger2"\nkey = "LG2"\ndata_class = "clinical"\n[[field]]\nname = "name"\n'
+CLOSE = '''id = "Close"
+key = "CLS"
+data_class = "clinical"
+[closing]
+through = "through"
+states = ["closed"]
+scope = "book"
+[[field]]
+name = "through"
+type = "date"
+required = true
+[[field]]
+name = "book"
+type = "reference"
+target = ["Ledger2"]
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "closed"]
+[lifecycle]
+field = "status"
+initial = "open"
+[[lifecycle.transition]]
+from = ["open"]
+to = "closed"
+[[lifecycle.transition]]
+from = ["closed"]
+to = "open"
+sign = "I reopen this period"
+'''
+TXN = '''id = "Txn"
+key = "TXN"
+data_class = "clinical"
+[period]
+closed_by = "Close"
+date = "on"
+scope = "book"
+[[field]]
+name = "on"
+type = "date"
+required = true
+[[field]]
+name = "book"
+type = "reference"
+target = ["Ledger2"]
+[[field]]
+name = "amount"
+type = "number"
+'''
+
+
+def _books(hub):
+    for src, tid in ((ACCT, "Ledger2"), (CLOSE, "Close"), (TXN, "Txn")):
+        _type(hub, src, tid)
+    amara = M(hub, "dr-amara")
+    a, b = (f"Ledger2/{hub.create_record(amara, 'Ledger2', {'name': n})['id']}" for n in ("A", "B"))
+    return amara, a, b
+
+
+def test_nothing_dated_in_a_closed_period_is_written_by_anyone(hub):
+    """Once a period is closed (a record of its [closing] type in a closing state), nothing dated on or before its
+    last day is written, moved out of it or into it: not by a person, a workflow or the hub. A close reaches only the
+    records of its own scope; a write that changes nothing writes nothing."""
+    amara, a, b = _books(hub)
+    ta = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-01-15', 'book': a, 'amount': 5})['id']}"
+    tb = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-01-15', 'book': b, 'amount': 5})['id']}"
+    feb = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-02-03', 'book': a, 'amount': 5})['id']}"
+    close = f"Close/{hub.create_record(amara, 'Close', {'through': '2026-01-31', 'book': a})['id']}"
+    hub.update_record(amara, close, {"status": "closed"})
+    assert hub.closed_through(hub.record_type("Txn"), hub.read_record(amara, ta)) == "2026-01-31"
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises(Invalid, match=r"a txn dated 2026-01-15 is in a closed period \(closed through 2026-01-31\)"):
+            hub.update_record(who, ta, {"amount": 6})
+        with pytest.raises(Invalid, match="in a closed period"):
+            hub.create_record(who, "Txn", {"on": "2026-01-31", "book": a, "amount": 1})
+        with pytest.raises(Invalid, match="dated 2026-01-20 is in a closed period"):
+            hub.update_record(who, feb, {"on": "2026-01-20"})
+    hub.update_record(amara, tb, {"amount": 6})  # another book's period is open
+    hub.update_record(amara, feb, {"amount": 6})
+    hub.update_record(amara, ta, dict(hub.read_record(amara, ta)))  # nothing changed: nothing written
+    with pytest.raises(Invalid, match="closes a period: nothing changes it until a signed move reopens it"):
+        hub.update_record(amara, close, {"through": "2026-02-28"})
+
+
+def test_a_closed_period_reopens_only_by_a_signed_move(hub):
+    """A close leaves its closing state only by a move its mover signs; then what it closed is written again."""
+    amara, a, _ = _books(hub)
+    ta = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-01-15', 'book': a, 'amount': 5})['id']}"
+    close = f"Close/{hub.create_record(amara, 'Close', {'through': '2026-01-31', 'book': a})['id']}"
+    hub.update_record(amara, close, {"status": "closed"})
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises((Invalid, Denied), match="signed|closes a period"):
+            hub.update_record(who, close, {"status": "open"})
+    hub.move_record(amara, close, "open", signature="I reopen this period")
+    assert hub.update_record(amara, ta, {"amount": 6})["amount"] == 6
+
+
+def test_a_period_and_its_close_are_declared_soundly(hub):
+    """[period] names a type with [closing], a required date and the same scope as the close; [closing] names a
+    required date, its states, and a signed move out of each."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    for bad, want in ((CLOSE.replace('sign = "I reopen this period"\n', ''), "it reopens a closed period"),
+                      (CLOSE.replace('states = ["closed"]', 'states = ["shut"]'), "'shut' is not one of its states"),
+                      (CLOSE.replace('through = "through"\n', 'through = "thru"\n'), 'did you mean "through"'),
+                      (TXN.replace('required = true\n', '', 1), "on is required"),
+                      (TXN.replace('closed_by = "Close"', 'closed_by = "Txn"'), "does not close its own period")):
+        with pytest.raises(DefinitionError) as e:
+            schema.parse(bad)
+        assert any(want in p for p in e.value.problems), (want, e.value.problems)
+    _type(hub, ACCT, "Ledger2")
+    _type(hub, CLOSE, "Close")
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), TXN.replace('scope = "book"\n', ''))
+    assert any("closes one book at a time" in p for p in e.value.problems)
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), TXN.replace('closed_by = "Close"', 'closed_by = "Ledger2"'))
+    assert any("closes nothing (it has no [closing])" in p for p in e.value.problems)

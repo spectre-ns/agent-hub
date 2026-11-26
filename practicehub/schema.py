@@ -23,6 +23,25 @@ answer that becomes a record, an engine calling the API.
     when = ["sent"]               #   given by the write that puts the record in one of these states (default: when it
                                   #   is made). A numbered record keeps its number and is never converted into another
                                   #   type: no number is skipped or given twice
+    reverses = "reversal_of"      # a reference field to this same type: a record corrects one in a final state (below)
+                                  #   by reversing it. It reverses one that is final, that nothing else reverses, and
+                                  #   which one never changes. The core copies the record's values into the new one's
+                                  #   form; what changes in it (a sign, say) is the pack's to say
+    covers = ["Line"]             # part types (each ``part_of`` this one) its signatures and locks also cover: a part
+                                  #   changed leaves a signature on this record not current; while this record is
+                                  #   locked people do not add or change its parts (its workflow still does), and while
+                                  #   it is final no one does
+    [period]                      # optional: its records are dated in periods a record of another type closes
+    closed_by = "PeriodClose"     #   that type (it has [closing]). Once a period is closed, nothing dated on or before
+                                  #   its last day is written, moved into it or out of it, by anyone
+    date = "posted_on"            #   a required date (or datetime) field (default: the type's date)
+    scope = "book"                #   optional: a reference field; a close then reaches only records with its own
+                                  #   (the close's scope names the same type). None: one close covers every record
+    [closing]                     # optional: its records close a period of the types that name it in [period]
+    through = "through"           #   a required date field: the last day it closes
+    states = ["closed"]           #   lifecycle states it closes in: locked, nothing changes it, and only a signed move
+                                  #   (``sign`` on every transition out of them) reopens it
+    scope = "book"                #   with [period] scope: the reference field naming what it closes
     data_class = "clinical"       # who may read and write it (grants are per data class)
     subject = false               # true: work is about records of this type (Patient, Client, Matter)
     strict = true                 # refuse top-level keys no field declares
@@ -65,6 +84,10 @@ answer that becomes a record, an engine calling the API.
     type = "reference"            # {"reference": "Patient/<id>"} or "Patient/<id>"
     target = ["Patient"]
     rel = "subject"               # the link written for it; ``subject`` makes it what the record is about
+    # pin = true                  # keeps the version and hash of what it refers to, as they were when it was given:
+                                  #   {"reference", "version", "sha256"}. A signature on this record covers what it
+                                  #   pins; it is not signed while a pin is behind, and only "Use version M" (repin)
+                                  #   moves one on. One field (``list = true`` for several), not a path through a list
     # fact = true                 # shown among a subject's headline facts
     # match = true                # with the name, how a second registration of the same subject is noticed
     # data_class = "clinical"     # a field of its own data class: only who may read that class sees it (on every
@@ -74,6 +97,9 @@ answer that becomes a record, an engine calling the API.
     [lifecycle]                   # optional: the states a record moves through
     field = "status"              # the field that holds the state; its choices are the states
     initial = "preliminary"
+    # locked = ["final"]          # people change nothing but the state (its own workflow still writes it)
+    # final = ["entered"]         # nothing changes it, no one (a workflow, an upgrade, a signature's move), and no move
+                                  #   leaves it (``from = ["*"]`` does not match it); it is corrected by ``reverses``
     # abandoned = { amended = "final" }   # where a record goes when the work moving it is cancelled: a move of its
                                   #   own, with no transition written for it; a state named as its own target stays
     [[lifecycle.transition]]      # a move people make by hand
@@ -238,6 +264,10 @@ class RecordType:
     workflow: dict | None = None  # {"id", "when"}: the workflow a new record of it starts, about it (_check_workflow)
     unique: list[list[str]] = field(default_factory=list)  # keys (field names) no two of its records share (_check_unique)
     number: dict | None = None  # [number]: {field, path, pattern, date (a field's name, or None), when}: _check_number
+    reverses: dict | None = None  # {field, path}: the reference to the final record of its type this one reverses
+    covers: list[str] = field(default_factory=list)  # part types a signature on it covers, and its lock reaches
+    period: dict | None = None  # [period]: {closed_by, date, path, scope, scope_path}: _check_period
+    closing: dict | None = None  # [closing]: {through, path, states, scope, scope_path}: what closes a period
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -300,9 +330,13 @@ class RecordType:
 
     def transition(self, old, new) -> dict | None:
         for t in (self.lifecycle or {}).get("transition", []):
-            if new == t["to"] and (old in t["from"] or "*" in t["from"]):
+            if new == t["to"] and leaves(self.lifecycle, t, old):
                 return t
         return None
+
+    def is_final(self, st) -> bool:
+        """Whether a record in state ``st`` is final (``lifecycle.final``): nothing changes it or moves it again."""
+        return st is not None and st in ((self.lifecycle or {}).get("final") or [])
 
 
 # A part's address is its owner's, then its slug and its id, to any depth (/patients/7f3a/visits/91c2/notes/44de).
@@ -317,11 +351,12 @@ KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
          "part_of", "slug", "link", "key",
-         "navigator", "layout", "standard", "consent", "booking", "workflow", "unique", "number"},
+         "navigator", "layout", "standard", "consent", "booking", "workflow", "unique", "number", "reverses", "covers",
+         "period", "closing"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
-              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
+              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class", "pin",
               "roles", "required_unless"},
-    "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "abandoned", "in_use", "labels",
+    "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "final", "abandoned", "in_use", "labels",
                   "tones"},
     "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
@@ -331,10 +366,12 @@ KEYS = {
     "navigator": {"tops", "hide"},
     "consent": {"kind", "date", "source", "withdrawn", "lasts"},
     "number": {"field", "pattern", "date", "when"},
+    "period": {"closed_by", "date", "scope"},
+    "closing": {"through", "states", "scope"},
     "booking": {"marked", "overbook", "overbook_label", "overbook_reason", "overbook_priority", "request",
                 "request_inputs"},
 }
-FIELD_BOOLS = ("required", "list", "show", "advanced", "fact", "match", "live")
+FIELD_BOOLS = ("required", "list", "show", "advanced", "fact", "match", "live", "pin")
 # A key that is another table's word for what this one calls something else, and is nowhere near it in spelling: a
 # screen lists its ``fields``; a move ``asks`` for them.
 OTHER_WORD = {"transition": {"fields": "asks"}}
@@ -419,6 +456,10 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
         problems.append(f"{where}: with is a table of sibling keys and values, e.g. {{ system = \"phone\" }}")
     if raw.get("live") is True and typ != "markdown":
         problems.append(f"{where}: live is for a markdown field (several people write it at once)")
+    if raw.get("pin") is True and typ != "reference":
+        problems.append(f"{where}: pin is for a reference field (it keeps the version of the record it points at)")
+    elif raw.get("pin") is True and "*" in str(raw.get("path") or ""):
+        problems.append(f"{where}: a pinned reference is one field (list = true for several), not a path through a list")
     if "roles" in raw and not (_strings(raw["roles"]) and raw["roles"]):
         problems.append(f"{where}: roles is a list of role ids, e.g. [\"lead\"]: only members holding one of them")
     elif "roles" in raw and typ != "reference":
@@ -456,7 +497,7 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
          "live": raw.get("live", False), "data_class": raw.get("data_class") or None,
-         "roles": list(raw.get("roles") or []), "required_unless": unless or None}
+         "roles": list(raw.get("roles") or []), "required_unless": unless or None, "pin": raw.get("pin") is True}
     if typ == "reference" and not f["rel"]:
         f["rel"] = name
     return f, []
@@ -508,7 +549,13 @@ def move_row(frm, to, *, by, label, asks=(), requires=(), **more) -> dict:
             "requires": list(requires), "comment": False, "sign": None, **more}
 
 
-def revising_states(states: list, trans: list, in_use) -> list:
+def leaves(lc: dict | None, t: dict, st) -> bool:
+    """Whether the move ``t`` is made from state ``st``: a state it names, or any state (``*``) but a final one,
+    which nothing leaves."""
+    return st in t["from"] or ("*" in t["from"] and st not in ((lc or {}).get("final") or []))
+
+
+def revising_states(states: list, trans: list, in_use, final=()) -> list:
     """The states a revision passes through: those with a way back to ``in_use`` (not 'obsolete')."""
     if in_use not in states:
         return []
@@ -516,7 +563,7 @@ def revising_states(states: list, trans: list, in_use) -> list:
     while grew:
         grew = False
         for t in trans:
-            for f in (states if "*" in t["from"] else t["from"]):
+            for f in ([s for s in states if s not in final] if "*" in t["from"] else t["from"]):
                 if t["to"] in reach and f not in reach:
                     reach.add(f)
                     grew = True
@@ -677,6 +724,22 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         for st in locked:
             if st not in states:
                 problems.append(f"lifecycle.locked: {st!r} is not one of its states")
+        # States nothing changes or moves a record out of, by anyone (a workflow, a signature, an upgrade): a record
+        # that is final is corrected by another one (``reverses``). A final state is locked too.
+        final = lc.get("final") or []
+        if not _strings(final):
+            problems.append("lifecycle.final: a list of its states")
+            final = []
+        for st in final:
+            if st not in states:
+                problems.append(f"lifecycle.final: {st!r} is not one of its states")
+        final = [st for st in final if st in states]
+        for t in trans:
+            for st in t["from"]:
+                if st in final:
+                    problems.append(f"lifecycle.transition to {t['to']!r}: nothing moves a record out of {st!r}, "
+                                    f"which is final")
+        locked = list(dict.fromkeys([*locked, *final]))
         # Where a record goes when the work that was moving it is cancelled: a state that only workflows leave
         # would otherwise strand the record for good. It is a move of its own, which the engine makes
         # (``Engine._abandon``): no transition is written for it. A state named as its own target stays where it is.
@@ -688,8 +751,11 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         for st, to in abandoned.items():
             if st not in states or to not in states:
                 problems.append(f"lifecycle.abandoned: {st!r} = {to!r}: both must be its states")
+            elif st in final and to != st:
+                problems.append(f"lifecycle.abandoned: {st!r} is final: a record stays there when its work is "
+                                f"cancelled; leave it out")
         for st in states:
-            exits = [t for t in trans if (st in t["from"] or "*" in t["from"]) and t["to"] != st]
+            exits = [t for t in trans if leaves({"final": final}, t, st) and t["to"] != st]
             if exits and all(t["by"] == "workflow" for t in exits) and st not in abandoned:
                 problems.append(f"lifecycle.abandoned: only workflows move a record out of {st!r}; say where it goes "
                                 f"if that work is cancelled (abandoned = {{ {st!r} = ... }})".replace("'", '"'))
@@ -701,17 +767,17 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                                 f"{' and '.join([', '.join(frm[:-1]), frm[-1]] if frm[:-1] else frm)} when its work "
                                 f"is cancelled; leave it out")
         for st, to in abandoned.items():  # the move itself, for each pair no transition of the type's makes
-            if st != to and st in states and to in states \
-                    and not any(x["to"] == to and (st in x["from"] or "*" in x["from"]) for x in trans):
+            if st != to and st in states and to in states and st not in final \
+                    and not any(x["to"] == to and leaves({"final": final}, x, st) for x in trans):
                 trans.append(move_row([st], to, by="workflow", label=labels.get(to) or state_words(to), abandon=True))
         in_use = lc.get("in_use")  # the state people work from; while revised, the last such version stays shown
         if in_use is not None and in_use not in states:
             problems.append(f"lifecycle.in_use: {in_use!r} is not one of its states")
-        revising = revising_states(states, trans, in_use)
+        revising = revising_states(states, trans, in_use, final)
         tones = _lifecycle_tones(lc.get("tones"), states, problems)
         lc = {"field": lf, "path": (fd or {}).get("path", lf), "states": states, "initial": initial, "tones": tones,
-              "starts": list(starts), "transition": trans, "locked": locked, "abandoned": abandoned, "in_use": in_use,
-              "revising": revising, "labels": labels}
+              "starts": list(starts), "transition": trans, "locked": locked, "final": final, "abandoned": abandoned,
+              "in_use": in_use, "revising": revising, "labels": labels}
     for key in ("date", "flag"):
         p = doc.get(key)
         if p and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.([A-Za-z0-9_]+))*", str(p)):
@@ -749,7 +815,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                             f"meanings ({', '.join(repr(g['meaning']) for g in sigs)})")
     screens = _screens(doc, fields, base_map, lc, problems)
     label = str(doc.get("label") or tid)
-    rt = RecordType(id=tid, label=label, plural=str(doc.get("plural") or label + "s"),
+    rt = RecordType(id=tid, label=label, plural=str(doc.get("plural") or plural_of(label)),
                     data_class=str(doc.get("data_class", "")), fields=fields, subject=doc.get("subject") is True,
                     strict=doc.get("strict", True) is not False, date=doc.get("date"), flag=doc.get("flag"),
                     alert=doc.get("alert") is True, active=active, order=order,
@@ -835,6 +901,14 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         problems += _check_unique(rt, doc["unique"])
     if doc.get("number") is not None:
         problems += _check_number(rt, doc["number"])
+    if doc.get("reverses") is not None:
+        problems += _check_reverses(rt, doc["reverses"])
+    if doc.get("covers") is not None:
+        problems += _check_covers(rt, doc["covers"])
+    if doc.get("period") is not None:
+        problems += _check_period(rt, doc["period"])
+    if doc.get("closing") is not None:
+        problems += _check_closing(rt, doc["closing"])
     std = doc.get("standard")
     if std is not None:
         problems += _check_standard(rt, std)
@@ -983,12 +1057,170 @@ def _check_number(rt: RecordType, raw) -> list[str]:
     return out
 
 
+def plural_of(label: str) -> str:
+    """A label's plural when the type gives none: Entry, Entries; Box, Boxes; Visit, Visits."""
+    if re.search(r"[^aeiou]y$", label):
+        return label[:-1] + "ies"
+    return label + ("es" if re.search(r"(s|x|z|ch|sh)$", label) else "s")
+
+
+def _one_field(rt: RecordType, name, what: str, types: tuple, key: str) -> tuple[dict | None, str | None]:
+    """The field ``name`` names, when it is one of ``types`` and holds one value per record; else why not."""
+    f = rt.field(name) if isinstance(name, str) else None
+    if f is None:
+        near = difflib.get_close_matches(str(name), [x["name"] for x in rt.fields], n=1)
+        return None, f"{key}: there is no field {name!r}" + (f' (did you mean "{near[0]}"?)' if near else "")
+    if f["type"] not in types or f.get("list") or "*" in f["path"]:
+        return None, f"{key}: {f['name']} is {'a list of ' if f.get('list') else ''}{f['type']}; it is {what}"
+    return f, None
+
+
+def _check_reverses(rt: RecordType, raw) -> list[str]:
+    """``reverses = "<field>"``: the reference by which a record of the type reverses another one of it, one that
+    is final (a posted entry is corrected by an entry that reverses it, never edited). A record is reversed once, never
+    by itself, and the field is given when the reversing record is made and never changes (``Hub._check_reversal``).
+    What the reversing record says (amounts the other way, say) is the pack's: the core copies, never negates."""
+    f, why = _one_field(rt, raw, f"a reference to one other {rt.id}", ("reference",), "reverses")
+    if why:
+        return [why]
+    out = []
+    if f["target"] != [rt.id]:
+        out.append(f"reverses: {f['name']} refers to {' or '.join(f['target'])}; a record reverses one of its own "
+                   f"type ({rt.id})")
+    if f.get("required"):
+        out.append(f"reverses: {f['name']} is not required: only a record that reverses another one gives it")
+    if not (rt.lifecycle or {}).get("final"):
+        out.append("reverses: a record is reversed once it is final; say which states are (lifecycle.final)")
+    if not out:
+        rt.reverses = {"field": f["name"], "path": f["path"]}
+    return out
+
+
+def _check_covers(rt: RecordType, raw) -> list[str]:
+    """``covers = ["<part type>"]``: the types of the records that are part of this one (their ``part_of`` points
+    here) that a signature on it covers, besides its own contents and the records it pins: a change to one leaves
+    the signature not current. While the record is locked people do not add or change them; while it is final, no
+    one does. The catalog checks each is such a part (``CatalogMixin.check_type``)."""
+    if not _strings(raw) or not raw or len(set(raw)) != len(raw):
+        return ['covers: a list of the record types that are part of it, each once, e.g. ["Line"]']
+    if rt.id in raw:
+        return ["covers: a record is not part of itself"]
+    rt.covers = list(raw)
+    return []
+
+
+def _date_of_period(rt: RecordType, raw: dict, key: str) -> tuple[dict | None, list[str]]:
+    if raw.get("date") is not None:
+        f, why = _one_field(rt, raw["date"], "a date", ("date", "datetime"), f"{key}.date")
+    else:
+        f = next((x for x in rt.fields if rt.date and x["path"] == rt.date and x["type"] in ("date", "datetime")
+                  and not x.get("list")), None)
+        why = None if f else f"{key}.date: name the date field that puts a record in a period"
+    if why:
+        return None, [why]
+    if not f.get("required"):
+        return None, [f"{key}.date: {f['name']} is required: a record with no date would be in no period"]
+    return f, []
+
+
+def _scope_of(rt: RecordType, raw: dict, key: str) -> tuple[dict | None, list[str]]:
+    if raw.get("scope") is None:
+        return None, []
+    f, why = _one_field(rt, raw["scope"], "a reference to one record", ("reference",), f"{key}.scope")
+    return (None, [why]) if why else (f, [])
+
+
+def _check_period(rt: RecordType, raw) -> list[str]:
+    """``[period]``: records of the type are dated in periods that a record of another type closes (its
+    ``[closing]``). Nothing dated on or before the latest date closed is written, by anyone: not a person, a
+    workflow, a signature or an upgrade (``Hub._check_period``), until a signed move reopens it.
+
+        [period]
+        closed_by = "PeriodClose"   # the type whose records close it
+        date = "issued_on"          # optional (default: the type's date); a required date field
+        scope = "account"           # optional: a reference; a close reaches only records with the same one"""
+    if not isinstance(raw, dict):
+        return ['period: a table, e.g. [period] closed_by = "PeriodClose"']
+    out = _unknown("period", raw, "period")
+    if not isinstance(raw.get("closed_by"), str) or not TYPE_ID.fullmatch(raw["closed_by"]):
+        out.append("period.closed_by: the record type whose records close a period")
+    elif raw["closed_by"] == rt.id:
+        out.append("period.closed_by: a record does not close its own period; name the type that does")
+    df, more = _date_of_period(rt, raw, "period")
+    sf, more2 = _scope_of(rt, raw, "period")
+    out += more + more2
+    if not out:
+        rt.period = {"closed_by": raw["closed_by"], "date": df["name"], "path": df["path"],
+                     "scope": sf["name"] if sf else None, "scope_path": sf["path"] if sf else None,
+                     "scope_target": list(sf["target"]) if sf else []}
+    return out
+
+
+def _check_closing(rt: RecordType, raw) -> list[str]:
+    """``[closing]``: a record of the type closes a period of the types whose ``[period]`` names it, through its
+    ``through`` date, while it is in one of ``states``. Nothing changes it while it is, and it leaves them only by a
+    move its mover signs (``sign``): reopening a period is a signed decision.
+
+        [closing]
+        through = "through"     # its required date field: the last day closed
+        states = ["closed"]     # it closes while in these
+        scope = "account"       # as the [period] says: both have one, or neither"""
+    if not isinstance(raw, dict):
+        return ['closing: a table, e.g. [closing] through = "through", states = ["closed"]']
+    out = _unknown("closing", raw, "closing")
+    tf, why = _one_field(rt, raw.get("through"), "the last date it closes", ("date",), "closing.through")
+    if why:
+        out.append(why)
+    elif not tf.get("required"):
+        out.append(f"closing.through: {tf['name']} is required: a close with no date closes nothing")
+    lc = rt.lifecycle
+    states = raw.get("states")
+    if not lc:
+        out.append("closing: a record closes a period while it is in some states: give the type a lifecycle")
+    elif not _strings(states) or not states:
+        out.append("closing.states: the states in which it closes, e.g. [\"closed\"]")
+    else:
+        for st in states:
+            if st not in lc["states"]:
+                out.append(f"closing.states: {st!r} is not one of its states")
+            elif st in (lc.get("final") or []):
+                out.append(f"closing.states: {st!r} is final, so the period would never reopen; leave it out of "
+                           f"lifecycle.final")
+        for t in lc["transition"]:
+            for st in states:
+                if leaves(lc, t, st) and t["to"] not in states and not t.get("sign"):
+                    out.append(f"lifecycle.transition to {t['to']!r}: it reopens a closed period, from {st!r}; its "
+                               f"mover signs it (sign = \"...\")")
+                    break
+    sf, more = _scope_of(rt, raw, "closing")
+    out += more
+    if not out:
+        rt.closing = {"through": tf["name"], "path": tf["path"], "states": list(states),
+                      "scope": sf["name"] if sf else None, "scope_path": sf["path"] if sf else None,
+                      "scope_target": list(sf["target"]) if sf else []}
+        lc["locked"] = list(dict.fromkeys([*lc["locked"], *states]))
+    return out
+
+
+def sealed(rt: RecordType, st) -> bool:
+    """Whether a record in state ``st`` changes for no one, a workflow, a signature and an upgrade included: it is
+    final, or it closes a period (it leaves that state only by a signed move)."""
+    return rt.is_final(st) or (st is not None and st in ((rt.closing or {}).get("states") or []))
+
+
+def pins(rt: RecordType) -> list[dict]:
+    """Its reference fields that keep the version of the record they point at (``pin = true``)."""
+    return [f for f in rt.fields if f["type"] == "reference" and f.get("pin")]
+
+
 def starts_workflow(rt: RecordType, rec: dict) -> str | None:
     """The workflow a new record of ``rt`` starts (its type's ``workflow``, when its ``when`` holds of it). The
     condition reads the record as stored and by its type's field names (``record.category_text`` for a field at
-    ``category.0.text``)."""
+    ``category.0.text``). A record in a final state starts nothing: no work changes it."""
     w = rt.workflow
     if not w or (w.get("when") and not expr.holds(w["when"], {"record": {**_named_values(rt, rec), **rec}})):
+        return None
+    if rt.lifecycle and sealed(rt, first(rec, rt.lifecycle["path"])):
         return None
     return w["id"]
 
@@ -998,7 +1230,7 @@ def starts_again(rt: RecordType, before: dict, after: dict) -> str | None:
     holds of the record as written and did not hold of it before), or None."""
     w = rt.workflow or {}
     cond = w.get("again")
-    if not cond or before is None:
+    if not cond or before is None or (rt.lifecycle and sealed(rt, first(after, rt.lifecycle["path"]))):
         return None
     ctx = lambda rec: {"record": {**_named_values(rt, rec), **rec}}  # noqa: E731
     if expr.holds(cond, ctx(after)) and not expr.holds(cond, ctx(before)):
