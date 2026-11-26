@@ -665,7 +665,8 @@ class PortalApp:
         times = "" if full else self._slots(k, got, chosen, no_slot)
         about = "" if full or not k.get("about") else self._records(
             got, values.get("_about") or "", self.say("choose_about") in (problems or ()))
-        nothing = bool(about) and not got.get("about")  # nothing of theirs to answer: no button to send it
+        if about and not got.get("about"):  # nothing of theirs it could be about: said so, and no form to send
+            return self.page(req, k["label"], desc + about)
         button = "Send to the practice" if full else "Book" if k["mode"] == "book" else "Send my request"
         # The first submit button in a form is what Enter presses: the real one, not a day.
         default = (f'<button class="enter-default" name="_go" value="1" tabindex="-1" aria-hidden="true">'
@@ -675,8 +676,7 @@ class PortalApp:
             f'<input type="hidden" name="_form" value="{e(s["form"])}">'
             f'<input type="hidden" name="_submit" value="{e(values.get("_submit") or secrets.token_urlsafe(16))}">'
             f'{about}{qs}{times}{rule}'
-            + ("" if nothing else f'<p><button class="btn primary" name="_go" value="1">{e(button)}</button></p>')
-            + '</form>'))
+            f'<p><button class="btn primary" name="_go" value="1">{e(button)}</button></p></form>'))
 
     def book(self, req, kid: str) -> str:
         self.signed_in(req)

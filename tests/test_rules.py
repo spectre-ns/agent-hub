@@ -6,11 +6,12 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from bson import json_util
 
 from conftest import M, claim_run, item_for, quiet, run_of, snapshot_onto, visit_run
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid, NotFound, member_ref
-from practicehub import visibility
+from practicehub import decimals, visibility
 from practicehub.models import ModelError, ModelGateway, default_model
 
 
@@ -739,7 +740,7 @@ amount = "{{input.amount}}"
     assert not hub.db.items.find({"run_id": run["id"], "kind": "notice", "status": "open"})
     assert any(x["action"] == "step.retried" for x in hub.track.list(run_id=run["id"]))
     assert seen["auth"] == "Bearer engine-token"
-    assert seen["body"]["input"] == {"claim": "Claim/123", "amount": 80}
+    assert seen["body"]["input"] == {"claim": "Claim/123", "amount": "80.00"}  # a decimal input: its exact text
     assert seen["body"]["target"] == "erpnext/claim"
     ran = [x for x in hub.track.list(run_id=run["id"])
            if x["action"] == "action.ran" and x["subject"] == "step:post"][0]
@@ -3176,7 +3177,7 @@ def test_a_passphrase_is_stored_salted_and_hashed_and_set_only_by_its_owner(hub)
     assert hub.sign_in("dr-amara", "a brand new passphrase")["id"] == "dr-amara"
     with pytest.raises(Denied):
         hub.sign_in("dr-amara", WORDS)
-    assert all(WORDS not in json.dumps(ev["data"]) for ev in hub.track.list(limit=10000))
+    assert all(WORDS not in json.dumps(ev["data"], default=decimals.jsonable) for ev in hub.track.list(limit=10000))
     assert hub.db.events.exists({"action": "credential.passphrase_set", "subject": "member:dr-amara"})
 
 
@@ -6071,7 +6072,8 @@ def test_the_access_report_listing_check_uses_an_index_not_a_scan_of_the_track(h
     q = {"action": "records.listed", "actor": "jo", "data.refs_sha256": "0" * 64, "data.how": "list",
          "at": {"$gte": "2026-01-01"}}
     plan = hub.db.events.c.find(q).sort([("_id", 1)]).limit(1).explain()["queryPlanner"]["winningPlan"]
-    assert "refs_sha256" in json.dumps(plan) and "COLLSCAN" not in json.dumps(plan)
+    plan = json_util.dumps(plan)  # a reply read with the hub's codecs keeps its parts as raw BSON
+    assert "refs_sha256" in plan and "COLLSCAN" not in plan
 
 
 def test_a_departing_practice_manager_is_switched_off_with_the_packs_own_staffing(hub):
@@ -6960,6 +6962,31 @@ def test_the_move_a_step_makes_is_the_step_and_doing_the_step_makes_the_move(hub
     hub.engine.complete(amara, i, {"filed": True})
     assert hub.records.read(*ref2.split("/"))["status"] == "done"
     assert hub.engine.run(run2["id"])["status"] == "completed"
+
+
+def test_a_move_that_does_a_step_is_judged_on_the_record_it_found_not_on_what_its_own_write_fills(hub):
+    """Rule: a step that is not for the record's editors (``not_by = ["record.editors"]``), done by a move, is refused
+    to whoever wrote or changed the record before that move. The fields the move itself writes (what it asks for,
+    what it stamps) do not make its mover an editor of the record they found; they are an editor of what follows."""
+    rana, amara, liam = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam")
+    p = hub.propose("type", rana, JOB.format(top=""), "jobs")
+    hub.approve(amara, "type", "Job", p["version"])
+    flow = JOB_FLOW.replace('moves = ["doing"]\n', 'moves = ["doing"]\nnot_by = ["record.editors"]\n', 1)
+    assert flow != JOB_FLOW
+    w = hub.propose_workflow(rana, flow, "jobs")
+    hub.approve_workflow(amara, "job-flow", w["version"])
+    p = hub.propose("type", rana, JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }'),
+                    "walked")
+    hub.approve(amara, "type", "Job", p["version"])
+    ref, run = _job(hub)  # Dr Amara wrote it
+    hub.move_record(liam, ref, "doing")  # a move that writes only the state makes no one an editor
+    with pytest.raises(Denied, match="whoever wrote or changed this record does not also approve it"):
+        hub.move_record(amara, ref, "done", {"outcome": "New seal fitted"})
+    assert hub.records.read(*ref.split("/"))["status"] == "doing"
+    hub.move_record(liam, ref, "done", {"outcome": "New seal fitted", "hours": 2})
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["work"]["state"] == "done" and run["steps"]["work"]["by"] == "dr-liam"
+    assert hub.revision_authors(ref) == {"dr-amara", "dr-liam"}  # what follows is judged on his write too
 
 
 def test_the_transition_screen_lists_the_moves_a_member_may_make_and_why_not_the_others(hub):
@@ -8225,6 +8252,22 @@ def test_a_signature_goes_stale_when_a_pinned_record_or_a_covered_part_changes(h
     assert not hub.signatures(amara, ref)[0]["current"]
 
 
+def test_a_pinned_record_s_move_leaves_the_signature_that_covers_it_not_current(hub):
+    """A pinned record is covered as it was, where it was in its lifecycle too: moving it (a slip sent back to be read
+    again) leaves a signature on the record that pins it not current, though none of its fields changed."""
+    _type(hub, CHIT.replace('type = "number"\n', 'type = "number"\n[[field]]\nname = "status"\ntype = "choice"\n'
+                            'choices = ["read", "unread"]\n[lifecycle]\nfield = "status"\ninitial = "read"\n'
+                            '[[lifecycle.transition]]\nfrom = ["read"]\nto = "unread"\n'), "Chit")
+    _type(hub, FILE.replace('covers = ["Entry"]\n', ''), "Packet")
+    amara = M(hub, "dr-amara")
+    chit = f"Chit/{hub.create_record(amara, 'Chit', {'amount': 10})['id']}"
+    ref = f"Packet/{hub.create_record(amara, 'Packet', {'title': '2025', 'counted': [chit]})['id']}"
+    hub.sign_record(amara, ref, "I reviewed it")
+    assert hub.signatures(amara, ref)[0]["current"]
+    hub.move_record(amara, chit, "unread")
+    assert not hub.signatures(amara, ref)[0]["current"]
+
+
 def test_signing_is_refused_while_a_pin_is_behind(hub):
     """A record is not signed while a record it pins has changed since: its pin is moved on first."""
     amara, chit, ref = _packet(hub)
@@ -8455,9 +8498,9 @@ def test_an_exact_number_is_kept_with_its_places_in_the_database_the_track_and_a
 def test_block_code_gets_and_gives_exact_numbers():
     """Python block code is given an exact number as a Decimal and what it gives back as one stays exact."""
     from practicehub import sandbox
-    out = sandbox.run_code("def run(input):\n    return {'sum': input['a'] + input['b'], 'kind': type(input['a']).__name__}",
+    out = sandbox.run_code("def run(input):\n    return {'sum': input['a'] + input['b'], 'text': str(input['a'] + input['b'])}",
                            {"a": Decimal("0.10"), "b": Decimal("0.20")})["output"]
-    assert out == {"sum": Decimal("0.30"), "kind": "Decimal"} and str(out["sum"]) == "0.30"
+    assert out == {"sum": Decimal("0.30"), "text": "0.30"} and str(out["sum"]) == "0.30"  # a float would be 0.3000…04
 
 
 def test_an_exact_number_is_rounded_half_up_to_its_places_and_refused_when_it_is_not_one(hub):
@@ -8481,7 +8524,7 @@ def test_an_exact_number_is_rounded_half_up_to_its_places_and_refused_when_it_is
 
 
 def test_an_exact_number_compares_exactly_and_the_same_one_written_again_changes_nothing(hub):
-    """In a condition a stored 0.10 is 0.1; writing the same decimal again (12.3 over 12.30) writes nothing, so a
+    """In a condition a stored 0.10 is 0.1; writing the same decimal again (12.3 over 12.30) changes no field, so a
     signature over it stays current; a different one is a change."""
     from practicehub import expr
     assert expr.holds("record.amount == 0.1", {"record": {"amount": Decimal("0.10")}})
@@ -8489,12 +8532,13 @@ def test_an_exact_number_compares_exactly_and_the_same_one_written_again_changes
     amara = _bills(hub)
     ref = f"Bill/{hub.create_record(amara, 'Bill', {'amount': '12.30'})['id']}"
     hub.sign_record(amara, ref, "I checked it")
-    v = hub.record_version(ref)
     hub.update_record(amara, ref, {"amount": 12.3})
     hub.update_record(amara, ref, {"amount": "12.300"})
-    assert hub.record_version(ref) == v and [s["current"] for s in hub.signatures(amara, ref)] == [True]
+    changed = [ev["data"]["changed"] for ev in hub.track.list(limit=50)
+               if ev["subject"] == ref and ev["action"] == "record.updated"]
+    assert changed == [[], []] and [s["current"] for s in hub.signatures(amara, ref)] == [True]
     hub.update_record(amara, ref, {"amount": "12.31"})
-    assert hub.record_version(ref) == v + 1 and [s["current"] for s in hub.signatures(amara, ref)] == [False]
+    assert [s["current"] for s in hub.signatures(amara, ref)] == [False]
 
 
 def test_an_exact_number_reaches_every_surface_as_its_exact_text(hub):

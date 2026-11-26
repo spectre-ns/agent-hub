@@ -51,6 +51,7 @@ Notes for anyone, human or agent, changing this code.
 | A move's stamp: who made it and when, written by that move alone (a workflow's move: whoever did the step) and covered by a signature that makes it | `Hub.stamped`, `Hub._check_stamps_kept` in `practicehub/hub.py`; `schema._stamp_fields` |
 | `unique` over a reference compares the record it names, however it is written | `Hub._check_unique` in `practicehub/hub.py` |
 | A portal kind about a person's own record: only one of theirs its condition offers them now, checked again on sending | `Portal.about_choices`, `Portal.book` in `practicehub/portal.py` |
+| A step done by a move is refused to whoever wrote the record before the move (`not_by = ["record.editors"]`); the fields that move writes do not make its mover an editor | `Hub.revision_authors` in `practicehub/hub.py`; `Engine.eligibility`; `_step_by_move` in `practicehub/moves.py` |
 
 If you change one of these, add or update a test in `tests/test_rules.py` that states the rule (the rules the
 2026-11-24 review panel found broken are stated in `tests/test_panel_fixes.py`).

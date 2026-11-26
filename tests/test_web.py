@@ -13,6 +13,7 @@ import pytest
 
 from conftest import M, follow_up_run, item_for, quiet, run_of, visit_run
 from practicehub.agents.runner import AgentRunner, HttpClient, Refused
+from practicehub import decimals
 from practicehub.hub import Denied, Invalid
 from practicehub.web.server import App, Redirect, make_handler
 
@@ -905,7 +906,7 @@ def test_a_person_sets_a_passphrase_with_a_setup_code_from_a_member_admin(hub, s
     code, page = call(server, "POST", "/team/locum/setup-code", rana)
     assert code == 200 and "shown once" in page
     setup = re.search(r"<pre>([A-Z2-9]{5}(?:-[A-Z2-9]{5}){3})</pre>", page).group(1)
-    assert setup not in json.dumps(hub.track.list(limit=10000))
+    assert setup not in json.dumps(hub.track.list(limit=10000), default=decimals.jsonable)
     b = browser(server)
     assert b("GET", "/setup?member=locum")[0] == 200
     words = "the tide comes in at noon"
@@ -1795,7 +1796,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """The clinic has one record for a booking and the visit it becomes, the Visit; there is no Appointment type."""
-    assert hub.pack.version == "5.2" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "5.3" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert hub.db.get_setting("pack_upgrades_done") == list(hub.pack.upgrades)  # a new practice has none left to run

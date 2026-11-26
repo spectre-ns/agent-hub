@@ -411,7 +411,7 @@ class RecordPages:
         return (f'<div class="tablewrap"><table class="rows"><thead><tr>{head}</tr></thead><tbody>{body}</tbody>'
                 f'</table></div>')
 
-    def _grid(self, f, rows, me) -> str:
+    def _table_grid(self, f, rows, me) -> str:
         """A table field as a grid of inputs: each row's cells named ``<table>.<row>.<column>``, its rows and a few
         blank ones (left blank, a row is dropped). The "Add a row" button adds more; without the script, saving and
         editing again does."""
@@ -677,7 +677,7 @@ class RecordPages:
             f = {**f, "required": schema.is_required(f, rec)}
         spec = {**f, "name": name}
         if f["type"] == "table":
-            return self._grid(f, vals[0] if vals else [], me)
+            return self._table_grid(f, vals[0] if vals else [], me)
         if f["type"] == "reference":
             refs = [schema.ref_of(v) for v in vals if schema.ref_of(v)]
             options, many = [], False
@@ -2483,7 +2483,7 @@ class RecordPages:
         aside = f"<p class='muted dash-aside'>{e(w['aside'][0].upper() + w['aside'][1:])}.</p>" if w.get("aside") else ""
         if w["kind"] == "count":
             stat = w["stat"] if w.get("computed") else w["total"]
-            return f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{e(stat)}</p>{aside}</div>"
+            return f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{e(str(stat))}</p>{aside}</div>"
         if w["kind"] == "line":
             from .charts import line_chart
             return f"<div class='section'>{head}{line_chart(w['line'] or {}, w['title'] or fallback)}{aside}</div>"
@@ -2491,9 +2491,9 @@ class RecordPages:
             texts = w.get("texts") or {}
             size = {k: abs(float(decimals.number(n) or 0)) for k, n in w["counts"].items()}
             top = max(size.values(), default=0) or 1
-            bars = "".join(f"<tr><th scope='row'>{e(k)}</th><td><span class='bar' style='width:"
+            bars = "".join(f"<tr><th scope='row'>{e(str(k))}</th><td><span class='bar' style='width:"
                            f"{max(4, int(100 * size[k] / top)) if size[k] else 0}%'></span> "
-                           f"{e(texts.get(k, n))}</td></tr>" for k, n in w["counts"].items())
+                           f"{e(str(texts.get(k, n)))}</td></tr>" for k, n in w["counts"].items())
             return (f"<div class='section'>{head}" + (f"<table class='chart'><tbody>{bars}</tbody></table>" if bars
                                                       else "<p class='muted'>Nothing yet.</p>") + aside + "</div>")
         if w["kind"] == "board":

@@ -55,7 +55,6 @@ name = "status"
 label = "Status"
 type = "choice"
 choices = ["planned", "acceptance", "not-accepted", "drafting", "proposed", "overdue", "signed", "active", "closed", "declined"]
-labels = { acceptance = "Waiting for a partner to accept it", not-accepted = "Not accepted by the firm" }
 required = true
 
 [[field]]

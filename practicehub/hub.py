@@ -3147,14 +3147,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         return [{**{k: v for k, v in r.items() if k not in ("_id", "refs")}, "data": self.redact(member, r["data"])}
                 for r in rows]
 
-    def revision_authors(self, ref: str) -> set[str]:
+    def revision_authors(self, ref: str, before: int | None = None) -> set[str]:
         """Who wrote what the record says now: whoever created it or changed a field other than its lifecycle state,
         since it was last in its lifecycle's ``in_use`` state (the approved revision others reviewed). Moving a
-        record through its lifecycle does not make someone its author."""
+        record through its lifecycle does not make someone its author. With ``before``, the versions before that one
+        (a move that is a step's work is judged on the record it found, not on the fields its own write fills)."""
         rtype, rid = ref.split("/", 1)
         rt = self.record_type(rtype)
         lc = rt.lifecycle if rt else None
-        rows = self.db.record_versions.find({"type": rtype, "id": rid}, sort=[("version", ASC)])
+        rows = self.db.record_versions.find({"type": rtype, "id": rid,
+                                             **({"version": {"$lt": before}} if before else {})},
+                                            sort=[("version", ASC)])
         authors: set[str] = set()
         prev = None
         for r in rows:
@@ -4345,21 +4348,23 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                          f"{t['sign']!r} by the person who moves it")
 
     # ------------------------------------------------------------------ signatures on any record
-    def _own_digest(self, rec: dict) -> str:
-        """The record's own contents, without its housekeeping (meta) or where it is in its lifecycle, so the move a
-        signature makes (approved, closed) does not leave it covering nothing."""
+    def _own_digest(self, rec: dict, *, state: bool = False) -> str:
+        """The record's own contents, without its housekeeping (meta) or, unless ``state``, where it is in its
+        lifecycle, so the move a signature makes (approved, closed) does not leave it covering nothing. A record
+        another one pins is hashed with its state: its moves are changes the pinning record's signature did not see."""
         from .track import canonical
         rt = self.record_type_for_reading(rec.get("resourceType", "")) if rec.get("resourceType") else None
         if rt:
             rec = schema.exact(rt, rec)  # 12.3 and 12.30 are the same value of a field kept at two places
-        if rt and rt.lifecycle:
+        if rt and rt.lifecycle and not state:
             rec = schema.put(rec, rt.lifecycle["path"], None)
         return hashlib.sha256(canonical({k: v for k, v in rec.items() if k != "meta"}).encode()).hexdigest()
 
     def _record_digest(self, rec: dict) -> str:
         """What a signature covers: the record's own contents, and, for a type that pins records (``pin = true``) or
-        covers its parts (``covers``), what each of those says now: a change to a pinned record or a covered part
-        leaves the signature not current. A record that pins and covers nothing is covered by its own digest."""
+        covers its parts (``covers``), what each of those says now: a change to a pinned record (a move included) or
+        a covered part leaves the signature not current. A record that pins and covers nothing is covered by its own
+        digest."""
         from .track import canonical
         own = self._own_digest(rec)
         rt = self.record_type_for_reading(rec.get("resourceType", "")) if rec.get("resourceType") else None
@@ -4369,7 +4374,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         for f in schema.pins(rt):
             for ref in self._pin_refs(f, rec):
                 there = self.records.read(*ref.split("/", 1))
-                pins[ref] = self._own_digest(there) if there else None
+                pins[ref] = self._own_digest(there, state=True) if there else None
         parts = {}
         for t in rt.covers:
             prt = self.record_type_for_reading(t)
@@ -4410,7 +4415,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     continue
                 there = self.records.read(*ref.split("/", 1)) if schema.REF_TEXT.fullmatch(ref) else None
                 pin = {"reference": ref, "version": self.record_version(ref) if there else 0,
-                       "sha256": self._own_digest(there) if there else None}
+                       "sha256": self._own_digest(there, state=True) if there else None}
                 if isinstance(x, dict) and x.get("display"):
                     pin["display"] = x["display"]
                 out.append(pin)

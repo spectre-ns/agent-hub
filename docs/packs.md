@@ -140,9 +140,10 @@ pin = true                      # one field (list = true for several), not a pat
 
 A later write keeps the pin whatever it says; only "Use version M" on the record page (`Hub.repin`) moves it on. A
 signature on the record covers what it pins, and the parts its type **covers** (`covers = ["Line"]`, part types whose
-`part_of` points here): a change to either leaves the signature not current. The record is not signed while a pin is
-behind. While the record is locked people do not add or change the parts it covers (its workflow still does); while
-it is final no one does. A type with no pins and no `covers` is signed exactly as before.
+`part_of` points here): a change to either leaves the signature not current. A pinned record is covered where it
+was in its lifecycle too, so moving it (a document sent back to be read again) is such a change. The record is not
+signed while a pin is behind. While the record is locked people do not add or change the parts it covers (its
+workflow still does); while it is final no one does. A type with no pins and no `covers` is signed exactly as before.
 
 A **closed period** keeps everything dated in it as it was. One type says what closes it, another closes it:
 

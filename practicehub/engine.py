@@ -2619,7 +2619,8 @@ class Engine:
                 if run["started_by"] == member["id"]:
                     return False, "whoever started this does not also do this step"
             elif prior == "record.editors":
-                if run["record"] and member["id"] in hub.revision_authors(run["record"]):
+                moved_in = (run["steps"].get(step.id) or {}).get("moved_in")
+                if run["record"] and member["id"] in hub.revision_authors(run["record"], before=moved_in):
                     return False, "whoever wrote or changed this record does not also approve it"
             elif self._did(run, prior, member["id"]):  # who did which step: the run's step history
                 return False, f"whoever did '{wf.step(prior).title}' does not also do this"

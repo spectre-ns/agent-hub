@@ -218,6 +218,7 @@ class MovesMixin:
                 if v not in (None, "", [], {}):
                     answer[n] = v
         run["steps"][step.id]["moved"] = True  # the record is where the step puts it: nothing more to move
+        run["steps"][step.id]["moved_in"] = self.record_version(ref)  # the move's own write: not the mover's revision
         self.db.runs.set(run["id"], {"steps": run["steps"]})
         self.engine.complete(member, item["id"], answer)
         return True

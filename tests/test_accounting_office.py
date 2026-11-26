@@ -7,6 +7,7 @@ confirmation number; a partner records the one the tax software gave, signed. An
 client authorises and what is filed: a reviewed return is locked, and changing it (a person reopening it, a slip
 that comes late) means the review and the client's authorisation again."""
 
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -21,6 +22,14 @@ REVIEW = "I reviewed this return and it is ready for the client"
 FILE = "I authorise filing this return with the CRA"
 ACCEPT = "I accept this engagement for the firm"
 IMPORTER = {"id": "import:test", "kind": "automation", "name": "Import", "status": "active"}
+
+
+@contextmanager
+def _refused(text):
+    """Refused (Invalid), with ``text`` among the reasons given."""
+    with pytest.raises(Invalid) as exc:
+        yield
+    assert any(text in p for p in exc.value.problems), exc.value.problems
 
 
 def _install_with_rates(hub):
@@ -308,7 +317,7 @@ def test_a_slip_that_comes_after_the_review_reopens_the_return_it_is_never_filed
         firm.move_record(anne, ref, "filing", FILED, signature=FILE)
     # the next pass drafts it with the slip in it; the earlier review does not stand in for this one
     ret = _draft(firm, cref)
-    assert ret["total_income"] == signed["total_income"] + 8000.0
+    assert ret["total_income"] == signed["total_income"] + Decimal("8000")
     assert "T5" in (ret.get("flags") or "")
     with pytest.raises((Invalid, Denied)):
         firm.move_record(anne, ref, "filing", FILED, signature=FILE)
@@ -321,7 +330,7 @@ def test_a_slip_that_comes_after_the_review_reopens_the_return_it_is_never_filed
     firm.move_record(anne, ref, "filing", FILED, signature=FILE)
     run_all_local(firm, log=quiet)
     ret = _the_return(firm, cref)
-    assert ret["status"] == "filed" and ret["total_income"] == signed["total_income"] + 8000.0
+    assert ret["status"] == "filed" and ret["total_income"] == signed["total_income"] + Decimal("8000")
     assert len(firm.records.search("Invoice", subject=cref, limit=None)) == 1
 
 
@@ -336,7 +345,7 @@ def test_a_slip_that_comes_late_reopens_the_return_wherever_it_waits_before_fili
     assert before["status"] == at
     firm.create_record(portal, "TaxSlip", {"client": cref, "status": "received", "source": "portal", "text": LATE_T5})
     ret = _draft(firm, cref)  # back through comparing and the draft, to a review that has not been signed
-    assert ret["total_income"] == before["total_income"] + 8000.0 and not ret.get("t183_signed_on")
+    assert ret["total_income"] == before["total_income"] + Decimal("8000") and not ret.get("t183_signed_on")
     runs = [r["id"] for r in firm.db.runs.find({"workflow_id": "t1-return", "record": ref, "status": "running"})]
     assert len(runs) == 1  # one pass walks it now: the one the slip started
     assert firm.db.items.find_one({"run_id": runs[0], "step_id": "review", "status": {"$in": ["open", "claimed"]}})
@@ -543,13 +552,13 @@ def test_a_client_has_one_return_a_year_and_one_engagement_for_a_service_a_year(
     however the client is written: the firm works on one, and a reopened return is the same return walked again."""
     sophie = firm.member("sophie")
     cref = _client(firm)
-    with pytest.raises(Invalid, match="another t1 return already has"):
+    with _refused("another t1 return already has"):
         firm.create_record(IMPORTER, "T1Return", {"client": {"reference": cref, "display": "S. MacNeil"},
                                                   "client_name": "Sarah MacNeil", "year": 2024, "status": "assessed",
                                                   "total_income": 62000.0, "taxable_income": 62000.0,
                                                   "net_refund": 900.0, "assessed_refund": 900.0,
                                                   "noa_date": "2025-05-20", "filed_on": "2025-04-10"})
-    with pytest.raises(Invalid, match="another engagement already has"):
+    with _refused("another engagement already has"):
         firm.create_record(sophie, "Engagement", {"client": cref, "client_name": "Sarah MacNeil", "service": "t1",
                                                   "year": 2025, "fee": 350, "status": "acceptance"})
     firm.create_record(sophie, "Engagement", {"client": cref, "client_name": "Sarah MacNeil", "service": "bookkeeping",
@@ -772,7 +781,7 @@ def test_an_approval_of_a_record_not_the_client_s_or_not_waiting_for_them_writes
                                                   "email": "kevin@example.ca", "services": ["t1"],
                                                   "partner_in_charge": "anne"})
     kref = f"Client/{other['id']}"
-    with pytest.raises(Invalid, match="is about someone else"):
+    with _refused("is about someone else"):
         _sign(firm, kref, ref)
     out = mod.act_client_sign(firm.engine, {"id": "r-1", "subject": kref, "record": kref}, None,
                               {"about": ref, "answer": "approve"}, IMPORTER)
@@ -863,7 +872,8 @@ def test_an_engagement_the_firm_does_not_accept_ends_there(firm):
     assert not firm.db.outbox.find_one({"run_id": run["id"]})
     assert not firm.records.search("T1Return", subject=cref, limit=None)
     rt = firm.record_type("Engagement")
-    assert not [t for t in rt.lifecycle["transition"] if "not-accepted" in t["from"]]
+    # no move leaves it: only its workflow starting on it again would (the entry every state has)
+    assert not [t for t in rt.lifecycle["transition"] if "not-accepted" in t["from"] and not t.get("entry")]
 
 
 def test_next_year_s_engagement_is_accepted_again_when_its_season_comes(firm):
@@ -913,13 +923,13 @@ def test_rates_are_records_partners_and_managers_enter_and_staff_read(firm):
         firm.create_record(rob, "TaxRate", {"kind": "sales-tax", "jurisdiction": "NS", "effective_from": "2025-04-01",
                                             "rate": "0.13"})
     # what each kind says
-    with pytest.raises(Invalid, match="no tax year"):
+    with _refused("no tax year"):
         firm.create_record(rob, "TaxRate", {"kind": "sales-tax", "jurisdiction": "NB", "year": 2026, "rate": "0.15",
                                             "effective_from": "2026-01-01"})
-    with pytest.raises(Invalid, match="brackets, the first from 0"):
+    with _refused("brackets, the first from 0"):
         firm.create_record(rob, "TaxRate", {"kind": "income-tax", "jurisdiction": "NB", "year": 2026, "rate": "0.094",
                                             "basic_amount": "13664", "brackets": [{"over": "51306", "rate": "0.14"}]})
-    with pytest.raises(Invalid, match="maximum earnings"):
+    with _refused("maximum earnings"):
         firm.create_record(rob, "TaxRate", {"kind": "cpp", "jurisdiction": "federal", "year": 2026, "rate": "0.0595"})
 
 
@@ -953,13 +963,13 @@ def test_an_invoice_s_lines_add_up_to_its_fee_its_hst_is_the_fee_at_its_rate_and
     lines = [{"description": "T1 preparation", "amount": "300.00"}, {"description": "Rental schedule", "amount": "50"}]
     inv = _invoice(firm, cref, lines=lines, amount="350", hst_rate="0.14", hst="49.00", total="399.00")
     assert inv["amount"] == Decimal("350.00")
-    with pytest.raises(Invalid, match="the fee is the sum of the lines"):
+    with _refused("the fee is the sum of the lines"):
         _invoice(firm, cref, lines=lines, amount="400", hst_rate="0.14", hst="56.00", total="456.00")
-    with pytest.raises(Invalid, match="HST is the fee at the HST rate"):
+    with _refused("HST is the fee at the HST rate"):
         _invoice(firm, cref, lines=lines, amount="350", hst_rate="0.14", hst="52.50", total="402.50")
-    with pytest.raises(Invalid, match="the total is the fee plus HST"):
+    with _refused("the total is the fee plus HST"):
         _invoice(firm, cref, lines=lines, amount="350", hst_rate="0.14", hst="49.00", total="400.00")
-    with pytest.raises(Invalid, match="the fee is the sum of the lines"):
+    with _refused("the fee is the sum of the lines"):
         firm.update_record(IMPORTER, f"Invoice/{inv['id']}", {"lines": lines[:1]})
 
 

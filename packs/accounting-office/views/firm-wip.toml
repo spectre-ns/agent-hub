@@ -9,7 +9,7 @@ title = "Returns by stage"
 type = "T1Return"
 group_by = "status"
 where = "not (record.status in ['assessed', 'withdrawn'])"
-columns = ["title", "client_name", "year"]
+columns = ["client_name", "year", "due_date"]
 
 [[widget]]
 kind = "chart"

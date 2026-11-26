@@ -96,7 +96,7 @@ def test_title_placeholders_date_and_flag_name_its_fields():
     ('match = "x"', "match is true or false"),
     ('max_length = "long"', "max_length is a whole number"),
     ('type = "number"\nmin = "0"', "min is a number"),
-    ('max = 3', "max is for a number field"),
+    ('max = 3', "max is for a number or decimal field"),
     ('type = "choice"\nchoices = "a, b"', "choices is a list of words"),
     ('type = "choice"\nchoices = ["a", "a"]', "choices lists 'a' twice"),
     ('target = ["Part"]', "target is for a reference field"),

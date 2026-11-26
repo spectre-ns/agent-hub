@@ -189,7 +189,7 @@ def test_a_computed_where_holds_exactly_where_the_hub_s_condition_does(hub):
     for r in rows:
         _sale(hub, patient=p1, **r)
     conds = ["record.status == 'won'", "record.status != 'won'", "record.status in ['won', 'lost']",
-             "record.status not in ['won']", "record.status == null", "record.amount > 5", "record.amount >= 5.00",
+             "not (record.status in ['won'])", "record.status == null", "record.amount > 5", "record.amount >= 5.00",
              "record.amount < 2.5", "record.amount == 0.1", "record.qty > 2 and record.flag",
              "record.flag == false", "not record.flag", "record.flag", "record.channel",
              "record.placed_on >= '2026-02-01'", "record.placed_on < today - 30d",
