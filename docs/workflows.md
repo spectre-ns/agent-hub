@@ -696,6 +696,13 @@ tone = "warm"
 | `<work>` | earlier work's (or an automation's) whole output |
 | `<work>.<field>` | one field of it |
 | `provider:<name>` | computed data: `free-slots`, `members`, or a provider the pack adds |
+| `file:<field>` | the file in that attachment field of the run's record: its name, type, size and words (none for a scan or a photo), and whether it is a picture; never its bytes. It needs a `record:<class>` entry beside it, the run's record's class |
+
+A step whose `file:` entry is a picture (a PNG, JPEG or WebP photo of a document) is answered by the model the
+agent's profile names as `vision_model`, which is shown the picture (fetched as the agent: reading it is a view of
+the record, on the track). An agent with no model for pictures is told there is a picture it cannot see; a skill
+that needs what it shows escalates. Setting or changing an agent's `vision_model` is proposed and approved by a
+second policy owner, as a change of its model is.
 
 **Data classes travel with data.** A member may take work only if they may read every class it reads:
 

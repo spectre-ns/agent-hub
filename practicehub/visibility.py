@@ -215,13 +215,19 @@ def step_classes(wf: Workflow, step: Step, _seen: set | None = None) -> set[str]
     seen.add(step.id)
     if step.kind == "automation":
         return workflow_classes(wf)
-    out = {c[7:] for c in step.context if c.startswith("record:")}
+    out = step_classes_own(step)
     if step.review_of:
         try:
             out |= step_classes(wf, wf.step(step.review_of), seen)
         except KeyError:
             pass
     return out
+
+
+def step_classes_own(step: Step) -> set[str]:
+    """The data classes a step's own context reads (``record:<class>``); a ``file:<field>`` entry beside them reads a
+    file of a record of one of these."""
+    return {c[7:] for c in step.context if c.startswith("record:")}
 
 
 def workflow_classes(wf: Workflow) -> set[str]:

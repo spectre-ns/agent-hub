@@ -9,7 +9,7 @@ description = "A governed operations platform for professional practices, where 
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
-dependencies = ["pymongo>=4.10,<5"]
+dependencies = ["pymongo>=4.10,<5", "pypdf>=7.2,<8"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

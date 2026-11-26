@@ -76,6 +76,14 @@ class LocalClient:
     def acknowledge(self, item_id):
         return self._call(self.hub.engine.acknowledge, self._me(), item_id)
 
+    def file(self, ref, blob):
+        """A file a record names, as this agent may read it (on the track, like opening the record)."""
+        from ..hub import NotFound
+        try:
+            return self._call(self.hub.read_file, self._me(), ref, blob)[0]
+        except NotFound as exc:
+            raise Refused(str(exc)) from None
+
 
 class HttpClient:
     """Calls the hub's JSON API with the agent's bearer token."""
@@ -83,14 +91,15 @@ class HttpClient:
     def __init__(self, base_url: str, token: str, timeout: float = 60):
         self.base, self.token, self.timeout = base_url.rstrip("/"), token, timeout
 
-    def _req(self, method, path, body=None):
+    def _req(self, method, path, body=None, *, raw: bool = False):
         req = urllib.request.Request(self.base + path, method=method,
                                      data=json.dumps(body, default=decimals.jsonable).encode() if body is not None else None,
                                      headers={"Authorization": f"Bearer {self.token}",
                                               "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read() or b"null")
+                data = resp.read()
+                return data if raw else json.loads(data or b"null")
         except urllib.error.HTTPError as exc:
             try:
                 err = json.loads(exc.read())
@@ -127,6 +136,9 @@ class HttpClient:
     def acknowledge(self, item_id):
         return self._req("POST", f"/api/items/{item_id}/ack", {})
 
+    def file(self, ref, blob):
+        return self._req("GET", f"/api/records/{ref}/files/{blob}", raw=True)
+
 
 # ------------------------------------------------------------------------------------------------------ runner
 class AgentRunner:
@@ -151,17 +163,36 @@ class AgentRunner:
                 self.log(f"[{me['id']}] skipped {item['id']}: {exc}")
         return handled
 
+    def _pictures(self, me: dict, ctx: dict) -> list[dict]:
+        """The pictures the step's context names (``file:<field>`` entries that are pictures). For an agent whose
+        profile names a model that can see, each is fetched as the agent (``data``); one it may not read, or any for
+        another agent, goes without, and the model is told there is a picture it is not shown."""
+        found = [v for k, v in (ctx.get("context") or {}).items()
+                 if k.startswith("file:") and isinstance(v, dict) and v.get("picture")]
+        sees = bool((me.get("profile") or {}).get("vision_model"))
+        out = []
+        for v in found:
+            p = {"name": v.get("name"), "contentType": v["picture"], "size": v.get("size")}
+            if sees:
+                try:
+                    p["data"] = self.client.file(v["ref"], v["blob"])
+                except (Refused, Rejected, ModelError) as exc:
+                    self.log(f"[{me['id']}] could not read {v.get('name')}: {exc}")
+            out.append(p)
+        return out
+
     def handle(self, me: dict, item: dict) -> str:
         iid = item["id"]
         self.client.claim(iid)
         ctx = self.client.context(iid)
+        pictures = self._pictures(me, ctx)
         feedback = None
         for attempt in (1, 2):
             if feedback:
                 ctx = {**ctx, "step": {**ctx["step"], "instructions": (ctx["step"].get("instructions") or "")
                                        + "\n\nYour previous answer was not accepted: " + "; ".join(feedback)}}
             try:
-                out = self.gateway.answer(me, ctx, me.get("practice", "the practice"))
+                out = self.gateway.answer(me, ctx, me.get("practice", "the practice"), pictures=pictures)
             except ModelError as exc:
                 return self._escalate(me, iid, f"model failed: {exc}")
             if out["escalate"]:

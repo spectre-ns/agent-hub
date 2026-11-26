@@ -57,7 +57,8 @@ def file_response(data: bytes, meta: dict) -> Download:
 
 
 def multipart(req) -> dict:
-    """A multipart/form-data body: {name: str} for fields, {name: (filename, content_type, bytes)} for files."""
+    """A multipart/form-data body: {name: str} for fields, {name: (filename, content_type, bytes)} for files; a
+    repeated field becomes a list, as in a plain form."""
     import email.parser
     import email.policy
     ctype = (req.get("headers") or {}).get("content-type", "")
@@ -74,7 +75,8 @@ def multipart(req) -> dict:
         if part.get_filename() is not None:
             out[name] = (part.get_filename(), part.get_content_type(), data)
         else:
-            out[name] = data.decode("utf-8", "replace")
+            v = data.decode("utf-8", "replace")
+            out[name] = v if name not in out else (out[name] if isinstance(out[name], list) else [out[name]]) + [v]
     return out
 
 
@@ -772,6 +774,29 @@ class RecordPages:
                 spec["_titles"] = sorted({self.hub.title(r) for r in self.hub.records.search(rt.id, limit=300)})
         return self._field(spec, choices, val)
 
+    def _new_files(self, rt, me) -> list[dict]:
+        """The attachment fields a new record's form takes a file for: shown, at a path a form writes, not a
+        workflow's, of a class the member may write, and on the type's create screen when it has one."""
+        screen = rt.screen("create")
+        named = {n for t in screen for n in t["fields"]} if screen is not None else None
+        hidden = {f["name"] for f in visibility.hidden_fields(self.hub, me, rt, write=True)}
+        return [f for f in rt.fields if f["type"] == "attachment" and SIMPLE.fullmatch(f["path"])
+                and f.get("show", True) is not False and f.get("by") != "workflow" and f["name"] not in hidden
+                and (named is None or f["name"] in named)]
+
+    def _new_files_html(self, rt, me, kept: dict | None) -> str:
+        """A file box for each of them; a form shown again after a refusal asks for its files again (a browser
+        never fills a file box in)."""
+        out = []
+        for f in self._new_files(rt, me):
+            name = f["path"].removesuffix(".*")
+            helps = ([f["help"]] if f.get("help") else []) + [f"at most {self.hub.MAX_FILE // (1024 * 1024)} MB"] + (
+                ["choose the file again"] if (kept or {}).get("_files") else [])
+            cid, ids = self._control_id(name, True)
+            req = " required" if f.get("required") else ""
+            out.append(self._labelled(f, f'<input type="file" name="{e(name)}"{ids}{req}>', cid, helps))
+        return "".join(out)
+
     def _on_screen(self, rt, op: str) -> list[dict] | None:
         """The tabs of the type's screen for ``op``, each with the editable fields it shows (None: no screen)."""
         tabs = rt.screen(op)
@@ -1083,7 +1108,7 @@ class RecordPages:
         if (rt.abstract or len(kinds) > 1) and kept is None and error is None and q.get("kind") != rtype:
             return self._kind_pick(req, rt, kinds)
         under = q.get("parent", "") or (kept or {}).get("_parent", "")
-        seed = {k: v for k, v in (kept or {}).items() if k not in ("_parent", "_owner")} or None
+        seed = {k: v for k, v in (kept or {}).items() if k not in ("_parent", "_owner", "_files")} or None
         if rt.parent and under.startswith(rtype + "/"):
             seed = {"resourceType": rtype, **(seed or {}), **schema.put({}, rt.parent, {"reference": under})}
         for f in rt.fields:  # a link named in the address (New visit, from a patient's page): filled in
@@ -1118,9 +1143,11 @@ class RecordPages:
         seed = self._seed_from_links(me, rt, seed, kept)
         start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
         inputs = self._inputs(rt, seed, me, "create", skip=skip)
+        files = self._new_files_html(rt, me, kept)
+        enc = ' enctype="multipart/form-data"' if files else ""
         verb = "Add" if rt.part_of else "Create"
-        body = (f'<div data-modal-body>{err}<form method="post" action="/records/{e(rtype)}" class="card stack" id="new">'
-                f'{own}<p class="muted">{e(rt.summary)}{start}</p>{self._req_note(inputs)}{inputs}'
+        body = (f'<div data-modal-body>{err}<form method="post" action="/records/{e(rtype)}"{enc} class="card stack" '
+                f'id="new">{own}<p class="muted">{e(rt.summary)}{start}</p>{self._req_note(inputs + files)}{inputs}{files}'
                 f'<div class="filters"><button class="primary">{verb}</button>'
                 f'<a class="btn secondary" href="{cancel}" data-modal-close>Cancel</a>{back}</div></form></div>')
         return self.layout(req, f"{verb} {a_an(self._lower(rt.label))}", body, crumbs=crumbs)
@@ -1287,12 +1314,19 @@ class RecordPages:
         rt = self.hub.record_type(rtype)
         if not rt:
             raise Invalid(f"there is no record type {rtype}")
-        f = self.form(req)
+        sent = (req.get("headers") or {}).get("content-type", "").lower().startswith("multipart/form-data")
+        f = multipart(req) if sent else self.form(req)
         of = self._owner_field(rt)
         try:
             data = self._from_form(rt, f, partial=False, op="create")
             if of and of["path"] not in data and f.get(of["path"]):  # the owner, set before the form (not on its screen)
                 data[of["path"]] = self._coerce(of, f[of["path"]])
+            for fld in self._new_files(rt, me):  # each file kept first, then named in the record at its field
+                key = fld["path"].removesuffix(".*")
+                got = f.get(key)
+                if isinstance(got, tuple) and got[2]:
+                    att = self.hub.add_file(me, rtype, got[2], got[0], got[1])
+                    data[key] = [att] if fld["path"].endswith(".*") else att
             rec = self.hub.create_record(me, rtype, data)
         except Invalid as exc:
             from .server import Rendered
@@ -1301,6 +1335,8 @@ class RecordPages:
                 kept["_parent"] = f["_parent"]
             if of and isinstance(f.get(of["path"]), str):
                 kept["_owner"] = f[of["path"]]
+            if any(isinstance(v, tuple) and v[2] for v in f.values()):
+                kept["_files"] = True
             raise Rendered(409 if isinstance(exc, Conflict) else 422,
                            self.page_record_new({**req, "query": {}}, rtype, kept=kept, error=exc)) from None
         owner = self.hub.owner_of(rec)

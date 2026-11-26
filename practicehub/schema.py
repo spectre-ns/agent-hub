@@ -96,6 +96,17 @@ answer that becomes a record, an engine calling the API.
                                   #   still says who sees the record exists, lists it and creates it.
 
     [[field]]
+    name = "file"
+    type = "attachment"           # one stored file: {"blob": <sha256>, "name", "contentType", "size"}
+    [[field]]
+    name = "text"
+    type = "text"
+    from_file = "file"            # filled with the words of the file in ``file`` when one is attached (a document,
+                                  #   a text file, a PDF's text layer), unless the same write gives it. A picture or
+                                  #   a scan has no words here: the field is left as it was, for an agent that can see
+                                  #   (a step's ``file:<field>`` context) or a person
+
+    [[field]]
     name = "amount"
     type = "decimal"              # an exact number (money, a quantity, a rate): kept to ``scale`` places, rounded half
     scale = 2                     #   up as it is written (12.345 is 12.35), never a float: 0.10 + 0.20 is 0.30. At most
@@ -458,7 +469,7 @@ KEYS = {
          "period", "closing", "check"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class", "pin",
-              "roles", "required_unless", "scale", "unit", "column", "min_rows", "max_rows"},
+              "roles", "required_unless", "scale", "unit", "column", "min_rows", "max_rows", "from_file"},
     "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "final", "abandoned", "in_use", "labels",
                   "tones"},
     "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm",
@@ -519,7 +530,7 @@ def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]
     if table is not None:
         problems += [f"{where}: {k} is said of the table, not of a column" for k in
                      ("path", "list", "by", "data_class", "pin", "column", "min_rows", "max_rows", "live", "fact",
-                      "match", "advanced", "required_unless", "with")
+                      "match", "advanced", "required_unless", "with", "from_file")
                      if k in raw]
     scale = raw.get("scale")
     if typ == "decimal":
@@ -609,6 +620,10 @@ def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]
         problems.append(f"{where}: with is a table of sibling keys and values, e.g. {{ system = \"phone\" }}")
     if raw.get("live") is True and typ != "markdown":
         problems.append(f"{where}: live is for a markdown field (several people write it at once)")
+    if "from_file" in raw and not (isinstance(raw["from_file"], str) and raw["from_file"]):
+        problems.append(f"{where}: from_file names the attachment field whose file's words fill this one")
+    elif "from_file" in raw and typ != "text":
+        problems.append(f"{where}: from_file is for a text field (it holds the words read from a file)")
     if raw.get("pin") is True and typ != "reference":
         problems.append(f"{where}: pin is for a reference field (it keeps the version of the record it points at)")
     elif raw.get("pin") is True and "*" in str(raw.get("path") or ""):
@@ -651,7 +666,7 @@ def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
          "live": raw.get("live", False), "data_class": raw.get("data_class") or None,
          "roles": list(raw.get("roles") or []), "required_unless": unless or None, "pin": raw.get("pin") is True,
-         "scale": scale if typ == "decimal" else None, "unit": unit or None}
+         "scale": scale if typ == "decimal" else None, "unit": unit or None, "from_file": raw.get("from_file") or None}
     if typ == "decimal":  # its bounds, exactly
         f["min"], f["max"] = (None if v is None else decimals.to_decimal(v) for v in (f["min"], f["max"]))
     if typ == "table":
@@ -775,6 +790,13 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool, parent: RecordType | 
             names.add(f["name"])
             paths.add(f["path"])
             fields.append(f)
+    by_name = {f["name"]: f for f in fields}
+    for f in fields:  # filled with a file's words: from one file, in an attachment field of this type
+        src = by_name.get(f["from_file"]) if f["from_file"] else None
+        if f["from_file"] and not (src and src["type"] == "attachment" and not src["list"]
+                                   and "*" not in src["path"] + f["path"]):
+            problems.append(f"field {f['name']}: from_file names {f['from_file']!r}, which is not one of this type's "
+                            f"attachment fields (one file, not a list, and neither field a path through a list)")
     if parent is not None:  # a field of its parent's it names again: narrowed, never changed
         problems += _narrowed(parent, own, fields, doc, catalog)
     ext, base_map, base = doc.get("extends"), {}, None  # under one of the hub's types: the core base at its root
@@ -1901,7 +1923,7 @@ NEVER_INHERITED = ("id", "label", "plural", "slug", "abstract")
 ADDED_KEYS = ("field", "check", "signature", "link", "unique", "screen")  # the parent's, then its own
 # A field it narrows keeps these as its parent's field has them.
 FIELD_STAYS = ("type", "path", "list", "data_class", "by", "pin", "rel", "with", "live", "scale", "unit",
-               "required_unless", "columns")
+               "required_unless", "columns", "from_file")
 
 
 def parse_all(sources: dict[str, str]) -> dict[str, RecordType]:

@@ -1055,6 +1055,27 @@ def test_a_file_is_attached_kept_in_the_database_and_read_only_through_its_recor
     assert code == 422 and "no file" in out
 
 
+def test_a_new_record_form_takes_its_files(hub, server):
+    import hashlib
+    rana = _modules(hub, server)
+    form = call(server, "GET", "/records/Document/new", rana)[1]
+    assert 'enctype="multipart/form-data"' in form and '<input type="file" name="file"' in form
+    pdf = b"%PDF-1.4 the procedure"
+    body, ctype = _multipart({"title": "Sharps disposal"}, ("sharps.pdf", "application/pdf", pdf))
+    assert raw(server, "POST", "/records/Document", rana, body, {"Content-Type": ctype})[0] == 303
+    d = next(r for r in hub.records.search("Document") if r["title"] == "Sharps disposal")
+    assert d["file"]["blob"] == hashlib.sha256(pdf).hexdigest() and d["file"]["name"] == "sharps.pdf"
+    assert d["file"]["contentType"] == "application/pdf" and d["file"]["size"] == len(pdf)
+    # refused: the form again, with what was typed, asking for the file again (a browser cannot keep it)
+    body, ctype = _multipart({"title": "", "number": "SOP-77"}, ("sharps.pdf", "application/pdf", pdf))
+    code, _, page = raw(server, "POST", "/records/Document", rana, body, {"Content-Type": ctype})
+    assert code == 422 and b"choose the file again" in page and b'value="SOP-77"' in page
+    # a form with no file box is sent as it always was
+    tag = re.search(r'<form[^>]*action="/records/Patient"[^>]*>', call(server, "GET", "/records/Patient/new",
+                                                                       token(hub, "jo"))[1]).group(0)
+    assert "enctype" not in tag
+
+
 def test_a_request_larger_than_any_file_is_refused_unread(hub, server):
     import socket
     host, port = server.removeprefix("http://").split(":")

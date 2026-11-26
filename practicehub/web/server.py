@@ -3053,6 +3053,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             return names.get(dc) or dc.capitalize() + " records"
         if key.startswith("provider:"):
             return key.split(":", 1)[1].replace("-", " ").capitalize()
+        if key.startswith("file:"):
+            return self.human(key.split(":", 1)[1])
         head, _, rest = key.partition(".")
         inputs = {i["name"]: i.get("label") or i["name"] for i in (wf.inputs if wf else [])}
         if head == "input":
@@ -3084,6 +3086,16 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                            if lines else f"<h3>{e(label)}</h3><ul class='plain'><li class='muted'>none</li></ul>")
             elif key.startswith("provider:") and isinstance(val, list):
                 out.append(f"<h3>{e(label)}</h3><p class='muted'>{len(val)} options, offered in the form below.</p>")
+            elif key.startswith("file:"):  # the record's file: open it; its words, when it has some
+                if not isinstance(val, dict):
+                    out.append(f"<h3>{e(label)}</h3><p class='muted'>No file.</p>")
+                    continue
+                href = f"/records/{val['ref']}/files/{val['blob']}"
+                words = (f"<details><summary>Its words</summary><pre class='wrap'>{e(val['text'])}</pre></details>"
+                         if val.get("text") else "<p class='muted'>No words could be read from it: open it.</p>")
+                out.append(f"<h3>{e(label)}</h3><p><a href=\"{e(href)}\" target=\"_blank\" rel=\"noopener\">"
+                           f"{e(val.get('name') or 'the file')}</a> <span class='muted'>{e(val.get('contentType') or '')}"
+                           f"</span></p>{words}")
             else:
                 out.append(f"<h3>{e(label)}</h3>" + self._values(val, me))
         return "".join(out) or "<p class='muted'>Nothing.</p>"
@@ -4123,6 +4135,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             rows = []
             if new.get("model", "") != prof.get("model", ""):
                 rows.append(("Model", e(prof.get("model", "") or "—"), e(new.get("model", "") or "—")))
+            if new.get("vision_model", "") != prof.get("vision_model", ""):
+                rows.append(("Model for pictures", e(prof.get("vision_model", "") or "—"),
+                             e(new.get("vision_model", "") or "—")))
             if new.get("max_risk") != prof.get("max_risk"):
                 rows.append(("Highest risk", e(prof["max_risk"].capitalize()), e(new["max_risk"].capitalize())))
             if bool(new.get("direct_writes")) != bool(prof.get("direct_writes")):
@@ -4165,6 +4180,10 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                        f'taking skills away or turning direct changes off, and nothing else, takes effect at once. Every version is kept, on '
                        f'the track.</p>'
                        f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
+                       f'<div class="field"><label>Model for pictures<input name="vision_model" '
+                       f'value="{e(prof.get("vision_model", ""))}" aria-describedby="vm-{e(mid)}"></label>'
+                       f'<small id="vm-{e(mid)}" class="help">A model that can see, shown a photo or scan a step '
+                       f'carries. Left empty, the agent is told there is a picture it cannot see.</small></div>'
                        f'<fieldset class="choices options"><legend>Highest risk it may take</legend>{risks}</fieldset>'
                        f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset>'
                        f'<fieldset class="choices options"><legend>Records</legend><label class="radio multi">'
@@ -4181,7 +4200,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         if versions:
             rows = "".join(
                 f'<tr><td>v{v["version"]}</td><td><span class="badge {e(v["status"])}">{e(v["status"])}</span></td>'
-                f'<td>{e(v["profile"].get("model", ""))} · {e(v["profile"].get("max_risk", "low"))} · '
+                f'<td>{e(v["profile"].get("model", ""))}'
+                f'{" (pictures: " + e(v["profile"]["vision_model"]) + ")" if v["profile"].get("vision_model") else ""}'
+                f' · {e(v["profile"].get("max_risk", "low"))} · '
                 f'{e(", ".join(self.human(x) for x in v["profile"].get("skills", [])))}'
                 f'{" · changes records directly" if v["profile"].get("direct_writes") else ""}</td>'
                 f'<td>{self.who(v["author"]) if hub.db.members.get(v["author"]) else e(v["note"])}</td>'
@@ -4307,7 +4328,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             elif verb == "sponsor":
                 hub.set_sponsor(me, mid, str(f.get("sponsor", "")))
             elif verb == "profile":
-                hub.propose_agent_profile(me, mid, {"model": str(f.get("model", "")), "max_risk": f.get("max_risk"),
+                hub.propose_agent_profile(me, mid, {"model": str(f.get("model", "")),
+                                                    "vision_model": str(f.get("vision_model", "")),
+                                                    "max_risk": f.get("max_risk"),
                                                     "skills": many("skills"),
                                                     "direct_writes": bool(f.get("direct_writes"))},
                                           str(f.get("note", "")))

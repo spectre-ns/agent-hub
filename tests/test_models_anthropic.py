@@ -32,3 +32,14 @@ def test_a_refusal_escalates_to_people(monkeypatch):
     monkeypatch.setattr(models, "_post", lambda *a: {"stop_reason": "refusal", "content": []})
     out = models.Anthropic(api_key="test")("claude-haiku-5-5", "sys", "prompt", {"type": "object"}, {})
     assert out["escalate"] is True
+
+
+def test_a_picture_is_an_image_block_before_the_words(monkeypatch):
+    import base64
+    sent = _capture(monkeypatch)
+    pic = {"name": "slip.png", "contentType": "image/png", "data": b"\x89PNG\r\n\x1a\n..."}
+    models.Anthropic(api_key="test")("claude-haiku-5-5", "sys", "prompt", {"type": "object"}, {}, pictures=[pic])
+    content = sent["body"]["messages"][0]["content"]
+    assert content[0] == {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                       "data": base64.b64encode(pic["data"]).decode()}}
+    assert content[1] == {"type": "text", "text": "prompt"}

@@ -111,6 +111,26 @@ that date, and a numbered record is never converted into another type: no number
 goes on after the highest number its records already carry. Numbers are unique within the type, and find the record
 as its key does (not in the address). Only the hub's own record store numbers records.
 
+### Words read from a file
+
+A text field may hold the words of an attachment field's file, read by the hub when the file is attached:
+
+```toml
+[[field]]
+name = "file"
+type = "attachment"
+[[field]]
+name = "text"
+type = "text"
+from_file = "file"      # an attachment field of this type: one file, not a list
+```
+
+When a write names a new file in `file`, `text` is set to its words: a PDF's text layer, an OpenDocument or Word
+file's text, or a plain text file (cut to the field's `max_length`). A write that also sets `text` itself keeps what
+it says. A file with no words here (a scan, a photo) leaves `text` as it is: a step can show the picture to an agent
+whose profile names a model that can see (`file:<field>` in its context, see the workflows guide), or a person
+types what it says.
+
 ### Types under types
 
 A type may extend another: one of the core's base types (`Subject`, `Booking`...), a module's type, the practice's or

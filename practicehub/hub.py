@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import blocks as blockmod
+from . import filetext
 from . import markup
 from . import schema
 from . import visibility
@@ -2579,7 +2580,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     # What an agent may do (its model, the skills and prompt blocks it takes, the highest risk) is a versioned record
     # under the same change control as a definition: proposed, approved by a second person who is a policy owner,
     # then in force. Nothing changes an agent's behaviour at once, and every version is kept.
-    PROFILE_KEYS = ("model", "max_risk", "skills", "direct_writes")
+    PROFILE_KEYS = ("model", "vision_model", "max_risk", "skills", "direct_writes")
 
     def _check_profile(self, profile: dict) -> dict:
         extra = sorted(set(profile) - set(self.PROFILE_KEYS))
@@ -2594,10 +2595,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             out.pop("direct_writes", None)  # off is the absence of the key: a profile says only what it allows
         else:
             raise Invalid("direct_writes is true, or left out")
-        if "model" in out:
-            out["model"] = str(out["model"] or "").strip()
-            if not out["model"]:
-                out.pop("model")
+        for k in ("model", "vision_model"):  # vision_model: the model a step carrying a picture is answered by
+            if k in out:
+                out[k] = str(out[k] or "").strip()
+                if not out[k]:
+                    out.pop(k)
         skills = out.get("skills", [])
         if not isinstance(skills, list) or not all(isinstance(x, str) for x in skills):
             raise Invalid("skills is a list of skill or prompt block ids")
@@ -2641,8 +2643,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     def propose_agent_profile(self, actor: dict, mid: str, changes: dict, note: str = "") -> dict:
         """Propose a new version of an agent's profile (a member admin, or its sponsor). It is in force only once a
         policy owner other than whoever proposed it approves it. A newer proposal replaces one still waiting.
-        A pure reduction (a lower ``max_risk``, skills taken away, direct writes taken away, the model as it is)
-        only ever lets the agent do less: it is in force at once, as a version on the track (``status`` active)."""
+        A pure reduction (a lower ``max_risk``, skills taken away, direct writes taken away, the vision model taken
+        away, the model as it is) only ever lets the agent do less: it is in force at once, as a version on the track
+        (``status`` active). A vision model set or changed is an addition: pictures go to a model they did not."""
         target = self.member(mid)
         if target["kind"] != "agent":
             raise Invalid("only agents have a profile")
@@ -2657,6 +2660,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if profile == current:
             raise Invalid("that is the profile in force: there is nothing to propose")
         reduction = (profile.get("model") == current.get("model")
+                     and profile.get("vision_model") in (None, current.get("vision_model"))
                      and RISK_ORDER[profile["max_risk"]] <= RISK_ORDER[current["max_risk"]]
                      and set(profile["skills"]) <= set(current["skills"])
                      and (current.get("direct_writes") or not profile.get("direct_writes")))
@@ -2679,7 +2683,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                           "after": profile})
             self._tell_approvers(actor, seq, {mid}, f"A change to what {target['name']} may do waits for your approval",
                                  f"{actor.get('name') or actor['id']} proposed version {version} of "
-                                 f"{target['name']}'s profile (its model, highest risk, skills and whether it may change "
+                                 f"{target['name']}'s profile (its models, highest risk, skills and whether it may change "
                                  f"records directly). A policy owner "
                                  f"other than whoever proposed it approves it on {target['name']}'s page in the "
                                  f"team.", f"/team/{mid}")
@@ -3139,6 +3143,40 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             if any(a["blob"] == blob for a in _files_in(seen)):
                 return True
         return False
+
+    def _file_words(self, rt, data: dict) -> dict:
+        """The words of each file a write names in an attachment field a text field is filled from (``from_file``),
+        by the text field's path: ``{path: (blob, words)}``. Read before the write's transaction (a file is kept
+        outside any); a file with no words here (a picture, a scan) is left out."""
+        out = {}
+        for f in rt.fields:
+            src = rt.field(f["from_file"]) if f.get("from_file") else None
+            att = schema.first(data, src["path"]) if src else None
+            if not (isinstance(att, dict) and _SHA256.fullmatch(str(att.get("blob") or ""))):
+                continue
+            got = self.db.get_file(att["blob"])
+            words = filetext.text_of(got[0], att.get("name") or "", att.get("contentType") or got[1].get(
+                "contentType") or "") if got else None
+            if words:
+                out[f["path"]] = (att["blob"], words[:f["max_length"]] if f.get("max_length") else words)
+        return out
+
+    def _fill_from_files(self, rt, before: dict | None, after: dict, words: dict) -> dict:
+        """A text field filled from a file (``from_file``) takes the words of a file the write newly names, unless
+        the same write gives that field itself (what a person typed is kept)."""
+        for f in rt.fields:
+            got = words.get(f["path"])
+            if not got:
+                continue
+            src = rt.field(f["from_file"])
+            was = (schema.first(before or {}, src["path"]) or {})
+            if isinstance(was, dict) and was.get("blob") == got[0]:
+                continue  # the same file as before: its words were taken then, or replaced by someone since
+            if schema.first(after, f["path"]) not in (None, "") and \
+                    schema.first(after, f["path"]) != schema.first(before or {}, f["path"]):
+                continue
+            after = schema.put(after, f["path"], got[1])
+        return after
 
     def _check_files_named(self, member: dict, rec: dict, before: dict | None, vouched=()) -> list[str]:
         """A record names a file only for a writer who could already get at it: the record named it before, they
@@ -4156,6 +4194,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if member.get("kind") != "automation":
             self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
         data = schema.exact(rt, dict(data))  # its decimals exact, at their places
+        data = self._fill_from_files(rt, None, data, self._file_words(rt, data))
         lc = rt.lifecycle
         if lc:
             st = schema.first(data, lc["path"])
@@ -4254,6 +4293,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                           f"to a type under it")
         if member.get("kind") != "automation" and _signature is None:
             self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
+        words = self._file_words(rt, data)  # a file's words, read before the transaction
         with self.db:  # read, check and write as one step: a change made in between is never lost or skipped
             before = self.records.read(rtype, rid)
             if not before:
@@ -4269,6 +4309,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             after = {**before, **{k: v for k, v in data.items() if k not in ("resourceType", "id", "meta")}}
             after = {k: v for k, v in after.items() if v is not None}  # None clears a field
             after = schema.exact(rt, after)
+            after = self._fill_from_files(rt, before, after, words)
             self._check_number_kept(rt, before, after)
             self._check_stamps_kept(rt, before, after)
             self._workflow_fields(rt, member, run_id, before, after)

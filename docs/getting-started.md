@@ -11,7 +11,7 @@ git clone https://github.com/spectre-ns/agent-hub.git
 cd agent-hub
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e .            # the hub is the standard library and pymongo
+pip install -e .            # the hub is the standard library, pymongo and pypdf
 ```
 
 That puts the `practicehub` command on your path. `python -m practicehub.cli` is the same command.

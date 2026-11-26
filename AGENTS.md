@@ -10,8 +10,9 @@ Notes for anyone, human or agent, changing this code.
   gitignored. Secrets come from the environment.
 - **Model output is data, never code.** There is no `eval`, `exec` or template engine over model output. Conditions
   use `practicehub/expr.py`.
-- **The runtime is the standard library and pymongo.** The database is MongoDB only (a replica set, for
-  transactions; files in GridFS); there is no SQLite, not even for tests. pytest is for tests only.
+- **The runtime is the standard library, pymongo and pypdf.** pypdf reads a PDF's words, in `practicehub/filetext.py`
+  only. The database is MongoDB only (a replica set, for transactions; files in GridFS); there is no SQLite, not even
+  for tests. pytest is for tests only.
 - **The core knows nothing about any one practice.** Anything medical belongs in `packs/general-practice`.
   `tests/test_other_practice.py` fails if the core starts assuming patients.
 
@@ -29,6 +30,8 @@ Notes for anyone, human or agent, changing this code.
 | Answer validation | `practicehub/fields.py`, plus the pack's `GUARDS`; a guard whose code is not running fails closed (`Hub.code_not_running`, checked in `Engine._complete`) |
 | What an agent may write outside its work (nothing, unless its profile has `direct_writes`) | `Hub.writes_directly`, `Hub.require_writer` in `practicehub/hub.py` |
 | Which files a record may name, and who reads a file | `Hub._check_files_named`, `Hub.read_file` in `practicehub/hub.py` |
+| Which files' words the hub reads (a PDF's text layer, office and text files; never a picture), and which field they fill (`from_file`, not over the writer's own words) | `filetext.text_of` in `practicehub/filetext.py`; `Hub._fill_from_files` in `practicehub/hub.py` |
+| Where a picture goes: only to the model the agent's profile names as `vision_model` (a second policy owner approves it), fetched as the agent; any other model is told it is not shown one | `Engine._file_context` in `practicehub/engine.py`; `AgentRunner._pictures` in `practicehub/agents/runner.py`; `ModelGateway.answer` in `practicehub/models.py`; `Hub.propose_agent_profile` |
 | Who reads a queued message (data classes, and a subject's directive on the file it is about) | `Hub.may_read_message`, `Hub.message_restricted` in `practicehub/outbox.py` |
 | A record in a locked state: people change nothing but its state, and its own workflow is not started on it again | the `locked` check in `Hub.update_record`; `Engine.start_over_refusal` in `practicehub/engine.py` |
 | An event nothing started on is not dropped | `Engine.emit`, `Engine._unhandled` in `practicehub/engine.py` |

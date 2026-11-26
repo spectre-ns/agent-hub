@@ -3040,6 +3040,8 @@ class Engine:
                             recs.append(r)
                             seen.add(ref)
                 data[c] = hub.redact_all(member, recs)  # without the fields of a class the member may not read
+            elif c.startswith("file:"):
+                data[c] = self._file_context(member, run, step, c[5:])
             elif c.startswith("provider:"):
                 name = c[9:]
                 fn = CORE_PROVIDERS.get(name) or hub.pack.providers.get(name)
@@ -3096,6 +3098,31 @@ class Engine:
             "schema": json_schema(fields, self._choice_ctx(fields, data, run)),
             "choices": {f["name"]: self._choices(f, data, run) for f in fields if f["type"] == "choice" or f.get("choices_from")},
         }
+
+    def _file_context(self, member: dict, run: dict, step, name: str) -> dict | None:
+        """``file:<field>``: the file in that attachment field of the run's record, as the member may read it: what
+        it is, its words (``filetext.text_of``) and whether it is a picture a model that can see is shown. No bytes:
+        an agent fetches those through the record (``Hub.read_file``), on the track. Only a record of a data class
+        the step reads (``record:<class>`` beside it): what the step's answer carries stays what the workflow says.
+        None: no such file."""
+        from . import filetext
+        hub, ref = self.hub, run.get("record")
+        rtype = (ref or "").split("/", 1)[0]
+        rt = hub.record_type(rtype) if ref else None
+        f = rt.field(name) if rt else None
+        if not f or f["type"] != "attachment" or hub.class_or_none(rtype) not in visibility.step_classes_own(step):
+            return None
+        rec = hub.redact(member, hub.records.read(*ref.split("/", 1)) or {})
+        att = schema.first(rec, f["path"])
+        got = hub.db.get_file(att["blob"]) if isinstance(att, dict) and att.get("blob") else None
+        if not got:
+            return None
+        data, meta = got
+        ctype = att.get("contentType") or meta.get("contentType") or ""
+        hub.note_view(member, ref, how="file")
+        return {"ref": ref, "field": name, "blob": att["blob"], "name": att.get("name") or "", "contentType": ctype,
+                "size": len(data), "text": filetext.text_of(data, att.get("name") or "", ctype),
+                "picture": filetext.picture_type(data, ctype)}
 
     def meaning_for(self, member: dict, run: dict, step, outcome: str | None = None) -> str:
         """What signing this gate says for this member: a ``meanings_if_did`` meaning when they did that earlier

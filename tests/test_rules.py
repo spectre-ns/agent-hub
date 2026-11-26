@@ -347,7 +347,7 @@ def test_an_agent_names_its_model_and_one_added_without_is_given_the_hubs_defaul
     class Local:  # stands for Ollama: counts what is asked of it
         external = False
 
-        def __call__(self, *a):
+        def __call__(self, *a, **kw):
             ollama.append(a)
             return {"answer": {}, "escalate": True, "reason": "asked"}
 
@@ -9347,3 +9347,145 @@ def test_records_of_a_type_made_abstract_stay_and_change_only_by_moving_under_it
     assert (moved["id"], moved["meta"]["key"]) == (old["id"], old["meta"]["key"])
     hub.update_record(amara, f"Savings/{old['id']}", {**moved, "name": "Renamed"})
     assert hub.records.read("Savings", old["id"])["name"] == "Renamed"
+
+
+def test_the_runtime_is_the_standard_library_pymongo_and_pypdf():
+    """What the hub, its packs and its modules import at run time: the standard library, pymongo (with bson and
+    gridfs, which come with it) and pypdf, and pypdf only where a PDF's words are read."""
+    import ast
+    import sys
+    root = Path(__file__).parent.parent
+    allowed = set(sys.stdlib_module_names) | {"practicehub", "pymongo", "bson", "gridfs", "pypdf", "__future__"}
+    found, pdf_users = {}, set()
+    for path in [*root.glob("practicehub/**/*.py"), *root.glob("packs/*/**/*.py"), *root.glob("modules/*/**/*.py")]:
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+                [node.module] if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else []
+            for name in names:
+                top = name.split(".", 1)[0]
+                if top not in allowed:
+                    found.setdefault(top, set()).add(str(path.relative_to(root)))
+                if top == "pypdf":
+                    pdf_users.add(str(path.relative_to(root)))
+    assert not found, f"imports outside the runtime: {found}"
+    assert pdf_users == {"practicehub/filetext.py"}, pdf_users
+
+
+LETTER = """id = "Letter"
+key = "LTX"
+data_class = "visits"
+[[field]]
+name = "subject"
+[[field]]
+name = "file"
+type = "attachment"
+[[field]]
+name = "words"
+type = "text"
+from_file = "file"
+max_length = 40
+"""
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def _letters(hub):
+    hub.approve(M(hub, "dr-amara"), "type", "Letter", hub.propose("type", M(hub, "rana"), LETTER)["version"])
+
+
+def test_a_field_from_a_file_is_filled_with_the_file_s_words_when_the_file_is_attached(hub):
+    _letters(hub)
+    jo = M(hub, "jo")
+    read = lambda ref: hub.records.read(*ref.split("/"))
+    first = hub.add_file(jo, "Letter", b"Dear Dr. Okafor,\r\nplease see Mr. Lee.\n", "letter.txt", "text/plain")
+    ref = "Letter/" + hub.create_record(jo, "Letter", {"subject": "Referral", "file": first})["id"]
+    assert read(ref)["words"] == "Dear Dr. Okafor,\nplease see Mr. Lee."
+    # a new file: its words, cut to the field's length
+    second = hub.add_file(jo, "Letter", b"A second letter, much longer than the field holds.", "two.txt", "text/plain")
+    hub.update_record(jo, ref, {**read(ref), "file": second})
+    assert read(ref)["words"] == "A second letter, much longer than the fi"
+    # the same file kept while something else changes: the words stay as whoever wrote them last left them
+    hub.update_record(jo, ref, {**read(ref), "words": "corrected by Jo", "subject": "Referral (2)"})
+    assert read(ref)["words"] == "corrected by Jo"
+    # a new file and words the writer typed in the same change: the writer's words
+    third = hub.add_file(jo, "Letter", b"third", "three.txt", "text/plain")
+    hub.update_record(jo, ref, {**read(ref), "file": third, "words": "typed with it"})
+    assert read(ref)["words"] == "typed with it"
+    # a file with no words here (a photo): nothing is read, and the field is the writer's to fill
+    photo = hub.add_file(jo, "Letter", PNG, "letter.png", "image/png")
+    other = "Letter/" + hub.create_record(jo, "Letter", {"subject": "Photo", "file": photo})["id"]
+    assert not read(other).get("words")
+    # the type says which file: one attachment field of its own, filling a text field
+    for bad, says in ((LETTER.replace('from_file = "file"', 'from_file = "subject"'), "not one of this type's attachment"),
+                      (LETTER.replace('from_file = "file"', 'from_file = "nowhere"'), "not one of this type's attachment"),
+                      (LETTER.replace('type = "text"\nfrom_file', 'type = "number"\nfrom_file')
+                       .replace("max_length = 40\n", ""), "from_file is for a text field")):
+        with pytest.raises(Invalid) as exc:
+            hub.propose("type", M(hub, "rana"), bad)
+        assert any(says in p for p in exc.value.problems), exc.value.problems
+
+
+LOOK = """id = "letter-look"
+title = "Look at a letter"
+record = "Letter"
+[trigger]
+starters = ["front-desk"]
+[start]
+to = "looking"
+[[state]]
+id = "looking"
+[[state.work]]
+id = "look"
+title = "Look at the letter"
+kind = "task"
+role = "scheduler"
+skill = "slot-proposal"
+context = ["record:visits", "file:file", "provider:free-slots"]
+[[edge]]
+id = "looked"
+from = "looking"
+to = "done"
+[[state]]
+id = "done"
+"""
+
+
+def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(hub):
+    _letters(hub)
+    jo, rana, amara, agent = M(hub, "jo"), M(hub, "rana"), M(hub, "dr-amara"), "scheduling-agent"
+    hub.approve_workflow(rana, "letter-look", hub.propose_workflow(jo, LOOK, "a look")["version"])
+    photo = hub.add_file(jo, "Letter", PNG, "letter.png", "image/png")
+    ref = "Letter/" + hub.create_record(jo, "Letter", {"subject": "Referral", "file": photo})["id"]
+    asked = []
+
+    class Local:  # stands for Ollama: what each model is asked, and shown
+        external = False
+
+        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+            if ctx["step"]["id"] == "look":
+                asked.append((model, prompt, list(pictures)))
+            return {"answer": {}, "escalate": True, "reason": "looked"}
+
+    gw = ModelGateway(hub)
+    gw.backends["ollama"] = Local()
+
+    def look():
+        hub.engine.start(jo, "letter-look", record=ref)
+        AgentRunner(LocalClient(hub, agent), gw, quiet).work_once()
+        return asked[-1]
+
+    hub.approve_agent_profile(amara, agent, hub.propose_agent_profile(rana, agent, {"model": "ollama/words"})["version"])
+    model, prompt, shown = look()
+    assert model == "words" and shown == [] and "a picture you cannot see: letter.png (image/png)" in prompt
+    assert '"picture": "image/png"' in prompt and '"text": null' in prompt  # what the file is, never its bytes
+    # a model for pictures is an addition: in force only once a second policy owner approves it
+    out = hub.propose_agent_profile(rana, agent, {"vision_model": "ollama/eyes"})
+    assert out["status"] == "proposed" and "vision_model" not in M(hub, agent)["profile"]
+    assert look()[0] == "words"
+    hub.approve_agent_profile(amara, agent, out["version"])
+    model, prompt, shown = look()
+    assert model == "eyes" and [p["data"] for p in shown] == [PNG] and shown[0]["contentType"] == "image/png"
+    assert "You are shown 1 picture with this step, in order: letter.png (image/png)" in prompt
+    assert hub.db.events.exists({"action": "record.viewed", "actor": agent, "subject": ref, "data.how": "file"})
+    # taking it away only lets the agent do less: in force at once
+    assert hub.propose_agent_profile(rana, agent, {"vision_model": ""})["status"] == "active"
+    assert look()[0] == "words"

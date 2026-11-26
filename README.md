@@ -28,7 +28,7 @@ You need Python 3.12 or later, and a MongoDB replica set to keep the data in. On
 ```sh
 git clone https://github.com/spectre-ns/agent-hub.git && cd agent-hub
 python3 -m venv .venv && . .venv/bin/activate
-pip install -e .                                # the hub is the standard library and pymongo
+pip install -e .                                # the hub is the standard library, pymongo and pypdf
 
 docker run -d --name practicehub-mongo -p 127.0.0.1:27017:27017 mongo:7.0 --replSet rs0 --bind_ip_all
 docker exec practicehub-mongo mongosh --quiet --eval \

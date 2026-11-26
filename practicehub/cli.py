@@ -388,7 +388,8 @@ def cmd_member(args):
         out = hub.set_status(actor, args.id, "active")
         print(f"{out['name']} is switched on")
     elif args.sub == "profile":
-        changes = {k: v for k, v in (("model", args.model), ("max_risk", args.max_risk)) if v is not None}
+        changes = {k: v for k, v in (("model", args.model), ("vision_model", args.vision_model),
+                                     ("max_risk", args.max_risk)) if v is not None}
         if args.direct_writes is not None:
             changes["direct_writes"] = args.direct_writes == "yes"
         if args.skill is not None:
@@ -994,6 +995,7 @@ def main(argv=None):
     p = mb.add_parser("profile", help="propose a new version of an agent's profile (a second policy owner approves)")
     p.add_argument("id")
     p.add_argument("--model")
+    p.add_argument("--vision-model", help="the model a step carrying a picture is answered by ('' for none)")
     p.add_argument("--max-risk", choices=["low", "medium", "high"])
     p.add_argument("--skill", action="append", help="every skill or prompt block it takes (repeat)")
     p.add_argument("--direct-writes", choices=["yes", "no"],

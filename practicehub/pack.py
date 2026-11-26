@@ -202,6 +202,13 @@ class Pack:
                 if c.startswith("record:"):
                     if c[7:] not in classes:
                         problems.append(f"step {s.id}: context {c!r}: there is no data class {c[7:]!r}")
+                elif c.startswith("file:"):
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", c[5:]):
+                        problems.append(f"step {s.id}: context {c!r}: file: names an attachment field of the run's "
+                                        f"record, e.g. file:document")
+                    elif not any(x.startswith("record:") for x in s.context):
+                        problems.append(f"step {s.id}: context {c!r}: say the data class the run's record is read in "
+                                        f"too (record:<class>): the file is that record's")
                 elif c.startswith("provider:"):
                     name = c[9:]
                     if name not in CORE_PROVIDERS and name not in self.providers:

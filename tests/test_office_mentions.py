@@ -89,6 +89,30 @@ def test_a_files_text_is_read_with_the_standard_library():
     assert filetext.text_of(bomb.getvalue(), "x.odt") is None
 
 
+def test_a_pdf_s_words_are_its_text_layer_and_a_scan_has_none(monkeypatch):
+    from pypdf import PdfWriter
+    from practicehub import pdf
+    made = pdf.render("T5 Statement of investment income", "Box 13: 412.50\n\nIssuer: the bank")
+    words = filetext.text_of(made, "t5.pdf", "application/pdf")
+    assert "Statement of investment income" in words and "412.50" in words
+    assert filetext.text_of(made, "named oddly.bin") == words  # a PDF by its first bytes, not its name
+    scan = io.BytesIO()
+    w = PdfWriter()
+    w.add_blank_page(612, 792)  # a page with no text layer: to the hub, a scan
+    w.write(scan)
+    assert filetext.text_of(scan.getvalue(), "scan.pdf") is None
+    assert filetext.text_of(b"%PDF-1.4 not really", "broken.pdf") is None
+    monkeypatch.setattr(filetext, "MAX_PAGES", 1)
+    long = filetext.text_of(pdf.render("Long", "\n\n".join(f"Paragraph {i} " + "word " * 80 for i in range(60))),
+                            "long.pdf")
+    assert "Paragraph 0" in long and "Paragraph 59" not in long
+    # a picture is a picture by its first bytes; the hub reads no words from it
+    assert filetext.picture_type(b"\x89PNG\r\n\x1a\n...", "") == "image/png"
+    assert filetext.picture_type(b"\xff\xd8\xff\xe0...", "image/png") == "image/jpeg"
+    assert filetext.picture_type(b"RIFF\x00\x00\x00\x00WEBPVP8 ", "") == "image/webp"
+    assert filetext.picture_type(b"GIF89a", "image/gif") is None and filetext.picture_type(made) is None
+
+
 # ------------------------------------------------------------------------------------------------ mentioning
 def test_mentioning_an_agent_on_a_document_gives_it_the_files_text_the_quote_and_the_thread(doc):
     hub, ref, att = doc
