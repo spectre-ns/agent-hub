@@ -483,28 +483,25 @@ These core rules came with inventory, and any module can use them:
   - **Older records:** on a change, the key is checked only if it changed. Two records that already shared a key
     before the type said unique can still be edited.
 
-Assemblies brought two more, for any module (invoice lines and order lines can use them too):
+Assemblies brought these, for any module. A bill of materials, a build's lots and a lot's contents are tables
+(`type = "table"` with `[[field.column]]`, as invoice lines are; see `practicehub/schema.py`):
 
-- **Rows** (`rows = true` on a `list` field whose items are objects, each column a field with `path = "bom.*.part"`):
-  - **The form** edits them as a table, with blank rows to add and a box to remove one, without script. Blank rows
-    are dropped on save.
-  - **Checks:** each row is checked as its fields say, and a reference in a row makes a link like any other. A
-    record holds at most 1,000 rows in one list.
-  - **Data classes:** a column has its rows' data class: `data_class` on a column is refused.
-  - **Dates and times:** a date-and-time cell shows the minute; one left as it was keeps its seconds and time zone.
-- **Graphs** (`graph = { down = "Bill of materials", up = "Used in" }` on a reference to the field's own type, in rows
-  or not):
+- **Times in a table's grid:** a date-and-time cell shows the minute; one sent back as it was keeps its seconds and
+  time zone.
+- **Graphs** (`graph = { down = "Bill of materials", up = "Used in" }` on a reference to the field's own type: a field
+  of its own, a list of them, or a table's column):
   - **Loops:** a write that would make a record reach itself through what it adds is refused, naming the path. So is
     one that would lead more than 50 levels down.
-  - **The record's page** shows two panels, every level down and every level up, with each row's other values.
-    Records the reader may not see are counted once each, not shown. Past 500 rows the page says how many it shows,
-    and links to the whole trace as CSV (up to 20,000 rows; the export is on the track like any other).
+  - **The record's page** shows two panels, every level down and every level up, with each table row's other
+    columns (how many, which positions). Records the reader may not see are counted once each, not shown. Past 500
+    rows the page says how many it shows, and links to the whole trace as CSV (up to 20,000 rows; the export is on
+    the track like any other).
   - **Fields that share words** (`down` and `up`) are one graph: a lot's parts and the lot it was split from are
     walked together. Two graph fields of a type may not use the same word for different graphs.
   - **No data class:** a graph is traced for whoever reads its records, so `data_class` on a graph field is
     refused.
-- **More than** (`above = 0` on a number field): the value must be more than that, as a bill of materials quantity
-  must. `min` is that number or more; a field takes one of the two.
+- **More than** (`above = 0` on a number or decimal field, or a table's column): the value must be more than that,
+  as a bill of materials quantity must. `min` is that number or more; a field takes one of the two.
 - **Addresses typed by hand** (a reference to any record, `target = ["*"]`): a person or an agent adds only a record
   they may read. A record they may not read is refused in the same words whether or not it exists. An integration
   (a lab feed filing results) files the records it was given. A reference to a member must name a member the hub

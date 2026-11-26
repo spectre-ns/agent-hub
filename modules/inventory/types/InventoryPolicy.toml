@@ -65,15 +65,19 @@ choices = ["off", "suggest", "enforce"]
 
 [[field]]
 name = "count_tolerance_pct"
-label = "Count tolerance (%)"
-type = "number"
+label = "Count tolerance"
+type = "decimal"
+scale = 2
+unit = "%"
 min = 0
 help = "how far counts may move a lot from what was last signed for before a count needs a signature"
 
 [[field]]
 name = "over_receipt_pct"
-label = "Over-receipt tolerance (%)"
-type = "number"
+label = "Over-receipt tolerance"
+type = "decimal"
+scale = 2
+unit = "%"
 min = 0
 
 [[field]]

@@ -29,6 +29,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from . import decimals
 
 ANTHROPIC_VERSION = "2026-10-21"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
@@ -107,7 +108,7 @@ def parse_answer(text: str) -> dict:
 
 
 def _post(url: str, body: dict, headers: dict, timeout: float) -> dict:
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+    req = urllib.request.Request(url, data=json.dumps(body, default=decimals.jsonable).encode(), method="POST",
                                  headers={"Content-Type": "application/json", **headers})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

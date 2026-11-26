@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 # how a visit's status reads in its one-line label (planned is FHIR's word for booked)
 STATUS_WORDS = {"planned": "booked", "arrived": "checked in", "in-progress": "in progress", "onleave": "on leave", "noshow": "no-show",
@@ -21,7 +22,9 @@ STATUS_WORDS = {"planned": "booked", "arrived": "checked in", "in-progress": "in
                 "not-reached": "not reached", "drafting": "note being drafted", "editing": "note being edited",
                 "signing": "note to sign"}
 SETTING_WORDS = {"AMB": "in clinic", "VR": "virtual", "HH": "home visit"}   # the visit's class (v3-ActCode)
-FEES = {"minor-assessment": 35, "complete-assessment": 65, "counselling": 55, "renewal-no-visit": 15}
+# the fee schedule, in exact dollars and cents (a claim's amount is a decimal kept to the cent)
+FEES = {"minor-assessment": Decimal("35.00"), "complete-assessment": Decimal("65.00"), "counselling": Decimal("55.00"),
+        "renewal-no-visit": Decimal("15.00")}
 SEVERITY = {"normal": 0, "abnormal": 1, "critical": 2}
 # A lab's flag as feeds really write it: HL7 codes (v2 table 0078, v3 ObservationInterpretation) or words, in any
 # case. Whatever is not here is "unknown": never normal.
@@ -423,8 +426,9 @@ PROVIDERS: dict = {}
 def guard_visit_coding(values, ctxview):
     problems = []
     fee = FEES.get(values["fee_code"])
-    if fee is not None and abs(values["amount"] - fee * values["units"]) > 0.01:
-        problems.append(f"{values['fee_code']} x {values['units']} is {fee * values['units']} on the fee schedule, "
+    units = Decimal(str(values["units"]))
+    if fee is not None and Decimal(str(values["amount"])) != fee * units:  # exactly: amounts are kept to the cent
+        problems.append(f"{values['fee_code']} x {values['units']} is {fee * units} on the fee schedule, "
                         f"not {values['amount']}")
     if values["fee_code"] != "counselling" and values["units"] != 1:
         problems.append("only counselling is billed in more than one unit")

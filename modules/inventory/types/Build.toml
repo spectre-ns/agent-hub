@@ -27,7 +27,8 @@ help = "the part it makes: one with a bill of materials"
 
 [[field]]
 name = "quantity"
-type = "number"
+type = "decimal"
+scale = 3
 required = true
 above = 0
 help = "how many it makes"
@@ -65,31 +66,28 @@ type = "date"
 [[field]]
 name = "consume"
 label = "Use these"
-type = "list"
-rows = true
+type = "table"
 help = "the component lots or serials to use; the rest is taken from the lots that expire first"
 
-[[field]]
-name = "consume_lot"
+[[field.column]]
+name = "lot"
 label = "Stock"
-path = "consume.*.lot"
 type = "reference"
 target = ["StockItem"]
 rel = "consumes"
 required = true
 
-[[field]]
-name = "consume_quantity"
+[[field.column]]
+name = "quantity"
 label = "Quantity used"
-path = "consume.*.quantity"
-type = "number"
+type = "decimal"
+scale = 3
 above = 0
 help = "empty: a serial's one, or as much of the lot as the build still needs"
 
-[[field]]
+[[field.column]]
 name = "into"
 label = "Into serial"
-path = "consume.*.into"
 max_length = 60
 help = "the serial it goes into, when the build makes several; empty: into each it makes"
 
@@ -114,9 +112,29 @@ help = "the revision of the assembly it was built to"
 [[field]]
 name = "bom_used"
 label = "Bill used"
-type = "json"
+type = "table"
 by = "workflow"
 help = "the bill of materials it was built to, as approved"
+
+[[field.column]]
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "built-to-bom"
+
+[[field.column]]
+name = "code"
+label = "Part code"
+max_length = 40
+
+[[field.column]]
+name = "quantity"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "designators"
+max_length = 200
 
 [[field]]
 name = "made"
@@ -142,9 +160,102 @@ by = "workflow"
 [[field]]
 name = "entries"
 label = "Ledger lines"
-type = "json"
+type = "table"
 by = "workflow"
 help = "each lot it changes: the component lots it used and the lots it made, before and after"
+
+[[field.column]]
+name = "lot"
+label = "Stock"
+type = "reference"
+target = ["StockItem"]
+rel = "entry-lot"
+
+[[field.column]]
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "entry-part"
+
+[[field.column]]
+name = "parent"
+label = "Split from"
+type = "reference"
+target = ["StockItem"]
+rel = "entry-parent"
+
+[[field.column]]
+name = "lot_number"
+label = "Lot number"
+max_length = 60
+
+[[field.column]]
+name = "serial"
+max_length = 60
+
+[[field.column]]
+name = "supplier_lot"
+label = "Supplier's lot"
+max_length = 60
+
+[[field.column]]
+name = "expiry"
+type = "date"
+
+[[field.column]]
+name = "part_revision"
+label = "Part revision"
+type = "number"
+
+[[field.column]]
+name = "quantity_before"
+label = "Quantity before"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "quantity_after"
+label = "Quantity after"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "status_before"
+label = "Status before"
+type = "choice"
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned", "built-in"]
+
+[[field.column]]
+name = "status_after"
+label = "Status after"
+type = "choice"
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned", "built-in"]
+
+[[field.column]]
+name = "location_before"
+label = "From"
+type = "reference"
+target = ["Location"]
+rel = "entry-from"
+
+[[field.column]]
+name = "location_after"
+label = "To"
+type = "reference"
+target = ["Location"]
+rel = "entry-to"
+
+[[field.column]]
+name = "baseline_before"
+label = "Baseline before"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "baseline_after"
+label = "Baseline after"
+type = "decimal"
+scale = 3
 
 [[field]]
 name = "policy"

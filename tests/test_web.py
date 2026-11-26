@@ -13,6 +13,7 @@ import pytest
 
 from conftest import M, follow_up_run, item_for, quiet, run_of, visit_run
 from practicehub.agents.runner import AgentRunner, HttpClient, Refused
+from practicehub import decimals
 from practicehub.hub import Denied, Invalid
 from practicehub.web.server import App, Redirect, make_handler
 
@@ -905,7 +906,7 @@ def test_a_person_sets_a_passphrase_with_a_setup_code_from_a_member_admin(hub, s
     code, page = call(server, "POST", "/team/locum/setup-code", rana)
     assert code == 200 and "shown once" in page
     setup = re.search(r"<pre>([A-Z2-9]{5}(?:-[A-Z2-9]{5}){3})</pre>", page).group(1)
-    assert setup not in json.dumps(hub.track.list(limit=10000))
+    assert setup not in json.dumps(hub.track.list(limit=10000), default=decimals.jsonable)
     b = browser(server)
     assert b("GET", "/setup?member=locum")[0] == 200
     words = "the tide comes in at noon"
@@ -1825,7 +1826,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """The clinic has one record for a booking and the visit it becomes, the Visit; there is no Appointment type."""
-    assert hub.pack.version == "5.2" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "5.3" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert hub.db.get_setting("pack_upgrades_done") == list(hub.pack.upgrades)  # a new practice has none left to run
@@ -2887,10 +2888,11 @@ def test_a_keys_own_address_and_the_search_box_open_what_it_names_for_who_may_se
     assert code == 200  # a name is searched as before
 
 
-def test_rows_are_edited_in_a_table_and_a_graph_is_shown_both_ways(hub, server, monkeypatch, tmp_path):
-    """A list of rows is a table in the form: each row's cells, a box to remove it, and blank rows to add one; saved,
-    the rows and their links are what the form said. The record page shows the rows as a table, the levels below
-    (Bill of materials) when there is more than one, and every record that uses it (Used in)."""
+def test_a_graph_column_is_edited_in_its_grid_and_shown_both_ways(hub, server, monkeypatch, tmp_path):
+    """A table whose column is a graph reference is edited as any table is: a grid of its rows and a few blank ones,
+    a row left blank dropped. Saved, the rows and their links are what the form said, and a row missing a required
+    value is refused by its row. The record page shows the rows as a table, the levels below (Bill of materials) when
+    there is more than one, each row's other values beside what it names, and every record that uses it (Used in)."""
     from conftest import kit, kit_module
     kit_module(hub, monkeypatch, tmp_path)
     rana = token(hub, "rana")
@@ -2899,13 +2901,12 @@ def test_rows_are_edited_in_a_table_and_a_graph_is_shown_both_ways(hub, server, 
     a = kit(hub, "KA", (b, 1), (c, 2))
     code, page = call(server, "GET", f"/records/Kit/{a['id']}?edit=1", rana)
     assert code == 200
-    assert re.search(rf'<select name="bom\.0\.part"[^>]*>.*?<option value="Kit/{b["id"]}" selected', page, re.S)
-    assert 'name="bom.1._remove"' in page and 'name="bom.4.part"' in page and 'name="bom.5.part"' not in page
-    assert 'aria-label="quantity, row 1"' in page.lower()
+    assert f'name="bom.0.part" aria-label="Part, row 1" value="Kit/{b["id"]}"' in page
+    assert 'name="bom.4.part"' in page and 'name="bom.5.part"' not in page  # its two rows and three blank
     code, _ = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana, form=[
         ("code", "KA"), ("bom", "rows"),
-        ("bom.0._row", "0"), ("bom.0.part", f"Kit/{b['id']}"), ("bom.0.quantity", "1"), ("bom.0._remove", "1"),
-        ("bom.1._row", "1"), ("bom.1.part", f"Kit/{c['id']}"), ("bom.1.quantity", "5"),
+        ("bom.0.part", ""), ("bom.0.quantity", ""),
+        ("bom.1.part", f"Kit/{c['id']}"), ("bom.1.quantity", "5"),
         ("bom.2.part", f"Kit/{d['id']}"), ("bom.2.quantity", "2"),
         ("bom.3.part", ""), ("bom.3.quantity", "")])
     assert code == 303
@@ -2916,13 +2917,11 @@ def test_rows_are_edited_in_a_table_and_a_graph_is_shown_both_ways(hub, server, 
     assert {x["to_ref"] for x in hub.db.links.find({"from_ref": f"Kit/{a['id']}", "rel": "made-of"})} == {
         f"Kit/{c['id']}", f"Kit/{d['id']}"}
     code, page = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana, form=[
-        ("bom", "rows"), ("bom.0._row", "0"), ("bom.0.part", f"Kit/{c['id']}"), ("bom.0.quantity", "5"),
-        ("bom.0._remove", "1"), ("bom.1._row", "1"), ("bom.1.part", f"Kit/{d['id']}"), ("bom.1.quantity", "")])
-    assert code == 422 and "row 1" in page  # a row missing a required value is refused, by its row
-    # shown again as typed, the row left is the first, and still names the stored row it came from
-    assert 'name="bom.0._row" value="1"' in page and 'name="bom.1._row"' not in page
+        ("bom", "rows"), ("bom.0.part", f"Kit/{c['id']}"), ("bom.0.quantity", "5"),
+        ("bom.1.part", f"Kit/{d['id']}"), ("bom.1.quantity", "")])
+    assert code == 422 and "row 2" in page  # a row missing a required value is refused, by its row
     page = call(server, "GET", f"/records/Kit/{a['id']}", rana)[1]
-    assert "<table class='rows'>" in page and "Bill of materials" in page and "KE" in page
+    assert "<table class=\"rows\">" in page and "Bill of materials" in page and "KE" in page
     assert "Quantity 4" in page  # a row's other values beside the record it names
     page = call(server, "GET", f"/records/Kit/{e_['id']}", rana)[1]
     assert "Used in" in page and "KA" in page and "KC" in page and "Bill of materials" not in page
@@ -2930,14 +2929,15 @@ def test_rows_are_edited_in_a_table_and_a_graph_is_shown_both_ways(hub, server, 
 
 def test_a_trace_downloads_whole_and_a_page_says_when_it_shows_only_the_first(hub, server, monkeypatch, tmp_path):
     """A graph's trace downloads as CSV, every level, with each row's other values; a record's page shows the first
-    ``TRACE_ROWS`` and links the download for the rest. A graph the type does not have is not there."""
+    ``TRACE_ROWS`` and links the download for the rest, naming the graph by its column's path (``bom.*.part``; its
+    name alone is taken too). A graph the type does not have is not there."""
     from conftest import kit, kit_module
     kit_module(hub, monkeypatch, tmp_path)
     rana = token(hub, "rana")
     c = kit(hub, "KC")
     b = kit(hub, "KB", (c, 3))
     a = kit(hub, "KA", (b, 2))
-    code, body = call(server, "GET", f"/records/Kit/{a['id']}/trace?graph=part&way=down", rana)
+    code, body = call(server, "GET", f"/records/Kit/{a['id']}/trace?graph=bom.*.part&way=down", rana)
     lines = body.strip().splitlines()
     assert code == 200 and lines[0].startswith("level,record,title,status,reached from,by,with"), body
     assert lines[1].startswith(f"1,Kit/{b['id']},KB,") and lines[1].endswith("Quantity 2")
@@ -2949,26 +2949,64 @@ def test_a_trace_downloads_whole_and_a_page_says_when_it_shows_only_the_first(hu
     monkeypatch.setattr(type(hub), "TRACE_ROWS", 1)
     page = call(server, "GET", f"/records/Kit/{a['id']}", rana)[1]
     assert "And more: the first 1 are shown." in page
-    assert f'href="/records/Kit/{a["id"]}/trace?graph=part&amp;way=down"' in page
+    assert f'href="/records/Kit/{a["id"]}/trace?graph=bom.%2A.part&amp;way=down"' in page
 
 
-def test_a_rows_form_holds_a_bounded_number_of_rows_and_keeps_what_it_shows_to_the_minute(
-        hub, server, monkeypatch, tmp_path):
-    """A rows form numbers its rows below ``ROWS_MAX``: a higher number is refused, and a longer one is not a row. A
-    time a row holds is shown to the minute; sent back unchanged, it keeps its seconds and zone."""
+def test_a_grid_keeps_a_time_it_shows_to_the_minute(hub, server, monkeypatch, tmp_path):
+    """A time a table's row holds is shown in its grid to the minute; sent back unchanged, it keeps its seconds and
+    zone, and changed, it is the time sent."""
     from conftest import kit, kit_module
     kit_module(hub, monkeypatch, tmp_path)
     rana = token(hub, "rana")
     b = kit(hub, "KB")
     a = hub.create_record(M(hub, "rana"), "Kit", {"code": "KA", "bom": [
         {"part": f"Kit/{b['id']}", "quantity": 1, "checked": "2026-11-20T09:15:42+00:00"}]})
-    row = [("code", "KA"), ("bom", "rows"), ("bom.0._row", "0"), ("bom.0.part", f"Kit/{b['id']}"),
-           ("bom.0.quantity", "2"), ("bom.0.checked", "2026-11-20T09:15")]
-    code, page = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana,
-                      form=row + [("bom.1000.part", f"Kit/{b['id']}"), ("bom.1000.quantity", "1")])
-    assert code == 422 and "a form holds at most 1000 rows" in page
-    code, _ = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana,
-                   form=row + [("bom.10000.part", f"Kit/{b['id']}"), ("bom.10000.quantity", "1")])
+    page = call(server, "GET", f"/records/Kit/{a['id']}?edit=1", rana)[1]
+    assert 'name="bom.0.checked" aria-label="Checked, row 1" value="2026-11-20T09:15"' in page
+    row = [("code", "KA"), ("bom", "rows"), ("bom.0.part", f"Kit/{b['id']}"), ("bom.0.quantity", "2"),
+           ("bom.0.checked", "2026-11-20T09:15")]
+    code, _ = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana, form=row)
     assert code == 303
     rec = hub.records.read("Kit", a["id"])
     assert [(x["quantity"], x["checked"]) for x in rec["bom"]] == [(2, "2026-11-20T09:15:42+00:00")]
+    code, _ = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana, form=row[:-1] + [
+        ("bom.0.checked", "2026-11-20T10:00")])
+    assert code == 303
+    assert hub.records.read("Kit", a["id"])["bom"][0]["checked"].startswith("2026-11-20T10:00")
+
+
+def test_a_grid_saved_unchanged_over_empty_cells_writes_nothing(hub, server, monkeypatch, tmp_path):
+    """Rows written with empty cells (an import, an agent) and saved from the grid untouched are the same rows: the
+    record is not written again, so its history shows no change that was never made."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = token(hub, "rana")
+    b = kit(hub, "KB")
+    a = hub.create_record(M(hub, "rana"), "Kit", {"code": "KA", "bom": [
+        {"part": {"reference": f"Kit/{b['id']}"}, "quantity": 1, "note": "", "checked": None}]})
+    versions = lambda: hub.db.record_versions.count({"type": "Kit", "id": a["id"]})  # noqa: E731
+    before = versions()
+    code, _ = call(server, "POST", f"/records/Kit/{a['id']}/edit", rana, form=[
+        ("code", "KA"), ("bom", "rows"), ("bom.0.part", f"Kit/{b['id']}"), ("bom.0.quantity", "1"),
+        ("bom.0.note", ""), ("bom.0.checked", ""), ("bom.1.part", ""), ("bom.1.quantity", "")])
+    assert code == 303 and versions() == before
+
+
+def test_a_table_is_a_grid_its_blank_rows_dropped_and_an_exact_number_is_its_exact_text(hub, server):
+    """A table field is a grid in the form (cells ``<table>.<row>.<column>``); a row left blank is dropped. Its
+    decimal cells take an exact number and show its places; the API gives the exact text, not a float."""
+    from test_rules import _bills
+    _bills(hub)
+    amara = token(hub, "dr-amara")
+    page = call(server, "GET", "/records/Bill/new", amara)[1]
+    assert 'name="lines.0.what"' in page and 'inputmode="decimal"' in page and 'name="lines" value="rows"' in page
+    code, body = call(server, "POST", "/records/Bill", amara, form={
+        "memo": "visit", "amount": "12.30", "lines": "rows", "lines.0.what": "exam", "lines.0.amount": "12.3",
+        "lines.1.what": "", "lines.1.amount": "", "lines.2.what": "swab", "lines.2.amount": "0"})
+    assert code == 303, body
+    bill = hub.records.search("Bill")[0]
+    assert [(r["what"], str(r["amount"])) for r in bill["lines"]] == [("exam", "12.30"), ("swab", "0.00")]
+    api = json.loads(call(server, "GET", f"/api/records/Bill/{bill['id']}", amara)[1])
+    assert api["amount"] == "12.30" and [r["amount"] for r in api["lines"]] == ["12.30", "0.00"]
+    page = call(server, "GET", f"/records/Bill/{bill['id']}", amara)[1]
+    assert "12.30" in page and "CAD" in page

@@ -28,10 +28,10 @@ released), and its release puts them back in use at their next revision. One cha
 another change holds, or one in its own review, refuses the approval and the change goes back to its author. A
 cancelled change lets go of its parts as they were before it held them. Whoever revised a part under the change does
 not also release it. Products made under version 5 are not carried over: remove the module and install it again
-(install inventory 6 first)."""
+(install inventory 7 first)."""
 summary = "Change orders that take parts and their bills of materials to a new revision, with their documents."
 shortcuts = ["ChangeOrder", "Part"]
-requires = ["dms", "qms", "inventory>=6"]   # inventory 6 has the bill of materials and the held part
+requires = ["dms", "qms", "inventory>=7"]   # inventory 7 has the bill of materials and the held part
 
 [[roles]]
 id = "product-owner"

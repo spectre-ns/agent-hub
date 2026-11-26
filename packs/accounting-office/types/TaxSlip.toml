@@ -5,7 +5,7 @@ id = "TaxSlip"
 key = "SLIP"
 label = "Slip or document"
 plural = "Slips and documents"
-data_class = "documents"
+data_class = "client-documents"
 strict = true
 title = "{slip_type}[ {year}][ · {issuer}]"
 date = "received_on"
@@ -51,13 +51,15 @@ type = "string"
 [[field]]
 name = "amount"
 label = "Amount"
-type = "number"
+type = "decimal"
+scale = 2
 help = "The slip's main box: employment income (T4 box 14), interest (T5 box 13), the contribution or donation; on a notice of assessment, the refund (negative: owing)"
 
 [[field]]
 name = "tax_deducted"
 label = "Tax deducted"
-type = "number"
+type = "decimal"
+scale = 2
 min = 0
 
 [[field]]
@@ -99,6 +101,9 @@ type = "text"
 field = "status"
 initial = "received"
 tones = { rejected = "ended" }
+# Read, a slip is what the return counts: people change nothing on it. One read wrong is read again (back to
+# received, and read once more), which takes a return drafted from it back to be compared and drafted again.
+locked = ["extracted", "rejected"]
 abandoned = { received = "rejected" }
 
 [[lifecycle.transition]]

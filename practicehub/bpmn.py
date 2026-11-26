@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 
 from . import workflows as wfmod
 from .states import compile_states
+from . import decimals
 
 BPMN = "http://www.omg.org/spec/BPMN/20100524/MODEL"
 BPMNDI = "http://www.omg.org/spec/BPMN/20100524/DI"
@@ -185,7 +186,7 @@ _BARE = re.compile(r"[A-Za-z0-9_\-]+")
 
 def _key(k) -> str:
     k = str(k)
-    return k if _BARE.fullmatch(k) else json.dumps(k, ensure_ascii=False)
+    return k if _BARE.fullmatch(k) else json.dumps(k, ensure_ascii=False, default=decimals.jsonable)
 
 
 def _str(s: str, inline: bool) -> str:
@@ -193,7 +194,7 @@ def _str(s: str, inline: bool) -> str:
         body = s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r")
         body = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", lambda m: f"\\u{ord(m.group()):04X}", body)
         return f'"""\n{body}"""'
-    return json.dumps(s, ensure_ascii=False).replace("\x7f", "\\u007F")
+    return json.dumps(s, ensure_ascii=False, default=decimals.jsonable).replace("\x7f", "\\u007F")
 
 
 def _value(v, inline: bool = True) -> str:

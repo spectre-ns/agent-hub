@@ -70,7 +70,8 @@ help = "{value, currency: CAD}"
 [[field]]
 name = "amount"
 path = "priceOverride.value"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[field]]
 name = "enterer"

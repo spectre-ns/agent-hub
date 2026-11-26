@@ -17,8 +17,9 @@ import logging
 import re
 import tomllib
 
-from . import schema
+from . import expr, schema
 from . import views as viewmod
+from . import views_query
 from .pack import parse_skill
 from .store import DESC
 from .workflows import DefinitionError
@@ -41,7 +42,8 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
     - a move an edge of the workflow makes (where it goes, a diversion or an ``on_fail`` included) is not written
       again as a transition ``by = "workflow"``. Such a row is still the type's to write for a move made from
       outside its own run (another workflow's, a signature), for one from a value the workflow has no state for,
-      and for one it attaches ``asks``, ``requires`` or ``sign`` to;
+      and for one it attaches ``asks``, ``requires``, ``sign`` or a ``check`` to (an edge that makes the move
+      keeps it);
     - a value that only the workflow moves a record out of, over the type's moves and the workflow's edges
       together, says in ``abandoned`` where the record goes if that work is cancelled (itself, if it stays): the
       check a type makes of its own moves alone (``schema._parse``) cannot see the edges."""
@@ -60,13 +62,25 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
             if e["from"] and to != e["from"]:
                 made.setdefault((e["from"], to), e["id"])
     for t in rows:
-        if t["by"] != "workflow" or t["asks"] or t["requires"] or t["sign"] or t["screen"]:
+        if t["by"] != "workflow" or t["asks"] or t["requires"] or t["sign"] or t["screen"] or t.get("check") \
+                or t.get("stamp"):
             continue
         problems += [f"lifecycle.transition to {t['to']!r}: the {wf.id} workflow already moves a record from {f!r} "
                      f"to {t['to']!r} (its edge {made[f, t['to']]}); leave it out"
                      for f in t["from"] if (f, t["to"]) in made]
+    final = lc.get("final") or []
+    closing = (rt.closing or {}).get("states") or []
+    for e in shape.get("edges") or []:  # nothing moves a record out of a final state, its own workflow included
+        if e["from"] in final and any(to != e["from"] for to in e.get("lands") or []):
+            problems.append(f"lifecycle.final: the {wf.id} workflow's edge {e['id']} moves a record out of "
+                            f"{e['from']!r}, which is final")
+        elif e["from"] in closing and any(to not in closing for to in e.get("lands") or []):
+            problems.append(f"closing.states: the {wf.id} workflow's edge {e['id']} moves a record out of "
+                            f"{e['from']!r}, where it closes a period: only a signed move reopens it")
     for st in lc["states"]:
-        by = [t["by"] for t in rows if (st in t["from"] or "*" in t["from"]) and t["to"] != st]
+        if st in final:
+            continue
+        by = [t["by"] for t in rows if schema.leaves(lc, t, st) and t["to"] != st]
         by += ["workflow" for f, to in made if f == st and to in lc["states"]]
         if by and all(x == "workflow" for x in by) and st not in lc["abandoned"]:
             problems.append(f"lifecycle.abandoned: only the {wf.id} workflow moves a record out of {st!r}; say where "
@@ -203,8 +217,8 @@ class CatalogMixin:
         written = list(lc.get("transition") or [])
         moves = [t for t in written if not t.get("abandon")]
 
-        def uncovered(frm, to):
-            return [f for f in frm if f in states and f != to
+        def uncovered(frm, to):  # a final state is left by no move, nor a closing one by a workflow's: not its entry
+            return [f for f in frm if f in states and f != to and not schema.sealed(rt, f)
                     and not any(t["to"] == to and f in t["from"] for t in moves)]
 
         def edge_moves(e):
@@ -224,7 +238,8 @@ class CatalogMixin:
         edge_moves(wf.shape["start"])
         lc.update(transition=moves, labels=labels, tones=tones,
                   # a workflow starting on the record again (its entry) is no way back into use
-                  revising=schema.revising_states(states, [t for t in moves if not t.get("entry")], lc.get("in_use")))
+                  revising=schema.revising_states(states, [t for t in moves if not t.get("entry")], lc.get("in_use"),
+                                                  lc.get("final") or []))
         merged.lifecycle = lc
         self._defs[key] = merged
         return merged
@@ -504,6 +519,7 @@ class CatalogMixin:
                         problems.append(f"base.{bname}: {base.id}'s {bname} is a {' or '.join(bf['target'])}; "
                                         f"{t} does not extend it")
         problems += self._key_problems(rt)
+        problems += self._part_problems(rt, known)
         if rt.number and not hasattr(self.records, "number_fn"):
             problems.append("number: this hub keeps its records in a store of their own (a FHIR server), which numbers "
                             "nothing: a type numbers its records ([number]) only in the hub's own store")
@@ -511,6 +527,54 @@ class CatalogMixin:
         if wf is not None:
             problems += lifecycle_fit(rt, wf)
         return problems
+
+    def _part_problems(self, rt: schema.RecordType, known: set) -> list[str]:
+        """What ``covers`` and ``[period]`` name must be so: a covered type is part of this one (its ``part_of``
+        points here), and a period is closed by a type that closes one (``[closing]``) over the same scope. A type
+        named but not readable yet (a pack installing its types one by one) is checked when it is."""
+        out = []
+        for t in rt.covers:
+            prt = self.record_type(t) if t != rt.id else None
+            if t not in known:
+                out.append(f"covers: there is no record type {t!r}")
+            elif prt is not None and not (prt.part_of and any(x == rt.id or rt.is_a(x) for x in prt.part_of["target"])):
+                out.append(f"covers: a {prt.label.lower()} is not part of a {rt.label.lower()} (its part_of says "
+                           f"{(prt.part_of or {}).get('field') or 'nothing'})")
+        for o in self.record_types().values():  # a part a type covers stays part of it
+            if o.id != rt.id and rt.id in o.covers and not (rt.part_of and o.id in rt.part_of["target"]):
+                out.append(f"part_of: {o.label} covers it (covers = [\"{rt.id}\"]): it stays part of a "
+                           f"{o.label.lower()}")
+        for t in (rt.lifecycle or {}).get("transition", []):  # a move's check reads parts of this type
+            for c in t.get("check") or []:
+                for pid in c["parts"]:
+                    prt = self.record_type(pid) if pid != rt.id else None
+                    where = f"lifecycle.transition to {t['to']!r}: check: parts.{pid}"
+                    if pid not in known:
+                        out.append(f"{where}: there is no record type {pid!r}")
+                    elif prt is not None and not (prt.part_of and any(x == rt.id or rt.is_a(x)
+                                                                      for x in prt.part_of["target"])):
+                        out.append(f"{where}: a {prt.label.lower()} is not part of a {rt.label.lower()}")
+                    elif prt is not None:
+                        for src in (c["must"], c.get("when")):
+                            for path in expr.paths(src) if src else []:
+                                bits = path.split(".")
+                                if bits[:2] == ["parts", pid] and len(bits) > 4 and prt.field(bits[4]) is None:
+                                    out.append(f"{where}: a {prt.label.lower()} has no field {bits[4]!r}")
+        p = rt.period
+        if p:
+            crt = self.record_type(p["closed_by"])
+            if p["closed_by"] not in known:
+                out.append(f"period.closed_by: there is no record type {p['closed_by']!r}")
+            elif crt is not None and not crt.closing:
+                out.append(f"period.closed_by: a {crt.label.lower()} closes nothing (it has no [closing])")
+            elif crt is not None and bool(p["scope"]) != bool(crt.closing["scope"]):
+                out.append(f"period.scope: a {crt.label.lower()} closes "
+                           + (f"one {crt.closing['scope']} at a time; say which field of it is that (scope = ...)"
+                              if crt.closing["scope"] else "every record at once; leave scope out"))
+            elif crt is not None and p["scope"] and not set(p["scope_target"]) & set(crt.closing["scope_target"]):
+                out.append(f"period.scope: {p['scope']} refers to {' or '.join(p['scope_target'])}, and a "
+                           f"{crt.label.lower()} closes a {' or '.join(crt.closing['scope_target'])}")
+        return out
 
     # ------------------------------------------------------------------ views
     def check_view(self, v: viewmod.View) -> list[str]:
@@ -524,16 +588,42 @@ class CatalogMixin:
                 problems.append(f"roles: there is no role {r!r}")
         for i, w in enumerate(v.widgets):
             where = f"widget {w['title'] or i + 1}"
-            if w["source"] == "records" and w["type"] and w["type"] not in types:
+            worked = views_query.computed(self, w)  # its numbers worked out in the database: every path resolved
+            if w["source"] in ("records", "signatures") and w["type"] and w["type"] not in types:
                 problems.append(f"{where}: there is no record type {w['type']!r}")
             elif w["source"] == "records" and w["type"]:
                 rt = self.record_type(w["type"])
                 names = {f["name"] for f in rt.fields} | rt.top_keys() if rt else set()
-                for c in [*w["columns"], *([{"path": w["group_by"]}] if w["group_by"] else []),
-                          *([{"path": w["sort"]}] if w.get("sort") else [])]:
+                plain = [*w["columns"], *([{"path": w["sort"]}] if w.get("sort") else []),
+                         *([{"path": w["group_by"]}] if w["group_by"] and not worked else [])]
+                for c in plain:
                     if rt and c["path"].split(".")[0] not in names:
                         problems.append(f"{where}: {rt.label} has no field {c['path']!r} (its fields: "
                                         f"{', '.join(f['name'] for f in rt.fields)})")
+                if rt and worked:
+                    try:
+                        views_query.columns_of(self.record_type, rt, w)
+                    except ValueError as exc:
+                        problems.append(f"{where}: {exc}")
+                if rt and w["kind"] == "board" and w["group_by"] and w["group_by"].split(".")[0] in names:
+                    try:
+                        if views_query.resolve(self.record_type, rt, w["group_by"]).hop:
+                            problems.append(f"{where}: a board groups by a field of its own records, not one a "
+                                            f"reference reaches ({w['group_by']})")
+                    except ValueError as exc:
+                        problems.append(f"{where}: {exc}")
+            if w["source"] == "signatures" and worked:
+                try:
+                    views_query.signature_columns(w)
+                except ValueError as exc:
+                    problems.append(f"{where}: {exc}")
+            if worked and w["source"] == "records" and w.get("where"):
+                try:
+                    views_query.Where("2000-01-01", lambda p: "$x").cond(expr.Parser(w["where"]).parse())
+                except views_query.Untranslatable as exc:
+                    problems.append(f"{where}: where: {exc}")
+                except expr.ExprError:
+                    pass  # said when the view is read
             if w["workflow"] and w["workflow"] not in flows:
                 problems.append(f"{where}: there is no workflow {w['workflow']!r}")
             if w["role"] and w["role"] not in roles:

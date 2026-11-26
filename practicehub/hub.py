@@ -35,6 +35,7 @@ from .journey import JourneyMixin
 from .models import default_model
 from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
+from . import decimals
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 APPROVAL_WORKFLOW = "approval-notice"  # the home of a notice that a change waits for a policy owner's approval
@@ -529,7 +530,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             there = self.records.read(rtype, new_id)
             if bool(there) != bool(into):
                 raise Invalid(f"there is a {new_ref} already" if there else f"there is no {new_ref}")
-            body = {k: v for k, v in data.items() if k not in ("resourceType", "meta")}
+            for r, x in ((before, self.record_type_for_reading(old_type)), (there, rt)):
+                st = schema.first(r, x.lifecycle["path"]) if r and x and x.lifecycle else None
+                if x and schema.sealed(x, st):  # nothing changes it: not a person, a workflow nor an upgrade
+                    raise Invalid(f"{r['resourceType']}/{r['id']} is {x.state_label(st).lower()}: nothing changes "
+                                  f"it, so it keeps its type and is not converted")
+            body = schema.exact(rt, {k: v for k, v in data.items() if k not in ("resourceType", "meta")})
             body["id"] = new_id
             self._check_record(rt, {"resourceType": rtype, **body})
             rec = self.records.update(rtype, new_id, body) if into else self.records.create(rtype, body)
@@ -937,7 +943,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         """What a record's search words were built from: the index's version and its type's classed fields."""
         import hashlib
         classed = sorted((f["path"], f["data_class"]) for f in (rt.classed_fields if rt is not None else []))
-        return self.SEARCH_INDEX + ":" + (hashlib.sha1(json.dumps(classed).encode()).hexdigest()[:12] if classed else "")
+        return self.SEARCH_INDEX + ":" + (hashlib.sha1(json.dumps(classed, default=decimals.jsonable).encode()).hexdigest()[:12] if classed else "")
 
     def _search_parts(self, rec: dict):
         """A record as each reader sees it, for its search words (``LocalRecordStore.parts_fn``)."""
@@ -2612,7 +2618,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     @staticmethod
     def _profile_source(profile: dict) -> str:
-        return json.dumps(profile, sort_keys=True, separators=(",", ":"))
+        return json.dumps(profile, sort_keys=True, separators=(",", ":"), default=decimals.jsonable)
 
     def _record_profile(self, actor: dict, mid: str, profile: dict, note: str) -> dict:
         """Put a profile in force without a second person: an agent's first version (added, or installed with a
@@ -3216,14 +3222,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 out += [r for r in (schema.ref_of(v) for v in schema.get(rec, f["path"])) if r and r not in out]
         return out
 
-    def revision_authors(self, ref: str) -> set[str]:
+    def revision_authors(self, ref: str, before: int | None = None) -> set[str]:
         """Who wrote what the record says now: whoever created it or changed a field other than its lifecycle state,
         since it was last in its lifecycle's ``in_use`` state (the approved revision others reviewed). Moving a
-        record through its lifecycle does not make someone its author."""
+        record through its lifecycle does not make someone its author. With ``before``, the versions before that one
+        (a move that is a step's work is judged on the record it found, not on the fields its own write fills)."""
         rtype, rid = ref.split("/", 1)
         rt = self.record_type(rtype)
         lc = rt.lifecycle if rt else None
-        rows = self.db.record_versions.find({"type": rtype, "id": rid}, sort=[("version", ASC)])
+        rows = self.db.record_versions.find({"type": rtype, "id": rid,
+                                             **({"version": {"$lt": before}} if before else {})},
+                                            sort=[("version", ASC)])
         authors: set[str] = set()
         prev = None
         for r in rows:
@@ -3304,6 +3313,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 if to == ref:
                     raise Invalid("a record is not linked to itself")
             st = schema.first(rec, rt.lifecycle["path"]) if rt.lifecycle else None
+            if schema.sealed(rt, st):
+                raise Invalid(f"a {rt.label.lower()} that is {rt.state_label(st).lower()} is final: nothing links "
+                              f"or unlinks it")
             if rt.lifecycle and st in rt.lifecycle.get("locked", []) and not self._by_workflow(member, run_id):
                 raise Invalid(f"a {rt.label.lower()} that is {rt.state_label(st).lower()} is not linked or unlinked")
             key = f"{ref}|{rel}|{to}"
@@ -3475,14 +3487,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         the member may read; and how many it may not."""
         out, hidden = {}, 0
         for rt in self.part_types(ref.split("/", 1)[0]):
-            f = rt.field(rt.part_of["field"])
-            rows = self.db.links.find({"to_ref": ref, "rel": f["rel"] if f else rt.part_of["field"],
-                                       "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}})
             if not self.may_read(member, rt.id):
-                hidden += len(rows)
+                f = rt.field(rt.part_of["field"])
+                hidden += self.db.links.count({"to_ref": ref, "rel": f["rel"] if f else rt.part_of["field"],
+                                               "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}})
                 continue
-            recs = [r for r in (self.records.read(*x["from_ref"].split("/", 1)) for x in rows)
-                    if r and schema.ref_of(schema.first(r, rt.part_of["path"])) == ref]
+            recs = self._part_records(ref, rt)
             shown = self.redact_all(member, recs)
             for r in shown:
                 if not visibility.withheld(r) or not visibility.withheld(r).get("whole"):
@@ -3629,6 +3639,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 problems.append(problem)
         if rt.is_a("Restriction") and not problems:
             problems += self.restrictions.problems(rt, rec)
+        if rt.checks and not problems and not getattr(self, "_upgrading", False):
+            # the type's own rules ([[check]]), whoever writes it: a person, the API, an agent, a workflow, a convert;
+            # records a pack upgrade carries over are taken as they were, as for unique
+            ctx = schema.check_context(rt, rec, self.engine.now().date().isoformat())
+            problems += [f"{rt.label}: {c['message']}" for c in rt.checks if not schema.check_holds(c, ctx)]
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
 
@@ -3746,28 +3761,37 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         inside the write's transaction, so the check and the write are one step (the store has one writer at a time).
         A key is checked when every field of it is filled in and, on a change, when one of them changed: two records
         that already shared one before the type said unique are not stopped from being edited otherwise. Text is
-        compared as a search compares it (no case, no accents, no surrounding spaces). Records carried over by a pack
-        upgrade are taken as they were."""
+        compared as a search compares it (no case, no accents, no surrounding spaces); a reference by the record it
+        names, whatever else it carries (a display, a pin). Records carried over by a pack upgrade are taken as they
+        were."""
         if not rt.unique or getattr(self, "_upgrading", False):
             return
         from .records import fold
-        same = lambda a, b: (fold(a).strip() == fold(b).strip()) if isinstance(a, str) and isinstance(b, str) \
-            else a == b  # noqa: E731
+
+        def as_key(v, f):
+            if f["type"] == "reference":  # "Type/id", or {reference, display, ...}: the record it names
+                ref = v.get("reference") if isinstance(v, dict) else v
+                return ("ref", ref.strip()) if isinstance(ref, str) else ("value", v)
+            return ("text", fold(v).strip()) if isinstance(v, str) else ("value", v)
+
         problems = []
         for key in rt.unique:
-            paths = [rt.field(n)["path"] for n in key]
-            values = [schema.first(rec, p) for p in paths]
+            fs = [rt.field(n) for n in key]
+            values = [schema.first(rec, f["path"]) for f in fs]
             if any(v in (None, "", [], {}) for v in values):
                 continue
-            if before is not None and all(same(schema.first(before, p), v) for p, v in zip(paths, values)):
+            mine = [as_key(v, f) for v, f in zip(values, fs)]
+            if before is not None and [as_key(schema.first(before, f["path"]), f) for f in fs] == mine:
                 continue
-            text = " ".join(str(v) for v in values if isinstance(v, (str, int, float)) and not isinstance(v, bool))
+            text = " ".join(str(v) for v, f in zip(values, fs)
+                            if isinstance(v, (str, int, float)) and not isinstance(v, bool) and f["type"] != "reference")
             for other in self.records.search(rt.id, text=text or None, limit=None):
                 if other.get("id") == rec.get("id"):
                     continue
-                if all(same(schema.first(other, p), v) for p, v in zip(paths, values)):
+                if [as_key(schema.first(other, f["path"]), f) for f in fs] == mine:
                     labels = " and ".join(rt.field(n)["label"] for n in key)
-                    shown = ", ".join(str(v) for v in values)
+                    shown = ", ".join(v["reference"] if isinstance(v, dict) and "reference" in v else str(v)
+                                      for v in values)
                     problems.append(f"{labels}: another {rt.label.lower()} already has {shown} "
                                     f"({self.title(other) or rt.id + '/' + str(other.get('id'))})")
                     break
@@ -4260,7 +4284,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         rt = self._type(rtype)
         if member.get("kind") != "automation":
             self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
-        data = dict(data)
+        data = schema.exact(rt, dict(data))  # its decimals exact, at their places
         lc = rt.lifecycle
         if lc:
             st = schema.first(data, lc["path"])
@@ -4276,6 +4300,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 if t["by"] == "workflow" and not self._by_workflow(member, run_id):
                     raise Denied(f"only a workflow makes a {rt.label.lower()} {st!r}")
         self._check_number_kept(rt, None, data)
+        if member.get("kind") != "automation":  # an import brings a record in as it was; nobody else stamps one
+            self._check_stamps_kept(rt, {}, data)
         self._workflow_fields(rt, member, run_id, {}, data)
         data = visibility.guard_write(self, member, rt, None, data)  # a field of a class they may not write
         over = overbook.strip() if overbook and overbook.strip() and rt.is_a("Booking") else None
@@ -4286,6 +4312,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         named = self._check_files_named(member, data, None)
         with self.db:  # the clash check and the write are one step: two people booking one time are never both told yes
             data = self._take_number(rt, None, data)
+            data = self._pinned(rt, None, data)
+            self._check_reversal(rt, None, {"resourceType": rtype, **data})
+            self._check_part_lock(rt, None, data, member, run_id)
+            self._check_period(rt, None, {"resourceType": rtype, **data})
             self._check_unique(rt, {"resourceType": rtype, **data})
             clashes = self._check_clashes(rt, {"resourceType": rtype, **data}, member, over)
             rec = self.records.create(rtype, data)
@@ -4329,7 +4359,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                       run_id: str | None = None, _signature: int | None = None,
                       expected_version: str | None = None, comment: str | None = None,
                       authors: list[str] | None = None, overbook: str | None = None,
-                      _files: tuple = ()) -> dict:
+                      _files: tuple = (), _repin: dict | None = None, _mover: dict | None = None,
+                      _stamp_at: datetime | None = None) -> dict:
         """``comment``: why, kept on the version (and on the move, if the record moves). ``authors``: who wrote the
         change, when several people did (each must be a member who may write the record). ``_files``: files the hub
         itself vouches for in this change (``_check_files_named``).
@@ -4337,7 +4368,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         ``_signature``: the move is made by a signature the record type allows (``moves_to``), which the signer's
         role was checked for; it may make moves reserved to workflows. ``expected_version``: the version the editor
         saw; when someone changed the record since, nothing is saved (their change is never silently overwritten).
-        ``overbook``: a booking moved over another one, and why (as for ``create_record``)."""
+        ``overbook``: a booking moved over another one, and why (as for ``create_record``). ``_repin``: the pins to
+        move to their records' versions now (``repin``), {field: [refs] or None for all of it}. ``_mover``: who made
+        a workflow's move (whoever did its step), for its ``stamp``; ``_stamp_at``: the time a signed move's stamp
+        reads, the one its signature covers.
+
+        A record in a final state changes for no one: a write that would change it is refused, one that changes
+        nothing writes nothing (``schema.sealed``)."""
         rtype, rid = ref.split("/", 1)
         rt = self._type(rtype)
         if member.get("kind") != "automation" and _signature is None:
@@ -4356,7 +4393,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                f"your change.")
             after = {**before, **{k: v for k, v in data.items() if k not in ("resourceType", "id", "meta")}}
             after = {k: v for k, v in after.items() if v is not None}  # None clears a field
+            after = schema.exact(rt, after)
             self._check_number_kept(rt, before, after)
+            self._check_stamps_kept(rt, before, after)
             self._workflow_fields(rt, member, run_id, before, after)
             after = visibility.guard_write(self, member, rt, before, after)  # untouched: kept; changed: refused
             if rt.part_of and schema.first(before, rt.part_of["path"]) != schema.first(after, rt.part_of["path"]):
@@ -4367,6 +4406,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 old, new = schema.first(before, rt.lifecycle["path"]), schema.first(after, rt.lifecycle["path"])
                 if old is None and rt.lifecycle.get("initial"):
                     old, after, new = self._filed_before_lifecycle(rt, after, new)
+                if schema.sealed(rt, old):  # for everyone: a person, a workflow, a signature, an upgrade
+                    if self._sealed_write(rt, old, new, before, after):
+                        return self.redact(member, before)
                 if old in rt.lifecycle.get("locked", []) and not self._by_workflow(member, run_id) and _signature is None:
                     # a locked record is not edited, but a person still moves it on: the move writes what its dialog
                     # asks for (why it is made obsolete, the date the client authorised it) and nothing else
@@ -4401,6 +4443,10 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                              if blank(schema.first(after, rt.field(n)["path"]))]
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
+                    after = self.stamped(rt, t, after, _mover or member, _stamp_at)  # before its checks read them
+                    why = self.move_check_refusal(rt, ref, t, after)  # the move's own checks, whoever makes it
+                    if why:
+                        raise Invalid(why)
                     self._move_signed(rt, t, _signature)
                     moved = (old, new)
             clashes, over = [], None
@@ -4415,9 +4461,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     after = self._overbooked(rt, after, over)
                     now_held = self._held_time(rt, after)
             after = self._take_number(rt, before, after)
+            after = self._pinned(rt, before, after, _repin)
             self._check_refs_readable(member, rt, after, before)
             self._check_record(rt, after, before)
             named = self._check_files_named(member, after, before, _files)
+            self._check_reversal(rt, before, after)
+            self._check_part_lock(rt, before, after, member, run_id)
+            self._check_period(rt, before, after)
             self._check_unique(rt, after, before)
             if rt.is_a("Booking") and held != now_held:  # only a change of time, members or state can make a clash
                 clashes = self._check_clashes(rt, after, member, over)
@@ -4449,6 +4499,63 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)
 
+    def stamped(self, rt, t: dict, rec: dict, mover: dict, at: datetime | None = None) -> dict:
+        """The record as the move ``t`` stamps it (``stamp``): a member field set to who made the move (none, when no
+        member made it: an automation of its own), a date to the practice's today, a time to the instant; ``at``
+        (an instant) is the time they read, so a signature computed first covers what the move then writes."""
+        if not t.get("stamp"):
+            return rec
+        from . import clock
+        wall = clock.local(at or self.engine.instant(), self.engine.zone())  # as records keep times: wall time
+        who = mover.get("id") if mover and mover.get("kind") in ("person", "agent") else None
+        for n in t["stamp"]:
+            f = rt.field(n)
+            value = who if f["type"] == "member" else wall.date().isoformat() if f["type"] == "date" \
+                else wall.replace(microsecond=0).isoformat()
+            rec = schema.put(rec, f["path"], value)
+        return {k: v for k, v in rec.items() if v is not None}
+
+    def _check_stamps_kept(self, rt, before: dict, after: dict) -> None:
+        """A field a move stamps (``stamp``) is written by that move alone, in its own write: no person, workflow or
+        tool sets it otherwise, so it always names who made the move. Records a pack upgrade carries over are taken
+        as they were."""
+        if getattr(self, "_upgrading", False):
+            return
+        for n in sorted(schema.stamped(rt)):
+            f = rt.field(n)
+            if schema.first(before, f["path"]) != schema.first(after, f["path"]):
+                moves = [t["label"] for t in rt.lifecycle["transition"] if n in t.get("stamp", [])]
+                raise Invalid(f"{f['label']} is set by the move that stamps it ({' or '.join(moves)}), "
+                              f"not written by hand")
+
+    def move_check_refusal(self, rt, ref: str, t: dict, rec: dict) -> str | None:
+        """Why a move's checks (``[[lifecycle.transition.check]]``) refuse it for the record as it would be once
+        moved, in the pack's words; None when they hold. The parts a check reads are read for the hub, whatever the
+        mover may see: the refusal says only the check's message."""
+        checks = t.get("check") or []
+        if not checks:
+            return None
+        named = sorted({p for c in checks for p in c["parts"]})
+        parts = {pid: self._parts_for_check(ref, pid) for pid in named}
+        ctx = schema.check_context(rt, rec, self.engine.now().date().isoformat(), parts)
+        failed = [c["message"] for c in checks if not schema.check_holds(c, ctx)]
+        if not failed:
+            return None
+        return f"to move a {rt.label.lower()} to {rt.state_label(t['to']).lower()}: {'; '.join(failed)}"
+
+    def _parts_for_check(self, ref: str, pid: str) -> list[dict]:
+        """A record's parts of type ``pid`` as a move's check reads them: each ``{record, signed}``, ``signed``
+        the meanings of its signatures that cover it as it is now."""
+        prt = self.record_type(pid)
+        if prt is None or not prt.part_of:
+            return []
+        out = []
+        for r in self._part_records(ref, prt):
+            sigs = self._signatures_of(f"{pid}/{r['id']}", r)
+            out.append({"record": {**schema._named_values(prt, r), **r},
+                        "signed": sorted({s["meaning"] for s in sigs if s["current"] and s["valid"] and s["meaning"]})})
+        return out
+
     def _move_signed(self, rt, t: dict, signature: int | None) -> None:
         """A transition with ``sign`` is made only by a person's signature with that meaning (``move_record`` with
         one, or a ``[[signature]]`` that ``moves_to`` there): never by an agent, a workflow or a plain edit."""
@@ -4461,14 +4568,235 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                          f"{t['sign']!r} by the person who moves it")
 
     # ------------------------------------------------------------------ signatures on any record
-    def _record_digest(self, rec: dict) -> str:
-        """What a signature covers: the record's contents, without its housekeeping (meta) or where it is in its
-        lifecycle, so the move a signature makes (approved, closed) does not leave it covering nothing."""
+    def _own_digest(self, rec: dict, *, state: bool = False) -> str:
+        """The record's own contents, without its housekeeping (meta) or, unless ``state``, where it is in its
+        lifecycle, so the move a signature makes (approved, closed) does not leave it covering nothing. A record
+        another one pins is hashed with its state: its moves are changes the pinning record's signature did not see."""
         from .track import canonical
         rt = self.record_type_for_reading(rec.get("resourceType", "")) if rec.get("resourceType") else None
-        if rt and rt.lifecycle:
+        if rt:
+            rec = schema.exact(rt, rec)  # 12.3 and 12.30 are the same value of a field kept at two places
+        if rt and rt.lifecycle and not state:
             rec = schema.put(rec, rt.lifecycle["path"], None)
         return hashlib.sha256(canonical({k: v for k, v in rec.items() if k != "meta"}).encode()).hexdigest()
+
+    def _record_digest(self, rec: dict) -> str:
+        """What a signature covers: the record's own contents, and, for a type that pins records (``pin = true``) or
+        covers its parts (``covers``), what each of those says now: a change to a pinned record (a move included) or
+        a covered part leaves the signature not current. A record that pins and covers nothing is covered by its own
+        digest."""
+        from .track import canonical
+        own = self._own_digest(rec)
+        rt = self.record_type_for_reading(rec.get("resourceType", "")) if rec.get("resourceType") else None
+        if not rt or not (schema.pins(rt) or rt.covers):
+            return own
+        pins = {}
+        for f in schema.pins(rt):
+            for ref in self._pin_refs(f, rec):
+                there = self.records.read(*ref.split("/", 1))
+                pins[ref] = self._own_digest(there, state=True) if there else None
+        parts = {}
+        for t in rt.covers:
+            prt = self.record_type_for_reading(t)
+            if prt and rec.get("id"):
+                for p in self._part_records(f"{rec['resourceType']}/{rec['id']}", prt):
+                    parts[f"{p['resourceType']}/{p['id']}"] = self._own_digest(p)
+        if not pins and not parts:
+            return own
+        return hashlib.sha256(canonical({"own": own, "pins": pins, "parts": parts}).encode()).hexdigest()
+
+    # ------------------------------------------------------------------ what a record pins, reverses and closes
+    @staticmethod
+    def _pin_items(f: dict, rec: dict | None) -> list:
+        v = schema.first(rec, f["path"]) if rec else None
+        return [] if v is None else list(v) if f.get("list") and isinstance(v, list) else [v]
+
+    def _pin_refs(self, f: dict, rec: dict | None) -> list[str]:
+        return [r for r in (schema.ref_of(x) for x in self._pin_items(f, rec)) if r]
+
+    def _pinned(self, rt, before: dict | None, after: dict, repin: dict | None = None) -> dict:
+        """A pinned reference (``pin = true``) keeps the version and hash of the record it points at as it was when
+        the reference was given: ``{reference, version, sha256}``. One kept from before keeps its pin, whatever the
+        write says; a new one is pinned now; only ``repin`` moves a pin on. Nobody writes a pin by hand."""
+        for f in schema.pins(rt):
+            items = self._pin_items(f, after)
+            if not items:
+                continue
+            had = {schema.ref_of(x): x for x in self._pin_items(f, before) if isinstance(x, dict) and "version" in x}
+            move = (repin or {}).get(f["name"], ()) if repin is not None else ()
+            out = []
+            for x in items:
+                ref = schema.ref_of(x)
+                if not ref:
+                    out.append(x)
+                    continue
+                if ref in had and not (f["name"] in (repin or {}) and (move is None or ref in move)):
+                    out.append(had[ref])
+                    continue
+                there = self.records.read(*ref.split("/", 1)) if schema.REF_TEXT.fullmatch(ref) else None
+                pin = {"reference": ref, "version": self.record_version(ref) if there else 0,
+                       "sha256": self._own_digest(there, state=True) if there else None}
+                if isinstance(x, dict) and x.get("display"):
+                    pin["display"] = x["display"]
+                out.append(pin)
+            after = schema.put(after, f["path"], out if f.get("list") else out[0])
+        return after
+
+    def pins_behind(self, rt, rec: dict) -> list[dict]:
+        """The records ``rec`` pins that have changed since: {field, reference, version, now}."""
+        out = []
+        for f in schema.pins(rt):
+            for x in self._pin_items(f, rec):
+                ref = schema.ref_of(x)
+                if not ref or not isinstance(x, dict) or "version" not in x:
+                    continue
+                now = self.record_version(ref)
+                if now != x["version"]:
+                    out.append({"field": f["name"], "reference": ref, "version": x["version"], "now": now})
+        return out
+
+    def refuse_pins_behind(self, rt, rec: dict) -> None:
+        """A signature covers the records a record pins as they are now: while one has changed since it was pinned,
+        nothing is signed (by ``sign_record`` or a signed move) until the pin is moved on."""
+        for b in self.pins_behind(rt, rec):
+            raise Invalid(f"{rt.label} pins {self.key_of(b['reference']) or b['reference']} at version {b['version']}; "
+                          f"it is at version {b['now']}: update the pin, then sign")
+
+    def repin(self, member: dict, ref: str, field: str, target: str | None = None, *, cause: int | None = None,
+              run_id: str | None = None) -> dict:
+        """Move a pin (or every pin in the field) on to the version of its record now: "Use version M". It is a
+        change to the record like any other, by someone who may write it, and it leaves earlier signatures on it not
+        current."""
+        rt = self._type(ref.split("/", 1)[0])
+        f = rt.field(field)
+        if not f or not f.get("pin"):
+            raise Invalid(f"a {rt.label.lower()} has no pinned reference {field!r}")
+        rec = self.records.read(*ref.split("/", 1))
+        if not rec:
+            raise NotFound(f"there is no {ref}")
+        if target is not None and target not in self._pin_refs(f, rec):
+            raise Invalid(f"{ref}'s {f['label'].lower()} does not point at {target}")
+        return self.update_record(member, ref, {}, cause=cause, run_id=run_id,
+                                  _repin={f["name"]: None if target is None else [target]})
+
+    def _sealed_write(self, rt, old, new, before: dict, after: dict) -> bool:
+        """A record in a sealed state (``schema.sealed``) is changed by no one. A write that changes nothing is
+        dropped (True: nothing to write). One that closes a period (``[closing]``) is let through only as its signed
+        move out, writing nothing but what that move asks; the move's own check demands the signature."""
+        bare = lambda r: {k: v for k, v in r.items() if k != "meta"}
+        if bare(before) == bare(after):
+            return True
+        label = rt.label.lower()
+        if rt.is_final(old):
+            raise Invalid(f"a {label} that is {rt.state_label(old).lower()} is final: nothing changes it"
+                          + (f"; make a {label} that reverses it" if rt.reverses else ""))
+        t = rt.transition(old, new) if old != new else None
+        asked = [rt.field(n)["path"] for n in (t or {}).get("asks", []) if rt.field(n)]
+
+        def strip(r):
+            for path in (rt.lifecycle["path"], *asked):
+                r = schema.put(r, path, None)
+            return bare(r)
+        if t is None or not t.get("sign") or strip(before) != strip(after):
+            raise Invalid(f"a {label} that is {rt.state_label(old).lower()} closes a period: nothing changes it "
+                          f"until a signed move reopens it")
+        return False
+
+    def _check_reversal(self, rt, before: dict | None, after: dict) -> None:
+        """``reverses``: a record reverses one other record of its type, one that is final, that no other record
+        reverses already; it says so when it is made, and that never changes."""
+        r = rt.reverses
+        if not r:
+            return
+        was = schema.ref_of(schema.first(before, r["path"])) if before else None
+        now = schema.ref_of(schema.first(after, r["path"]))
+        label = rt.label.lower()
+        if before is not None:
+            if was != now:
+                raise Invalid(f"which {label} a {label} reverses is said when it is made, and never changes")
+            return
+        if not now:
+            return
+        me = f"{after.get('resourceType') or rt.id}/{after['id']}" if after.get("id") else None
+        if now == me:
+            raise Invalid(f"a {label} does not reverse itself")
+        ttype, tid = now.split("/", 1)
+        target = self.records.read(ttype, tid) if ttype == rt.id else None
+        if not target:
+            raise Invalid(f"a {label} reverses another {label}; there is no {now}")
+        st = schema.first(target, rt.lifecycle["path"])
+        if not rt.is_final(st):
+            raise Invalid(f"{self.key_of(now) or now} is {rt.state_label(st).lower()}: a {label} reverses one that "
+                          f"is final; change this one instead")
+        f = rt.field(r["field"])
+        other = self.db.links.find_one({"to_ref": now, "rel": f["rel"], "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}})
+        if other and other["from_ref"] != me:
+            raise Invalid(f"{self.key_of(now) or now} is reversed already, by {self.key_of(other['from_ref']) or other['from_ref']}")
+
+    def _part_records(self, ref: str, prt) -> list[dict]:
+        """The records of part type ``prt`` that are part of ``ref`` (read for the hub, whoever asks)."""
+        f = prt.field(prt.part_of["field"])
+        rows = self.db.links.find({"to_ref": ref, "rel": f["rel"] if f else prt.part_of["field"],
+                                   "from_ref": {"$regex": f"^{re.escape(prt.id)}/"}})
+        return [r for r in (self.records.read(*x["from_ref"].split("/", 1)) for x in rows)
+                if r and schema.ref_of(schema.first(r, prt.part_of["path"])) == ref]
+
+    def _check_part_lock(self, rt, before: dict | None, after: dict, member: dict, run_id: str | None) -> None:
+        """A part that its record covers (``covers``) is not added or changed while that record is locked, unless by
+        its workflow, and by no one while it is final or closes a period."""
+        if not rt.part_of:
+            return
+        if before is not None and {k: v for k, v in before.items() if k != "meta"} == \
+                {k: v for k, v in after.items() if k != "meta"}:
+            return
+        owner = schema.ref_of(schema.first(after, rt.part_of["path"]))
+        ort = self.record_type(owner.split("/", 1)[0]) if owner else None
+        if not ort or rt.id not in ort.covers or not ort.lifecycle:
+            return
+        rec = self.records.read(*owner.split("/", 1))
+        st = schema.first(rec, ort.lifecycle["path"]) if rec else None
+        if schema.sealed(ort, st) or (st in ort.lifecycle.get("locked", []) and not self._by_workflow(member, run_id)):
+            raise Invalid(f"{self.key_of(owner) or owner} is {ort.state_label(st).lower()}: its {rt.plural.lower()} "
+                          f"are not added or changed while it is")
+
+    def closed_through(self, rt, rec: dict) -> str | None:
+        """The last date closed for ``rec`` (``[period]``): the latest ``through`` of the records that close its
+        period, while they are in a state that closes it, within its scope. None: no period of it is closed."""
+        p = rt.period
+        crt = self.record_type(p["closed_by"]) if p else None
+        if not crt or not crt.closing:
+            return None
+        c = crt.closing
+        if p["scope"]:
+            scope = schema.ref_of(schema.first(rec, p["scope_path"]))
+            if not scope:
+                return None
+            f = crt.field(c["scope"])
+            rows = self.db.links.find({"to_ref": scope, "rel": f["rel"],
+                                       "from_ref": {"$regex": f"^{re.escape(crt.id)}/"}})
+            closes = [r for r in (self.records.read(*x["from_ref"].split("/", 1)) for x in rows)
+                      if r and schema.ref_of(schema.first(r, c["scope_path"])) == scope]
+        else:
+            closes = self.records.search(crt.id, limit=None)
+        dates = [str(schema.first(r, c["path"]))[:10] for r in closes
+                 if schema.first(r, crt.lifecycle["path"]) in c["states"] and schema.first(r, c["path"])]
+        return max(dates) if dates else None
+
+    def _check_period(self, rt, before: dict | None, after: dict) -> None:
+        """Nothing dated on or before the last date closed (``[period]``) is written, moved out of it or into it, by
+        anyone: a person, a workflow, a signature, an upgrade. A write that changes nothing writes nothing new."""
+        p = rt.period
+        if not p:
+            return
+        if before is not None and {k: v for k, v in before.items() if k != "meta"} == \
+                {k: v for k, v in after.items() if k != "meta"}:
+            return
+        for r in (after, before):
+            d = schema.first(r, p["path"]) if r else None
+            through = self.closed_through(rt, r) if d else None
+            if through and str(d)[:10] <= through:
+                raise Invalid(f"a {rt.label.lower()} dated {str(d)[:10]} is in a closed period (closed through "
+                              f"{through}): nothing in it is written until the period is reopened")
 
     def record_version(self, ref: str) -> int:
         rtype, rid = ref.split("/", 1)
@@ -4515,6 +4843,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if any(s["by"] == member["id"] and s["meaning"] == meaning and s["current"]
                for s in self.signatures(member, ref)):
             raise Invalid(f"you have already signed this version as {meaning!r}")
+        self.refuse_pins_behind(rt, self.records.read(rtype, rid) or {})
         moves = bool(kind and kind.get("moves_to") and rt.lifecycle)
         with self.db:  # read, check and write as one step, so a change in between cannot slip under the signature
             rec = self.read_record(member, ref, raw=True)
@@ -4526,16 +4855,19 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     raise Invalid(f"this {rt.label.lower()} is in the work {running[0]['title']!r}: its decisions are "
                                   f"made there, and a signature here does not move it on")
                 signed_rec = schema.put(rec, rt.lifecycle["path"], kind["moves_to"])
+                t = rt.transition(schema.first(rec, rt.lifecycle["path"]), kind["moves_to"])
             else:
-                signed_rec = rec
+                signed_rec, t = rec, None
+            at = self.engine.instant()
             version = self.record_version(ref) + (1 if moves else 0)
-            digest = self._record_digest(signed_rec)  # what the record says once the signature has taken effect
+            # what the record says once the signature has taken effect: moved, with what its move stamps
+            digest = self._record_digest(self.stamped(rt, t, signed_rec, member, at) if t else signed_rec)
             seq = self.track.append(member, "record.signed", ref, data={"comment": comment},
                                     signed={"record": ref, "version": version, "record_sha256": digest,
                                             "meaning": meaning})
             if moves:
                 self.update_record(member, ref, signed_rec, cause=seq,
-                                   _signature=seq)
+                                   _signature=seq, _stamp_at=at)
         return {"event": seq, "version": version, "record_sha256": digest}
 
     def attest(self, actor: dict, ref: str, run: dict, step_id: str) -> int:
@@ -4557,8 +4889,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     def signatures(self, member: dict, ref: str) -> list[dict]:
         """Every signature on a record, newest first, each marked current if it covers what the record says now."""
+        return self._signatures_of(ref, self.read_record(member, ref, raw=True))
+
+    def _signatures_of(self, ref: str, rec: dict) -> list[dict]:
+        """``signatures`` for the hub, whoever asks: the record is read already."""
         rtype, rid = ref.split("/", 1)
-        rec = self.read_record(member, ref, raw=True)
         now = self._record_digest(rec)
         out = []
         rows = self.db.events.find({"$or": [{"action": "record.signed", "subject": ref},
@@ -5154,7 +5489,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     what = {"python": "Python code", "prompt": "an injected prompt for agents",
                             "external": f"a call to {b.engine}"}[b.runtime]
                     notes.append(f"'{s.title}' uses the block '{b.title}' (v{row['version']}, {what}) "
-                                 f"with params {json.dumps(s.params)}.")
+                                 f"with params {json.dumps(s.params, default=decimals.jsonable)}.")
                 except NotFound:
                     notes.append(f"'{s.title}' uses the block {s.block!r}, which is not approved yet.")
             if s.kind == "automation":

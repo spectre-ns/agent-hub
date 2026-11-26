@@ -39,6 +39,7 @@ from . import views as viewmod
 from .db import utcnow
 from .hub import Denied, HubError, Invalid, NotFound
 from .store import Transient
+from . import decimals
 
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")  # newest first; what initialize may agree on
 LATEST = VERSIONS[0]
@@ -51,7 +52,7 @@ PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS, INTERNAL_ERROR =
 
 SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?")
 NESTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.([0-9]+|[A-Za-z_][A-Za-z0-9_]*))+")
-SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "boolean")
+SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "decimal", "boolean")
 # a move worded like one of these puts something into force: a person does it, never an agent
 INTO_FORCE = re.compile(r"\b(approv|releas|sign|authori[sz]|certif|effective|publish)", re.I)
 MAX_LIMIT = 200
@@ -383,6 +384,21 @@ def field_schema(hub, f: dict) -> dict:
             p["minimum"] = f["min"]
         if f.get("max") is not None:
             p["maximum"] = f["max"]
+    elif t == "decimal":  # exact: as text ("1234.50"), or a number, rounded half up to its places
+        p = {"type": ["string", "number"], "pattern": r"^-?\d+(\.\d+)?$",
+             "description": f"an exact number with {f['scale']} places, best written as text: "
+                            f"{decimals.example(f['scale'])}" + (f" ({f['unit']})" if f.get("unit") else "")}
+        if f.get("min") is not None:
+            p["minimum"] = float(f["min"])
+        if f.get("max") is not None:
+            p["maximum"] = float(f["max"])
+    elif t == "table":
+        p = {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                        "properties": {c["name"]: field_schema(hub, c) for c in f["columns"]},
+                                        "required": [c["name"] for c in f["columns"] if c.get("required")]},
+             "maxItems": f.get("max_rows") or schema.MAX_ROWS, "description": "its rows"}
+        if f.get("min_rows"):
+            p["minItems"] = f["min_rows"]
     elif t == "boolean":
         p = {"type": "boolean"}
     elif t == "date":
@@ -601,7 +617,7 @@ def listed(ts: list[dict]) -> list[dict]:
 
 
 def fingerprint(ts: list[dict]) -> str:
-    return hashlib.sha256(json.dumps(listed(ts), sort_keys=True).encode()).hexdigest()[:32]
+    return hashlib.sha256(json.dumps(listed(ts), sort_keys=True, default=decimals.jsonable).encode()).hexdigest()[:32]
 
 
 # ------------------------------------------------------------------ arguments: checked against the schema, as data
@@ -620,6 +636,9 @@ def check_args(schema_: dict, args) -> list[str]:
 
 def _check(s: dict, v) -> list[str]:
     t = s.get("type")
+    if isinstance(t, list):  # one of several: a decimal is text or a number
+        tries = [_check({**s, "type": x}, v) for x in t]
+        return [] if any(not p for p in tries) else tries[0]
     if t == "string":
         if not isinstance(v, str):
             return ["expected text"]
@@ -640,7 +659,12 @@ def _check(s: dict, v) -> list[str]:
     elif t == "array":
         if not isinstance(v, list):
             return ["expected a list"]
-        return [p for x in v for p in _check(s.get("items") or {}, x)][:5]
+        if s.get("maxItems") is not None and len(v) > s["maxItems"]:
+            return [f"at most {s['maxItems']} items"]
+        if s.get("minItems") and len(v) < s["minItems"]:
+            return [f"at least {s['minItems']} items"]
+        return [f"item {i}: {p}" if (s.get("items") or {}).get("type") == "object" else p
+                for i, x in enumerate(v, 1) for p in _check(s.get("items") or {}, x)][:5]
     elif t == "object":
         if not isinstance(v, dict):
             return ["expected an object"]
@@ -653,6 +677,10 @@ def _place(rec: dict, f: dict, value) -> dict:
     """A field's value into the record by its path, references as the record keeps them ({reference: Type/id})."""
     if f["type"] == "reference" and value is not None:
         value = [{"reference": x} for x in value] if isinstance(value, list) else {"reference": value}
+    if f["type"] == "table" and isinstance(value, list):  # its reference columns as the record keeps them
+        refs = [c["name"] for c in f["columns"] if c["type"] == "reference"]
+        value = [{k: ({"reference": x} if k in refs and isinstance(x, str) else x) for k, x in row.items()}
+                 if isinstance(row, dict) else row for row in value]
     if f["path"].endswith(".*"):
         return schema.set_in(rec, f["path"][:-2].split("."), value)
     return schema.set_in(rec, schema.locate(rec, f["path"], f.get("with")).split("."), value, f.get("with"))
@@ -838,6 +866,10 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
                               what=f"view:{target}")
             if "counts" in w:
                 d["counts"] = w["counts"]
+            if w.get("computed"):  # worked out in the database: its numbers as exact text beside them
+                d.update({k: w[k] for k in ("stat", "texts", "aside") if w.get(k) not in (None, "", {})})
+                if w.get("line"):
+                    d["line"] = w["line"]
             out.append(d)
         return {"widgets": out, "_text": f"{v.title}: {len(out)} widget(s)"}
     raise Refused(f"there is nothing called {what}")
@@ -849,6 +881,9 @@ def _row(hub, w: dict, r: dict) -> dict:
         return _summary(hub, rt, r) if rt else {"ref": f"{w['type']}/{r.get('id')}"}
     if w["source"] == "items":
         return {k: r.get(k) for k in ("id", "title", "kind", "status", "role", "run_title", "record")}
+    if w["source"] == "signatures":
+        return {k: r.get(k) for k in ("at", "by", "name", "meaning", "record", "type", "title", "version", "comment",
+                                      "current")}
     return {k: r.get(k) for k in ("id", "title", "status", "workflow_id", "record")}
 
 
@@ -884,7 +919,7 @@ def read_resource(hub, sid: str, member: dict, uri: str) -> dict:
         raise RpcError(-32002, "Resource not found", {"uri": uri})
     if kind == "types":
         return {"contents": [{"uri": uri, "mimeType": "application/schema+json",
-                              "text": json.dumps(record_schema(hub, rt), indent=1)}]}
+                              "text": json.dumps(record_schema(hub, rt), indent=1, default=decimals.jsonable)}]}
     lc = rt.lifecycle or {}
     rec = hub.redact(member, hub.records.read(tid, rid))
     if not rec or not lc.get("in_use"):

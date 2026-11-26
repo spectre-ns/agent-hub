@@ -19,6 +19,7 @@ from .. import schema
 from ..hub import Invalid, NotFound
 from ..integrations import collabora as cool
 from ..integrations.wopi import Wopi
+from .. import decimals
 
 e = html.escape
 _FIELD = r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
@@ -323,6 +324,6 @@ class OfficePages:
     def handle_wopi(self, method, raw_path, headers, body):
         url = urllib.parse.urlsplit(raw_path)
         if not self.wopi:
-            return 404, {"Content-Type": "application/json"}, json.dumps({"error": "WOPI is not set up"}).encode()
+            return 404, {"Content-Type": "application/json"}, json.dumps({"error": "WOPI is not set up"}, default=decimals.jsonable).encode()
         query = dict(urllib.parse.parse_qsl(url.query))
         return self.wopi.handle(method, url.path, query, headers, body, raw_path)

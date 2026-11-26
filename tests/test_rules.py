@@ -2,14 +2,16 @@
 
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from bson import json_util
 
 from conftest import M, claim_run, item_for, quiet, run_of, snapshot_onto, visit_run
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid, NotFound, member_ref
-from practicehub import visibility
+from practicehub import decimals, visibility
 from practicehub.models import ModelError, ModelGateway, default_model
 
 
@@ -738,7 +740,7 @@ amount = "{{input.amount}}"
     assert not hub.db.items.find({"run_id": run["id"], "kind": "notice", "status": "open"})
     assert any(x["action"] == "step.retried" for x in hub.track.list(run_id=run["id"]))
     assert seen["auth"] == "Bearer engine-token"
-    assert seen["body"]["input"] == {"claim": "Claim/123", "amount": 80}
+    assert seen["body"]["input"] == {"claim": "Claim/123", "amount": "80.00"}  # a decimal input: its exact text
     assert seen["body"]["target"] == "erpnext/claim"
     ran = [x for x in hub.track.list(run_id=run["id"])
            if x["action"] == "action.ran" and x["subject"] == "step:post"][0]
@@ -3175,7 +3177,7 @@ def test_a_passphrase_is_stored_salted_and_hashed_and_set_only_by_its_owner(hub)
     assert hub.sign_in("dr-amara", "a brand new passphrase")["id"] == "dr-amara"
     with pytest.raises(Denied):
         hub.sign_in("dr-amara", WORDS)
-    assert all(WORDS not in json.dumps(ev["data"]) for ev in hub.track.list(limit=10000))
+    assert all(WORDS not in json.dumps(ev["data"], default=decimals.jsonable) for ev in hub.track.list(limit=10000))
     assert hub.db.events.exists({"action": "credential.passphrase_set", "subject": "member:dr-amara"})
 
 
@@ -3721,7 +3723,8 @@ def test_a_lot_changes_only_when_a_move_posts_and_its_posted_moves_add_up(stock)
     assert new["quantity"] == 10 and new["status"] == "available" and got["entries"][0]["lot"] == f"StockItem/{new['id']}"
     issued = _move(hub, rana, "issue", 15, lot=gauze, reason="dressings, room 2")
     assert issued["status"] == "posted" and (issued["before_quantity"], issued["after_quantity"]) == (40, 25)
-    assert issued["entries"][0]["quantity"] == [40, 25]
+    line = issued["entries"][0]
+    assert (line["quantity_before"], line["quantity_after"]) == (40, 25)
     assert _lot(hub, "GZ-10", "GZ2291")["quantity"] == 25
     part = _part(hub, "GZ-10")
     assert (part["on_hand"], part["available"], part["quarantined"]) == (35, 35, 0)   # summed from its lots
@@ -3730,6 +3733,24 @@ def test_a_lot_changes_only_when_a_move_posts_and_its_posted_moves_add_up(stock)
     # a lot changed behind the ledger's back is caught: its posted moves no longer add up to it
     hub.records.update("StockItem", gauze["id"], {**hub.records.read("StockItem", gauze["id"]), "quantity": 26})
     assert pack.ledger_problems(hub, f"StockItem/{gauze['id']}") == ["its posted moves leave 25; it holds 26"]
+
+
+def test_a_posted_move_s_ledger_lines_link_the_lots_they_changed_and_its_quantities_are_exact(stock):
+    """Rule: a stock move's ledger lines are a table (one typed row per lot it changes), and each row links the lot
+    it changed (``entry-lot``): a lot's history is found by those links. Quantities are exact to 3 places: a tenth
+    issued three times leaves exactly 0.3 less, and the posted moves still add up to what the lot holds."""
+    hub, rana = stock, M(stock, "rana")
+    pack, gloves = _inv(hub), _lot(hub, "GL-M")
+    ref = f"StockItem/{gloves['id']}"
+    moves = [_move(hub, rana, "issue", 0.1, lot=gloves) for _ in range(3)]
+    assert [m["status"] for m in moves] == ["posted"] * 3
+    line = moves[-1]["entries"][0]
+    assert (line["quantity_before"], line["quantity_after"]) == (Decimal("23.800"), Decimal("23.700"))
+    assert hub.records.read("StockItem", gloves["id"])["quantity"] == Decimal("23.700")
+    assert _part(hub, "GL-M")["on_hand"] == Decimal("23.7")
+    linked = {row["from_ref"] for row in hub.db.links.find({"to_ref": ref, "rel": "entry-lot"})}
+    assert {f"StockMove/{m['id']}" for m in moves} <= linked
+    assert pack.ledger_problems(hub, ref) == []
 
 
 def test_an_issue_never_goes_below_zero_and_a_refusal_says_why(stock):
@@ -3803,7 +3824,7 @@ def test_a_signature_covers_only_the_stock_it_was_checked_against(stock):
     _policy(hub, rana, "tracked")
     gloves = _lot(hub, "GL-M")
     adjust = _move(hub, rana, "adjust", 30, lot=gloves, reason="found a box")
-    assert adjust["entries"][0]["quantity"] == [24, 30]
+    assert (adjust["entries"][0]["quantity_before"], adjust["entries"][0]["quantity_after"]) == (24, 30)
     assert _move(hub, rana, "issue", 4, lot=gloves)["status"] == "posted"   # the shelf moved while it waited
     stale = _sign(hub, amara, f"StockMove/{adjust['id']}", "inventory-post", "sign-other", "post")
     assert stale["status"] == "rejected" and "stock changed" in stale["reject_reason"]
@@ -4011,9 +4032,11 @@ def test_a_build_takes_its_bill_from_stock_and_what_it_makes_knows_what_went_in(
     first = _build(hub, rana, "DK-1", 3, lot_number="DK0002", location=_place(hub, "Supply room"))
     early = _lot(hub, "PAD-5", "PD1180")
     assert first["status"] == "posted" and first["needs_signoff"] == ""   # basic: nothing is signed
-    got = {e["lot"]: e["quantity"] for e in first["entries"] if e["lot"] in (_stk(early), _stk(pads), _stk(saline))}
+    got = {e["lot"]: [e["quantity_before"], e["quantity_after"]] for e in first["entries"]
+           if e["lot"] in (_stk(early), _stk(pads), _stk(saline))}
+    gone = next(e for e in first["entries"] if (e["status_before"], e["status_after"]) == ("available", "depleted"))
     assert got == {_stk(pads): [20, 18], _stk(saline): [15, 12]} and \
-        next(e for e in first["entries"] if e["status"] == ["available", "depleted"])["quantity"] == [4, 0]
+        [gone["quantity_before"], gone["quantity_after"]] == [4, 0]
     _receive(hub, rana, "SAL-10", 10, lot_number="SA9000", expiry=f"{year}-01-31")
     later = _lot(hub, "SAL-10", "SA9000")
     named = _build(hub, rana, "DK-1", 1, consume=[{"lot": _stk(later)}])
@@ -4136,7 +4159,8 @@ def test_what_a_build_makes_expires_with_the_first_of_what_went_in_and_its_count
     assert built["status"] == "posted" and built["built"] == hub.engine.now().date().isoformat()
     assert _lot(hub, "DK-1", "DK0010")["expiry"] == first
     assert hub.records.read("StockItem", pads["id"])["count_baseline"] == 16  # 20 counted, 4 taken
-    assert next(e for e in built["entries"] if e["lot"] == _stk(pads))["baseline"] == [20, 16]
+    line = next(e for e in built["entries"] if e["lot"] == _stk(pads))
+    assert [line["baseline_before"], line["baseline_after"]] == [20, 16]
     assert _move(hub, rana, "issue", 6, lot=hub.records.read("StockItem", pads["id"]))["status"] == "posted"
     assert hub.records.read("StockItem", pads["id"])["count_baseline"] == 10  # an issue too: not missing at a count
 
@@ -6210,10 +6234,14 @@ def test_a_search_matches_only_what_the_member_may_read_and_is_answered_by_the_d
     calls = []
     real = hub.records.search
     monkeypatch.setattr(hub.records, "search", lambda *a, **k: calls.append(k) or real(*a, **k))
+    # the restrictions in force are read again every few seconds, which a slow run can land between these searches:
+    # read them every time, so that read is always among the calls, and only the searches by words are pages
+    monkeypatch.setattr("practicehub.restrictions._TTL", 0)
     assert [r["id"] for r in hub.search_records(amara, "Encounter", text="quokka")] == [v["id"]]  # by its start
     assert hub.search_records(jo, "Encounter", text="quokkaburn") == []
     assert hub.search_records(jo, None, text="quokkaburn cough") == []
-    assert all(k.get("limit") == 200 for k in calls)  # a page, never every record
+    words = [k for k in calls if k.get("text")]
+    assert len(words) == 3 and all(k.get("limit") == 200 for k in words)  # a page, never every record
     # what jo may read of the same visit still finds it
     pat = hub.records.read(*pat_ref.split("/"))
     family = pat["name"][0]["family"]
@@ -6404,7 +6432,8 @@ def test_the_access_report_listing_check_uses_an_index_not_a_scan_of_the_track(h
     q = {"action": "records.listed", "actor": "jo", "data.refs_sha256": "0" * 64, "data.how": "list",
          "at": {"$gte": "2026-01-01"}}
     plan = hub.db.events.c.find(q).sort([("_id", 1)]).limit(1).explain()["queryPlanner"]["winningPlan"]
-    assert "refs_sha256" in json.dumps(plan) and "COLLSCAN" not in json.dumps(plan)
+    plan = json_util.dumps(plan)  # a reply read with the hub's codecs keeps its parts as raw BSON
+    assert "refs_sha256" in plan and "COLLSCAN" not in plan
 
 
 def test_a_departing_practice_manager_is_switched_off_with_the_packs_own_staffing(hub):
@@ -7293,6 +7322,31 @@ def test_the_move_a_step_makes_is_the_step_and_doing_the_step_makes_the_move(hub
     hub.engine.complete(amara, i, {"filed": True})
     assert hub.records.read(*ref2.split("/"))["status"] == "done"
     assert hub.engine.run(run2["id"])["status"] == "completed"
+
+
+def test_a_move_that_does_a_step_is_judged_on_the_record_it_found_not_on_what_its_own_write_fills(hub):
+    """Rule: a step that is not for the record's editors (``not_by = ["record.editors"]``), done by a move, is refused
+    to whoever wrote or changed the record before that move. The fields the move itself writes (what it asks for,
+    what it stamps) do not make its mover an editor of the record they found; they are an editor of what follows."""
+    rana, amara, liam = M(hub, "rana"), M(hub, "dr-amara"), M(hub, "dr-liam")
+    p = hub.propose("type", rana, JOB.format(top=""), "jobs")
+    hub.approve(amara, "type", "Job", p["version"])
+    flow = JOB_FLOW.replace('moves = ["doing"]\n', 'moves = ["doing"]\nnot_by = ["record.editors"]\n', 1)
+    assert flow != JOB_FLOW
+    w = hub.propose_workflow(rana, flow, "jobs")
+    hub.approve_workflow(amara, "job-flow", w["version"])
+    p = hub.propose("type", rana, JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }'),
+                    "walked")
+    hub.approve(amara, "type", "Job", p["version"])
+    ref, run = _job(hub)  # Dr Amara wrote it
+    hub.move_record(liam, ref, "doing")  # a move that writes only the state makes no one an editor
+    with pytest.raises(Denied, match="whoever wrote or changed this record does not also approve it"):
+        hub.move_record(amara, ref, "done", {"outcome": "New seal fitted"})
+    assert hub.records.read(*ref.split("/"))["status"] == "doing"
+    hub.move_record(liam, ref, "done", {"outcome": "New seal fitted", "hours": 2})
+    run = hub.engine.run(run["id"])
+    assert run["steps"]["work"]["state"] == "done" and run["steps"]["work"]["by"] == "dr-liam"
+    assert hub.revision_authors(ref) == {"dr-amara", "dr-liam"}  # what follows is judged on his write too
 
 
 def test_the_transition_screen_lists_the_moves_a_member_may_make_and_why_not_the_others(hub):
@@ -8343,15 +8397,11 @@ def test_numbers_in_a_series_have_no_gaps_and_each_year_starts_again(hub):
     assert letter("2027-02-01")[1] == "L-2027-002"
 
 
-# ----------------------------------------------------------------------------- rows, and references that make a graph
+# ----------------------------------------------------------------------------------- references that make a graph
 _KIT_HEAD = 'id = "Kit"\ndata_class = "products"\n[[field]]\nname = "code"\n'
 
 
 @pytest.mark.parametrize("fields, words", [
-    ('[[field]]\nname = "bom"\ntype = "list"\nrows = true\n', "and it has none"),  # no columns
-    ('[[field]]\nname = "bom"\nrows = true\n', "rows is for a list"),  # not a list
-    ('[[field]]\nname = "bom"\ntype = "list"\nrows = true\n[[field]]\nname = "tags"\npath = "bom.*.tags"\n'
-     'type = "list"\n', "a row"),  # a column that holds a list
     ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\ngraph = "Used in"\n',
      "graph is a table"),
     ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\ngraph = { down = "Has" }\n',
@@ -8359,8 +8409,10 @@ _KIT_HEAD = 'id = "Kit"\ndata_class = "products"\n[[field]]\nname = "code"\n'
     ('[[field]]\nname = "up"\ngraph = { down = "Has", up = "In" }\n', "graph is for a reference"),
     ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Document"]\nrel = "made-of"\n'
      'graph = { down = "Has", up = "In" }\n', "its own type"),
-    ('[[field]]\nname = "bom"\ntype = "list"\nrows = true\n[[field]]\nname = "cost"\npath = "bom.*.cost"\n'
-     'data_class = "billing"\n', "a column has the data class of its rows"),  # a row is kept or dropped whole
+    ('[[field]]\nname = "bom"\ntype = "table"\n[[field.column]]\nname = "part"\ntype = "reference"\n'
+     'target = ["Document"]\nrel = "made-of"\ngraph = { down = "Has", up = "In" }\n', "its own type"),  # a column too
+    ('[[field]]\nname = "x"\ntype = "object"\n[[field]]\nname = "up"\npath = "x.up"\ntype = "reference"\n'
+     'target = ["Kit"]\nrel = "made-of"\ngraph = { down = "Has", up = "In" }\n', "a table's column"),
     ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\ndata_class = "billing"\n'
      'graph = { down = "Has", up = "In" }\n', "is traced for whoever reads"),
     ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\n'
@@ -8369,9 +8421,9 @@ _KIT_HEAD = 'id = "Kit"\ndata_class = "products"\n[[field]]\nname = "code"\n'
     ('[[field]]\nname = "n"\ntype = "number"\nmin = 0\nabove = 0\n', "give min (that number or more) or above"),
     ('[[field]]\nname = "n"\ntype = "number"\nabove = 5\nmax = 5\n', "leaves nothing up to max"),
 ])
-def test_rows_and_graph_references_are_declared_right(fields, words):
-    """Rule: a table of rows (``rows``) is a list at a key of its own whose columns are plain values or references at
-    ``<list>.*.<key>``; a graph reference (``graph``) names its two ways and points at records of its own type."""
+def test_graph_references_are_declared_right(fields, words):
+    """Rule: a graph reference (``graph``) names its two ways and points at records of its own type, from a field of
+    its own, a list of them, or a table's column; a number more than a bound (``above``) leaves room up to its max."""
     from practicehub import schema
     with pytest.raises(schema.DefinitionError) as exc:
         schema.parse(_KIT_HEAD + fields)
@@ -8400,8 +8452,8 @@ def test_a_graph_reference_never_leads_a_record_back_to_itself(hub, monkeypatch,
 
 
 def test_each_row_is_checked_and_its_references_are_links(hub, monkeypatch, tmp_path):
-    """Rule: a required column is required in each row, and the refusal names the row; a reference in a row is a
-    link like any other, gone when its row is."""
+    """Rule: a table's graph column is required in each row, and the refusal names the row; a reference in a row is
+    a link like any other, gone when its row is."""
     from conftest import kit, kit_module
     kit_module(hub, monkeypatch, tmp_path)
     rana = M(hub, "rana")
@@ -8502,22 +8554,33 @@ def test_a_record_withheld_whole_is_counted_once_however_often_a_trace_meets_it(
     assert [hub.title(r) for _, _, r, *_ in got["rows"]] == ["KB", "KC"] and got["hidden"] == 1
 
 
-def test_rows_are_capped_and_a_column_more_than_a_number_refuses_it(hub, monkeypatch, tmp_path):
-    """Rule: a rows field holds at most ``ROWS_MAX`` rows; a number with ``above`` must be more than it (a bill's
-    quantity is more than nothing)."""
+def test_a_number_more_than_a_bound_refuses_the_bound(hub, monkeypatch, tmp_path):
+    """Rule: a number with ``above`` must be more than it, in a table's column too (a bill's quantity is more than
+    nothing)."""
     from conftest import kit, kit_module
-    from practicehub import schema
     kit_module(hub, monkeypatch, tmp_path)
     rana = M(hub, "rana")
     b = kit(hub, "KB")
     with pytest.raises(Invalid) as exc:
         hub.create_record(rana, "Kit", {"code": "KA", "bom": [{"part": f"Kit/{b['id']}", "quantity": 0}]})
-    assert any("must be more than 0" in p for p in exc.value.problems), exc.value.problems
-    rows = [{"part": f"Kit/{b['id']}", "quantity": 1}] * (schema.ROWS_MAX + 1)
-    with pytest.raises(Invalid) as exc:
-        hub.create_record(rana, "Kit", {"code": "KA", "bom": rows})
-    assert any(f"has more than {schema.ROWS_MAX} rows" in p for p in exc.value.problems), exc.value.problems
+    assert any("row 1: quantity must be more than 0" in p.lower() for p in exc.value.problems), exc.value.problems
     kit(hub, "KA", (b, 0.5))
+
+
+def test_a_decimal_more_than_a_bound_is_more_than_it_exactly(stock):
+    """Rule: a decimal with ``above`` must be more than it, compared exactly: a part's bill of materials gives each
+    line a quantity more than nothing, and the least it may give is the smallest step of its places."""
+    hub = stock
+    rana = M(hub, "rana")
+    pad = _part(hub, "PAD-5")
+    for q in ("0", "0.000", "-1"):
+        with pytest.raises(Invalid) as exc:
+            hub.create_record(rana, "Part", {"code": "KIT-X", "name": "Kit", "bom": [
+                {"part": f"Part/{pad['id']}", "quantity": q}]})
+        assert any("row 1: quantity must be more than 0" in p.lower() for p in exc.value.problems), exc.value.problems
+    made = hub.create_record(rana, "Part", {"code": "KIT-X", "name": "Kit", "bom": [
+        {"part": f"Part/{pad['id']}", "quantity": "0.001"}]})
+    assert str(made["bom"][0]["quantity"]) == "0.001"
 
 
 def test_a_reference_is_added_only_to_a_record_its_writer_may_read_and_said_alike_whether_it_exists(stock):
@@ -8584,3 +8647,922 @@ def test_a_module_needs_the_version_it_names_of_what_it_builds_on_and_an_upgrade
         put_in_force("kits", "upgrade")
     assert exc.value.problems == ["it no longer has the record type Kit, and there are Kit records"]
     assert hub.module_version("kits") == "2"
+
+
+# ------------------------------------------------------------------------------------- sign-off that holds
+POSTING = '''id = "Posting"
+key = "PST"
+data_class = "clinical"
+reverses = "reversal_of"
+[[link]]
+rel = "see"
+to = ["Posting"]
+[[field]]
+name = "memo"
+type = "string"
+[[field]]
+name = "amount"
+type = "number"
+[[field]]
+name = "reversal_of"
+type = "reference"
+target = ["Posting"]
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "posted"]
+[lifecycle]
+field = "status"
+initial = "draft"
+final = ["posted"]
+[[lifecycle.transition]]
+from = ["draft"]
+to = "posted"
+label = "Post"
+'''
+
+
+def _type(hub, src, tid):
+    hub.approve(M(hub, "dr-amara"), "type", tid, hub.propose("type", M(hub, "rana"), src)["version"])
+
+
+def _posted(hub, who, **data):
+    rec = hub.create_record(who, "Posting", {"memo": "fees", "amount": 120, **data})
+    ref = f"Posting/{rec['id']}"
+    hub.update_record(who, ref, {"status": "posted"})
+    return ref
+
+
+def test_nothing_changes_a_final_record_not_its_workflow_nor_a_signature(hub):
+    """A record in a final state (lifecycle.final) is changed by no one: not a person, not a workflow or the hub's own
+    automation, not an upgrade; it is not linked, converted or started on again. A write that changes nothing
+    writes nothing; a signature on it stays current."""
+    _type(hub, POSTING, "Posting")
+    amara = M(hub, "dr-amara")
+    ref = _posted(hub, amara)
+    versions = hub.record_version(ref)
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises(Invalid, match="a posting that is posted is final: nothing changes it; make a posting "
+                                          "that reverses it"):
+            hub.update_record(who, ref, {"amount": 121})
+        with pytest.raises(Invalid, match="does not move|final"):
+            hub.update_record(who, ref, {"status": "draft"})
+    hub._upgrading = True
+    try:
+        with pytest.raises(Invalid, match="is final"):
+            hub.update_record(HUB_ITSELF, ref, {"memo": "rewritten by an upgrade"})
+    finally:
+        hub._upgrading = False
+    same = hub.update_record(HUB_ITSELF, ref, dict(hub.read_record(amara, ref)))
+    assert same["amount"] == 120 and hub.record_version(ref) == versions  # nothing changed: nothing written
+    hub.sign_record(amara, ref, "I checked it")
+    assert [s["current"] for s in hub.signatures(amara, ref)] == [True]
+    assert hub.engine.start_over_refusal(type("W", (), {"id": "x", "title": "Work"})(), ref) is None  # not its own
+    with pytest.raises(Invalid, match="nothing links or unlinks it"):
+        hub.link(amara, ref, "see", f"Posting/{hub.create_record(amara, 'Posting', {'memo': 'other'})['id']}")
+
+
+def test_no_move_leaves_a_final_state():
+    """A final state is left by no move: a transition from it is refused, one from any state ("*") does not leave it,
+    and where cancelled work leaves a record is not said of it (it stays)."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    with pytest.raises(DefinitionError) as e:
+        schema.parse(POSTING + '[[lifecycle.transition]]\nfrom = ["posted"]\nto = "draft"\n')
+    assert any("nothing moves a record out of 'posted', which is final" in p for p in e.value.problems)
+    rt = schema.parse(POSTING.replace('choices = ["draft", "posted"]', 'choices = ["draft", "posted", "void"]')
+                      + '[[lifecycle.transition]]\nfrom = ["*"]\nto = "void"\n')
+    assert rt.transition("draft", "void") and rt.transition("posted", "void") is None
+    assert "posted" in rt.lifecycle["locked"] and rt.is_final("posted")
+    with pytest.raises(DefinitionError) as e:
+        schema.parse(POSTING + '[lifecycle.abandoned]\nposted = "draft"\n')
+    assert any("'posted' is final" in p for p in e.value.problems)
+
+
+def test_a_final_record_is_corrected_by_one_record_that_reverses_it(hub):
+    """A final record is corrected by a new record of its type that reverses it (``reverses``): it reverses one
+    that is final, that no other record reverses, and which one it reverses never changes. The core copies the
+    record into the reversing one's form; what the pack's practice changes in it (the sign) is the pack's."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    _type(hub, POSTING, "Posting")
+    amara = M(hub, "dr-amara")
+    ref = _posted(hub, amara)
+    draft = f"Posting/{hub.create_record(amara, 'Posting', {'memo': 'not yet'})['id']}"
+    with pytest.raises(Invalid, match="a posting reverses one that is final"):
+        hub.create_record(amara, "Posting", {"memo": "undo", "reversal_of": {"reference": draft}})
+    rev = hub.create_record(amara, "Posting", {"memo": "undo", "amount": -120, "reversal_of": {"reference": ref}})
+    rref = f"Posting/{rev['id']}"
+    with pytest.raises(Invalid, match="is reversed already, by"):
+        hub.create_record(amara, "Posting", {"memo": "again", "reversal_of": ref})
+    with pytest.raises(Invalid, match="is said when it is made, and never changes"):
+        hub.update_record(amara, rref, {"reversal_of": None})
+    hub.update_record(amara, rref, {"status": "posted"})
+    for bad, want in ((POSTING.replace('target = ["Posting"]', 'target = ["Patient"]'), "a record reverses one of its own"),
+                      (POSTING.replace('final = ["posted"]\n', ''), "reverses: a record is reversed once it is final"),
+                      (POSTING.replace('reverses = "reversal_of"', 'reverses = "reversal"'), 'did you mean "reversal_of"')):
+        with pytest.raises(DefinitionError) as e:
+            schema.parse(bad)
+        assert any(want in p for p in e.value.problems), e.value.problems
+
+
+def test_an_upgrade_does_not_convert_a_final_record(hub):
+    """Converting a record to another type (a pack upgrade merging two) rewrites it: a final record keeps its type."""
+    _type(hub, POSTING, "Posting")
+    _type(hub, 'id = "Note3"\nkey = "NT3"\ndata_class = "clinical"\n[[field]]\nname = "memo"\n', "Note3")
+    amara = M(hub, "dr-amara")
+    ref = _posted(hub, amara)
+    with pytest.raises(Invalid, match="nothing changes it, so it keeps its type and is not converted"):
+        hub.convert_record(amara, ref, "Note3", {"memo": "fees"})
+    assert hub.read_record(amara, ref)["status"] == "posted"
+
+
+CHIT = 'id = "Chit"\nkey = "CHT"\ndata_class = "clinical"\n[[field]]\nname = "amount"\ntype = "number"\n'
+FILE = '''id = "Packet"
+key = "PKT"
+data_class = "clinical"
+covers = ["Entry"]
+[[field]]
+name = "title"
+[[field]]
+name = "counted"
+type = "reference"
+target = ["Chit"]
+list = true
+pin = true
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "reviewed", "filed"]
+[lifecycle]
+field = "status"
+initial = "open"
+locked = ["reviewed"]
+final = ["filed"]
+[[lifecycle.transition]]
+from = ["open"]
+to = "reviewed"
+[[lifecycle.transition]]
+from = ["reviewed"]
+to = "open"
+[[lifecycle.transition]]
+from = ["reviewed"]
+to = "filed"
+'''
+ENTRY = '''id = "Entry"
+key = "ENT"
+data_class = "clinical"
+part_of = "packet"
+[[field]]
+name = "packet"
+type = "reference"
+target = ["Packet"]
+required = true
+[[field]]
+name = "amount"
+type = "number"
+'''
+
+
+def _packet(hub):
+    _type(hub, CHIT, "Chit")
+    _type(hub, FILE.replace('covers = ["Entry"]\n', ''), "Packet")
+    _type(hub, ENTRY, "Entry")
+    _type(hub, FILE, "Packet")
+    amara = M(hub, "dr-amara")
+    chit = f"Chit/{hub.create_record(amara, 'Chit', {'amount': 10})['id']}"
+    pk = hub.create_record(amara, "Packet", {"title": "2025", "counted": [chit]})
+    return amara, chit, f"Packet/{pk['id']}"
+
+
+def test_a_pin_keeps_the_version_and_hash_of_the_record_it_points_at(hub):
+    """A pinned reference (pin = true) keeps the version and hash of its record as they were when it was given; a
+    later write keeps that pin whatever it says, and only "Use version M" (repin) moves it on."""
+    amara, chit, ref = _packet(hub)
+    pin = hub.read_record(amara, ref)["counted"][0]
+    assert pin["reference"] == chit and pin["version"] == 1 and len(pin["sha256"]) == 64
+    hub.update_record(amara, chit, {"amount": 11})
+    hub.update_record(amara, ref, {"title": "2025 return", "counted": [{"reference": chit, "version": 2, "sha256": "x"}]})
+    assert hub.read_record(amara, ref)["counted"][0] == pin  # kept: nobody writes a pin by hand
+    assert hub.pins_behind(hub.record_type("Packet"), hub.read_record(amara, ref)) == [
+        {"field": "counted", "reference": chit, "version": 1, "now": 2}]
+    hub.repin(amara, ref, "counted")
+    assert hub.read_record(amara, ref)["counted"][0]["version"] == 2
+
+
+def test_a_signature_goes_stale_when_a_pinned_record_or_a_covered_part_changes(hub):
+    """A signature covers what the record pins and the parts its type covers (covers): a change to either leaves it
+    not current. A part its type does not cover leaves it alone."""
+    amara, chit, ref = _packet(hub)
+    line = hub.create_record(amara, "Entry", {"packet": ref, "amount": 5})
+    hub.sign_record(amara, ref, "I reviewed it")
+    assert hub.signatures(amara, ref)[0]["current"]
+    hub.update_record(amara, f"Entry/{line['id']}", {"amount": 6})
+    assert not hub.signatures(amara, ref)[0]["current"]
+    hub.sign_record(amara, ref, "I reviewed it")
+    hub.update_record(amara, chit, {"amount": 12})
+    assert not hub.signatures(amara, ref)[0]["current"]
+
+
+def test_a_pinned_record_s_move_leaves_the_signature_that_covers_it_not_current(hub):
+    """A pinned record is covered as it was, where it was in its lifecycle too: moving it (a slip sent back to be read
+    again) leaves a signature on the record that pins it not current, though none of its fields changed."""
+    _type(hub, CHIT.replace('type = "number"\n', 'type = "number"\n[[field]]\nname = "status"\ntype = "choice"\n'
+                            'choices = ["read", "unread"]\n[lifecycle]\nfield = "status"\ninitial = "read"\n'
+                            '[[lifecycle.transition]]\nfrom = ["read"]\nto = "unread"\n'), "Chit")
+    _type(hub, FILE.replace('covers = ["Entry"]\n', ''), "Packet")
+    amara = M(hub, "dr-amara")
+    chit = f"Chit/{hub.create_record(amara, 'Chit', {'amount': 10})['id']}"
+    ref = f"Packet/{hub.create_record(amara, 'Packet', {'title': '2025', 'counted': [chit]})['id']}"
+    hub.sign_record(amara, ref, "I reviewed it")
+    assert hub.signatures(amara, ref)[0]["current"]
+    hub.move_record(amara, chit, "unread")
+    assert not hub.signatures(amara, ref)[0]["current"]
+
+
+def test_signing_is_refused_while_a_pin_is_behind(hub):
+    """A record is not signed while a record it pins has changed since: its pin is moved on first."""
+    amara, chit, ref = _packet(hub)
+    hub.update_record(amara, chit, {"amount": 11})
+    with pytest.raises(Invalid, match=r"Packet pins CHT-1 at version 1; it is at version 2: update the pin, then sign"):
+        hub.sign_record(amara, ref, "I reviewed it")
+    hub.repin(amara, ref, "counted", chit)
+    assert hub.sign_record(amara, ref, "I reviewed it")["version"]
+
+
+def test_a_signed_move_is_refused_while_a_pin_is_behind(hub):
+    """A move signed on the record page signs what the record pins too: while a pinned record has changed since, the
+    move is refused, like a signature, until the pin is moved on."""
+    amara, chit, ref = _packet(hub)
+    _type(hub, FILE.replace('to = "reviewed"\n', 'to = "reviewed"\nsign = "I reviewed it"\n', 1), "Packet")
+    hub.update_record(amara, chit, {"amount": 11})
+    with pytest.raises(Invalid, match=r"Packet pins CHT-1 at version 1; it is at version 2: update the pin, then sign"):
+        hub.move_record(amara, ref, "reviewed", signature="I reviewed it")
+    assert hub.records.read(*ref.split("/"))["status"] == "open"
+    hub.repin(amara, ref, "counted", chit)
+    hub.move_record(amara, ref, "reviewed", signature="I reviewed it")
+    assert hub.records.read(*ref.split("/"))["status"] == "reviewed"
+
+
+def test_a_covered_part_is_not_added_or_changed_while_its_record_is_locked(hub):
+    """While a record is locked, people do not add or change the parts it covers (its workflow still does); while it
+    is final, no one does."""
+    amara, chit, ref = _packet(hub)
+    line = f"Entry/{hub.create_record(amara, 'Entry', {'packet': ref, 'amount': 5})['id']}"
+    hub.update_record(amara, ref, {"status": "reviewed"})
+    with pytest.raises(Invalid, match="PKT-1 is reviewed: its entries are not added or changed while it is"):
+        hub.update_record(amara, line, {"amount": 6})
+    with pytest.raises(Invalid, match="its entries are not added"):
+        hub.create_record(amara, "Entry", {"packet": ref, "amount": 1})
+    hub.update_record(HUB_ITSELF, line, {"amount": 6})  # a workflow's step still writes it
+    hub.update_record(amara, ref, {"status": "filed"})
+    with pytest.raises(Invalid, match="PKT-1 is filed: its entries"):
+        hub.update_record(HUB_ITSELF, line, {"amount": 7})
+
+
+ACCT = 'id = "Ledger2"\nkey = "LG2"\ndata_class = "clinical"\n[[field]]\nname = "name"\n'
+CLOSE = '''id = "Close"
+key = "CLS"
+data_class = "clinical"
+[closing]
+through = "through"
+states = ["closed"]
+scope = "book"
+[[field]]
+name = "through"
+type = "date"
+required = true
+[[field]]
+name = "book"
+type = "reference"
+target = ["Ledger2"]
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "closed"]
+[lifecycle]
+field = "status"
+initial = "open"
+[[lifecycle.transition]]
+from = ["open"]
+to = "closed"
+[[lifecycle.transition]]
+from = ["closed"]
+to = "open"
+sign = "I reopen this period"
+'''
+TXN = '''id = "Txn"
+key = "TXN"
+data_class = "clinical"
+[period]
+closed_by = "Close"
+date = "on"
+scope = "book"
+[[field]]
+name = "on"
+type = "date"
+required = true
+[[field]]
+name = "book"
+type = "reference"
+target = ["Ledger2"]
+[[field]]
+name = "amount"
+type = "number"
+'''
+
+
+def _books(hub):
+    for src, tid in ((ACCT, "Ledger2"), (CLOSE, "Close"), (TXN, "Txn")):
+        _type(hub, src, tid)
+    amara = M(hub, "dr-amara")
+    a, b = (f"Ledger2/{hub.create_record(amara, 'Ledger2', {'name': n})['id']}" for n in ("A", "B"))
+    return amara, a, b
+
+
+def test_nothing_dated_in_a_closed_period_is_written_by_anyone(hub):
+    """Once a period is closed (a record of its [closing] type in a closing state), nothing dated on or before its
+    last day is written, moved out of it or into it: not by a person, a workflow or the hub. A close reaches only the
+    records of its own scope; a write that changes nothing writes nothing."""
+    amara, a, b = _books(hub)
+    ta = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-01-15', 'book': a, 'amount': 5})['id']}"
+    tb = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-01-15', 'book': b, 'amount': 5})['id']}"
+    feb = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-02-03', 'book': a, 'amount': 5})['id']}"
+    close = f"Close/{hub.create_record(amara, 'Close', {'through': '2026-01-31', 'book': a})['id']}"
+    hub.update_record(amara, close, {"status": "closed"})
+    assert hub.closed_through(hub.record_type("Txn"), hub.read_record(amara, ta)) == "2026-01-31"
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises(Invalid, match=r"a txn dated 2026-01-15 is in a closed period \(closed through 2026-01-31\)"):
+            hub.update_record(who, ta, {"amount": 6})
+        with pytest.raises(Invalid, match="in a closed period"):
+            hub.create_record(who, "Txn", {"on": "2026-01-31", "book": a, "amount": 1})
+        with pytest.raises(Invalid, match="dated 2026-01-20 is in a closed period"):
+            hub.update_record(who, feb, {"on": "2026-01-20"})
+    hub.update_record(amara, tb, {"amount": 6})  # another book's period is open
+    hub.update_record(amara, feb, {"amount": 6})
+    hub.update_record(amara, ta, dict(hub.read_record(amara, ta)))  # nothing changed: nothing written
+    with pytest.raises(Invalid, match="closes a period: nothing changes it until a signed move reopens it"):
+        hub.update_record(amara, close, {"through": "2026-02-28"})
+
+
+def test_a_closed_period_reopens_only_by_a_signed_move(hub):
+    """A close leaves its closing state only by a move its mover signs; then what it closed is written again."""
+    amara, a, _ = _books(hub)
+    ta = f"Txn/{hub.create_record(amara, 'Txn', {'on': '2026-01-15', 'book': a, 'amount': 5})['id']}"
+    close = f"Close/{hub.create_record(amara, 'Close', {'through': '2026-01-31', 'book': a})['id']}"
+    hub.update_record(amara, close, {"status": "closed"})
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises((Invalid, Denied), match="signed|closes a period"):
+            hub.update_record(who, close, {"status": "open"})
+    hub.move_record(amara, close, "open", signature="I reopen this period")
+    assert hub.update_record(amara, ta, {"amount": 6})["amount"] == 6
+
+
+def test_a_period_and_its_close_are_declared_soundly(hub):
+    """[period] names a type with [closing], a required date and the same scope as the close; [closing] names a
+    required date, its states, and a signed move out of each."""
+    from practicehub import schema
+    from practicehub.workflows import DefinitionError
+    for bad, want in ((CLOSE.replace('sign = "I reopen this period"\n', ''), "it reopens a closed period"),
+                      (CLOSE.replace('states = ["closed"]', 'states = ["shut"]'), "'shut' is not one of its states"),
+                      (CLOSE.replace('through = "through"\n', 'through = "thru"\n'), 'did you mean "through"'),
+                      (TXN.replace('required = true\n', '', 1), "on is required"),
+                      (TXN.replace('closed_by = "Close"', 'closed_by = "Txn"'), "does not close its own period")):
+        with pytest.raises(DefinitionError) as e:
+            schema.parse(bad)
+        assert any(want in p for p in e.value.problems), (want, e.value.problems)
+    _type(hub, ACCT, "Ledger2")
+    _type(hub, CLOSE, "Close")
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), TXN.replace('scope = "book"\n', ''))
+    assert any("closes one book at a time" in p for p in e.value.problems)
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), TXN.replace('closed_by = "Close"', 'closed_by = "Ledger2"'))
+    assert any("closes nothing (it has no [closing])" in p for p in e.value.problems)
+
+
+# ------------------------------------------------------------------ exact numbers, tables and checks (phase C)
+BILL = '''id = "Bill"
+key = "BIL"
+data_class = "clinical"
+[[field]]
+name = "memo"
+[[field]]
+name = "amount"
+type = "decimal"
+scale = 2
+unit = "CAD"
+min = 0
+[[field]]
+name = "rate"
+type = "decimal"
+scale = 4
+unit = "%"
+[[field]]
+name = "lines"
+type = "table"
+[[field.column]]
+name = "item"
+type = "reference"
+target = ["Chit"]
+[[field.column]]
+name = "what"
+required = true
+[[field.column]]
+name = "amount"
+type = "decimal"
+scale = 2
+required = true
+'''
+BILL_CHECK = '''[[check]]
+when = "count(record.lines.*) > 0"
+must = "record.amount == sum(record.lines.*.amount)"
+message = "the amount is the sum of its lines"
+'''
+
+
+def _bills(hub, *, check=False):
+    _type(hub, CHIT, "Chit")
+    _type(hub, BILL + (BILL_CHECK if check else ""), "Bill")
+    return M(hub, "dr-amara")
+
+
+def test_an_exact_number_is_kept_with_its_places_in_the_database_the_track_and_a_backup(hub, store, tmp_path):
+    """A decimal field's value is stored exact (Decimal128) and read back with its places (12.30, not 12.3 or the
+    float nearest it); the track still verifies over it, and a backup restores it exactly."""
+    from bson.decimal128 import Decimal128
+    from practicehub import cli
+    amara = _bills(hub)
+    rec = hub.create_record(amara, "Bill", {"memo": "visit", "amount": "12.30", "rate": 0.15})
+    ref = f"Bill/{rec['id']}"
+    got = hub.read_record(amara, ref)
+    assert got["amount"] == Decimal("12.30") and str(got["amount"]) == "12.30" and str(got["rate"]) == "0.1500"
+    raw = hub.db.client.get_database(hub.db.name)["records"].find_one({"_id": ref})
+    assert isinstance(raw["data"]["amount"], Decimal128) and str(raw["data"]["amount"]) == "12.30"
+    assert hub.verify()["ok"]
+    manifest = cli._dump(hub.db, tmp_path / "backup")
+    assert '"$numberDecimal": "12.30"' in (tmp_path / "backup" / "records.jsonl").read_text()
+    cli._load(store, tmp_path / "backup", manifest)
+    back = store.db["records"].find_one({"_id": ref})["data"]
+    assert back["amount"] == Decimal("12.30") and str(back["amount"]) == "12.30" and str(back["rate"]) == "0.1500"
+
+
+def test_block_code_gets_and_gives_exact_numbers():
+    """Python block code is given an exact number as a Decimal and what it gives back as one stays exact."""
+    from practicehub import sandbox
+    out = sandbox.run_code("def run(input):\n    return {'sum': input['a'] + input['b'], 'text': str(input['a'] + input['b'])}",
+                           {"a": Decimal("0.10"), "b": Decimal("0.20")})["output"]
+    assert out == {"sum": Decimal("0.30"), "text": "0.30"} and str(out["sum"]) == "0.30"  # a float would be 0.3000…04
+
+
+def test_an_exact_number_is_rounded_half_up_to_its_places_and_refused_when_it_is_not_one(hub):
+    """A decimal is rounded half up, away from zero, to its field's places; text with grouping commas is read;
+    true and false, NaN, more than 15 digits and words are refused, saying how to write one."""
+    from practicehub import decimals
+    assert str(decimals.to_decimal(12.345, 2)) == "12.35" and str(decimals.to_decimal(-2.345, 2)) == "-2.35"
+    assert str(decimals.to_decimal("1,234.5", 2)) == "1234.50" and str(decimals.to_decimal("-0.001", 2)) == "0.00"
+    for bad, why in ((True, "not true or false"), (float("nan"), "not NaN"), ("1234567890123456", "at most 15 digits"),
+                     ("12,34", "is not a number")):
+        with pytest.raises(ValueError, match=why):
+            decimals.to_decimal(bad, 2)
+    amara = _bills(hub)
+    assert str(hub.create_record(amara, "Bill", {"amount": 12.345})["amount"]) == "12.35"
+    with pytest.raises(Invalid) as e:
+        hub.create_record(amara, "Bill", {"amount": "x"})
+    assert any("'x' is not a number (write it as 1234.50)" in p for p in e.value.problems), e.value.problems
+    with pytest.raises(Invalid) as e:
+        hub.create_record(amara, "Bill", {"amount": "-1"})
+    assert any("Amount" in p for p in e.value.problems), e.value.problems
+
+
+def test_an_exact_number_compares_exactly_and_the_same_one_written_again_changes_nothing(hub):
+    """In a condition a stored 0.10 is 0.1; writing the same decimal again (12.3 over 12.30) changes no field, so a
+    signature over it stays current; a different one is a change."""
+    from practicehub import expr
+    assert expr.holds("record.amount == 0.1", {"record": {"amount": Decimal("0.10")}})
+    assert expr.holds("record.amount > 12.29 and record.amount < 12.31", {"record": {"amount": Decimal("12.30")}})
+    amara = _bills(hub)
+    ref = f"Bill/{hub.create_record(amara, 'Bill', {'amount': '12.30'})['id']}"
+    hub.sign_record(amara, ref, "I checked it")
+    hub.update_record(amara, ref, {"amount": 12.3})
+    hub.update_record(amara, ref, {"amount": "12.300"})
+    changed = [ev["data"]["changed"] for ev in hub.track.list(limit=50)
+               if ev["subject"] == ref and ev["action"] == "record.updated"]
+    assert changed == [[], []] and [s["current"] for s in hub.signatures(amara, ref)] == [True]
+    hub.update_record(amara, ref, {"amount": "12.31"})
+    assert [s["current"] for s in hub.signatures(amara, ref)] == [False]
+
+
+def test_an_exact_number_reaches_every_surface_as_its_exact_text(hub):
+    """Search finds a decimal by its exact text; JSON, CSV and MCP give it as that text (12.30); FHIR, whose decimal
+    is a JSON number, gets a number."""
+    from practicehub import decimals, export, mcp
+    amara = _bills(hub)
+    rec = hub.create_record(amara, "Bill", {"memo": "visit", "amount": "12.30",
+                                             "lines": [{"what": "a", "amount": 12}, {"what": "b", "amount": "0.30"}]})
+    ref = f"Bill/{rec['id']}"
+    assert rec["id"] in [r["id"] for r in hub.search_records(amara, "Bill", text="12.30")]
+    body = lambda x: x.body.decode() if isinstance(x.body, bytes) else x.body  # noqa: E731
+    js = json.loads(body(export.record(hub, amara, ref, "json")))
+    assert js["amount"] == "12.30" and [r["amount"] for r in js["lines"]] == ["12.00", "0.30"]
+    assert "12.30" in body(export.records_list(hub, amara, "Bill", "csv"))
+    words = dict(export.record_rows(hub, amara, hub.record_type("Bill"), hub.read_record(amara, ref)))
+    assert words["Amount"] == "12.30 CAD" and words["Lines"] == "2 rows"
+    out = mcp.call_tool(hub, "practice", amara, "read_bill", {"id": rec["id"]})
+    assert not out["isError"], out
+    assert json.loads(json.dumps(out["structuredContent"], default=decimals.jsonable))["record"]["amount"] == "12.30"
+    fhir = export.fhir_resource(hub, hub.record_type("ChargeItem"), {"id": "c1", "priceOverride": {"value": Decimal("12.30")}})
+    assert fhir["priceOverride"]["value"] == 12.3 and type(fhir["priceOverride"]["value"]) is float
+
+
+def test_a_decimal_is_asked_of_a_model_as_a_number_and_kept_exact_at_its_places():
+    """A model is asked for a decimal as a JSON number (a local model's structured output leaves a string with a
+    pattern empty); what it answers is kept exactly at the field's places, to the 15 digits a decimal may have."""
+    from practicehub import fields as fieldmod
+    spec = [{"name": "amount", "label": "Amount", "type": "decimal", "scale": 2, "required": True},
+            {"name": "rate", "label": "Rate", "type": "decimal", "scale": 4}]
+    schema = fieldmod.json_schema(spec)
+    assert schema["properties"]["amount"] == {"type": "number"} and schema["required"] == ["amount"]
+    got = fieldmod.coerce(spec, json.loads('{"amount": 48250.00, "rate": 0.1400}'))
+    assert got == {"amount": Decimal("48250.00"), "rate": Decimal("0.1400")}
+    assert str(got["amount"]) == "48250.00" and str(got["rate"]) == "0.1400"
+    assert fieldmod.coerce(spec, {"amount": 1234567890123.45})["amount"] == Decimal("1234567890123.45")
+    assert fieldmod.coerce(spec, {"amount": "48,250.00"})["amount"] == Decimal("48250.00")
+
+
+def test_a_condition_adds_multiplies_and_totals_exactly():
+    """Conditions do + - * / exactly (0.1 + 0.2 is 0.3), in brackets too; a whole number with a whole number stays
+    one. Anything over a missing value or text is null, and so is dividing by zero. sum, min, max and count read
+    every item of a list, ``it`` each one: a sum skips blanks and is 0 over nothing; min and max of nothing are null."""
+    from practicehub import expr
+    assert expr.holds("0.1 + 0.2 == 0.3", {}) and expr.value("10 / 4", {}) == Decimal("2.5")
+    assert expr.value("7 - 2 * 3", {}) == 1 and expr.value("(7 - 2) * 3", {}) == 15 and type(expr.value("2 + 3", {})) is int
+    assert expr.value("-record.a", {"record": {"a": 2}}) == -2 and expr.value("round(10 / 3, 2)", {}) == Decimal("3.33")
+    assert expr.value("record.x + 1", {"record": {}}) is None and expr.value("record.t * 2", {"record": {"t": "x"}}) is None
+    assert expr.value("10 / 0", {}) is None and not expr.holds("10 / 0 > 1", {})
+    lines = {"record": {"l": [{"a": 1.1}, {}, {"a": 2}, {"a": "x"}]}}
+    assert expr.value("sum(record.l.*.a)", lines) == Decimal("3.1") and expr.value("max(record.l.*.a)", lines) == 2
+    assert expr.value("sum(record.l.*.a)", {"record": {"l": []}}) == 0
+    assert expr.value("min(record.l.*.a)", {"record": {"l": []}}) is None
+    assert expr.value("count(record.l.*, it.a > 1)", {"record": {"l": [{"a": 1}, {"a": 2}, {"a": 3}]}}) == 2
+    assert expr.value("sum(record.l.*, it.q * it.p)", {"record": {"l": [{"q": 2, "p": 1.25}, {"q": 3, "p": 0.1}]}}) \
+        == Decimal("2.80")
+    assert expr.paths("sum(record.lines.*.amount) == record.amount") == ["record.lines.*.amount", "record.amount"]
+    assert expr.paths("count(parts.Point.*, it.record.status != 'closed') == 0") == ["parts.Point.*",
+                                                                                    "parts.Point.*.record.status"]
+    with pytest.raises(expr.ExprError, match=re.escape("read it with sum(), count(), min() or max()")):
+        expr.check("record.l.*.a > 1")
+
+
+def test_a_date_shift_still_works_an_unquoted_date_is_refused_and_a_dashed_name_is_one_name():
+    """``run.today + 30d`` moves a date as before; 2025-01-31 unquoted would be a sum, so it is refused, saying to
+    quote it; ``a-b`` is still one name, ``a - b`` a difference."""
+    from practicehub import expr
+    assert expr.value("run.today + 30d", {"run": {"today": "2026-01-31"}}) == "2026-03-02"
+    with pytest.raises(expr.ExprError, match="a date is written in quotes: '2025-01-31'"):
+        expr.check("record.on > 2025-01-31")
+    ctx = {"a-b": 3, "a": 5, "b": 1}
+    assert expr.value("a-b", ctx) == 3 and expr.value("a - b", ctx) == 4
+
+
+def test_a_types_check_holds_on_every_write_whoever_makes_it(hub):
+    """A type's [[check]] is run on every write once its fields are sound, by whoever writes: a person, a workflow
+    or the hub; it applies only while its ``when`` holds, and the refusal is the pack's message."""
+    amara = _bills(hub, check=True)
+    lines = [{"what": "a", "amount": 0.1}, {"what": "b", "amount": 0.2}]
+    ref = f"Bill/{hub.create_record(amara, 'Bill', {'amount': '0.30', 'lines': lines})['id']}"
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises(Invalid) as e:
+            hub.create_record(who, "Bill", {"amount": "0.31", "lines": lines})
+        assert "Bill: the amount is the sum of its lines" in e.value.problems, e.value.problems
+        with pytest.raises(Invalid) as e:
+            hub.update_record(who, ref, {"amount": "0.40"})
+        assert "Bill: the amount is the sum of its lines" in e.value.problems
+    assert hub.update_record(amara, ref, {"amount": "0.60", "lines": lines + [{"what": "c", "amount": "0.30"}]})
+    assert hub.create_record(amara, "Bill", {"amount": "5.00"})  # no lines: its when does not hold
+
+
+def test_a_types_check_reads_fields_by_their_names_and_today(hub):
+    """A check reads a field by its name wherever its path puts it, and ``today``."""
+    _type(hub, '''id = "Promise"
+key = "PRM"
+data_class = "clinical"
+[[field]]
+name = "due"
+type = "date"
+[[field]]
+name = "amount"
+path = "money.value"
+type = "decimal"
+scale = 2
+[[check]]
+must = "record.due == null or record.due >= today"
+message = "a promise is due today or later"
+[[check]]
+must = "record.amount == null or record.amount > 0"
+message = "a promise is for more than nothing"
+''', "Promise")
+    amara = M(hub, "dr-amara")
+    with pytest.raises(Invalid) as e:
+        hub.create_record(amara, "Promise", {"due": "2000-01-01", "money": {"value": 0}})
+    assert e.value.problems == ["Promise: a promise is due today or later", "Promise: a promise is for more than nothing"]
+    assert str(hub.create_record(amara, "Promise", {"due": "2999-01-01", "money": {"value": 3}})["money"]["value"]) == "3.00"
+
+
+DOSSIER = '''id = "Dossier"
+key = "DOS"
+data_class = "visits"
+[[field]]
+name = "title"
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "done"]
+[lifecycle]
+field = "status"
+initial = "open"
+[[lifecycle.transition]]
+from = ["open"]
+to = "done"
+label = "Close it"
+'''
+DOSSIER_CHECKS = '''[[lifecycle.transition.check]]
+must = "count(parts.Point.*, it.record.status != 'closed') == 0"
+message = "every review point is closed"
+[[lifecycle.transition.check]]
+must = "count(parts.Point.*, 'I checked it' in it.signed) == count(parts.Point.*)"
+message = "every review point is signed"
+'''
+POINT = '''id = "Point"
+key = "PNT"
+data_class = "clinical"
+part_of = "dossier"
+[[field]]
+name = "dossier"
+type = "reference"
+target = ["Dossier"]
+required = true
+[[field]]
+name = "note"
+[[field]]
+name = "status"
+type = "choice"
+choices = ["open", "closed"]
+'''
+
+
+def _dossier(hub):
+    _type(hub, DOSSIER, "Dossier")
+    _type(hub, POINT, "Point")
+    _type(hub, DOSSIER + DOSSIER_CHECKS, "Dossier")
+    amara, jo = M(hub, "dr-amara"), M(hub, "jo")
+    d = f"Dossier/{hub.create_record(jo, 'Dossier', {'title': 'Year end'})['id']}"
+    p = f"Point/{hub.create_record(amara, 'Point', {'dossier': d, 'note': 'check the totals'})['id']}"
+    return amara, jo, d, p
+
+
+def test_a_move_waits_until_every_part_is_closed_and_signed_whoever_moves_it(hub):
+    """A move's checks ([[lifecycle.transition.check]]) refuse it, in the pack's words, whoever moves the record;
+    over its parts, it waits until none is open and each is signed, and a signed part changed since blocks it
+    again. The parts are read for the hub: the mover need not be able to read them, and is told only the message."""
+    amara, jo, d, p = _dossier(hub)
+    both = "to move a dossier to done: every review point is closed; every review point is signed"
+    with pytest.raises(Denied, match=re.escape(both)):
+        hub.move_record(jo, d, "done")
+    with pytest.raises(Invalid, match=re.escape(both)):
+        hub.update_record(HUB_ITSELF, d, {"status": "done"})
+    with pytest.raises(Denied):
+        hub.read_record(jo, p)
+    assert [(m["to"], m["why"]) for m in hub.transition_screen(jo, d)["may_not"]] == [("done", both)]
+    hub.update_record(amara, p, {"status": "closed"})
+    with pytest.raises(Denied, match="to move a dossier to done: every review point is signed$"):
+        hub.move_record(jo, d, "done")
+    hub.sign_record(amara, p, "I checked it")
+    hub.update_record(amara, p, {"note": "checked the totals"})  # its signature no longer covers it
+    with pytest.raises(Denied, match="every review point is signed"):
+        hub.move_record(jo, d, "done")
+    hub.sign_record(amara, p, "I checked it")
+    assert hub.move_record(jo, d, "done")["status"] == "done"
+
+
+def test_a_moves_check_reads_only_parts_of_its_own_record(hub):
+    """A move's check reads parts of a type whose part_of points at this one; any other is refused."""
+    _type(hub, DOSSIER, "Dossier")
+    _type(hub, POINT.replace('part_of = "dossier"\n', ''), "Point")
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), DOSSIER + DOSSIER_CHECKS)
+    assert any("lifecycle.transition to 'done': check: parts.Point: a point is not part of a dossier" in x
+               for x in e.value.problems), e.value.problems
+
+
+JOB_CHECKED = JOB.replace('requires = ["outcome"]\n', 'requires = ["outcome"]\n[[lifecycle.transition.check]]\n'
+                          'must = "record.hours == null or record.hours <= 8"\nmessage = "a job takes at most 8 hours"\n')
+
+
+def test_a_task_that_would_make_a_refused_move_is_not_finished(hub):
+    """A person's step that makes a move is not finished when the move's check would refuse it (with what the answer
+    writes): the step stays open and the record where it was. The check is the transition's, so the workflow's
+    edge has it too; the move made by hand is refused the same way."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    hub.approve(amara, "type", "Job", hub.propose("type", rana, JOB_CHECKED.format(top=""), "jobs")["version"])
+    hub.approve_workflow(amara, "job-flow", hub.propose_workflow(rana, JOB_FLOW, "jobs")["version"])
+    walked = JOB_CHECKED.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }')
+    hub.approve(amara, "type", "Job", hub.propose("type", rana, walked, "walked")["version"])
+    assert hub.record_type("Job").transition("doing", "done")["check"][0]["message"] == "a job takes at most 8 hours"
+    ref, run = _job(hub)
+    hub.move_record(amara, ref, "doing")
+    with pytest.raises(Invalid, match="to move a job to done: a job takes at most 8 hours"):
+        hub.move_record(amara, ref, "done", {"outcome": "Fixed", "hours": 12})
+    with pytest.raises(Invalid, match=re.escape("Do the work is not done yet: to move a job to done: a job takes at "
+                                                "most 8 hours")):
+        hub.engine.complete(amara, run["item"], {"outcome": "Fixed", "hours": 12})
+    assert hub.engine.run(run["id"])["steps"]["work"]["state"] == "active"
+    assert hub.records.read(*ref.split("/"))["status"] == "doing"
+    hub.engine.complete(amara, run["item"], {"outcome": "Fixed", "hours": 3})
+    assert hub.records.read(*ref.split("/"))["status"] == "done"
+
+
+def test_every_row_of_a_table_is_checked_rounded_and_its_reference_column_links(hub):
+    """A table's rows are each checked against its columns (a missing required cell, a cell that is no column, a
+    reference to nothing), its decimal columns rounded in every row, and a reference column links its record."""
+    amara = _bills(hub)
+    chit = f"Chit/{hub.create_record(amara, 'Chit', {'amount': 1})['id']}"
+    for lines, want in (([{"what": "a", "amount": 1}, {"amount": 2}], "Bill: Lines, row 2: What is required"),
+                        ([{"what": "a", "amount": 1, "colour": "red"}], "Bill: Lines, row 1: colour is not a column"),
+                        ([{"what": "a", "amount": "x"}],
+                         "Bill: Lines, row 1: Amount: 'x' is not a number (write it as 1234.50)"),
+                        ("rows", "Bill: Lines: expected rows (a list of {column: value})")):
+        with pytest.raises(Invalid) as e:
+            hub.create_record(amara, "Bill", {"lines": lines})
+        assert want in e.value.problems, (want, e.value.problems)
+    with pytest.raises(Invalid) as e:
+        hub.create_record(amara, "Bill", {"lines": [{"what": "a", "amount": 1, "item": "Chit/nope"}]})
+    assert any("points at Chit/nope, which does not exist" in x for x in e.value.problems), e.value.problems
+    rec = hub.create_record(amara, "Bill", {"lines": [{"what": "a", "amount": "1.005", "item": chit},
+                                                       {"what": "b", "amount": 2.344}]})
+    assert [str(r["amount"]) for r in rec["lines"]] == ["1.01", "2.34"]
+    assert {"rel": "item", "ref": f"Bill/{rec['id']}"} in hub.linked(amara, chit)
+
+
+# ---------------------------------------------------------------------------------------------- a view's numbers
+def test_a_view_s_numbers_add_up_only_what_its_reader_may_read(hub):
+    """A view's numbers are worked out in the database over the records the reader may read (``records_numbers``):
+    a type, a reference's target or a field in a class they do not read gives "needs access", never a number; a
+    value a subject withheld from them is not added up; a reference followed shows what its record withholds as
+    none."""
+    from test_view_numbers import _account, _lockbox as _directive, _patients, _sale, _show, _types
+    _types(hub)
+    p1, p2 = _patients(hub)
+    _directive(hub, p1, withhold_classes=["clinical", "billing"],
+               allow_members=[{"reference": "Practitioner/dr-amara"}])
+    east, west = _account(hub, p1, "east"), _account(hub, p2, "west")
+    _sale(hub, memo="hers", patient=p1, account=west, amount="5.00")
+    _sale(hub, memo="his", patient=p2, account=east, amount="7.00")
+    total = dict(kind="count", measure="sum(amount)")
+    assert _show(hub, "rana", **total)["note"] == "needs access to clinical records"
+    assert _show(hub, "noor", kind="chart", group_by="account.region")["note"] == "needs access to billing records"
+    assert _show(hub, "noor", kind="count", measure="sum(margin)")["note"] == "needs access to billing records"
+    assert _show(hub, "dr-amara", **total)["number"] == Decimal("12.00")
+    assert _show(hub, "noor", **total)["number"] == Decimal("7.00")
+    assert _show(hub, "dr-liam", **total)["number"] == Decimal("7.00")
+    by_region = dict(kind="chart", measure="sum(amount)", group_by="account.region")
+    assert _show(hub, "dr-amara", **by_region)["counts"] == {"East": Decimal("7.00"), "West": Decimal("5.00")}
+    # hers: her sale names no account he may see; his: the account is hers, and she withheld it
+    assert _show(hub, "dr-liam", **by_region)["counts"] == {"none": Decimal("7.00")}
+
+
+def test_the_sign_offs_a_view_lists_are_a_person_s_on_records_the_reader_may_read(hub):
+    """The sign-offs a view lists (``views.signature_rows``) are people's signatures on records of types the reader
+    reads; one on a record withheld from them at its subject's request is not listed, and the note says so."""
+    from test_view_numbers import _lockbox as _directive, _patients, _sale, _show, _types
+    _types(hub)
+    p1, p2 = _patients(hub)
+    _directive(hub, p1, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-amara"}])
+    hers, his = _sale(hub, memo="hers", patient=p1), _sale(hub, memo="his", patient=p2)
+    for ref in (hers, his):
+        hub.sign_record(M(hub, "dr-amara"), ref, "checked")
+    w = dict(kind="table", source="signatures", type="Sale", columns=["by", "record", "current"])
+    assert {r["record"] for r in _show(hub, "dr-amara", **w)["rows"]} == {hers, his}
+    noor = _show(hub, "noor", **w)
+    assert [r["record"] for r in noor["rows"]] == [his]
+    assert noor["note"] == "1 on records withheld from you at their subject's request"
+    assert _show(hub, "rana", **w)["note"] == "needs access to clinical records"
+    every = _show(hub, "rana", kind="table", source="signatures", columns=["record"])  # every type rana reads
+    assert not {hers, his} & {r["record"] for r in every["rows"]}
+    with pytest.raises(Denied):
+        hub.sign_record(M(hub, "scribe-agent"), his, "checked")
+
+
+# ------------------------------------------------------------------ a move's stamp: who made it and when
+STAMPED_JOB = JOB.replace(
+    "[[signature]]\n",
+    '[[field]]\nname = "finished_by"\nlabel = "Finished by"\ntype = "member"\n'
+    '[[field]]\nname = "finished_on"\nlabel = "Finished on"\ntype = "date"\n'
+    '[[field]]\nname = "approved_by"\nlabel = "Approved by"\ntype = "member"\n'
+    '[[field]]\nname = "approved_at"\nlabel = "Approved at"\ntype = "datetime"\n[[signature]]\n', 1).replace(
+    'requires = ["outcome"]\n', 'requires = ["outcome"]\nstamp = ["finished_by", "finished_on"]\n', 1).replace(
+    'sign = "Approved"\n', 'sign = "Approved"\nstamp = ["approved_by", "approved_at"]\n'
+    '[[lifecycle.transition.check]]\nmust = "record.approved_by != record.finished_by"\n'
+    'message = "whoever finished a job does not approve it"\n', 1)
+# the same job's workflow, its edge moving the record once the work is done (the work is not itself the move)
+ARRIVING_JOB_FLOW = JOB_FLOW.replace('id = "finished"\nfrom = "open"\nto = "done"\n',
+                                     'id = "finished"\nfrom = "open"\nto = "done"\n'
+                                     'when = "work.hours == null or work.hours >= 0"\n', 1)
+
+
+def _stamped_jobs(hub, flow=None):
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    hub.approve(amara, "type", "Job", hub.propose("type", rana, STAMPED_JOB.format(top=""), "jobs")["version"])
+    if flow:
+        hub.approve_workflow(amara, "job-flow", hub.propose_workflow(rana, flow, "jobs")["version"])
+        walked = STAMPED_JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }')
+        hub.approve(amara, "type", "Job", hub.propose("type", rana, walked, "walked")["version"])
+
+
+def test_a_moves_stamp_names_who_made_it_and_when_and_nothing_else_writes_it(hub):
+    """A move's ``stamp`` fields are set by that move as it is made, in its own write: a member field to who made it,
+    a date to the practice's today, a time to now (to the second). A signature that makes the move covers them and
+    the move's checks read them, so a check keeps whoever finished a job from approving it. Nobody writes a stamped
+    field by hand, making the record or changing it."""
+    from datetime import datetime
+    _stamped_jobs(hub)
+    rt = hub.record_type("Job")
+    assert {rt.field(n)["by"] for n in ("finished_by", "finished_on", "approved_by", "approved_at")} == {"workflow"}
+    amara, liam = M(hub, "dr-amara"), M(hub, "dr-liam")
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    hub.move_record(liam, ref, "doing")
+    hub.move_record(liam, ref, "done", {"outcome": "Fixed", "hours": 2})
+    rec = hub.records.read(*ref.split("/"))
+    assert rec["finished_by"] == "dr-liam" and rec["finished_on"] == hub.engine.now().date().isoformat()
+    hub.move_record(amara, ref, "approved", signature="Approved")
+    rec = hub.records.read(*ref.split("/"))
+    at = datetime.fromisoformat(rec["approved_at"])
+    assert rec["approved_by"] == "dr-amara" and at.microsecond == 0 and at.tzinfo is None
+    assert abs((hub.engine.now() - at).total_seconds()) < 120
+    assert hub.signatures(amara, ref)[0]["current"], "the signature covers what its move stamped"
+
+    other = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the sink'})['id']}"
+    hub.move_record(amara, other, "doing")
+    hub.move_record(amara, other, "done", {"outcome": "Fixed"})
+    with pytest.raises(Denied, match="to move a job to approved: whoever finished a job does not approve it"):
+        hub.move_record(amara, other, "approved", signature="Approved")
+    assert hub.records.read(*other.split("/"))["status"] == "done"
+    said = re.escape("Finished by is set by the move that stamps it (Finish), not written by hand")
+    with pytest.raises(Invalid, match=said):
+        hub.create_record(amara, "Job", {"title": "Done already", "finished_by": "dr-liam"})
+    with pytest.raises(Invalid, match=said):
+        hub.update_record(amara, other, {"finished_by": "dr-liam"})
+    assert hub.records.read(*other.split("/"))["finished_by"] == "dr-amara"
+
+
+@pytest.mark.parametrize("flow", [JOB_FLOW, ARRIVING_JOB_FLOW], ids=["the-work-is-the-move", "the-edge-moves-after"])
+def test_a_workflows_move_is_stamped_with_whoever_did_the_work_it_follows(hub, flow):
+    """A move its workflow makes is stamped with a person, never the workflow: whoever did the step that is the move
+    or, when the edge makes the move once the work on the state is done, whoever did that work."""
+    from practicehub import workflows
+    makes = next(s for s in workflows.parse(flow).steps if s.state == "done")
+    assert makes.kind == ("task" if flow is JOB_FLOW else "automation")
+    _stamped_jobs(hub, flow)
+    liam = M(hub, "dr-liam")
+    ref = f"Job/{hub.create_record(liam, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    run = _own_run(hub, ref, "job-flow")
+    hub.move_record(liam, ref, "doing")
+    if flow is not JOB_FLOW:  # the edge's move writes nothing the work answered: what it requires is on the record
+        hub.update_record(liam, ref, {"outcome": "Fixed"})
+    hub.engine.complete(liam, run["item"], {"outcome": "Fixed", "hours": 3})
+    rec = hub.records.read(*ref.split("/"))
+    assert rec["status"] == "done" and rec["finished_by"] == "dr-liam", rec
+    assert rec["finished_on"] == hub.engine.now().date().isoformat()
+
+
+# ------------------------------------------------------------------ unique over a reference
+TAG = """id = "Tag"
+data_class = "visits"
+unique = [["gauge", "side"]]
+[[field]]
+name = "gauge"
+type = "reference"
+target = ["Gauge"]
+required = true
+[[field]]
+name = "side"
+required = true
+"""
+
+
+def test_unique_over_a_reference_compares_the_record_it_names_however_it_is_written(hub):
+    """A ``unique`` key with a reference in it compares the record the reference names: "Gauge/1" and
+    {reference: "Gauge/1", display: ...} (a form's pick, with its name) are one key; another gauge is another."""
+    liam = M(hub, "dr-liam")
+    _type(hub, GAUGE.replace("{top}", ""), "Gauge")
+    _type(hub, TAG, "Tag")
+    g = f"Gauge/{hub.create_record(liam, 'Gauge', {'code': 'GL-M'})['id']}"
+    other = f"Gauge/{hub.create_record(liam, 'Gauge', {'code': 'GZ-10'})['id']}"
+    hub.create_record(liam, "Tag", {"gauge": {"reference": g, "display": "GL-M"}, "side": "front"})
+    for again in (g, {"reference": g}, {"reference": g, "display": "another name"}):
+        with pytest.raises(Invalid, match="not unique") as exc:
+            hub.create_record(liam, "Tag", {"gauge": again, "side": "Front"})
+        assert any(p.startswith(f"Gauge and Side: another tag already has {g}, Front") for p in exc.value.problems), \
+            exc.value.problems
+    hub.create_record(liam, "Tag", {"gauge": other, "side": "front"})
+    assert len(hub.records.search("Tag", limit=None)) == 2

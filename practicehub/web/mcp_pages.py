@@ -17,6 +17,7 @@ import urllib.parse
 
 from .. import mcp
 from ..hub import Denied, Invalid, NotFound
+from .. import decimals
 
 e = html.escape
 JSON = {"Content-Type": "application/json"}
@@ -24,7 +25,7 @@ MAX_BODY = 4 * 1024 * 1024
 
 
 def _rpc(code: int, message: str, mid=None) -> bytes:
-    return json.dumps(mcp._err(mid, code, message)).encode()
+    return json.dumps(mcp._err(mid, code, message), default=decimals.jsonable).encode()
 
 
 class McpPages:
@@ -94,7 +95,7 @@ class McpPages:
         if notes and "text/event-stream" in headers.get("accept", ""):
             h["Content-Type"] = "text/event-stream"
             h["Cache-Control"] = "no-cache"
-            stream = "".join(f"event: message\ndata: {json.dumps(m)}\n\n" for m in [*notes, resp])
+            stream = "".join(f"event: message\ndata: {json.dumps(m, default=decimals.jsonable)}\n\n" for m in [*notes, resp])
             return 200, h, stream.encode()
         return 200, h, json.dumps(resp, default=str).encode()
 
@@ -250,9 +251,9 @@ class McpPages:
                 f'<label>The AI app or program *<select name="client" required>{apps}</select></label>'
                 '<button>Issue an MCP token</button></form>'
                 "<p>Then, over HTTP:</p>"
-                f"<pre>{e(json.dumps(http_cfg, indent=2))}</pre>"
+                f"<pre>{e(json.dumps(http_cfg, indent=2, default=decimals.jsonable))}</pre>"
                 "<p>Or through the command line bridge, for clients that speak stdio:</p>"
-                f"<pre>{e(json.dumps(stdio_cfg, indent=2))}</pre></div>")
+                f"<pre>{e(json.dumps(stdio_cfg, indent=2, default=decimals.jsonable))}</pre></div>")
 
     def post_connection_token(self, req):
         f, me = self.form(req), req["me"]

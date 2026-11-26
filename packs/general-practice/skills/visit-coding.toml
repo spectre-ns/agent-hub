@@ -22,7 +22,8 @@ max = 4
 
 [[output]]
 name = "amount"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 min = 0
 

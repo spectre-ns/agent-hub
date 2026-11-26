@@ -48,7 +48,8 @@ by = "workflow"
 
 [[field]]
 name = "quantity"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 
 [[field]]
@@ -102,32 +103,29 @@ by = "workflow"
 
 [[field]]
 name = "contains"
-type = "list"
-rows = true
+type = "table"
 by = "workflow"
 help = "the lots and serials its build put into it"
 
-[[field]]
-name = "contained_lot"
+[[field.column]]
+name = "lot"
 label = "Stock"
-path = "contains.*.lot"
 type = "reference"
 target = ["StockItem"]
 rel = "contains"
 graph = { down = "Made from", up = "Went into" }
-by = "workflow"
 
-[[field]]
-name = "contained_quantity"
+[[field.column]]
+name = "quantity"
 label = "Quantity used"
-path = "contains.*.quantity"
-type = "number"
-by = "workflow"
+type = "decimal"
+scale = 3
 help = "how much of it went into this one; empty when the build shared it among several it made"
 
 [[field]]
 name = "count_baseline"
 label = "Count baseline"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 help = "what counts are measured against: set when it was received or last signed for, so small counts cannot add up to a write-off nobody signed"

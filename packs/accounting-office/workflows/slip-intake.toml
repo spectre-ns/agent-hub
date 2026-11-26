@@ -31,7 +31,7 @@ skill = "slip-extract"
 risk = "low"
 due = "1d"
 people_role = "staff"
-context = ["record:documents"]
+context = ["record:client-documents"]
 
 [[edge]]
 id = "read"

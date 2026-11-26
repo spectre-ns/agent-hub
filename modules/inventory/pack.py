@@ -1,9 +1,11 @@
-"""Inventory: parts, the lots that hold them, where they are kept, and the ledger of stock moves (after InvenTree).
+"""Inventory: parts and their bills of materials, the lots that hold them, where they are kept, and the ledger of
+stock moves and builds (after InvenTree).
 
 A lot (``StockItem``: one quantity of one part in one place) is never written by a person. Only ``inventory.post``
-changes one, in the step that posts a stock move, and it writes on the move what it changed (``entries``: each lot's
-quantity, status and place before and after). So a lot's quantity is always what its posted moves left it, and the
-part's totals are summed from its lots in that same step.
+changes one, in the step that posts a stock move or a build, and it writes on the move or build what it changed
+(``entries``: each lot's quantity, status and place before and after). So a lot's quantity is always what its posted
+moves left it, and the part's totals are summed from its lots in that same step. A build takes its assembly's bill of
+materials from component lots and makes the assembly's lot or serials, each knowing what went into it.
 
 What needs a signature first is the inventory policy in force (``inventory.policy``): basic (a corner store: nothing
 is signed), tracked (a small clinic: adjustments, write-offs and releases are signed) or regulated (ISO 13485). What is
@@ -16,6 +18,7 @@ A refusal is a result, not an error: the move goes back to its author with the r
 from __future__ import annotations
 
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 LEVELS = ("basic", "tracked", "regulated")
 SIGNOFF = ("none", "self", "second")
@@ -68,7 +71,7 @@ def _looser(k: str, a, b) -> bool:
     if k == "fefo":
         return FEFO.index(a) < FEFO.index(b)
     if k in ("count_tolerance_pct", "over_receipt_pct"):
-        return b is not None and (a is None or float(a) > float(b))
+        return b is not None and (a is None or _dec(a) > _dec(b))
     if k == "default_tracking":
         return False
     return bool(b) and not a
@@ -96,7 +99,7 @@ def _show(v) -> str:
         return "on"
     if v is False:
         return "off"
-    return "none" if v is None else (f"{v:g}%" if isinstance(v, (int, float)) else str(v))
+    return "none" if v is None else (f"{_say(v)}%" if isinstance(v, (int, float, Decimal)) else str(v))
 
 
 def policy_in_force(hub) -> dict:
@@ -118,9 +121,49 @@ def _last_in_force(hub, ref: str) -> dict | None:
 
 
 # ------------------------------------------------------------------ records the ledger reads
-def _num(x) -> float | int:
-    v = round(float(x or 0), 6)
-    return int(v) if v.is_integer() else v
+PLACES = Decimal("0.001")  # a quantity's places: the types keep 3
+ZERO = Decimal("0.000")
+
+
+def _dec(v) -> Decimal:
+    return v if isinstance(v, Decimal) else Decimal(str(v))
+
+
+def _qty(x) -> Decimal:
+    """A quantity, exact to its 3 places (nothing is 0)."""
+    if x in (None, ""):
+        return ZERO
+    try:
+        d = _dec(x)
+    except (InvalidOperation, ValueError):
+        raise Refused(f"{x!r} is not a quantity") from None
+    if not d.is_finite():
+        raise Refused(f"{x!r} is not a quantity")
+    return d.quantize(PLACES, rounding=ROUND_HALF_UP) + 0
+
+
+def _say(x) -> str:
+    """A quantity in words: 25, 2.5 (no trailing zeros)."""
+    try:
+        return f"{_qty(x).normalize():f}"
+    except Refused:
+        return str(x)
+
+
+def _line(lot, part, quantity, status, location, baseline, **more) -> dict:
+    """One ledger line: a lot's quantity, status, place and count baseline, each (before, after)."""
+    (qb, qa), (sb, sa), (lb, la), (bb, ba) = quantity, status, location, baseline
+    return {"lot": lot, "part": part, "quantity_before": qb, "quantity_after": qa, "status_before": sb,
+            "status_after": sa, "location_before": lb, "location_after": la, "baseline_before": bb,
+            "baseline_after": ba, **more}
+
+
+def _ref(v):
+    """What a line's value says, for comparing: a reference by what it names, a blank as None."""
+    from practicehub.schema import ref_of
+    if v in (None, ""):
+        return None
+    return ref_of(v) or v if isinstance(v, dict) else v
 
 
 def _read(hub, ref, rtype: str, what: str) -> dict:
@@ -214,46 +257,44 @@ def _purpose(loc: dict | None) -> str:
 
 # ------------------------------------------------------------------ the plan
 def plan(hub, move: dict, pol: dict, today: str) -> dict:
-    """What posting ``move`` would do, or Refused. ``entries``: one per lot it touches, each with its quantity,
-    status, place and count baseline before and after (``lot`` empty for a lot it makes). ``signoff``: why it needs a
-    signature first, in words ("" when it posts at once)."""
+    """What posting ``move`` would do, or Refused. ``entries``: its ledger lines (``_line``), one per lot it touches,
+    each with its quantity, status, place and count baseline before and after (``lot`` empty for a lot it makes).
+    ``signoff``: why it needs a signature first, in words ("" when it posts at once)."""
     kind = move.get("kind")
     if kind not in KINDS:
         raise Refused(f"say what kind of move it is: {', '.join(KINDS)}")
     q = move.get("quantity")
+    some = q not in (None, "")
     signoff, note = "", ""
     if kind == "receive":
         return _plan_receive(hub, move, pol, today)
     lot = _read(hub, move.get("lot"), "StockItem", "stock (the lot or serial)")
     ref = f"StockItem/{lot['id']}"
     part = _read(hub, lot.get("part"), "Part", "part")
-    st, have, here = lot.get("status"), float(lot.get("quantity") or 0), lot.get("location") or ""
-    base = float(lot.get("count_baseline") if lot.get("count_baseline") is not None else have)
+    st, have, here = lot.get("status"), _qty(lot.get("quantity")), lot.get("location") or ""
+    base = _qty(lot.get("count_baseline") if lot.get("count_baseline") is not None else have)
     name = _name(lot)
     if st in GONE:
         raise Refused(f"{name} of {_name(part)} is {st}: nothing of it is left to move")
-    whole = q in (None, "") or float(q) == have
+    whole = not some or _qty(q) == have
     if kind != "count" and kind != "adjust":
-        if q not in (None, "") and float(q) <= 0:
+        if some and _qty(q) <= 0:
             raise Refused("the quantity must be more than nothing")
-        if q not in (None, "") and float(q) > have:
-            raise Refused(f"only {_num(have)} of {_name(part)} is in {name}; this moves {_num(q)}")
-    take = have if q in (None, "") else float(q)
-    entry = {"lot": ref, "part": lot["part"], "quantity": [_num(have), _num(have)], "status": [st, st],
-             "location": [here, here], "baseline": [_num(base), _num(base)]}
+        if some and _qty(q) > have:
+            raise Refused(f"only {_say(have)} of {_name(part)} is in {name}; this moves {_say(q)}")
+    take = _qty(q) if some else have
+    entry = _line(ref, lot["part"], (have, have), (st, st), (here, here), (base, base))
     entries = [entry]
 
     def split(status: str, where: str) -> None:
         if lot.get("serial"):
             raise Refused(f"{name} is one serial number: it moves whole")
-        share = _num(take * base / have) if have else 0
-        entry["quantity"][1] = _num(have - take)
-        entry["baseline"][1] = _num(base - share)
-        entries.append({"lot": "", "part": lot["part"], "parent": ref, "lot_number": lot.get("lot") or "",
-                        "supplier_lot": lot.get("supplier_lot") or "", "expiry": lot.get("expiry") or "",
-                        "part_revision": lot.get("part_revision"), "built_by": lot.get("built_by") or "",
-                        "quantity": [0, _num(take)], "status": ["", status],
-                        "location": ["", where], "baseline": [0, share]})
+        share = _qty(take * base / have) if have else ZERO
+        entry["quantity_after"] = _qty(have - take)
+        entry["baseline_after"] = _qty(base - share)
+        entries.append(_line("", lot["part"], (ZERO, take), ("", status), ("", where), (ZERO, share), parent=ref,
+                             lot_number=lot.get("lot") or "", supplier_lot=lot.get("supplier_lot") or "",
+                             expiry=lot.get("expiry") or "", part_revision=lot.get("part_revision")))
 
     if kind == "issue":
         if st != "available":
@@ -265,9 +306,9 @@ def plan(hub, move: dict, pol: dict, today: str) -> dict:
             raise Refused(f"{_name(first)} of {_name(part)} expires first ({first['expiry']}): issue that first")
         if first and pol["fefo"] == "suggest":
             note = f"{_name(first)} expires first ({first['expiry']})"
-        entry["quantity"][1] = _num(have - take)
-        entry["baseline"][1] = _num(max(base - take, 0))  # what was issued is not missing at the next count
-        entry["status"][1] = "depleted" if have - take <= 0 else st
+        entry["quantity_after"] = _qty(have - take)
+        entry["baseline_after"] = max(base - take, ZERO)  # what was issued is not missing at the next count
+        entry["status_after"] = "depleted" if have - take <= 0 else st
     elif kind == "transfer":
         to = _place(hub, move.get("location"))
         to_ref = f"Location/{to['id']}"
@@ -280,30 +321,30 @@ def plan(hub, move: dict, pol: dict, today: str) -> dict:
         if st == "available" and expired(lot, today):
             raise Refused(f"{name} expired on {lot['expiry']}: expired stock is not moved to storage; hold it")
         if whole:
-            entry["location"][1] = to_ref
+            entry["location_after"] = to_ref
         else:
             split(st, to_ref)
     elif kind in ("count", "adjust"):
-        if q in (None, "") or float(q) < 0:
+        if not some or _qty(q) < 0:
             raise Refused("say how many there are (0 or more)")
-        after = float(q)
+        after = _qty(q)
         if lot.get("serial") and after not in (0, 1):
             raise Refused(f"{name} is one serial number: it counts 1 or 0")
-        entry["quantity"][1] = _num(after)
+        entry["quantity_after"] = after
         if after <= 0 and st == "available":
-            entry["status"][1] = "depleted"
+            entry["status_after"] = "depleted"
         if kind == "adjust":
-            entry["baseline"][1] = _num(after)
+            entry["baseline_after"] = after
             signoff = "an adjustment changes stock without a count"
         else:
             tol = pol["count_tolerance_pct"]
-            drift = abs(after - base) / base * 100 if base else (0 if after == 0 else 100)
-            if pol["signoff"] != "none" and tol is not None and drift > float(tol) + 1e-9:
+            drift = abs(after - base) / base * 100 if base else Decimal(0 if after == 0 else 100)
+            if pol["signoff"] != "none" and tol is not None and drift > _dec(tol):
                 since = "" if base == have else \
-                    f" (the counts since it was last set to {_num(base)} share one tolerance)"
-                signoff = (f"counted {_num(after)} against {_num(base)}: {drift:.1f}% off{since}, beyond the "
-                           f"{_num(tol)}% a count may change without a signature")
-                entry["baseline"][1] = _num(after)  # a signed count is the new baseline
+                    f" (the counts since it was last set to {_say(base)} share one tolerance)"
+                signoff = (f"counted {_say(after)} against {_say(base)}: {drift:.1f}% off{since}, beyond the "
+                           f"{_say(tol)}% a count may change without a signature")
+                entry["baseline_after"] = after  # a signed count is the new baseline
     elif kind == "hold":
         if st != "available":
             raise Refused(f"{name} is {st}: only available stock is held")
@@ -315,7 +356,7 @@ def plan(hub, move: dict, pol: dict, today: str) -> dict:
                               "it is")
             where = f"Location/{to['id']}"
         if whole:
-            entry["status"][1], entry["location"][1] = "quarantined", where
+            entry["status_after"], entry["location_after"] = "quarantined", where
         else:
             split("quarantined", where)
     elif kind == "release":
@@ -333,14 +374,14 @@ def plan(hub, move: dict, pol: dict, today: str) -> dict:
             where = f"Location/{to['id']}"
         elif _purpose(_location(hub, here)) in HOLDING:
             raise Refused(f"{name} is in a quarantine location: say where it goes once released")
-        entry["status"][1], entry["location"][1] = "available", where
+        entry["status_after"], entry["location_after"] = "available", where
         signoff = "a release puts held stock back into use"
     elif kind in ("scrap", "return"):
         gone = "scrapped" if kind == "scrap" else "returned"
-        entry["quantity"][1] = _num(have - take)
-        entry["baseline"][1] = _num(max(base - take, 0))
+        entry["quantity_after"] = _qty(have - take)
+        entry["baseline_after"] = max(base - take, ZERO)
         if have - take <= 0:
-            entry["status"][1] = gone
+            entry["status_after"] = gone
         signoff = "a write-off takes stock away without an issue" if kind == "scrap" else \
             "a return sends stock back to its supplier"
     if pol["signoff"] == "none":
@@ -362,8 +403,8 @@ def _earlier(hub, lot: dict, today: str, taken: dict | None = None, cache: dict 
     for other in lots_of(hub, lot["part"], live=True, cache=cache):
         if other["id"] == lot["id"] or other.get("status") != "available" or not other.get("expiry"):
             continue
-        left = float(other.get("quantity") or 0) - (taken or {}).get(f"StockItem/{other['id']}", 0.0)
-        if expired(other, today) or left <= 1e-9:
+        left = _qty(other.get("quantity")) - (taken or {}).get(f"StockItem/{other['id']}", ZERO)
+        if expired(other, today) or left <= 0:
             continue
         if str(other["expiry"]) < str(lot["expiry"]) and (best is None or other["expiry"] < best["expiry"]):
             best = other
@@ -383,9 +424,9 @@ def _new_stock(hub, part: dict, use: dict, rec: dict, today: str, verb: str, ins
     """The ledger lines for the stock a delivery or a build brings in (``rec``'s quantity, location, lot number,
     serials and expiry): one lot, or one line per serial number. ``use`` is the part as it may be used now."""
     q = rec.get("quantity")
-    if q in (None, "") or float(q) <= 0:
+    if q in (None, "") or _qty(q) <= 0:
         raise Refused("the quantity must be more than nothing")
-    q = float(q)
+    q = _qty(q)
     to = _place(hub, rec.get("location"))
     if _purpose(to) in HOLDING:
         raise Refused(f"{to.get('name')} keeps held stock: {instead}")
@@ -393,8 +434,8 @@ def _new_stock(hub, part: dict, use: dict, rec: dict, today: str, verb: str, ins
     serials = [s.strip() for s in str(rec.get("serials") or "").replace(",", "\n").splitlines() if s.strip()]
     lot_number = str(rec.get("lot_number") or "").strip()
     if tracking == "serial":
-        if not q.is_integer() or len(serials) != int(q):
-            raise Refused(f"{_name(part)} is tracked by serial number: give one for each of the {_num(q)} {verb} "
+        if q != q.to_integral_value() or len(serials) != int(q):
+            raise Refused(f"{_name(part)} is tracked by serial number: give one for each of the {_say(q)} {verb} "
                           f"({len(serials)} given)")
         if len(set(serials)) != len(serials):
             raise Refused("a serial number is given twice")
@@ -408,20 +449,20 @@ def _new_stock(hub, part: dict, use: dict, rec: dict, today: str, verb: str, ins
         raise Refused(f"{_name(part)} has a shelf life: give the expiry date on the label")
     if expiry and expiry < today:
         raise Refused(f"it expired on {expiry}: expired stock is not taken into use")
-    status = "available"
-    one = {"part": f"Part/{part['id']}", "parent": "", "lot_number": lot_number,
-           "supplier_lot": str(rec.get("supplier_lot") or ""), "expiry": expiry,
-           "part_revision": use.get("revision"), "status": ["", status],
-           "location": ["", f"Location/{to['id']}"], "lot": ""}
+    part_ref, where, status = f"Part/{part['id']}", f"Location/{to['id']}", "available"
+    one = {"parent": "", "lot_number": lot_number, "supplier_lot": str(rec.get("supplier_lot") or ""),
+           "expiry": expiry, "part_revision": use.get("revision")}
     if tracking == "serial":
-        return [{**one, "serial": s, "quantity": [0, 1], "baseline": [0, 1]} for s in serials]
-    return [{**one, "quantity": [0, _num(q)], "baseline": [0, _num(q)]}]
+        return [_line("", part_ref, (ZERO, _qty(1)), ("", status), ("", where), (ZERO, _qty(1)), serial=s, **one)
+                for s in serials]
+    return [_line("", part_ref, (ZERO, q), ("", status), ("", where), (ZERO, q), **one)]
 
 
 # ------------------------------------------------------------------ builds
-def _ref(v) -> str:
-    """A reference as stored ("Part/7", or ``{"reference": "Part/7"}``), as its text."""
-    return str(v.get("reference") or "") if isinstance(v, dict) else str(v or "")
+def _ref_text(v) -> str:
+    """A reference as stored ("Part/7", or ``{"reference": "Part/7"}``), as its text ("" for none)."""
+    r = _ref(v)
+    return r if isinstance(r, str) else ""
 
 
 def _code(rec: dict | None) -> str:
@@ -439,33 +480,33 @@ def plan_build(hub, build: dict, pol: dict, today: str) -> dict:
     """What posting a build would do, or Refused with every reason at once. Each line of the assembly's bill of
     materials (as last approved: ``part_in_use``) needs its quantity times the build's. The lots the build names
     (``consume``) are used as named; the rest of each part comes from its available lots, the first to expire first,
-    a serial whole. ``entries``: the lots it makes (a receipt's, each with ``contains``: the component lots in it),
-    then each component lot it takes from (an issue's). What it makes expires no later than the first of what went
-    into it (that date, when the build gives none). ``signoff``: why it is signed first ("" when it posts at once):
-    when the policy inspects what comes into stock, the build's record is that inspection."""
+    a serial whole. ``entries``: the ledger lines (``_line``) of the lots it makes (a receipt's), then of each
+    component lot it takes from (an issue's); ``contains``: for each lot it makes, the component lots in it. What it
+    makes expires no later than the first of what went into it (that date, when the build gives none). ``signoff``:
+    why it is signed first ("" when it posts at once): when the policy inspects what comes into stock, the build's
+    record is that inspection."""
     part = _read(hub, build.get("part"), "Part", "assembly (the part it makes)")
     use = part_in_use(hub, part)
     if use is None:
         raise Refused(f"{_name(part)} is {part.get('status')}: only a part in use is built")
-    lines = [r for r in use.get("bom") or [] if isinstance(r, dict) and _ref(r.get("part"))]
+    lines = [r for r in use.get("bom") or [] if isinstance(r, dict) and _ref_text(r.get("part"))]
     if not lines:
         raise Refused(f"{_name(part)} has no approved bill of materials: say what goes into it on its page")
     problems: list[str] = []
     cache: dict = {}
-    try:
-        n = float(build.get("quantity"))
-    except (TypeError, ValueError):
-        raise Refused("say how many it makes") from None
+    if build.get("quantity") in (None, ""):
+        raise Refused("say how many it makes")
+    n = _qty(build.get("quantity"))
     if n <= 0:
         raise Refused("the quantity must be more than nothing")
-    need: dict[str, float] = {}
+    need: dict[str, Decimal] = {}
     for r in lines:
-        cref = _ref(r.get("part"))
-        if float(r.get("quantity") or 0) <= 0:
+        cref = _ref_text(r.get("part"))
+        each = _qty(r.get("quantity"))
+        if each <= 0:
             problems.append(f"its bill of materials gives no quantity of {cref}")
-        need[cref] = need.get(cref, 0.0) + float(r.get("quantity") or 0) * n
+        need[cref] = need.get(cref, ZERO) + _qty(each * n)
     comps: dict[str, dict] = {}
-    serial_parts: set[str] = set()
     for cref in need:
         comp = _location(hub, cref)
         if comp is None:
@@ -474,23 +515,21 @@ def plan_build(hub, build: dict, pol: dict, today: str) -> dict:
         cuse = part_in_use(hub, comp)
         if cuse is None:
             problems.append(f"{_name(comp)} is {comp.get('status')}: only a part in use goes into a build")
-        elif (cuse.get("tracking") or "none") == "serial":
-            serial_parts.add(cref)
-            if not float(need[cref]).is_integer():
-                problems.append(f"{_name(comp)} is tracked by serial number: the build needs {_num(need[cref])} of it")
+        elif (cuse.get("tracking") or "none") == "serial" and need[cref] != need[cref].to_integral_value():
+            problems.append(f"{_name(comp)} is tracked by serial number: the build needs {_say(need[cref])} of it")
         comps[cref] = comp
 
     # the serials it makes, as the build gives them (what a row's ``into`` may name)
     made = [x.strip() for x in str(build.get("serials") or "").replace(",", "\n").splitlines() if x.strip()] \
         if (use.get("tracking") or "none") == "serial" else []
     lots: dict[str, dict] = {}
-    taken: dict[str, float] = {}
-    named: dict[str, float] = {}
-    uses: list[tuple[str, float, str]] = []      # (lot, quantity, the serial it goes into or "")
+    taken: dict[str, Decimal] = {}
+    named: dict[str, Decimal] = {}
+    uses: list[tuple[str, Decimal, str]] = []    # (lot, quantity, the serial it goes into or "")
     chosen: list[str] = []                       # the lots it names
     note = ""
     for i, row in enumerate(build.get("consume") or [], 1):
-        lref = _ref((row or {}).get("lot"))
+        lref = _ref_text((row or {}).get("lot"))
         lot = _location(hub, lref) if lref.startswith("StockItem/") else None
         if lot is None:
             problems.append(f"row {i} of the stock to use: say which lot or serial")
@@ -500,7 +539,7 @@ def plan_build(hub, build: dict, pol: dict, today: str) -> dict:
         if lot.get("part") not in need:
             problems.append(f"{what} is not in the bill of materials of {_code(part)}")
             continue
-        st, have = lot.get("status"), float(lot.get("quantity") or 0)
+        st, have = lot.get("status"), _qty(lot.get("quantity"))
         if st != "available":
             problems.append(f"{what} is {st}: only available stock goes into a build")
             continue
@@ -509,13 +548,13 @@ def plan_build(hub, build: dict, pol: dict, today: str) -> dict:
             continue
         q = row.get("quantity")
         if lot.get("serial"):
-            if q not in (None, "") and float(q) != 1:
+            if q not in (None, "") and _qty(q) != 1:
                 problems.append(f"{what} is one serial number: it goes in whole")
                 continue
-            q = 1.0
+            q = _qty(1)
         elif q in (None, ""):
-            q = min(have - taken.get(lref, 0.0), need[lot["part"]] - named.get(lot["part"], 0.0))
-        q = float(q)
+            q = min(have - taken.get(lref, ZERO), need[lot["part"]] - named.get(lot["part"], ZERO))
+        q = _qty(q)
         if q <= 0:
             continue
         into = str(row.get("into") or "").strip()
@@ -523,38 +562,38 @@ def plan_build(hub, build: dict, pol: dict, today: str) -> dict:
             problems.append(f"{into} is not a serial number this build makes"
                             + (f" ({', '.join(made)})" if made else " (it makes no serial numbers)"))
             continue
-        taken[lref] = taken.get(lref, 0.0) + q
-        named[lot["part"]] = named.get(lot["part"], 0.0) + q
-        if taken[lref] > have + 1e-9:
-            problems.append(f"only {_num(have)} is in {what}; this build takes {_num(taken[lref])}")
+        taken[lref] = taken.get(lref, ZERO) + q
+        named[lot["part"]] = named.get(lot["part"], ZERO) + q
+        if taken[lref] > have:
+            problems.append(f"only {_say(have)} is in {what}; this build takes {_say(taken[lref])}")
         uses.append((lref, q, into))
         chosen.append(lref)
     for cref, got in named.items():
-        if got > need[cref] + 1e-9:
-            problems.append(f"it names {_num(got)} of {_code(comps.get(cref))}; the build needs {_num(need[cref])}")
+        if got > need[cref]:
+            problems.append(f"it names {_say(got)} of {_code(comps.get(cref))}; the build needs {_say(need[cref])}")
 
     # the rest, from the lots that expire first
     short = []
     for cref, want in need.items():
-        rest = want - named.get(cref, 0.0)
-        if rest <= 1e-9 or cref not in comps:
+        rest = want - named.get(cref, ZERO)
+        if rest <= 0 or cref not in comps:
             continue
         for lot in sorted(lots_of(hub, cref, live=True, cache=cache), key=_fefo_key):
             lref = f"StockItem/{lot['id']}"
-            left = float(lot.get("quantity") or 0) - taken.get(lref, 0.0)
-            if lot.get("status") != "available" or expired(lot, today) or left <= 1e-9:
+            left = _qty(lot.get("quantity")) - taken.get(lref, ZERO)
+            if lot.get("status") != "available" or expired(lot, today) or left <= 0:
                 continue
-            if lot.get("serial") and rest < 1 - 1e-9:
+            if lot.get("serial") and rest < 1:
                 break
-            q = 1.0 if lot.get("serial") else min(left, rest)
+            q = _qty(1) if lot.get("serial") else min(left, rest)
             lots[lref] = lot
-            taken[lref] = taken.get(lref, 0.0) + q
+            taken[lref] = taken.get(lref, ZERO) + q
             uses.append((lref, q, ""))
             rest -= q
-            if rest <= 1e-9:
+            if rest <= 0:
                 break
-        if rest > 1e-9:
-            short.append(f"{_num(want)} × {_code(comps[cref])} ({_num(want - rest)} available)")
+        if rest > 0:
+            short.append(f"{_say(want)} × {_code(comps[cref])} ({_say(want - rest)} available)")
     if short:
         problems.append("short: " + ", ".join(short))
 
@@ -595,14 +634,14 @@ def plan_build(hub, build: dict, pol: dict, today: str) -> dict:
     issues = []
     for lref, q in taken.items():
         lot = lots[lref]
-        st, have, here = lot.get("status"), float(lot.get("quantity") or 0), lot.get("location") or ""
-        base = float(lot.get("count_baseline") if lot.get("count_baseline") is not None else have)
-        after = have - q
-        to = "built-in" if lot.get("serial") else ("depleted" if after <= 1e-9 else st)
-        issues.append({"lot": lref, "part": lot["part"], "quantity": [_num(have), _num(after)], "status": [st, to],
-                       "location": [here, here], "baseline": [_num(base), _num(max(base - q, 0))]})
+        st, have, here = lot.get("status"), _qty(lot.get("quantity")), lot.get("location") or ""
+        base = _qty(lot.get("count_baseline") if lot.get("count_baseline") is not None else have)
+        after = _qty(have - q)
+        to = "built-in" if lot.get("serial") else ("depleted" if after <= 0 else st)
+        issues.append(_line(lref, lot["part"], (have, after), (st, to), (here, here), (base, max(base - q, ZERO))))
+    contains = []
     for e in outputs:   # what went into each: a row tied to a serial goes into that one only, the rest into each
-        rows: dict[str, float | None] = {}
+        rows: dict[str, Decimal | None] = {}
         for lref, q, into in uses:
             if into and into != e.get("serial"):
                 continue
@@ -610,14 +649,14 @@ def plan_build(hub, build: dict, pol: dict, today: str) -> dict:
             if share is None or (lref in rows and rows[lref] is None):
                 rows[lref] = None       # shared among those it makes: how much went into each is not known
             else:
-                rows[lref] = rows.get(lref, 0.0) + share
-        e["contains"] = [{"lot": lref, **({"quantity": _num(q)} if q is not None else {})} for lref, q in rows.items()]
-    bom = [{"part": _ref(r.get("part")), "code": _code(comps.get(_ref(r.get("part")))),
-            "quantity": _num(r.get("quantity")), **({"designators": r["designators"]} if r.get("designators") else {})}
+                rows[lref] = rows.get(lref, ZERO) + share
+        contains.append([{"lot": lref, **({"quantity": q} if q is not None else {})} for lref, q in rows.items()])
+    bom = [{"part": _ref_text(r.get("part")), "code": _code(comps.get(_ref_text(r.get("part")))),
+            "quantity": _qty(r.get("quantity")), **({"designators": r["designators"]} if r.get("designators") else {})}
            for r in lines]
     signoff = "" if pol["signoff"] == "none" or not pol["inspection"] else \
         "the policy inspects what comes into stock: a build is signed before what it makes is used"
-    return {"kind": "build", "entries": outputs + issues, "signoff": signoff, "note": note,
+    return {"kind": "build", "entries": outputs + issues, "contains": contains, "signoff": signoff, "note": note,
             "revision": use.get("revision"), "bom": bom, "outputs": len(outputs)}
 
 
@@ -630,18 +669,21 @@ def plan_any(hub, ref: str, rec: dict, pol: dict, today: str) -> dict:
 def _same(planned: list[dict], checked: list[dict]) -> bool:
     """Whether the stock is as it was when the move was checked: each lot's quantity, status and place before, and
     what the move does to them."""
-    keys = ("lot", "quantity", "status", "location", "baseline")
-    return [{k: e.get(k) for k in keys} for e in planned] == [{k: e.get(k) for k in keys} for e in (checked or [])]
+    keys = ("lot", "quantity_before", "quantity_after", "status_before", "status_after", "location_before",
+            "location_after", "baseline_before", "baseline_after")
+    return [{k: _ref(e.get(k)) for k in keys} for e in planned] == \
+        [{k: _ref(e.get(k)) for k in keys} for e in (checked or [])]
 
 
 def post(hub, actor: dict, run_id: str, ref: str, move: dict, p: dict, pol: dict, authority: str = "") -> list[str]:
     """Write the plan: the lots, the move's (or build's) ledger lines with its place in the ledger, and the parts'
-    totals. A lot a build makes knows the build and what went into it. Returns the lots written."""
+    totals. A lot a build makes knows the build and what went into it; a lot split from one a build made knows that
+    build too. Returns the lots written."""
     lots, parts, today, new = [], set(), _today(hub), []
     build = p["kind"] == "build"
-    for e in p["entries"]:
-        values = {"quantity": e["quantity"][1], "status": e["status"][1], "location": e["location"][1],
-                  "count_baseline": e["baseline"][1]}
+    for i, e in enumerate(p["entries"]):
+        values = {"quantity": e["quantity_after"], "status": e["status_after"], "location": e["location_after"],
+                  "count_baseline": e["baseline_after"]}
         parts.add(e["part"])
         if e["lot"]:
             hub.update_record(actor, e["lot"], values, run_id=run_id)
@@ -650,33 +692,32 @@ def post(hub, actor: dict, run_id: str, ref: str, move: dict, p: dict, pol: dict
             tracking = (part_in_use(hub, part) or part).get("tracking") or "none"
             number = e.get("lot_number") or ("" if tracking == "none" or e.get("serial") else
                                               f"LOT-{hub.db.next_seq('inventory.lot'):05d}")
+            whole = _location(hub, e["parent"]) if e.get("parent") else None
             made = hub.create_record(actor, "StockItem", {
                 **values, "part": e["part"], "part_code": part.get("code") or "", "lot": number,
                 "serial": e.get("serial") or "",
                 "supplier_lot": e.get("supplier_lot") or "", "expiry": e.get("expiry") or None,
                 "part_revision": e.get("part_revision"), "parent": e.get("parent") or None,
-                **({"built_by": ref, "contains": e.get("contains") or []} if build else
-                   {"built_by": e["built_by"]} if e.get("built_by") else {}),
+                **({"built_by": ref, "contains": p["contains"][i]} if build else
+                   {"built_by": whole["built_by"]} if (whole or {}).get("built_by") else {}),
                 "received": move.get("moved") or move.get("built") or today}, run_id=run_id, start_workflow=False)
             e["lot"], e["lot_number"] = f"StockItem/{made['id']}", number
             new.append(e["lot"])
         lots.append(e["lot"])
     first = p["entries"][0]
+    done = {"policy": pol.get("ref") or f"module default ({pol['level']})", "level": pol["level"],
+            **({"authority": authority} if authority else {}), "reject_reason": "",
+            "posted_seq": hub.db.next_seq("inventory.posted")}
     if build:
         hub.update_record(actor, ref, {
             **({} if move.get("built") else {"built": today}),  # the day it posted, when it gave none
             "entries": p["entries"], "made": new, "makes": _label(hub, p["entries"][:p["outputs"]]),
-            "part_revision": p["revision"], "bom_used": p["bom"],
-            "policy": pol.get("ref") or f"module default ({pol['level']})", "level": pol["level"],
-            **({"authority": authority} if authority else {}), "reject_reason": "",
-            "posted_seq": hub.db.next_seq("inventory.posted")}, run_id=run_id)
+            "part_revision": p["revision"], "bom_used": p["bom"], **done}, run_id=run_id)
     else:
         hub.update_record(actor, ref, {
             "entries": p["entries"], "lot": move.get("lot") or first["lot"], "stock": _label(hub, p["entries"]),
-            "before_quantity": first["quantity"][0], "after_quantity": first["quantity"][1],
-            "policy": pol.get("ref") or f"module default ({pol['level']})", "level": pol["level"],
-            **({"authority": authority} if authority else {}), "reject_reason": "",
-            "posted_seq": hub.db.next_seq("inventory.posted")}, run_id=run_id)
+            "before_quantity": first["quantity_before"], "after_quantity": first["quantity_after"], **done},
+            run_id=run_id)
     for part in sorted(parts):
         hub.update_record(actor, part, totals(hub, part, today), run_id=run_id)
     return lots
@@ -685,38 +726,39 @@ def post(hub, actor: dict, run_id: str, ref: str, move: dict, p: dict, pol: dict
 def totals(hub, part_ref: str, today: str) -> dict:
     """A part's stock, summed from its lots: on hand (every lot with stock in it), available (in use: not held, not
     waiting for inspection, not expired) and held."""
-    on_hand = available = held = 0.0
+    on_hand = available = held = ZERO
     for lot in lots_of(hub, part_ref):
-        q, st = float(lot.get("quantity") or 0), lot.get("status")
+        q, st = _qty(lot.get("quantity")), lot.get("status")
         if st in LIVE:
             on_hand += q
         if st == "quarantined":
             held += q
         if st == "available" and not expired(lot, today):
             available += q
-    return {"on_hand": _num(on_hand), "available": _num(available), "quarantined": _num(held)}
+    return {"on_hand": on_hand, "available": available, "quarantined": held}
 
 
 def ledger_problems(hub, lot_ref: str) -> list[str]:
     """Where a lot's history does not add up: its posted moves and builds, in order, must take it from nothing to what
-    it holds now, each starting where the one before left it. Empty when it adds up."""
+    it holds now, each starting where the one before left it. Empty when it adds up. The moves and builds are found by
+    their lines' links to the lot."""
     lines = []
-    for rtype in ("StockMove", "Build"):
-        for m in hub.records.search(rtype, limit=None):
-            if m.get("status") != "posted":
-                continue
-            for e in m.get("entries") or []:
-                if e.get("lot") == lot_ref:
-                    lines.append((int(m.get("posted_seq") or 0), f"{rtype}/{m['id']}", e))
+    for mref in sorted({row["from_ref"] for row in hub.db.links.find({"to_ref": lot_ref, "rel": "entry-lot"})}):
+        m = hub.records.read(*mref.split("/", 1))
+        if m is None or m.get("status") != "posted":
+            continue
+        for e in m.get("entries") or []:
+            if _ref(e.get("lot")) == lot_ref:
+                lines.append((int(m.get("posted_seq") or 0), mref, e))
     lines.sort(key=lambda x: (x[0], x[1]))
     lot = hub.records.read(*lot_ref.split("/", 1)) or {}
-    at, out = 0, []
+    at, out = ZERO, []
     for _, mid, e in lines:
-        if _num(e["quantity"][0]) != _num(at):
-            out.append(f"{mid} starts from {e['quantity'][0]}, not {_num(at)}")
-        at = e["quantity"][1]
-    if _num(at) != _num(lot.get("quantity")):
-        out.append(f"its posted moves leave {_num(at)}; it holds {_num(lot.get('quantity'))}")
+        if _qty(e.get("quantity_before")) != at:
+            out.append(f"{mid} starts from {_say(e.get('quantity_before'))}, not {_say(at)}")
+        at = _qty(e.get("quantity_after"))
+    if at != _qty(lot.get("quantity")):
+        out.append(f"its posted moves leave {_say(at)}; it holds {_say(lot.get('quantity'))}")
     return out
 
 
@@ -758,8 +800,8 @@ def act_check(engine, run, step, params, actor):
     else:
         first = p["entries"][0]
         hub.update_record(actor, ref, {"entries": p["entries"], "stock": _label(hub, p["entries"]),
-                                       "before_quantity": first["quantity"][0],
-                                       "after_quantity": first["quantity"][1], "needs_signoff": p["signoff"],
+                                       "before_quantity": first["quantity_before"],
+                                       "after_quantity": first["quantity_after"], "needs_signoff": p["signoff"],
                                        "reject_reason": ""}, run_id=run["id"])
     signed = bool(p["signoff"])
     return {"ok": True, "problem": "", "signoff": p["signoff"], "self": signed and pol["signoff"] == "self",
@@ -843,15 +885,16 @@ ACTIONS = {"inventory.policy": act_policy, "inventory.check": act_check, "invent
 def summarize(rec: dict) -> str:
     t = rec.get("resourceType")
     if t == "Part":
-        return (f"{rec.get('code', '')} {rec.get('name', '')}: {_num(rec.get('available'))} {rec.get('unit') or ''} "
-                f"available, {_num(rec.get('on_hand'))} on hand ({rec.get('status', '')})")
+        return (f"{rec.get('code', '')} {rec.get('name', '')}: {_say(rec.get('available'))} {rec.get('unit') or ''} "
+                f"available, {_say(rec.get('on_hand'))} on hand ({rec.get('status', '')})")
     if t == "StockItem":
-        return (f"{_name(rec)}: {_num(rec.get('quantity'))} ({rec.get('status', '')})"
+        return (f"{_name(rec)}: {_say(rec.get('quantity'))} ({rec.get('status', '')})"
                 + (f", expires {rec['expiry']}" if rec.get("expiry") else ""))
     if t == "StockMove":
-        return f"Stock move: {rec.get('kind', '')} {rec.get('quantity', '')} ({rec.get('status', '')})"
+        qty = _say(rec["quantity"]) if rec.get("quantity") not in (None, "") else ""
+        return f"Stock move: {rec.get('kind', '')} {qty} ({rec.get('status', '')})"
     if t == "Build":
-        return f"Build: {_num(rec.get('quantity'))} {rec.get('makes') or ''} ({rec.get('status', '')})"
+        return f"Build: {_say(rec.get('quantity'))} {rec.get('makes') or ''} ({rec.get('status', '')})"
     if t == "Location":
         return f"Storage location: {rec.get('name', '')}"
     if t == "InventoryPolicy":

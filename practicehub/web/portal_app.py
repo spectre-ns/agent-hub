@@ -21,6 +21,7 @@ from http import cookies
 
 from .assets import CSS
 from .server import CLIENT_HEADER, FORBIDDEN_PORTS, client_address, make_handler
+from .. import decimals
 
 e = html.escape
 SESSION = "php_session"
@@ -111,7 +112,7 @@ class HubClient:
         self.url, self.token, self.timeout = url.rstrip("/"), token, timeout
 
     def call(self, op: str, data: dict | None = None) -> dict:
-        req = urllib.request.Request(f"{self.url}/api/portal/{op}", data=json.dumps(data or {}).encode(),
+        req = urllib.request.Request(f"{self.url}/api/portal/{op}", data=json.dumps(data or {}, default=decimals.jsonable).encode(),
                                      method="POST", headers={"Authorization": f"Bearer {self.token}",
                                                              "Content-Type": "application/json"})
         try:
@@ -131,7 +132,7 @@ class LocalClient:
 
     def call(self, op: str, data: dict | None = None) -> dict:
         status, _, payload = self.app.handle("POST", f"/api/portal/{op}", {
-            "authorization": f"Bearer {self.token}", "content-type": "application/json"}, json.dumps(data or {}).encode())
+            "authorization": f"Bearer {self.token}", "content-type": "application/json"}, json.dumps(data or {}, default=decimals.jsonable).encode())
         return _answer(status, payload)
 
 
@@ -591,6 +592,19 @@ class PortalApp:
                      f'{e(val)}</textarea>')
         return self._label(fid, label, bool(q.get("required"))) + help_ + err + field
 
+    def _records(self, got: dict, chosen: str = "", problem: bool = False) -> str:
+        """Which of the person's own records the kind is about: one radio each, chosen already when there is one."""
+        rows = got.get("about") or []
+        if not rows:
+            return f'<p class="limit" role="status">{e(self.say("nothing_about"))}</p>'
+        if not any(r["ref"] == chosen for r in rows):
+            chosen = rows[0]["ref"] if len(rows) == 1 else ""
+        inv = ' aria-invalid="true" aria-describedby="problems"' if problem else ""
+        return (f'<fieldset{inv}><legend class="q">{e(self.say("about"))} <span class=req>(required)</span></legend>'
+                + "".join(f'<label><input type="radio" name="_about" value="{e(r["ref"])}"'
+                          f'{" checked" if r["ref"] == chosen else ""} required> {e(r["title"])}</label>'
+                          for r in rows) + "</fieldset>")
+
     def _slots(self, k: dict, got: dict, chosen: str = "", problem: bool = False) -> str:
         """Day first: the working days with free time, as buttons that show that day (no script: the form comes back
         with what was written kept), then that day's times, under each person who gives them."""
@@ -649,6 +663,10 @@ class PortalApp:
         no_slot = any("time" in str(p).lower() for p in problems or ())
         chosen = values.get("slot", "") if (values.get("slot") or "")[:10] == got.get("day") else ""
         times = "" if full else self._slots(k, got, chosen, no_slot)
+        about = "" if full or not k.get("about") else self._records(
+            got, values.get("_about") or "", self.say("choose_about") in (problems or ()))
+        if about and not got.get("about"):  # nothing of theirs it could be about: said so, and no form to send
+            return self.page(req, k["label"], desc + about)
         button = "Send to the practice" if full else "Book" if k["mode"] == "book" else "Send my request"
         # The first submit button in a form is what Enter presses: the real one, not a day.
         default = (f'<button class="enter-default" name="_go" value="1" tabindex="-1" aria-hidden="true">'
@@ -657,9 +675,8 @@ class PortalApp:
             f'<form method="post" action="/book/{e(kid)}" class="card">{default}'
             f'<input type="hidden" name="_form" value="{e(s["form"])}">'
             f'<input type="hidden" name="_submit" value="{e(values.get("_submit") or secrets.token_urlsafe(16))}">'
-            f'{qs}{times}{rule}'
-            f'<p><button class="btn primary" name="_go" value="1">{e(button)}</button></p>'
-            f'</form>'))
+            f'{about}{qs}{times}{rule}'
+            f'<p><button class="btn primary" name="_go" value="1">{e(button)}</button></p></form>'))
 
     def book(self, req, kid: str) -> str:
         self.signed_in(req)
@@ -670,7 +687,7 @@ class PortalApp:
         answers = {q["name"]: f[q["name"]] for q in k["questions"] if f.get(q["name"]) not in (None, "")}
         try:
             got = self.call(req, "book", form=f.get("_form", ""), submit=f.get("_submit", ""), kind=kid,
-                            slot=f.get("slot") or None, answers=answers)
+                            slot=f.get("slot") or None, answers=answers, about=f.get("_about") or None)
         except HubSaid as exc:
             if exc.status == 409:  # the time went: the form again, with that day's times free now, as a new form
                 raise _Page(409, self.book_form(req, kid, [self.say("taken")],

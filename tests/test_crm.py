@@ -42,6 +42,11 @@ def today(h):
     return h.engine.now().date().isoformat()
 
 
+def morning(h):
+    """09:00 today in the practice: after the daily sweeps (07:00), whatever time the tests run at."""
+    return h.engine.now().replace(hour=9, minute=0, second=0, microsecond=0)
+
+
 def drafter(h):
     h._create_member(h.member("lee"), {"id": "rel-agent", "kind": "agent", "name": "Relationship agent",
                                        "sponsor": "lee", "roles": ["follow-up-drafter"],
@@ -132,7 +137,7 @@ def test_a_due_follow_up_goes_to_the_owner_an_agent_drafts_and_a_person_sends(fi
                             "consent_source": "Signed form"})
     due = next(w for w in viewmod.compute(firm, lee, firm.view("crm-follow-ups")) if w["title"] == "Due now")
     assert due["total"] == 1
-    firm.engine.tick(firm.engine.now())
+    firm.engine.tick(morning(firm))
     run = next(r for r in firm.engine.runs() if r["workflow_id"] == "crm-follow-up")
     assert run["ctx"]["who"]["owner"] == "lee" and run["ctx"]["who"]["to"] == raj
     run_all_local(firm, log=quiet)
@@ -145,7 +150,7 @@ def test_a_due_follow_up_goes_to_the_owner_an_agent_drafts_and_a_person_sends(fi
     row = firm.db.outbox.find_one({"run_id": run["id"]})
     assert row["recipient"] == raj and row["purpose"] == "commercial" and row["status"] == "queued"
     assert firm.engine.run(run["id"])["status"] == "completed"
-    firm.engine.tick(firm.engine.now())  # asked once for this date: the next run waits for its next date
+    firm.engine.tick(morning(firm))  # asked once for this date: the next run waits for its next date
     runs = [r for r in firm.engine.runs() if r["workflow_id"] == "crm-follow-up"]
     assert len(runs) == 2 and runs[0]["status"] == "running" and runs[0]["ctx"]["run"]["previous"] == run["id"]
     assert firm.engine.run(runs[0]["id"])["steps"]["due"]["state"] == "waiting"
@@ -157,7 +162,7 @@ def test_a_follow_up_to_a_contact_without_consent_is_refused_and_the_person_told
     drafter(firm)
     lee = firm.member("lee")
     _follow_up(firm, {})
-    firm.engine.tick(firm.engine.now())
+    firm.engine.tick(morning(firm))
     run_all_local(firm, log=quiet)
     run = next(r for r in firm.engine.runs() if r["workflow_id"] == "crm-follow-up")
     firm.engine.complete(lee, item_for(firm, run, "send"), {"how": "send", "subject": "Hi", "body": "Hello"})
@@ -178,7 +183,7 @@ def test_implied_consent_lapsing_within_30_days_is_flagged_for_its_owner(firm):
                                        "consent_source": "Contract"})
     make(firm, lee, "Person", {"name": "Express", "consent": "express", "consent_source": "Form",
                                "consent_date": shift_date(t, "-", 3, "y")})
-    firm.engine.tick(firm.engine.now())
+    firm.engine.tick(morning(firm))
     runs = [r for r in firm.engine.runs() if r["workflow_id"] == "crm-consent-expiry"]
     assert [r["record"] for r in runs] == [soon]
     assert firm.read_record(lee, soon)["consent_flag"].startswith("implied consent lapses ")

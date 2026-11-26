@@ -38,6 +38,7 @@ from .states import FAILED
 from .db import utcnow
 from .backends import backend_for, _timeout as engine_timeout
 from .fields import FieldError, coerce, json_schema
+from . import decimals
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
@@ -131,7 +132,7 @@ def message_classes(hub, run, step) -> set[str]:
     free_input = any(i.get("type", "string") in ("text", "string") for i in wf.inputs)
 
     def quoted(st) -> set[str]:
-        return set(re.findall(r"\{\{\s*([A-Za-z_][\w-]*)\.", json.dumps(st.params or {})))
+        return set(re.findall(r"\{\{\s*([A-Za-z_][\w-]*)\.", json.dumps(st.params or {}, default=decimals.jsonable)))
 
     out, seen, todo = {base}, set(), list(quoted(step))
     while todo:
@@ -849,6 +850,9 @@ class Engine:
             return None
         rec = self.hub.records.read(*record.split("/", 1))
         state = schema.first(rec, rt.lifecycle["path"]) if rec else None
+        if schema.sealed(rt, state):
+            return (f"a {rt.label.lower()} that is {rt.state_label(state).lower()} is final: no work is started on "
+                    f"it, and {wf.title} would change it")
         if state not in rt.lifecycle.get("locked", []) or schema.starts_workflow(rt, rec) == wf.id:
             return None
         return (f"a {rt.label.lower()} that is {rt.state_label(state).lower()} is not started again: it is kept as "
@@ -984,6 +988,11 @@ class Engine:
                     val = int(val) if val.is_integer() else val
                 except ValueError:
                     continue  # not a number: left out, never a step refused (other fields keep the words)
+            if f["type"] == "decimal" and not isinstance(val, bool):  # "1,234.5" or 12.345: exact, at its places
+                try:
+                    val = decimals.to_decimal(val, f["scale"])
+                except ValueError:
+                    continue
             rec = schema.place(rec, f, val)
         return rec
 
@@ -1123,7 +1132,12 @@ class Engine:
                 f = rt.field(n)
                 if f and n in names and got.get(n) not in (None, ""):
                     moved = schema.put(moved, f["path"], got[n])
-            hub.update_record(actor, ref, moved, cause=cause, run_id=run["id"])
+            by = (run["steps"].get(step.id) or {}).get("by")  # whoever did the step made the move: its stamp names them
+            if step.kind == "automation" and step.on_edge:  # an edge's own move: whoever did the work it follows
+                by = next((run["steps"][s]["by"] for s in reversed(step.needs or [])
+                           if (run["steps"].get(s) or {}).get("by")), by)
+            mover = hub.db.members.get(by) if isinstance(by, str) and t and t.get("stamp") else None
+            hub.update_record(actor, ref, moved, cause=cause, run_id=run["id"], _mover=mover)
 
     def _signed_move(self, run: dict, step) -> tuple[str, str, str] | None:
         """(record label, state label, meaning) when the move a step with ``state`` makes from where its record is
@@ -1137,6 +1151,29 @@ class Engine:
             return None
         t = rt.transition(schema.first(rec, rt.lifecycle["path"]), step.state)
         return (rt.label, rt.state_label(step.state).lower(), t["sign"]) if t and t.get("sign") else None
+
+    def _refused_move(self, run: dict, step, values: dict, member: dict | None = None) -> str | None:
+        """Why the move a person's step with ``state`` makes as it is done would be refused by the move's checks
+        (``[[lifecycle.transition.check]]``), for the record as it would be with what the answer gives the fields the
+        move asks for; None when it would not. The task is then not finished: the move would fail after it."""
+        ref = run.get("record") or ""
+        if not step.state or "/" not in ref:
+            return None
+        rt = self.hub.record_type(ref.split("/", 1)[0])
+        rec = self.hub.records.read(*ref.split("/", 1)) if rt is not None and rt.lifecycle else None
+        if rec is None or step.state not in rt.states():
+            return None
+        now = schema.first(rec, rt.lifecycle["path"])
+        t = rt.transition(now, step.state) if now != step.state else None
+        if not t or not t.get("check"):
+            return None
+        moved = schema.put(dict(rec), rt.lifecycle["path"], step.state)
+        for n in t.get("asks", []):
+            f = rt.field(n)
+            if f and values.get(n) not in (None, ""):
+                moved = schema.put(moved, f["path"], values[n])
+        moved = self.hub.stamped(rt, t, moved, member or {})  # as the move would stamp it, made by whoever does it
+        return self.hub.move_check_refusal(rt, ref, t, schema.exact(rt, moved))
 
     def _moves_due(self, run: dict, wf, cause) -> bool:
         """Move the record for each step with a ``state`` that people or a wait finished (an automation moves it as it
@@ -1665,7 +1702,7 @@ class Engine:
         if not lc:
             return False
         at = schema.first(rec, lc["path"])
-        return not any(at in t["from"] or "*" in t["from"] for t in lc.get("transition", []))
+        return not any(schema.leaves(lc, t, at) for t in lc.get("transition", []))
 
     def _end_wait(self, run, step, cause, output: dict, action: str) -> bool:
         run["ctx"][step.id] = output
@@ -2582,7 +2619,8 @@ class Engine:
                 if run["started_by"] == member["id"]:
                     return False, "whoever started this does not also do this step"
             elif prior == "record.editors":
-                if run["record"] and member["id"] in hub.revision_authors(run["record"]):
+                moved_in = (run["steps"].get(step.id) or {}).get("moved_in")
+                if run["record"] and member["id"] in hub.revision_authors(run["record"], before=moved_in):
                     return False, "whoever wrote or changed this record does not also approve it"
             elif wfmod.NAMED_EDITORS.fullmatch(prior):
                 name = wfmod.NAMED_EDITORS.fullmatch(prior).group(1)
@@ -3155,10 +3193,13 @@ class Engine:
                     if why:
                         raise Invalid("the answer cannot be checked now, so it is not taken: the code that checks "
                                       f"this step is not running ({why})")
-            if guard:
-                problems = guard(values, ctxview) or []
+            if guard:  # it sees what the answerer was shown, and who answers (a person or an agent)
+                problems = guard(values, {**ctxview, "by": {"id": member["id"], "kind": member["kind"]}}) or []
                 if problems:
                     raise Invalid("the answer does not pass the step's checks", problems)
+            refused = self._refused_move(run, step, values, member)
+            if refused:  # finished, its move would fail after it: the record would stay where it is
+                raise Invalid(f"{step.title} is not done yet: {refused}")
             self._require_links(run, step)
             if item["status"] == "open":  # Done on an open item takes it first, on the record: nobody presses
                 # Assign to me only to be allowed to finish

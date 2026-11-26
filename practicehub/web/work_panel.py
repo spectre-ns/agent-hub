@@ -469,7 +469,7 @@ class WorkPanel:
             if t.get("entry"):
                 continue  # where its workflow starts it: the map's Start, not a move out of every state
             frm = "any state" if "*" in t["from"] else ", ".join(rt.state_label(f) for f in t["from"])
-            here = (st in t["from"] or "*" in t["from"]) and t["by"] != "workflow"
+            here = schema.leaves(rt.lifecycle, t, st) and t["by"] != "workflow"
             who = "only when its work is cancelled" if t.get("abandon") else \
                 "only a workflow" if t["by"] == "workflow" else "anyone who may change it"
             rows.append(f'<tr{" class=here" if here and t["to"] != st else ""}><td>{e(frm)}</td>'

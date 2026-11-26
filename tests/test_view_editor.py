@@ -57,9 +57,9 @@ def test_the_editor_s_document_writes_a_view_that_reads_back_the_same():
     assert table["sort"] == "plannedStartDate" and table["descending"] and table["grid"]["w"] == 9
 
 
-def test_every_view_a_module_ships_reads_back_the_same():
-    files = sorted(ROOT.glob("modules/*/views/*.toml"))
-    assert files
+def test_every_view_a_module_or_pack_ships_reads_back_the_same():
+    files = sorted(ROOT.glob("modules/*/views/*.toml")) + sorted(ROOT.glob("packs/*/views/*.toml"))
+    assert files and any(f.parts[-3] == "accounting-office" for f in files)
     for f in files:
         text = f.read_text()
         doc = viewmod.doc_of(text)
@@ -91,8 +91,35 @@ def test_the_editor_cannot_write_what_a_view_may_not_say():
         viewmod.where_of({"rules": [{"path": "status", "op": "==", "value": "it's \"x\""}]})
     with pytest.raises(DefinitionError):  # nor a path that is not one
         viewmod.where_of({"rules": [{"path": "status) or (1", "op": "==", "value": "x"}]})
+    assert any("measure reads the fields of records" in p for p in problems(source="items", measure="sum(x)"))
+    assert any("measure is sum(field)" in p for p in problems(measure="total"))
+    assert any("x is a date or time by month" in p for p in problems(kind="line", x="birthDate"))
+    assert any("series is for a line chart" in p for p in problems(kind="chart", group_by="gender", series="gender"))
+    assert any("did you mean 'group_by'" in p for p in problems(kind="chart", group_by="gender", groupby="gender"))
     spec = viewmod.editor_spec()
     assert set(spec["kinds"]) == set(viewmod.WIDGETS)
+    assert spec["measures"] == ["sum", "avg", "min", "max"] and spec["buckets"] == ["month", "quarter", "year"]
+
+
+def test_a_view_s_numbers_read_back_the_same():
+    doc = {"id": "numbers", "title": "Numbers", "widget": [
+        {"kind": "count", "title": "Total", "type": "Order", "measure": "sum(total)",
+         "where": "record.status != 'void'"},
+        {"kind": "chart", "title": "By month", "type": "Order", "measure": "avg(total)", "group_by": "placed_on:month"},
+        {"kind": "line", "title": "Over time", "type": "Order", "measure": "sum(lines.*.amount)",
+         "x": "placed_on:quarter", "series": "customer.owner"},
+        {"kind": "table", "title": "Sign-offs", "source": "signatures", "type": "Order",
+         "columns": [{"path": "by"}, {"path": "current"}]},
+        {"kind": "line", "title": "Signed", "source": "signatures", "x": "at:month"}]}
+    text = viewmod.to_toml(doc)
+    v = viewmod.parse(text)
+    assert [w["kind"] for w in v.widgets] == ["count", "chart", "line", "table", "line"]
+    assert v.widgets[2]["measure"] == "sum(lines.*.amount)" and v.widgets[2]["x"] == "placed_on:quarter"
+    assert v.widgets[2]["series"] == "customer.owner" and v.widgets[4]["source"] == "signatures"
+    assert 'x = "at:month"' in text and 'source = "signatures"' in text
+    back = viewmod.doc_of(text)
+    assert viewmod.to_toml(back) == text
+    assert [w.get("measure") for w in back["widget"]] == ["sum(total)", "avg(total)", "sum(lines.*.amount)", None, None]
 
 
 def test_the_hub_checks_the_fields_a_view_sorts_by(hub):
@@ -193,3 +220,27 @@ def test_an_item_widget_shows_what_a_step_wrote_only_to_who_may_read_it(hub, ser
     probe = source.replace('limit = 500', 'limit = 500\nwhere = "row.output.answer == \'SECRET-CLINICAL-NOTE\'"')
     _, o = call(server, "POST", "/api/views/draft", token(hub, "jo"), body={"source": probe})
     assert json.loads(o)["widgets"][0].get("total", 0) == 0
+
+
+def test_the_editor_offers_the_fields_a_reference_reaches_and_a_table_s_columns(hub, server):
+    from test_view_numbers import _patients, _sale, _types
+    _types(hub)
+    p1, _ = _patients(hub)
+    _sale(hub, memo="s", patient=p1, amount="2.50", placed_on="2026-03-04")
+    code, page = call(server, "GET", "/define/views/new", token(hub, "dr-amara"))
+    boot = json.loads(re.search(r'id="dz-boot">(.*?)</script>', page, re.S).group(1))
+    sale = next(t for t in boot["catalog"]["types"] if t["id"] == "Sale")
+    assert {"name": "account.region", "label": "Account › Region", "type": "choice",
+            "choices": ["east", "west"]} in sale["hops"]
+    assert {"name": "lines.*.amount", "label": "Lines › Amount", "type": "decimal"} in sale["cells"]
+    amount = next(f for f in sale["fields"] if f["name"] == "amount")
+    assert amount["scale"] == 2 and amount["unit"] == "CAD"
+    doc = {"id": "x", "title": "X", "widget": [{"kind": "line", "title": "Sold", "type": "Sale",
+                                                 "measure": "sum(amount)", "x": "placed_on:month"}]}
+    _, out = call(server, "POST", "/api/views/draft", token(hub, "dr-amara"), body={"doc": doc})
+    out = json.loads(out)
+    assert out["problems"] == [] and 'class="line-chart"' in out["widgets"][0]["html"]
+    assert "2.50 CAD" in out["widgets"][0]["html"]
+    _, out = call(server, "POST", "/api/views/draft", token(hub, "rana"), body={"doc": doc})
+    w = json.loads(out)["widgets"][0]
+    assert w["note"] == "needs access to clinical records" and "line-chart" not in w["html"]

@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from .. import schema
 from ..hub import Denied, HubError, NotFound
 from . import collabora as cool
+from .. import decimals
 
 TOKEN_TTL = 10 * 3600  # seconds
 LOCK_TTL = 30 * 60
@@ -85,7 +86,7 @@ class Wopi:
         """An access token and its ``access_token_ttl``: its expiry, in milliseconds since the epoch."""
         exp = int((time.time() + ttl) * 1000)
         body = _b64(json.dumps({"m": member["id"], "f": file_id, "w": int(bool(write)), "o": origin, "exp": exp},
-                               separators=(",", ":"), sort_keys=True).encode())
+                               separators=(",", ":"), sort_keys=True, default=decimals.jsonable).encode())
         mac = _b64(hmac.new(self.key, f"token|{body}".encode(), hashlib.sha256).digest())
         return f"{body}.{mac}", exp
 
@@ -246,7 +247,7 @@ class Wopi:
 
     @staticmethod
     def _json(code: int, obj, extra: dict | None = None):
-        return code, {"Content-Type": "application/json", **(extra or {})}, json.dumps(obj).encode()
+        return code, {"Content-Type": "application/json", **(extra or {})}, json.dumps(obj, default=decimals.jsonable).encode()
 
     def check_file_info(self, member: dict, claims: dict, sess: dict) -> dict:
         rec = self.hub.read_record(member, sess["ref"])

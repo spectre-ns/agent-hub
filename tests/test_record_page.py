@@ -562,3 +562,32 @@ def test_open_work_s_own_address_goes_to_its_record_s_page_and_work_that_is_over
     assert get(f"/items/{iid}/answer", "jo")[0] == 200  # what the step asks for still opens by the item
     hub.engine.cancel(M(hub, "jo"), run["id"], "asked for by mistake")
     assert get(f"/items/{iid}", "jo")[0] == 200  # over: what was done with it is told on its own page
+
+
+def test_a_final_record_offers_reverse_it_and_the_form_holds_a_copy(hub, server):
+    """A final record's page says nothing changes it and offers "Reverse it" (for a type with ``reverses``): the new
+    record's form holds the record's values and the reference, never its state."""
+    from test_rules import POSTING, _posted, _type
+    _type(hub, POSTING, "Posting")
+    ref = _posted(hub, M(hub, "dr-amara"), memo="Consulting fees")
+    amara = token(hub, "dr-amara")
+    page = call(server, "GET", f"/records/{ref}", amara)[1]
+    assert "is <b>Posted</b> is final: nothing changes it." in page
+    link = f'/records/Posting/new?reversal_of={urllib.parse.quote(ref, safe="")}'
+    assert html.escape(link) in page
+    form = call(server, "GET", link, amara)[1]
+    assert 'value="Consulting fees"' in form and 'value="120"' in form and html.escape(ref) in form
+
+
+def test_a_pin_behind_its_record_offers_use_version_m(hub, server):
+    """A pinned reference shows the version it keeps; once its record has changed, the version now and a button that
+    moves the pin on."""
+    from test_rules import _packet
+    amara_m, chit, ref = _packet(hub)
+    amara = token(hub, "dr-amara")
+    assert "version 1</span>" in call(server, "GET", f"/records/{ref}", amara)[1]
+    hub.update_record(amara_m, chit, {"amount": 11})
+    page = call(server, "GET", f"/records/{ref}", amara)[1]
+    assert "version 1 (now 2)" in page and "Use version 2</button>" in page
+    code, _ = call(server, "POST", f"/records/{ref}/repin", amara, form={"field": "counted", "target": chit})
+    assert code == 303 and hub.read_record(amara_m, ref)["counted"][0]["version"] == 2

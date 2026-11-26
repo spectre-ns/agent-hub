@@ -16,6 +16,7 @@ from .. import pack as packmod
 from .. import export as exportmod
 from .. import schema, visibility
 from ..hub import Conflict, HubError, Denied, Invalid, NotFound
+from .. import decimals
 
 e = html.escape
 SIMPLE, NESTED, SCALAR = schema.FORM_SIMPLE, schema.FORM_NESTED, schema.SCALAR  # what a form can edit
@@ -126,6 +127,7 @@ class RecordPages:
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/link", self.page_link)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/(?P<verb>link|unlink)", self.post_link)
         R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/override", self.post_override)
+        R("POST", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/repin", self.post_repin)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
         R("GET", r"/api/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/files/(?P<blob>[0-9a-f]{64})", self.get_file)
         R("POST", r"/api/files/(?P<rtype>[A-Za-z][\w]*)", self.api_add_file)
@@ -371,18 +373,21 @@ class RecordPages:
         return schema.form_fields(rt)
 
     def _value_html(self, f, rec) -> str:
-        if f.get("rows"):
-            return self._rows_html(f, rec)
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "", [], {})]
+        if f["type"] == "table":
+            return self._table_html(f, vals[0]) if vals else "<span class='muted'>—</span>"
         out = []
         for v in vals:
             for item in (v if isinstance(v, list) else [v]):
-                if f["type"] == "attachment" and isinstance(item, dict):
+                if f["type"] in ("decimal", "number") and decimals.number(item) is not None:
+                    shown = decimals.text(item) if isinstance(item, decimals.Decimal) else str(item)
+                    out.append(e(shown) + (f' <span class="unit">{e(f["unit"])}</span>' if f.get("unit") else ""))
+                elif f["type"] == "attachment" and isinstance(item, dict):
                     out.append(self._attachment_html(rec, item))
                 elif f["type"] == "markdown" and isinstance(item, str):
                     out.append(self.markdown_html(item, rec))
                 elif f["type"] == "reference" and schema.ref_of(item):
-                    out.append(self.record_link(schema.ref_of(item)))
+                    out.append(self.record_link(schema.ref_of(item)) + self._pin_html(f, rec, item))
                 elif f["type"] == "member" and isinstance(item, str):
                     out.append(self.who(item.removeprefix("member:")))
                 elif f["type"] == "datetime" and isinstance(item, str) and self._datetime_words(item):
@@ -399,6 +404,127 @@ class RecordPages:
                 else:
                     out.append(e(str(item)))
         return "<br>".join(out) if out else "<span class='muted'>—</span>"
+
+    def _table_html(self, f, rows) -> str:
+        """A table field's rows as a table: a column's values right-aligned when they are numbers."""
+        if not isinstance(rows, list):
+            return self._plain_html(rows)
+        cols = f["columns"]
+        num = lambda c: ' class="num"' if c["type"] in ("number", "decimal") else ""  # noqa: E731
+        head = "".join(f"<th{num(c)} scope='col'>{e(c['label'])}"
+                       + (f" <span class='unit'>({e(c['unit'])})</span>" if c.get("unit") else "") + "</th>"
+                       for c in cols)
+        body = "".join("<tr>" + "".join(f"<td{num(c)}>{self._value_html({**c, 'unit': None}, row)}</td>" for c in cols)
+                       + "</tr>" for row in rows if isinstance(row, dict))
+        return (f'<div class="tablewrap"><table class="rows"><thead><tr>{head}</tr></thead><tbody>{body}</tbody>'
+                f'</table></div>')
+
+    def _table_grid(self, f, rows, me) -> str:
+        """A table field as a grid of inputs: each row's cells named ``<table>.<row>.<column>``, its rows and a few
+        blank ones (left blank, a row is dropped). The "Add a row" button adds more; without the script, saving and
+        editing again does."""
+        name = f["path"]
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        blank = max(0, min(3, (f.get("max_rows") or schema.MAX_ROWS) - len(rows)))
+        cols = f["columns"]
+
+        def cell(c, i, row):
+            n = f"{name}.{i}.{c['name']}"
+            v = row.get(c["name"])
+            lab = f' aria-label="{e(c["label"])}, row {i + 1}"'
+            if c["type"] in ("choice", "boolean", "member"):
+                opts = ([(str(x), self._choice_label(c, x)) for x in c["choices"]] if c["type"] == "choice" else
+                        [("true", "Yes"), ("false", "No")] if c["type"] == "boolean" else
+                        [(m["id"], m["name"]) for m in self.hub.members() if m["status"] == "active"])
+                cur = "" if v is None else ("true" if v is True else "false" if v is False else
+                                            str(v).removeprefix("member:"))
+                return (f'<select name="{e(n)}"{lab}><option value=""></option>' + "".join(
+                    f'<option value="{e(o)}"{" selected" if o == cur else ""}>{e(lbl)}</option>' for o, lbl in opts)
+                        + "</select>")
+            if c["type"] == "reference":
+                shown = schema.ref_of(v) or ""
+                return f'<input name="{e(n)}"{lab} value="{e(shown)}" placeholder="a name or Type/id">'
+            if c["type"] == "decimal":
+                shown = decimals.text(v) if isinstance(v, decimals.Decimal) else "" if v is None else str(v)
+                return (f'<input name="{e(n)}"{lab} inputmode="decimal" value="{e(shown)}" '
+                        f'placeholder="{e(decimals.example(c["scale"]))}">')
+            kind = {"number": "number", "date": "date", "datetime": "datetime-local"}.get(c["type"], "text")
+            step = ' step="any"' if c["type"] == "number" else ""
+            shown = "" if v is None else str(v)[:16] if c["type"] == "datetime" else str(v)
+            return f'<input type="{kind}" name="{e(n)}"{lab}{step} value="{e(shown)}">'
+
+        head = "".join(f"<th scope='col'>{self._label_words(c)}"
+                       + (f" <span class='unit'>({e(c['unit'])})</span>" if c.get("unit") else "") + "</th>"
+                       for c in cols)
+        body = "".join("<tr>" + "".join(f"<td>{cell(c, i, row)}</td>" for c in cols) + "</tr>"
+                       for i, row in enumerate(rows + [{}] * blank))
+        helps = ([f["help"]] if f.get("help") else []) + ["A row left blank is dropped."]
+        return (f'<fieldset class="grid" data-grid="{e(name)}" data-rows="{len(rows) + blank}" '
+                f'data-max="{f.get("max_rows") or schema.MAX_ROWS}"><legend>{self._label_words(f)}</legend>'
+                f'<input type="hidden" name="{e(name)}" value="rows">'
+                f'<div class="tablewrap"><table class="rows"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+                f'</div><button type="button" class="btn subtle" data-grid-add hidden>Add a row</button>'
+                f'<small class="help">{" · ".join(e(h) for h in helps)}</small></fieldset>')
+
+    def _rows_from_form(self, f, form: dict, before=None) -> list[dict]:
+        """A grid's rows as the form sent them, each cell as its column's type; a blank row is dropped. ``before``:
+        the rows the record holds, which the grid shows in order: a datetime cell sent back as it was shown (to the
+        minute) keeps its seconds and zone."""
+        name, found = f["path"], {}
+        old = before if isinstance(before, list) else []
+        for k in form:
+            m = re.fullmatch(re.escape(name) + r"\.(\d{1,4})\.([A-Za-z_][A-Za-z0-9_]*)", k)
+            if m:
+                found.setdefault(int(m.group(1)), {})[m.group(2)] = form[k]
+        cols = {c["name"]: c for c in f["columns"]}
+        rows = []
+        for i in sorted(found):
+            row = {}
+            for col, raw in found[i].items():
+                c = cols.get(col)
+                if c is None:
+                    continue
+                was = old[i].get(col) if i < len(old) and isinstance(old[i], dict) else None
+                if c["type"] == "datetime" and isinstance(was, str) and isinstance(raw, str) and raw \
+                        and raw == was[:16]:
+                    row[col] = was     # shown to the minute and not changed
+                    continue
+                try:
+                    v = self._coerce(c, raw)
+                except Invalid as exc:
+                    raise Invalid(f"{f['label']}, row {len(rows) + 1}: {exc}") from None
+                if v not in (None, ""):
+                    row[col] = v
+            if row:
+                rows.append(row)
+        return rows
+
+    @staticmethod
+    def _same_rows(new: list, old) -> bool:
+        """Whether rows as sent are the rows the record holds: a reference held as {reference} or Type/id alike, and
+        an empty cell (which a grid sends back as nothing) the same as none."""
+        flat = lambda rows: [{k: (schema.ref_of(v) or v) if isinstance(v, dict) else v for k, v in x.items()  # noqa: E731
+                              if v not in (None, "")} if isinstance(x, dict) else x for x in (rows or [])]
+        return flat(new) == flat(old)
+
+    def _pin_html(self, f, rec, item) -> str:
+        """A pinned reference's version, and, when its record has changed since, the version now and a button that
+        moves the pin on ("Use version M") for someone who may change the record."""
+        if not f.get("pin") or not isinstance(item, dict) or "version" not in item:
+            return ""
+        ref = schema.ref_of(item)
+        now = self.hub.record_version(ref)
+        out = f' <span class="muted">version {e(str(item["version"]))}'
+        if now == item["version"]:
+            return out + "</span>"
+        out += f" (now {e(str(now))})</span>"
+        me = self.reader()
+        if rec.get("id") and rec.get("resourceType") and self.hub.may_write(me, rec["resourceType"]):
+            out += (f'<form method="post" action="/records/{e(rec["resourceType"])}/{e(rec["id"])}/repin" class="inline">'
+                    f'<input type="hidden" name="field" value="{e(f["name"])}">'
+                    f'<input type="hidden" name="target" value="{e(ref)}">'
+                    f'<button class="btn subtle">Use version {e(str(now))}</button></form>')
+        return out
 
     @staticmethod
     def _datetime_words(v: str) -> str:
@@ -600,14 +726,14 @@ class RecordPages:
         """A form control for a field, filled from the record (none for a field of a class they may not write)."""
         if not visibility.may_field(self.hub, me, f, write=True):
             return ""
-        if f.get("rows"):
-            return self._rows_input(f, rec, me)
         name = f["path"].removesuffix(".*")
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "")] \
             if rec else []
         if f.get("required_unless") and rec:  # not required while the record is in the state that excuses it
             f = {**f, "required": schema.is_required(f, rec)}
         spec = {**f, "name": name}
+        if f["type"] == "table":
+            return self._table_grid(f, vals[0] if vals else [], me)
         if f["type"] == "reference":
             refs = [schema.ref_of(v) for v in vals if schema.ref_of(v)]
             multi = f["path"].endswith(".*")
@@ -648,7 +774,7 @@ class RecordPages:
             return self._labelled(f, ctl, cid, [f["help"]] if f.get("help") else [])
         val = vals[0] if vals else None
         if self._as_json(f, val):  # structured values are edited as JSON, never as Python's repr
-            txt = json.dumps(val, indent=1, ensure_ascii=False) if val not in (None, "", [], {}) else ""
+            txt = json.dumps(val, indent=1, ensure_ascii=False, default=decimals.jsonable) if val not in (None, "", [], {}) else ""
             req = " required" if f.get("required") else ""
             cid, ids = self._control_id(name, True)
             ctl = (f'<textarea class="mono" name="{e(name)}"{ids} rows="{min(12, txt.count(chr(10)) + 2)}" '
@@ -677,158 +803,6 @@ class RecordPages:
                 spec["_titles"] = sorted({self.hub.title(r) for r in self.hub.records.search(rt.id, limit=300)})
         return self._field(spec, choices, val)
 
-    ROWS_BLANK = 3  # blank rows a rows editor offers; saved, three more are offered
-    ROW_DIGITS = 4  # a row's number in a form: past schema.ROWS_MAX it is refused, and a longer one is not a row
-
-    @staticmethod
-    def _column_key(c) -> str:
-        return c["path"].rsplit(".", 1)[1]
-
-    def _rows_input(self, f, rec, me) -> str:
-        """A list of rows (``rows``) as a table to edit: a row per item, a column per field at ``<list>.*.<key>``,
-        a box to remove each row, and blank rows to add. Each row names the item it came from (``._row``), so what
-        the form does not show of it (a column this member may not write, a value the type has no column for) is
-        kept. No script needed: more rows are offered each time it is saved."""
-        name = f["path"]
-        rows = [x for x in (schema.first(rec or {}, name) or []) if isinstance(x, dict)] if rec else []
-        cols = [c for c in f["columns"] if c.get("show", True) is not False and c.get("by") != "workflow"
-                and visibility.may_field(self.hub, me, c, write=True)]
-        own = self.hub.record_type((rec or {}).get("resourceType", "")) if rec else None
-        own_ref = f"{own.id}/{rec['id']}" if own and rec.get("id") else None
-        lists, extra = {}, []
-        for c in cols:  # a reference column's choices are listed once, for every row
-            if c["type"] == "reference":
-                refs = [r for r in (schema.ref_of(x.get(self._column_key(c))) for x in rows) if r]
-                options, many = self._ref_options(c, refs, me)
-                options = [(v, lbl) for v, lbl in options if v != own_ref]  # a record is never a row of its own
-                lists[c["name"]] = (options, many)
-                if many:
-                    extra.append(f'<datalist id="dl-{e(name)}-{e(c["name"])}">' + "".join(
-                        f'<option value="{e(lbl)} · {e(v.split("/", 1)[1])}">' for v, lbl in options) + "</datalist>")
-        head = "".join(f"<th scope='col'>{self._label_words(c)}</th>" for c in cols) + "<th scope='col'>Remove</th>"
-        body = []
-        for i, row in enumerate(rows + [None] * self.ROWS_BLANK):
-            cells = "".join(f"<td>{self._rows_cell(c, f'{name}.{i}.{self._column_key(c)}', row, i, lists)}</td>"
-                            for c in cols)
-            if row is not None:
-                came = row["_row"] if "_row" in row else i  # a form shown again: the stored row it came from, if any
-                tail = ((f'<td><input type="hidden" name="{e(name)}.{i}._row" value="{came}">' if came is not None
-                         else "<td>") + f'<input type="checkbox" name="{e(name)}.{i}._remove" value="1" '
-                        f'aria-label="Remove row {i + 1}"></td>')
-            else:
-                tail = "<td></td>"
-            body.append(f"<tr>{cells}{tail}</tr>")
-        helps = [f["help"]] if f.get("help") else []
-        helps.append(f"Fill in a blank row to add one; tick Remove to take one out. Saved, {self.ROWS_BLANK} more "
-                     f"blank rows are offered.")
-        return (f'<fieldset class="rows-edit"><legend>{self._label_words(f)}</legend>'
-                f'<input type="hidden" name="{e(name)}" value="rows">'
-                f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table>'
-                f'</div>{"".join(extra)}<small class="help">{" · ".join(e(h) for h in helps)}</small></fieldset>')
-
-    def _rows_cell(self, c, name: str, row: dict | None, i: int, lists: dict) -> str:
-        """One cell of a rows editor: the column's control, labelled by its column and row. Never ``required`` in
-        the page (a blank row is left blank); a row missing a required value is refused when saved."""
-        val = (row or {}).get(self._column_key(c))
-        label = f' aria-label="{e(c["label"])}, row {i + 1}"'
-        n = e(name)
-        if c["type"] == "reference":
-            options, many = lists[c["name"]]
-            cur = schema.ref_of(val) or ""
-            if many:
-                shown = dict(options).get(cur, cur)
-                typed = f"{shown} · {cur.split('/', 1)[1]}" if cur else ""
-                return (f'<input name="{n}"{label} list="dl-{e(name.split(".", 1)[0])}-{e(c["name"])}" '
-                        f'value="{e(typed)}" autocomplete="off" placeholder="type a name or number">')
-            opts = "".join(f'<option value="{e(v)}"{" selected" if v == cur else ""}>{e(lbl)}</option>'
-                           for v, lbl in options)
-            return f'<select name="{n}"{label}><option value=""></option>{opts}</select>'
-        if c["type"] == "member":
-            cur = str(val or "").removeprefix("member:")
-            opts = "".join(f'<option value="{e(m["id"])}"{" selected" if m["id"] == cur else ""}>{e(m["name"])}</option>'
-                           for m in self.hub.members("person") if m["status"] == "active")
-            return f'<select name="{n}"{label}><option value=""></option>{opts}</select>'
-        if c["type"] == "choice":
-            opts = "".join(f'<option value="{e(v)}"{" selected" if str(val) == str(v) else ""}>'
-                           f'{e(self._choice_label(c, v))}</option>' for v in c["choices"])
-            return f'<select name="{n}"{label}><option value=""></option>{opts}</select>'
-        if c["type"] == "boolean":
-            cur = "" if val is None else ("true" if val else "false")
-            opts = "".join(f'<option value="{v}"{" selected" if v == cur else ""}>{w}</option>'
-                           for v, w in (("", ""), ("true", "Yes"), ("false", "No")))
-            return f'<select name="{n}"{label}>{opts}</select>'
-        kind = {"number": "number", "date": "date", "datetime": "datetime-local"}.get(c["type"], "text")
-        more = ' step="any" inputmode="decimal"' if kind == "number" else ""
-        for k in ("min", "max"):
-            if kind == "number" and c.get(k) is not None:
-                more += f' {k}="{c[k]}"'
-        if kind == "datetime-local" and isinstance(val, str) and "T" in val:
-            val = val[:16]
-        shown = "" if val is None else (str(int(val)) if isinstance(val, float) and val.is_integer() else str(val))
-        return f'<input type="{kind}" name="{n}"{label} value="{e(shown)}"{more}>'
-
-    def _rows_from_form(self, f, form: dict, before: dict | None, lenient: bool) -> list[dict]:
-        """The rows a rows editor sent: each as the item it came from with its columns as typed; a row ticked to
-        remove, or with every column empty, is left out. A column the form did not send keeps its value."""
-        pre = f["path"] + "."
-        index = lambda v: int(v) if v.isdecimal() and len(v) <= self.ROW_DIGITS else None  # 0-9 only, short
-        idx = sorted({n for n in (index(k[len(pre):].split(".", 1)[0]) for k in form if k.startswith(pre))
-                      if n is not None})
-        if idx and idx[-1] >= schema.ROWS_MAX:
-            raise Invalid(f"{f['label']}: a form holds at most {schema.ROWS_MAX} rows")
-        old = [x for x in ((before or {}).get(f["path"]) or [])]
-        last = lambda v: (v[-1] if isinstance(v, list) and v else v) or ""
-        out = []
-        for i in idx:
-            if last(form.get(f"{pre}{i}._remove")):
-                continue
-            src = index(str(last(form.get(f"{pre}{i}._row"))))
-            came = src if src is not None and src < len(old) and isinstance(old[src], dict) else None
-            row = dict(old[came]) if came is not None else {}
-            for c in f["columns"]:
-                key = self._column_key(c)
-                if f"{pre}{i}.{key}" not in form:
-                    continue
-                sent = last(form[f"{pre}{i}.{key}"])
-                if (c["type"] == "datetime" and isinstance(row.get(key), str) and isinstance(sent, str)
-                        and sent and row[key][:16] == sent[:16] and len(sent) <= 16):
-                    continue  # shown to the minute: unchanged, it keeps its seconds and zone
-                try:
-                    val = self._coerce(c, form[f"{pre}{i}.{key}"])
-                except Invalid as exc:
-                    if lenient:
-                        continue
-                    raise Invalid(f"{f['label']}, row {len(out) + 1}: {exc}") from None
-                if val in (None, ""):
-                    row.pop(key, None)
-                else:
-                    row[key] = val
-            if any(row.get(self._column_key(c)) not in (None, "", [], {}) for c in f["columns"]):
-                if lenient:  # shown again after a refusal: each row still says which stored row it came from
-                    row["_row"] = came
-                out.append(row)
-        return out
-
-    @staticmethod
-    def _same_rows(new: list, old) -> bool:
-        """Whether rows as sent are the rows the record holds (a reference held as {reference} or Type/id alike)."""
-        flat = lambda rows: [{k: (schema.ref_of(v) or v) if isinstance(v, dict) else v for k, v in x.items()}
-                             if isinstance(x, dict) else x for x in (rows or [])]
-        return flat(new) == flat(old)
-
-    def _rows_html(self, f, rec) -> str:
-        """A list of rows (``rows``) read: a table, a column per field that holds something in some row."""
-        rows = [x for x in (schema.first(rec, f["path"]) or []) if isinstance(x, dict)]
-        if not rows:
-            return "<span class='muted'>—</span>"
-        cols = [c for c in f["columns"] if c.get("show", True) is not False
-                and any(x.get(self._column_key(c)) not in (None, "", [], {}) for x in rows)]
-        head = "".join(f"<th scope='col'>{e(c['label'])}</th>" for c in cols)
-        body = "".join("<tr>" + "".join(
-            f"<td>{self._value_html({**c, 'path': self._column_key(c), 'with': {}}, x)}</td>" for c in cols)
-            + "</tr>" for x in rows)
-        return f"<div class='tablewrap'><table class='rows'><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
-
     def _graph_panels(self, me, rt, rec, ref: str) -> str:
         """For each graph (``graph``; fields sharing the same words are one, as a lot's parts and what it was split
         from), where it leads from this record at every level, both ways: down (what it points at, and what those
@@ -851,21 +825,15 @@ class RecordPages:
                 items = []
                 for d, r, x, via, rel in rows:
                     f = by_rel.get(rel) or g["fields"][0]
-                    whole = rt.field(f["row_of"]) if f.get("row_of") else None
                     holder, target = (held.get(via), r) if way == "down" else (x, via)
-                    words = [f["label"]] if len(g["fields"]) > 1 and not whole else []
-                    if whole and holder:
-                        key = self._column_key(f)
-                        for item in schema.first(holder, whole["path"]) or []:
-                            if isinstance(item, dict) and schema.ref_of(item.get(key)) == target:
-                                words += [f"{c['label']} {self._plain_words(item.get(self._column_key(c)))}"
-                                          for c in whole["columns"] if c is not f and c.get("show", True) is not False
-                                          and item.get(self._column_key(c)) not in (None, "", [], {})]
+                    words = [f["label"]] if len(g["fields"]) > 1 and not f.get("table") else []
+                    if f.get("table") and holder:
+                        words += schema.row_words(rt, f, holder, target)
                     items.append(f'<li style="--depth:{d - 1}">{self.record_link(r)}'
                                  + (f' <span class="muted">{e(" · ".join(words))}</span>' if words else "") + "</li>")
                 notes = []
                 if more:
-                    href = (f"{self.record_href(ref)}/trace?graph={urllib.parse.quote(g['fields'][0]['name'])}"
+                    href = (f"{self.record_href(ref)}/trace?graph={urllib.parse.quote(g['fields'][0]['path'])}"
                             f"&amp;way={way}")
                     notes.append(f"And more: the first {len(rows)} are shown. <a href=\"{href}\">Download the whole "
                                  f"trace</a> (CSV).")
@@ -875,12 +843,6 @@ class RecordPages:
                 out.append(f"<section class='section graph'><h2>{e(g[way])}</h2>"
                            + (f"<ul class='tree'>{''.join(items)}</ul>" if items else "") + note + "</section>")
         return "".join(out)
-
-    @staticmethod
-    def _plain_words(v) -> str:
-        if isinstance(v, float) and v.is_integer():
-            return str(int(v))
-        return str(v)
 
     def _on_screen(self, rt, op: str) -> list[dict] | None:
         """The tabs of the type's screen for ``op``, each with the editable fields it shows (None: no screen)."""
@@ -953,6 +915,11 @@ class RecordPages:
             except ValueError:
                 raise Invalid(f"{f['label']}: {raw!r} is not a number") from None
             return int(n) if n.is_integer() else n
+        if f["type"] == "decimal":
+            try:
+                return decimals.to_decimal(raw, f["scale"])
+            except ValueError as exc:
+                raise Invalid(f"{f['label']}: {exc}") from None
         if f["type"] == "boolean":
             return raw == "true"
         text = str(raw).strip()
@@ -992,14 +959,6 @@ class RecordPages:
         # whole values first, then the plain values inside them, so a field for name.0.family edits the name
         fields = [f for f in fields if not NESTED.fullmatch(f["path"])] + [f for f in fields if NESTED.fullmatch(f["path"])]
         for f in fields:
-            if f.get("rows"):  # a table of rows: its marker says the form showed it
-                if f["path"] not in form:
-                    continue
-                val = self._rows_from_form(f, form, before, lenient)
-                if before is not None and self._same_rows(val, before.get(f["path"])):
-                    continue
-                data[f["path"]] = val
-                continue
             key = f["path"].removesuffix(".*")
             if NESTED.fullmatch(f["path"]):
                 if key not in form:
@@ -1024,6 +983,17 @@ class RecordPages:
                 data[top] = schema.set_in(current.get(top), rest.split("."), val, f.get("with"))
                 continue
             if key not in form and not (f["type"] == "reference" and f["path"].endswith(".*") and partial):
+                continue
+            if f["type"] == "table":
+                try:
+                    val = self._rows_from_form(f, form, (before or {}).get(key))
+                except Invalid:
+                    if not lenient:
+                        raise
+                    continue
+                if before is not None and self._same_rows(val, before.get(key)):
+                    continue
+                data[key] = val or None
                 continue
             ok, val = coerce(f, form.get(key, []))
             if not ok:
@@ -1196,6 +1166,7 @@ class RecordPages:
                    f'<p class="part-of">Part of <a href="{e(href)}">{e(self.hub.short_title(o))}</a></p>')
             cancel, back = e(href), ""
             crumbs = [(href, self.hub.short_title(o)), (f"{href}#part-{rtype}", rt.plural), (None, "Add")]
+        seed = self._reversal_seed(me, rt, q, seed, kept)
         seed = self._seed_from_links(me, rt, seed, kept)
         start = f' It starts as <b>{e(lc["initial"])}</b>.' if lc and lc.get("initial") else ""
         inputs = self._inputs(rt, seed, me, "create", skip=skip)
@@ -1205,6 +1176,25 @@ class RecordPages:
                 f'<div class="filters"><button class="primary">{verb}</button>'
                 f'<a class="btn secondary" href="{cancel}" data-modal-close>Cancel</a>{back}</div></form></div>')
         return self.layout(req, f"{verb} {a_an(self._lower(rt.label))}", body, crumbs=crumbs)
+
+    def _reversal_seed(self, me, rt, q, seed: dict | None, kept: dict | None) -> dict | None:
+        """"Reverse it": the new record's form holds what the record it reverses says (as the member may read it),
+        to change as the pack's practice is (amounts the other way, say): the core copies, never negates. Not its
+        state, number or what only a workflow writes."""
+        rv = rt.reverses
+        got = q.get(rv["field"]) if rv else None
+        if not rv or kept or not isinstance(got, str) or not got.startswith(rt.id + "/"):
+            return seed
+        try:
+            src = self.hub.read_record(me, got)
+        except (Invalid, Denied, HubError):
+            return seed
+        copy = {k: v for k, v in src.items() if k not in ("id", "meta")}
+        for f in rt.fields:
+            if f.get("by") == "workflow" or (rt.lifecycle and f["path"] == rt.lifecycle["path"]) \
+                    or f["type"] == "attachment":
+                copy = schema.put(copy, f["path"], None)
+        return {**{k: v for k, v in copy.items() if v is not None}, **(seed or {}), "resourceType": rt.id}
 
     def _seed_from_links(self, me, rt, seed: dict | None, kept: dict | None) -> dict | None:
         """What a new record's links already say, filled in: a link left empty (the note's patient) takes what a record
@@ -1733,6 +1723,13 @@ class RecordPages:
         return (f'<div class="flash info" role="status"><p>{e(gone["note"])}: '
                 f'{e(", ".join(gone.get("fields") or []))}.</p></div>')
 
+    def post_repin(self, req, rtype, rid):
+        """"Use version M": a pinned reference moved on to the version of its record now (``hub.repin``)."""
+        form = self.form(req)
+        ref = f"{rtype}/{rid}"
+        self.hub.repin(req["me"], ref, str(form.get("field") or ""), str(form.get("target") or "") or None)
+        raise self._redirect(self.record_href(ref))
+
     def post_override(self, req, rtype, rid):
         """Break the glass (``hub.break_glass``), then back to the record, now open, under the banner."""
         reason = str(self.form(req).get("reason") or "")
@@ -1784,7 +1781,7 @@ class RecordPages:
         empty: list = []  # read, a field with nothing in it is not a row: they are named once, below
 
         def row(f):
-            if f in prose or f in unseen or f.get("row_of"):
+            if f in prose or f in unseen:
                 return ""
             if not self._has_value(f, rec) and not req["query"].get("edit"):
                 empty.append(f["label"])
@@ -1850,13 +1847,23 @@ class RecordPages:
             if used:
                 d = used["data"]
                 body = "".join(f"<tr><th>{e(f['label'])}</th><td>{self._value_html(f, d)}</td></tr>"
-                               for f in rt.fields if f.get("show", True) is not False and not f.get("row_of")
+                               for f in rt.fields if f.get("show", True) is not False
                                and not (lc and f["path"] == lc["path"]) and schema.first(d, schema.locate(d, f["path"], f.get("with"))) not in (None, ""))
                 main.append(f'<section class="card in-use"><h3>In use: the {e(lc["in_use"])} version</h3>'
                             f'<p class="muted">This {e(rt.label.lower())} is being revised ({e(rt.state_label(st).lower())}). Until the '
                             f'revision is {e(lc["in_use"])}, work from this version (saved {self._at(used["at"])}).'
                             f'</p><table class="kv">{body}</table></section>')
-            if locked:
+            if locked and schema.sealed(rt, st):
+                reverse = (f' <a class="btn secondary" href="/records/{e(rtype)}/new?{e(rt.reverses["field"])}='
+                           f'{e(urllib.parse.quote(ref, safe=""))}" data-modal>Reverse it</a>'
+                           if rt.reverses and rt.is_final(st) and may_write else "")
+                main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is '
+                            f'<b>{e(rt.state_label(st))}</b> is '
+                            + ("final: nothing changes it." + (" A record that reverses it corrects it." if rt.reverses
+                                                               else "")
+                               if rt.is_final(st) else "closing a period: a signed move reopens it.")
+                            + f'{reverse}</p></div>')
+            elif locked:
                 by_hand = "; ".join(t["label"] for t in lc["transition"] if st in t["from"] and t["by"] != "workflow")
                 on = any(st in t["from"] and t["by"] == "workflow" and not t.get("entry") for t in lc["transition"])
                 main.append(f'<div class="flash info"><p>{e(a_an(rt.label)[0].upper() + a_an(rt.label)[1:])} that is <b>{e(rt.state_label(st))}</b> is not edited.'
@@ -1924,7 +1931,7 @@ class RecordPages:
             if starts:
                 main.append(f"<div class='starts' role='group' aria-label='Start work'>{starts}</div>")
 
-        moves = [t for t in lc.get("transition", []) if (st in t["from"] or "*" in t["from"]) and t["to"] != st] \
+        moves = [t for t in lc.get("transition", []) if schema.leaves(lc, t, st) and t["to"] != st] \
             if lc else []
         # where its workflow moves it from here: not where it goes only if that work is cancelled (``abandoned``),
         # and not where the workflow begins (``entry``): a workflow starting on it again is no way on from here
@@ -2560,14 +2567,22 @@ class RecordPages:
                 + "</li>" for d, r in w["tree"])
             return f"<div class='section'>{head}" + (f"<ul class='tree'>{items}</ul>" if items else
                                                      "<p class='muted'>Nothing yet.</p>") + "</div>"
+        aside = f"<p class='muted dash-aside'>{e(w['aside'][0].upper() + w['aside'][1:])}.</p>" if w.get("aside") else ""
         if w["kind"] == "count":
-            return f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{w['total']}</p></div>"
+            stat = w["stat"] if w.get("computed") else w["total"]
+            return f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{e(str(stat))}</p>{aside}</div>"
+        if w["kind"] == "line":
+            from .charts import line_chart
+            return f"<div class='section'>{head}{line_chart(w['line'] or {}, w['title'] or fallback)}{aside}</div>"
         if w["kind"] == "chart":
-            top = max(w["counts"].values() or [1])
-            bars = "".join(f"<tr><th scope='row'>{e(k)}</th><td><span class='bar' style='width:"
-                           f"{max(4, 100 * n // top)}%'></span> {n}</td></tr>" for k, n in w["counts"].items())
+            texts = w.get("texts") or {}
+            size = {k: abs(float(decimals.number(n) or 0)) for k, n in w["counts"].items()}
+            top = max(size.values(), default=0) or 1
+            bars = "".join(f"<tr><th scope='row'>{e(str(k))}</th><td><span class='bar' style='width:"
+                           f"{max(4, int(100 * size[k] / top)) if size[k] else 0}%'></span> "
+                           f"{e(str(texts.get(k, n)))}</td></tr>" for k, n in w["counts"].items())
             return (f"<div class='section'>{head}" + (f"<table class='chart'><tbody>{bars}</tbody></table>" if bars
-                                                      else "<p class='muted'>Nothing yet.</p>") + "</div>")
+                                                      else "<p class='muted'>Nothing yet.</p>") + aside + "</div>")
         if w["kind"] == "board":
             groups, counts = w["groups"], w["counts"]
             moving = self._board_moves(me, w) if live else None
@@ -2607,6 +2622,8 @@ class RecordPages:
     def _view_href(self, w, r) -> str:
         if w["source"] == "records":
             return self.record_href(f"{w['type']}/{r['id']}")
+        if w["source"] == "signatures":  # a sign-off opens the record it is on
+            return self.record_href(r["record"])
         return f"/items/{r['id']}" if w["source"] == "items" else self.run_href(r)
 
     def _view_cell(self, w, r, c, first) -> str:
@@ -2631,7 +2648,7 @@ class RecordPages:
         st = schema.first(rec, rt.lifecycle["path"])
         out = {}
         for t in rt.lifecycle.get("transition", []):
-            if t["by"] == "workflow" or t["to"] == st or not (st in t["from"] or "*" in t["from"]) or t["to"] in out:
+            if t["by"] == "workflow" or t["to"] == st or not schema.leaves(rt.lifecycle, t, st) or t["to"] in out:
                 continue
             asks = bool(t["asks"] or t["comment"])
             out[t["to"]] = {"how": "screen" if asks else "post",

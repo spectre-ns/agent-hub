@@ -11,12 +11,19 @@ title = "{name}[ · {client_number}]"
 short_title = "{name}"
 active = "record.active != false"
 order = 0
+# a client number names one client: it is on their letters, and how they sign in to the portal. The hub gives it, the
+# next in its series (TW-0001), when the client is made; clients carried over from an older version keep theirs.
+unique = ["client_number"]
 summary = "A person or a business the firm works for."
 
 [base]
 identifier = "client_number"
 contact = "email"
 responsible = "partner_in_charge"
+
+[number]
+field = "client_number"
+pattern = "TW-{seq:04}"
 
 [[field]]
 name = "kind"
@@ -39,7 +46,7 @@ name = "client_number"
 label = "Client number"
 type = "string"
 fact = true
-help = "TW- and four digits: on every letter, and how a client signs in to the portal"
+help = "Given by the hub when the client is made (TW- and four digits): on every letter, and how a client signs in to the portal"
 
 [[field]]
 name = "email"

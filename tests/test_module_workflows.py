@@ -874,7 +874,8 @@ def test_an_interaction_is_walked_by_its_follow_up_and_the_daily_sweep_never_mov
     assert rec["logged_by"] == "rana" and rec["status"] == "logged" and step_state(hub, first, "due") == "waiting"
     assert not hub.db.workflows.find_one({"workflow_id": "crm-interaction-logged"})  # merged into its owner
     hub.update_record(rana, ref, {"follow_up": hub.engine.now().date().isoformat()})
-    hub.engine.tick(hub.engine.now())  # the date came: the sweep marks it, and the waiting follow-up takes it
+    nine = hub.engine.now().replace(hour=9, minute=0, second=0, microsecond=0)  # after the 07:00 sweep
+    hub.engine.tick(nine)  # the date came: the sweep marks it, and the waiting follow-up takes it
     rec = hub.records.read(*ref.split("/", 1))
     assert rec["follow_up_asked"] == rec["follow_up"] and rec["status"] == "follow-up"
     sweep = next(r for r in hub.engine.runs() if r["workflow_id"] == "crm-follow-up-due" and r["record"] == ref)
@@ -887,7 +888,7 @@ def test_an_interaction_is_walked_by_its_follow_up_and_the_daily_sweep_never_mov
     second = open_run(hub, "crm-follow-up", ref)
     assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "due") == "waiting"
     assert hub.records.read(*ref.split("/", 1))["status"] == "logged"
-    hub.engine.tick(hub.engine.now())  # the same date does not come back
+    hub.engine.tick(nine)  # the same date does not come back
     assert hub.records.read(*ref.split("/", 1))["status"] == "logged"
     # one with no date yet is followed up now by a person: a move its waiting step takes
     now = _interaction(hub, rana)

@@ -21,22 +21,48 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 # =====================================================================================================================
 # FOUNDATION
 # =====================================================================================================================
 FIRM = "Tidewater CPA"
-HST_RATE = 0.14          # Nova Scotia HST, from April 1, 2025
+PROVINCE = "NS"  # where the firm and its clients are: the province whose HST it charges and whose income tax it works out
 DEFAULT_FEES = {"t1": 350, "bookkeeping": 400, "t2": 2400, "gst-hst": 300, "payroll": 150}
+CENT = Decimal("0.01")
 SIN = re.compile(r"\b\d{3}[ -]?\d{3}[ -]?\d{3}\b")
 BN = re.compile(r"\b\d{9}\s?[A-Z]{2}\s?\d{4}\b")
 
 
-def _money(v) -> str:
+def _dec(v, default=None):
+    """Money as an exact Decimal (the hub keeps amounts so: 12.30, never 12.299999); ``default`` for none."""
+    if isinstance(v, Decimal):
+        return v
+    if v is None or isinstance(v, bool) or v == "":
+        return default
     try:
-        n = float(v)
-    except (TypeError, ValueError):
+        d = Decimal(str(v).replace(",", "").replace("$", "").strip())
+    except InvalidOperation:
+        return default
+    return d if d.is_finite() else default
+
+
+def _cents(v) -> Decimal:
+    """To the cent, half up: 12.345 is 12.35 (as the hub rounds a two-place amount)."""
+    return (_dec(v, Decimal(0)) + 0).quantize(CENT, ROUND_HALF_UP)
+
+
+def _plain(v) -> str:
+    """A number without trailing zeros: 25.00 is 25, 12.50 is 12.5."""
+    s = f"{_dec(v, Decimal(0)):f}"
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
+def _money(v) -> str:
+    n = _dec(v)
+    if n is None:
         return "—"
+    n = _cents(n)
     return f"-${abs(n):,.2f}" if n < 0 else f"${n:,.2f}"
 
 
@@ -86,7 +112,7 @@ def _summary_communication(rec):
 
 
 def _summary_relationship(rec):
-    return f"{rec['percent']:g}%" if isinstance(rec.get("percent"), (int, float)) else None
+    return f"{_plain(rec['percent'])}%" if _dec(rec.get("percent")) is not None else None
 
 
 FOUNDATION_SUMMARIES = {"Client": _summary_client, "Engagement": _summary_engagement, "Invoice": _summary_invoice,
@@ -142,40 +168,50 @@ def act_client_message(engine, run, step, params, actor):
                           drafted_by=params.get("drafted_by"))
 
 
+# What a client signs on the portal, by the type of record they chose: the states it waits for them in, the field their
+# signature fills (empty until they sign), and what they approved, in words.
+CLIENT_SIGNS = {
+    "T1Return": (("with-client", "t183-overdue"), "t183_signed_on", "the return and authorised filing (T183)", "return"),
+    "Engagement": (("proposed", "overdue"), "client_signed_on", "the engagement letter", "engagement"),
+}
+
+
 def act_client_sign(engine, run, step, params, actor):
-    """client.sign: the client answered on the portal. An approval is recorded on what was waiting for it: on the
-    return waiting for their T183 (its date and how), or on the engagement waiting for their signature. The record's
-    own workflow, waiting for that, then moves it (client-signed, signed): this run never moves another's record.
-    ``signed`` says whether it was recorded; a question, or nothing waiting, is for the office."""
+    """client.sign: the client answered on the portal about one record of theirs, the one they read and chose
+    (``about``): the return waiting for their T183, or the engagement letter waiting for their signature. An approval
+    is recorded on that record alone (its date and how), which its own workflow, waiting for it, then moves on
+    (client-signed, signed): this run never moves another's record. Nothing is written, and the answer is for the
+    office, unless the record is the client's, waits for them now and is not signed yet. ``signed`` says whether it
+    was recorded."""
     hub = engine.hub
     client = _subject_of_run(engine, run)
-    what, answer = str(params.get("what") or ""), str(params.get("answer") or "")
+    ref, answer = _ref(params.get("about")), str(params.get("answer") or "")
+    rtype = ref.split("/", 1)[0]
+    if rtype not in CLIENT_SIGNS:
+        raise ValueError(f"client.sign: nothing a client signs is a {rtype or 'record'} ({ref!r})")
+    states, field, approved, noun = CLIENT_SIGNS[rtype]
     today = _today(engine).isoformat()
     name = (_read(hub, client) or {}).get("name") or "The client"
+    rec = _read(hub, ref) or {}
+    theirs = bool(rec) and _ref(rec.get("client")) == client
     if answer != "approve":
-        _communication(engine, run, actor, client, channel="portal", direction="in",
-                       subject=f"Question about my {'return' if what == 't183' else 'engagement'}",
-                       body=f"{name} has a question before approving.")
+        _communication(engine, run, actor, client, channel="portal", direction="in", about=ref if theirs else None,
+                       subject=f"Question about my {noun}", body=f"{name} has a question before approving.")
         return {"signed": False, "summary": f"{name} has a question before approving: call them back."}
-    if what == "t183":
-        rtype, states, values = "T1Return", ("client-approval", "with-client", "t183-overdue"), {
-            "t183_signed_on": today, "t183_how": "portal"}
-    elif what == "engagement":
-        rtype, states, values = "Engagement", ("drafting", "proposed", "overdue"), {
-            "client_signed_on": today, "client_signed_how": "portal", "signed_by_name": name}
+    if not theirs:
+        return {"signed": False, "summary": f"{name} approved {ref} on the portal, but it is not theirs: nothing was "
+                                            f"recorded."}
+    if rec.get("status") not in states or rec.get(field):
+        return {"signed": False, "summary": f"{name} approved {hub.key_of(ref) or ref} on the portal, but it is not "
+                                            f"waiting for them ({rec.get('status')}"
+                                            f"{', signed already' if rec.get(field) else ''}): nothing was recorded."}
+    if rtype == "T1Return":
+        values = {"t183_signed_on": today, "t183_how": "portal"}
     else:
-        raise ValueError(f"client.sign: nothing to sign called {what!r}")
-    sign_field = "t183_signed_on" if rtype == "T1Return" else "client_signed_on"
-    waiting = [r for r in hub.records.search(rtype, subject=client, limit=None)
-               if r.get("status") in states and not r.get(sign_field)]
-    if not waiting:
-        return {"signed": False, "summary": f"{name} approved on the portal, but nothing of theirs is waiting for it."}
-    rec = sorted(waiting, key=lambda r: (r.get("year") or 0))[-1]
-    ref = f"{rtype}/{rec['id']}"
+        values = {"client_signed_on": today, "client_signed_how": "portal", "signed_by_name": name}
     _set(hub, actor, ref, run, **values)
     _communication(engine, run, actor, client, channel="portal", direction="in", about=ref,
-                   subject="Approved on the portal",
-                   body=f"{name} approved {'the return and authorised filing (T183)' if what == 't183' else 'the engagement letter'} on {today}.")
+                   subject="Approved on the portal", body=f"{name} approved {approved} on {today}.")
     return {"signed": True, "record": ref, "summary": f"{name} approved {ref} on the portal."}
 
 
@@ -232,8 +268,8 @@ def act_engagement_renewal_date(engine, run, step, params, actor):
 
 
 def act_engagement_renew(engine, run, step, params, actor):
-    """engagement.renew: next year's engagement, as this one was: proposed to the client (its workflow sends it), or
-    planned (``status``: its workflow waits for its season, then sends it)."""
+    """engagement.renew: next year's engagement, as this one was: waiting for a partner to accept it (then its
+    workflow sends it), or planned (``status``: its workflow waits for its season, then a partner accepts it)."""
     hub, ref = engine.hub, run["record"]
     eng = _read(hub, ref)
     year = int(eng["year"]) + 1
@@ -245,22 +281,41 @@ def act_engagement_renew(engine, run, step, params, actor):
         "client": eng["client"], "client_name": eng.get("client_name") or "", "service": eng["service"], "year": year,
         "fee": eng.get("fee", DEFAULT_FEES.get(eng["service"], 0)), "fee_basis": eng.get("fee_basis") or "fixed",
         "scope": eng.get("scope") or "", "previous": ref,
-        "status": "planned" if params.get("status") == "planned" else "proposed"}, run_id=run["id"])
+        "status": "planned" if params.get("status") == "planned" else "acceptance"}, run_id=run["id"])
     return {"engagement": f"Engagement/{new['id']}", "new": True}
 
 
+def sales_tax_rate(hub, on: date, province: str = PROVINCE) -> Decimal | None:
+    """The sales tax (HST) in force in ``province`` on the day ``on``: the TaxRate of the latest day it applies from,
+    on or before it. None when none is on file: an invoice is never charged a guessed rate."""
+    day = on.isoformat()
+    rows = [r for r in hub.records.search("TaxRate", limit=None)
+            if r.get("kind") == "sales-tax" and r.get("jurisdiction") == province
+            and str(r.get("effective_from") or "") <= day]
+    if not rows:
+        return None
+    return _dec(max(rows, key=lambda r: str(r["effective_from"]))["rate"])
+
+
 def act_invoice(engine, run, step, params, actor, *, description: str, fee=None) -> dict:
-    """An invoice for the run's work, sent: the engagement's fee plus HST, due in 30 days, and the email with it."""
+    """An invoice for the run's work, sent: the engagement's fee, one line, plus HST at the rate in force today (a
+    TaxRate record), due in 30 days, and the email with it. With no rate on file the step fails, and a person enters
+    the rate and runs it again: nothing is invoiced at a guessed rate."""
     hub = engine.hub
     work = _read(hub, run["record"]) or {}
     eng = _read(hub, work.get("engagement")) if work.get("engagement") else None
     client = _ref(work.get("client"))
-    amount = float(fee if fee is not None else (eng or {}).get("fee") or DEFAULT_FEES.get((eng or {}).get("service"), 0))
-    hst = round(amount * HST_RATE, 2)
+    amount = _cents(fee if fee is not None else (eng or {}).get("fee") or DEFAULT_FEES.get((eng or {}).get("service"), 0))
     today = _today(engine)
+    rate = sales_tax_rate(hub, today)
+    if rate is None:
+        raise ValueError(f"no HST rate ({PROVINCE}) is on file for {today.isoformat()}: a partner or manager enters it "
+                         f"(Tax rates), then this step is run again")
+    hst = _cents(amount * rate)
     inv = hub.create_record(actor, "Invoice", {  # numbered by the hub as it is made sent (Invoice.toml [number])
         "client": client, "client_name": work.get("client_name") or "", "description": description,
-        "amount": amount, "hst": hst, "total": round(amount + hst, 2), "issued_on": today.isoformat(),
+        "lines": [{"description": description, "amount": amount}], "amount": amount, "hst_rate": rate, "hst": hst,
+        "total": amount + hst, "issued_on": today.isoformat(),
         "due_on": (today + timedelta(days=30)).isoformat(), "status": "sent", "about": run["record"],
         **({"engagement": f"Engagement/{eng['id']}"} if eng else {})}, run_id=run["id"])
     ref, number = f"Invoice/{inv['id']}", inv["number"]
@@ -268,7 +323,7 @@ def act_invoice(engine, run, step, params, actor, *, description: str, fee=None)
                    body=f"Thank you for choosing {FIRM}. Invoice {number} for {description}: "
                         f"{_money(amount)} plus HST {_money(hst)}, total {_money(amount + hst)}, due "
                         f"{(today + timedelta(days=30)).isoformat()}.")
-    return {"invoice": ref, "number": number, "total": round(amount + hst, 2)}
+    return {"invoice": ref, "number": number, "total": amount + hst}
 
 
 FOUNDATION_ACTIONS = {"client.message": act_client_message, "client.sign": act_client_sign,
@@ -330,32 +385,97 @@ FOUNDATION_STANDINS = {"engagement-letter": standin_engagement_letter}
 # T1: personal tax
 # =====================================================================================================================
 RISK_LINE_REFUND = 1000          # a refund that changes by more than this from last year is over the risk line
-RISK_LINE_INCOME = 0.25          # ...and total income that changes by more than this share (and by $10,000)
+RISK_LINE_INCOME = Decimal("0.25")  # ...and total income that changes by more than this share (and by $10,000)
 INCOME_SLIPS = {"T4", "T4A", "T4A-P", "T4A-OAS", "T4E", "T5", "T3", "T5008", "business-income"}
 SLIP_WORDS = {"T4": "employment income", "T4A": "pension or other income", "T4A-P": "CPP benefits",
               "T4A-OAS": "Old Age Security", "T4E": "EI benefits", "T5": "investment income", "T3": "trust income",
               "T5008": "securities sold", "business-income": "self-employment income", "RRSP": "RRSP contribution",
               "donation": "donations", "medical": "medical expenses", "childcare": "childcare", "T2202": "tuition"}
-# 2025 brackets, simplified (federal and Nova Scotia; basic personal amounts only): an estimate the reviewer checks
-FEDERAL = [(57375, 0.15), (114750, 0.205), (177882, 0.26), (253414, 0.29), (None, 0.33)]
-NOVA_SCOTIA = [(30507, 0.0879), (61015, 0.1495), (95883, 0.1667), (154650, 0.175), (None, 0.21)]
-FEDERAL_BPA, NS_BPA = 16129, 11744
-CPP_RATE, CPP_EXEMPT, CPP_MAX_EARNINGS = 0.0595, 3500, 71300
-EI_RATE, EI_MAX_EARNINGS = 0.0164, 65700
-CANADA_EMPLOYMENT_AMOUNT = 1471
+# The year's rates are records (TaxRate, in the rates data class); estimate() reads the four a T1 needs. The donation
+# credit over $200 is the federal rule's own rate, not a year's.
+DONATION_HIGH_RATE = Decimal("0.29")
+T1_RATES = {"federal": ("income-tax", "federal"), "province": ("income-tax", PROVINCE), "cpp": ("cpp", "federal"),
+            "ei": ("ei", "federal")}
 FILE_MEANING = "I authorise filing this return with the CRA"
 REVIEW_MEANING = "I reviewed this return and it is ready for the client"
 
 
-def _tax(income: float, brackets) -> float:
-    out, low = 0.0, 0.0
-    for top, rate in brackets:
-        hi = income if top is None else min(income, top)
-        if hi > low:
-            out += (hi - low) * rate
-        if top is None or income <= top:
+def tax_rates(hub, year) -> dict:
+    """The rates a T1 for ``year`` is worked out with, by what estimate() calls them (T1_RATES): each the TaxRate of
+    that kind, place and year, or None when none is on file."""
+    rows = [r for r in hub.records.search("TaxRate", limit=None) if r.get("year") == year]
+    return {name: next((r for r in rows if (r.get("kind"), r.get("jurisdiction")) == kw), None)
+            for name, kw in T1_RATES.items()}
+
+
+# The rates a new firm starts with (seed_rates): federal and Nova Scotia income tax, CPP and EI for 2024 and 2025
+# (brackets and basic amounts only: the estimate is one a reviewer checks), and Nova Scotia's HST since 2010. A partner
+# or manager adds the next year's as a TaxRate when it is published.
+def _brackets(*rows):
+    return [{"over": Decimal(str(over)), "rate": Decimal(rate)} for over, rate in rows]
+
+
+_FED_RATES = ("0.15", "0.205", "0.26", "0.29", "0.33")
+_NS_RATES = ("0.0879", "0.1495", "0.1667", "0.175", "0.21")
+SEED_RATES = [
+    {"kind": "income-tax", "jurisdiction": "federal", "year": 2024, "rate": Decimal("0.15"),
+     "brackets": _brackets(*zip((0, 55867, 111733, 173205, 246752), _FED_RATES)),
+     "basic_amount": Decimal("15705"), "employment_amount": Decimal("1433"), "source": "CRA, 2024 indexation"},
+    {"kind": "income-tax", "jurisdiction": "federal", "year": 2025, "rate": Decimal("0.15"),
+     "brackets": _brackets(*zip((0, 57375, 114750, 177882, 253414), _FED_RATES)),
+     "basic_amount": Decimal("16129"), "employment_amount": Decimal("1471"),
+     "source": "CRA, 2025 indexation (the lowest rate at 15%, as the estimate has it)"},
+    {"kind": "income-tax", "jurisdiction": "NS", "year": 2024, "rate": Decimal("0.0879"),
+     "brackets": _brackets(*zip((0, 29590, 59180, 93000, 150000), _NS_RATES)),
+     "basic_amount": Decimal("8481"), "source": "Nova Scotia, 2024 (no supplement)"},
+    {"kind": "income-tax", "jurisdiction": "NS", "year": 2025, "rate": Decimal("0.0879"),
+     "brackets": _brackets(*zip((0, 30507, 61015, 95883, 154650), _NS_RATES)),
+     "basic_amount": Decimal("11744"), "source": "Nova Scotia budget 2025, indexed"},
+    {"kind": "cpp", "jurisdiction": "federal", "year": 2024, "rate": Decimal("0.0595"), "basic_amount": Decimal("3500"),
+     "max_earnings": Decimal("68500"), "source": "CRA, CPP 2024"},
+    {"kind": "cpp", "jurisdiction": "federal", "year": 2025, "rate": Decimal("0.0595"), "basic_amount": Decimal("3500"),
+     "max_earnings": Decimal("71300"), "source": "CRA, CPP 2025"},
+    {"kind": "ei", "jurisdiction": "federal", "year": 2024, "rate": Decimal("0.0166"), "max_earnings": Decimal("63200"),
+     "source": "CRA, EI 2024"},
+    {"kind": "ei", "jurisdiction": "federal", "year": 2025, "rate": Decimal("0.0164"), "max_earnings": Decimal("65700"),
+     "source": "CRA, EI 2025"},
+    {"kind": "sales-tax", "jurisdiction": "NS", "effective_from": "2010-07-01", "rate": Decimal("0.15"),
+     "source": "Nova Scotia HST, 15% from July 1, 2010"},
+    {"kind": "sales-tax", "jurisdiction": "NS", "effective_from": "2025-04-01", "rate": Decimal("0.14"),
+     "source": "Nova Scotia HST, 14% from April 1, 2025"},
+]
+
+
+def _rate_key(r: dict) -> tuple:
+    return r.get("kind"), r.get("jurisdiction"), r.get("year"), str(r.get("effective_from") or "") or None
+
+
+def seed_rates(hub, actor) -> list[str]:
+    """The SEED_RATES not on file yet, made as TaxRate records by ``actor``: the references made. A rate the firm
+    already has (of that kind, place and year or day) is left as the firm has it."""
+    have = {_rate_key(r) for r in hub.records.search("TaxRate", limit=None)}
+    made = []
+    for row in SEED_RATES:
+        if _rate_key(row) not in have:
+            made.append(f"TaxRate/{hub.create_record(actor, 'TaxRate', dict(row))['id']}")
+    return made
+
+
+def missing_rates(rates: dict) -> list[str]:
+    """The rates not on file, as a person would look for them ('income-tax NS')."""
+    return [" ".join(T1_RATES[n]) for n, r in rates.items() if not r]
+
+
+def _tax(income: Decimal, rate: dict) -> Decimal:
+    """Income tax on ``income`` by a TaxRate's brackets: each bracket's rate on what is over its amount, up to the
+    next one's."""
+    rows = sorted(((_dec(b["over"]), _dec(b["rate"])) for b in rate.get("brackets") or []), key=lambda b: b[0])
+    out = Decimal(0)
+    for i, (over, r) in enumerate(rows):
+        if income <= over:
             break
-        low = top
+        top = rows[i + 1][0] if i + 1 < len(rows) else None
+        out += ((income if top is None else min(income, top)) - over) * r
     return out
 
 
@@ -369,14 +489,22 @@ def _key_matches(key: str, slip: dict) -> bool:
     return slip.get("slip_type") == kind and (not issuer or issuer.lower() == str(slip.get("issuer") or "").lower())
 
 
-def estimate(slips: list[dict]) -> dict:
-    """The return's figures from the year's slips: a deterministic estimate (lines 15000 and 26000, tax, refund)."""
-    income = deductions = credits = deducted = employment = 0.0
+def estimate(slips: list[dict], year: int, rates: dict) -> dict:
+    """The return's figures from the year's slips, worked out with that year's rates (tax_rates): a deterministic
+    estimate (lines 15000 and 26000, tax, refund), in exact amounts, each to the cent. Rates of another year, or
+    missing, are refused: an estimate never borrows a year's rates."""
+    missing = missing_rates(rates)
+    if missing or any(r.get("year") != year for r in rates.values()):
+        raise ValueError(f"no {year} rates on file for {', '.join(missing) or 'every kind'}: nothing is estimated")
+    fed, prov, cpp, ei = (rates[n] for n in ("federal", "province", "cpp", "ei"))
+    fed_rate, prov_rate = _dec(fed["rate"]), _dec(prov["rate"])
+    zero = Decimal(0)
+    income = deductions = credits = deducted = employment = zero
     for s in slips:
-        amt = float(s.get("amount") or 0)
+        amt = _dec(s.get("amount"), zero)
         kind = s.get("slip_type")
         if kind == "T5008":
-            amt = amt * 0.5  # the taxable half of a capital gain
+            amt = amt / 2  # the taxable half of a capital gain
         if kind in INCOME_SLIPS:
             income += amt
         if kind == "T4":
@@ -384,17 +512,21 @@ def estimate(slips: list[dict]) -> dict:
         elif kind in ("RRSP", "childcare"):
             deductions += amt
         elif kind == "donation":
-            credits += 0.15 * min(amt, 200) + 0.29 * max(amt - 200, 0)
+            credits += fed_rate * min(amt, 200) + DONATION_HIGH_RATE * max(amt - 200, zero)
         elif kind in ("medical", "T2202"):
-            credits += 0.15 * amt
-        deducted += float(s.get("tax_deducted") or 0)
+            credits += fed_rate * amt
+        deducted += _dec(s.get("tax_deducted"), zero)
     # CPP and EI on employment income: credits (both governments), and the Canada employment amount (federal)
-    cpp_ei = max(min(employment, CPP_MAX_EARNINGS) - CPP_EXEMPT, 0) * CPP_RATE + min(employment, EI_MAX_EARNINGS) * EI_RATE
-    taxable = max(income - deductions, 0.0)
-    fed_credits = (FEDERAL_BPA + cpp_ei + (min(employment, CANADA_EMPLOYMENT_AMOUNT))) * 0.15 + credits
-    tax = max(_tax(taxable, FEDERAL) - fed_credits, 0.0) + max(_tax(taxable, NOVA_SCOTIA) - (NS_BPA + cpp_ei) * 0.0879, 0.0)
-    return {"total_income": round(income, 2), "taxable_income": round(taxable, 2), "tax_deducted": round(deducted, 2),
-            "tax": round(tax, 2), "net_refund": round(deducted - tax, 2)}
+    cpp_ei = max(min(employment, _dec(cpp["max_earnings"])) - _dec(cpp.get("basic_amount"), zero), zero) \
+        * _dec(cpp["rate"]) + min(employment, _dec(ei["max_earnings"])) * _dec(ei["rate"])
+    taxable = max(income - deductions, zero)
+    fed_credits = (_dec(fed["basic_amount"]) + cpp_ei + min(employment, _dec(fed.get("employment_amount"), zero))) \
+        * fed_rate + credits
+    tax = max(_tax(taxable, fed) - fed_credits, zero) + \
+        max(_tax(taxable, prov) - (_dec(prov["basic_amount"]) + cpp_ei) * prov_rate, zero)
+    tax = _cents(tax)
+    return {"total_income": _cents(income), "taxable_income": _cents(taxable), "tax_deducted": _cents(deducted),
+            "tax": tax, "net_refund": _cents(deducted) - tax}
 
 
 # The T1's states while its slips are gathered (organizer to the call about what is missing), and before it is drafted.
@@ -420,15 +552,20 @@ def _last_return(returns, year):
                  and r.get("status") in ("filed", *T1_ASSESSED)), None)
 
 
-def compare(ret: dict, slips: list[dict], returns: list[dict]) -> dict:
+def compare(ret: dict, slips: list[dict], returns: list[dict], rates: dict) -> dict:
     """This year against last year: the risk line. Over it when a kind of income is new, a slip that came last year
     did not come, the refund changes by more than RISK_LINE_REFUND, or income by more than RISK_LINE_INCOME (and
-    $10,000); and for a client with no return of last year to compare with."""
+    $10,000); for a client with no return of last year to compare with; and for a year whose rates (``rates``,
+    tax_rates) are not all on file, when nothing is estimated (``estimate`` None) and a person works it out."""
     year = ret.get("year")
     now, before = _year_slips(slips, year), _year_slips(slips, (year or 0) - 1)
-    est = estimate(now)
+    missing = missing_rates(rates)
+    est = None if missing else estimate(now, year, rates)
     last = _last_return(returns, year or 0)
     reasons = []
+    if missing:
+        reasons.append(f"No {year} rates on file ({', '.join(missing)}): nothing was estimated; a partner or manager "
+                       f"enters them (Tax rates)")
     if last is None:
         reasons.append("No return of last year to compare with")
     kinds_before = {s.get("slip_type") for s in before}
@@ -439,15 +576,16 @@ def compare(ret: dict, slips: list[dict], returns: list[dict]) -> dict:
         if not any(_key_matches(slip_key(s), n) for n in now):
             reasons.append(f"Last year's {slip_key(s)} did not come")
     last_refund = (last or {}).get("assessed_refund", (last or {}).get("net_refund"))
-    if last_refund is not None and abs(est["net_refund"] - float(last_refund)) > RISK_LINE_REFUND:
-        reasons.append(f"Refund changes by {_money(abs(est['net_refund'] - float(last_refund)))} from last year "
+    if est and _dec(last_refund) is not None and abs(est["net_refund"] - _dec(last_refund)) > RISK_LINE_REFUND:
+        reasons.append(f"Refund changes by {_money(abs(est['net_refund'] - _dec(last_refund)))} from last year "
                        f"({_money(last_refund)} to {_money(est['net_refund'])})")
     last_income = (last or {}).get("total_income")
-    if last_income:
-        change = est["total_income"] - float(last_income)
-        if abs(change) > 10000 and abs(change) / float(last_income) > RISK_LINE_INCOME:
-            reasons.append(f"Total income changes by {_money(change)} ({change / float(last_income):+.0%})")
+    if est and _dec(last_income):
+        change = est["total_income"] - _dec(last_income)
+        if abs(change) > 10000 and abs(change) / _dec(last_income) > RISK_LINE_INCOME:
+            reasons.append(f"Total income changes by {_money(change)} ({change / _dec(last_income):+.0%})")
     return {"over_line": bool(reasons), "reasons": reasons, "estimate": est, "slips": len(now),
+            "counted": [f"TaxSlip/{s['id']}" for s in now if s.get("id")],
             "last_year": f"T1Return/{last['id']}" if last else None, "last_year_refund": last_refund,
             "last_year_income": last_income}
 
@@ -512,8 +650,10 @@ def act_t1_slip_filed(engine, run, step, params, actor):
     """t1.slip_filed (a slip's run): the slip counts on the client's return for its year. A slip it was waiting for
     is no longer missing (all in: slips_complete); a notice of assessment is recorded on the return it assesses.
 
-    A slip that comes after the return was drafted, and before it is filed, reopens it: the return goes back to be
-    compared and drafted again with the slip in it, the client's authorisation (T183) is cleared, and it is reviewed
+    A slip read after the return was drafted (one that came late, or one read again), and before it is filed,
+    reopens it: the return goes back to be
+    compared and drafted again with the slip in it (the slip is its review point, which the next draft answers
+    first), the client's authorisation (T183) is cleared, and it is reviewed
     and authorised again before it can be filed. It is never left as a flag on a return someone could still file.
     One that comes after the filing was recorded is flagged for a person (the return may need an adjustment)."""
     hub = engine.hub
@@ -529,8 +669,8 @@ def act_t1_slip_filed(engine, run, step, params, actor):
         boxes = parse_boxes(slip.get("boxes"))
         _set(hub, actor, ref, run, noa_received=True, noa_date=str(boxes.get("date") or slip.get("received_on")
                                                                      or _today(engine).isoformat()),
-             assessed_refund=float(slip.get("amount") or 0),
-             assessed_taxable_income=float(boxes["26000"]) if boxes.get("26000") is not None else None)
+             assessed_refund=_dec(slip.get("amount"), Decimal(0)),
+             assessed_taxable_income=_dec(boxes.get("26000")))
         return {"return": ref, "notice": True, "summary": f"Notice of assessment recorded on {ref}."}
     slips = _year_slips(_client_records(hub, client, "TaxSlip"), year)
     if ret.get("status") in T1_BEFORE_DRAFT:
@@ -542,13 +682,13 @@ def act_t1_slip_filed(engine, run, step, params, actor):
         return {"return": ref, "missing": missing, "summary": f"{slip_key(slip)} counted on {ref}; "
                 + (f"still missing: {', '.join(missing)}." if missing else "nothing expected is missing.")}
     if ret.get("status") in T1_DRAFTED:
-        why = f"a slip came after the return was drafted: {slip_key(slip)}"
+        why = f"a slip was read after the return was drafted: {slip_key(slip)}"  # a late slip, or one read again
         note = "\n".join(b for b in (str(ret.get("note") or "").strip(),
                                      f"Reopened {_today(engine).isoformat()}: {why}.") if b)
         # the return's own workflow lets this move through (its open work's ``moves``, its wait's ``until``): this
         # pass ends, and the next one compares and drafts it again (t1.reopen)
         _set(hub, actor, ref, run, status="comparing", t183_signed_on=None, t183_how=None, note=note,
-             attention=f"Reopened: {why}")
+             attention=f"Reopened: {why}", review_points=f"Count the slip read after the draft: {slip_key(slip)}.")
         return {"return": ref, "late": True, "reopened": True,
                 "summary": f"{slip_key(slip)} came after {ref} was drafted: reopened, to be drafted, reviewed and "
                            f"authorised again."}
@@ -572,13 +712,18 @@ def act_t1_reopen(engine, run, step, params, actor):
 
 
 def act_t1_compare(engine, run, step, params, actor):
-    """t1.compare: this year against last year, and whether the draft is over the risk line (``over_line``)."""
+    """t1.compare: this year against last year, and whether the draft is over the risk line (``over_line``). The
+    return keeps the slips it counted (``slips``), each pinned as it is now: a signature on the return covers them,
+    so a slip read again since leaves it not current."""
     hub, ref = engine.hub, run["record"]
     ret = _read(hub, ref)
     client = _ref(ret.get("client"))
-    out = compare(ret, _client_records(hub, client, "TaxSlip"), _client_records(hub, client, "T1Return"))
-    _set(hub, actor, ref, run, last_year_refund=out["last_year_refund"],
+    out = compare(ret, _client_records(hub, client, "TaxSlip"), _client_records(hub, client, "T1Return"),
+                  tax_rates(hub, ret.get("year")))
+    _set(hub, actor, ref, run, last_year_refund=out["last_year_refund"], slips=out["counted"],
          attention=("Over the risk line: " + "; ".join(out["reasons"]))[:2000] if out["over_line"] else None)
+    if hub.pins_behind(hub.record_type("T1Return"), _read(hub, ref)):  # a slip kept from the last pass, read again
+        hub.repin(actor, ref, "slips", run_id=run["id"])
     out["summary"] = ("Over the risk line: " + "; ".join(out["reasons"]) + ".") if out["over_line"] else \
         "Within the risk line: like last year."
     return out
@@ -631,7 +776,8 @@ def act_t1_compare_noa(engine, run, step, params, actor):
     diffs = []
     for mine, theirs, what in (("net_refund", "assessed_refund", "refund"),
                                ("taxable_income", "assessed_taxable_income", "taxable income")):
-        if ret.get(mine) is not None and ret.get(theirs) is not None and abs(float(ret[mine]) - float(ret[theirs])) >= 1:
+        if _dec(ret.get(mine)) is not None and _dec(ret.get(theirs)) is not None \
+                and abs(_dec(ret[mine]) - _dec(ret[theirs])) >= 1:
             diffs.append(f"{what}: filed {_money(ret[mine])}, assessed {_money(ret[theirs])}")
     if diffs:
         _set(hub, actor, ref, run, attention=("The assessment differs: " + "; ".join(diffs))[:2000])
@@ -660,27 +806,60 @@ T1_PROVIDERS = {"t1-last-year": prov_t1_last_year}
 FINAL = re.compile(r"\b(filed|final|signed|approved by)\b", re.I)
 
 
+DRAFT_FIGURES = ("total_income", "taxable_income", "tax_deducted", "net_refund")
+
+
 def guard_t1_draft(values, ctxview):
     """Every reason the comparison gave is in the flags (the reviewer sees each), and a draft never says it is filed,
-    final or signed."""
+    final or signed. An agent's figures are the comparison's estimate, worked out from the slips read so far: it copies
+    them, as it copies a slip's amount, and never adds up a document's text itself, so a document not read yet is not
+    counted. With nothing estimated (no rates for the year), an agent does not draft. A person drafts from the firm's
+    tax software, and may differ."""
     cmp = (ctxview.get("context") or {}).get("compare") or {}
     flags = str(values.get("flags") or "")
     problems = [f"flags must name: {r}" for r in cmp.get("reasons") or [] if r not in flags]
     problems += [f"{k} calls the draft filed, final or signed; it is a draft for review"
                  for k in ("draft_summary", "summary") if FINAL.search(str(values.get(k) or ""))]
+    if (ctxview.get("by") or {}).get("kind") == "agent":
+        est = cmp.get("estimate")
+        if not est:
+            problems.append("nothing was estimated (no rates on file for the year): escalate; a person drafts it")
+        else:
+            problems += [f"{k} is {_money(values.get(k))}; the slips read so far give {_money(est.get(k))} "
+                         f"(compare.estimate): copy that figure; a document not read yet is not counted"
+                         for k in DRAFT_FIGURES if _dec(values.get(k)) != _dec(est.get(k))]
     return problems + guard_no_identifiers(values, ctxview)
 
 
 def guard_slip_extract(values, ctxview):
-    """The amount read is in the document's text, as printed: an agent copies numbers, never computes them."""
-    slip = next(iter((ctxview.get("context") or {}).get("record:documents") or []), {})
+    """The amount read is in the document's text, as printed: an agent copies numbers, never computes them. An agent
+    reads only the text, so its slip and year are in it too: a document that does not say which slip it is, or for
+    which year, goes to a person, who sees the document itself."""
+    slip = next(iter((ctxview.get("context") or {}).get("record:client-documents") or []), {})
     text = str(slip.get("text") or "").replace(",", "")
     amt = values.get("amount")
-    if text and amt is not None:
-        forms = {f"{abs(float(amt)):.2f}", f"{abs(float(amt)):g}"}
+    problems = []
+    if text and _dec(amt) is not None:  # as printed: 1234.50 or 1234.5, never a sum of other boxes
+        forms = {f"{abs(_dec(amt)):.2f}", _plain(abs(_dec(amt)))}
         if not any(f in text for f in forms):
-            return [f"the amount {amt} is not in the document's text; copy it as printed"]
-    return []
+            problems.append(f"the amount {amt} is not in the document's text; copy it as printed")
+    if text and (ctxview.get("by") or {}).get("kind") == "agent":
+        kind, year = values.get("slip_type"), values.get("year")
+        said = dict(SLIP_PATTERNS).get(kind)
+        if said and not said.search(text):
+            problems.append(f"the document's text does not say it is a {kind}; a document you cannot place is "
+                            f"escalated to a person")
+        if year is not None and not re.search(rf"\b{int(year)}\b", text):
+            problems.append(f"the year {year} is not in the document's text; copy it as printed, or escalate")
+    kind = values.get("slip_type")  # the main and tax boxes are the amount and the tax deducted, not other boxes
+    boxes = {re.sub(r"(?i)^box\s*", "", k): v for k, v in parse_boxes(values.get("boxes")).items()}
+    for box, field, what in ((MAIN_BOX.get(kind), "amount", "its amount"),
+                             (TAX_BOX.get(kind), "tax_deducted", "the income tax deducted")):
+        if box in boxes and _dec(values.get(field)) != _dec(boxes[box]):
+            have = _money(values.get(field)) if _dec(values.get(field)) is not None else "empty"
+            problems.append(f"box {box} of a {kind} is {what}: {field} is {have} but box {box} reads "
+                            f"{_money(boxes[box])}; put it in {field}")
+    return problems
 
 
 def guard_t1_client_letter(values, ctxview):
@@ -688,8 +867,8 @@ def guard_t1_client_letter(values, ctxview):
     ret = next(iter((ctxview.get("context") or {}).get("record:tax") or []), {})
     body = str(values.get("body") or "")
     problems = guard_no_identifiers(values, ctxview)
-    if ret.get("net_refund") is not None and _money(abs(float(ret["net_refund"]))).lstrip("-") not in body:
-        problems.append(f"the letter must give the reviewed figure, {_money(abs(float(ret['net_refund'])))}")
+    if _dec(ret.get("net_refund")) is not None and _money(abs(_dec(ret["net_refund"]))) not in body:
+        problems.append(f"the letter must give the reviewed figure, {_money(abs(_dec(ret['net_refund'])))}")
     if re.search(r"\b(has been|was|is) filed\b", body, re.I):
         problems.append("the letter says the return is filed; it is filed only after the client approves")
     return problems
@@ -708,7 +887,7 @@ def standin_t1_organizer(ctx):
     if not ret or not client:
         return {"answer": {}, "escalate": True, "reason": "the return or the client's file is not readable"}
     year = ret.get("year")
-    slips = _recs(ctx, "documents", "TaxSlip")
+    slips = _recs(ctx, "client-documents", "TaxSlip")
     expected = list(dict.fromkeys(slip_key(s) for s in _year_slips(slips, year - 1)))
     have = _year_slips(slips, year)
     missing = [k for k in expected if not any(_key_matches(k, s) for s in have)]
@@ -747,6 +926,7 @@ SLIP_PATTERNS = [
     ("business-income", re.compile(r"business income|statement of business", re.I))]
 MAIN_BOX = {"T4": "14", "T5": "13", "T4A": "16", "T4A-P": "20", "T4A-OAS": "18", "T4E": "14", "T3": "26",
             "T5008": "21"}
+TAX_BOX = {k: "22" for k in ("T4", "T4A", "T4E", "T4A-P", "T4A-OAS")}  # income tax deducted
 
 
 def parse_boxes(text) -> dict:
@@ -757,15 +937,14 @@ def parse_boxes(text) -> dict:
         k, v = k.strip(), v.strip().replace(",", "").lstrip("$")
         if not sep or not k:
             continue
-        try:
-            out[k] = float(v)
-        except ValueError:
-            out[k] = v
+        d = _dec(v) if re.fullmatch(r"-?\d+(\.\d+)?", v) else None
+        out[k] = d if d is not None else v
     return out
 
 
 def boxes_text(boxes: dict) -> str:
-    return "\n".join(f"{k}: {v:.2f}" if isinstance(v, float) else f"{k}: {v}" for k, v in boxes.items())
+    return "\n".join(f"{k}: {_cents(v):.2f}" if isinstance(v, (float, Decimal)) else f"{k}: {v}"
+                     for k, v in boxes.items())
 
 
 def read_slip(text: str) -> dict | None:
@@ -775,7 +954,7 @@ def read_slip(text: str) -> dict | None:
     if not kind or not year:
         return None
     issuer = re.search(r"(?:issuer|employer|payer|from|issued by)\s*:\s*(.+)", text, re.I)
-    boxes = {m.group(1): float(m.group(2).replace(",", ""))
+    boxes = {m.group(1): _dec(m.group(2))
              for m in re.finditer(r"box\s*(\d{2,5})\s*[:=]?\s*\$?(-?[\d,]+(?:\.\d+)?)", text, re.I)}
     amount = re.search(r"(?:amount|refund|total)\s*:?\s*\$?(-?[\d,]+(?:\.\d+)?)", text, re.I)
     owing = re.search(r"balance owing\s*:?\s*\$?([\d,]+(?:\.\d+)?)", text, re.I)
@@ -784,13 +963,13 @@ def read_slip(text: str) -> dict | None:
     if main and main in boxes:
         out["amount"] = boxes.pop(main)
     elif owing:
-        out["amount"] = -float(owing.group(1).replace(",", ""))
+        out["amount"] = -_dec(owing.group(1))
     elif amount:
-        out["amount"] = float(amount.group(1).replace(",", ""))
+        out["amount"] = _dec(amount.group(1))
     else:
         return None
-    if "22" in boxes and kind in ("T4", "T4A", "T4E", "T4A-P", "T4A-OAS"):
-        out["tax_deducted"] = boxes.pop("22")
+    if TAX_BOX.get(kind) in boxes:
+        out["tax_deducted"] = boxes.pop(TAX_BOX[kind])
     elif "28" in boxes and kind == "T4A":
         out["tax_deducted"] = boxes.pop("28")
     dated = re.search(r"date\s*:?\s*(20\d\d-\d\d-\d\d)", text, re.I)
@@ -802,7 +981,7 @@ def read_slip(text: str) -> dict | None:
 
 
 def standin_slip_extract(ctx):
-    slip = next(iter(_recs(ctx, "documents", "TaxSlip")), None)
+    slip = next(iter(_recs(ctx, "client-documents", "TaxSlip")), None)
     got = read_slip(str((slip or {}).get("text") or ""))
     if not got:
         return {"answer": {}, "escalate": True, "reason": "the document could not be read: a person must look at it"}
@@ -814,15 +993,22 @@ def standin_t1_draft(ctx):
     if not ret:
         return {"answer": {}, "escalate": True, "reason": "the return is not readable"}
     cmp = ctx["context"].get("compare") or {}
-    slips = _year_slips(_recs(ctx, "documents", "TaxSlip"), ret.get("year"))
+    slips = _year_slips(_recs(ctx, "client-documents", "TaxSlip"), ret.get("year"))
     if any(s.get("slip_type") == "business-income" for s in slips):
         return {"answer": {}, "escalate": True,
                 "reason": "Self-employment income: the statement of business activities (T2125), its expenses and "
                           "CCA, is prepared from the client's books by a person"}
-    est = estimate(slips)
+    est = cmp.get("estimate")  # worked out by the comparison with the year's rates, from the slips on file now
+    if not est:
+        return {"answer": {}, "escalate": True,
+                "reason": f"No {ret.get('year')} rates are on file, so nothing was estimated: a person drafts it"}
+    est = {k: _dec(v) for k, v in est.items()}
     flags = "\n".join(cmp.get("reasons") or [])
     refund = est["net_refund"]
-    summary = (f"Total income {_money(est['total_income'])}, taxable {_money(est['taxable_income'])}; "
+    # sent back with review points: the draft answers them first (the standin redrafts from the slips on file now)
+    answered = (f"Review points answered first: redrafted from the {len(slips)} slip(s) on file now. "
+                if str(ret.get("review_points") or "").strip() else "")
+    summary = (answered + f"Total income {_money(est['total_income'])}, taxable {_money(est['taxable_income'])}; "
                f"{'refund' if refund >= 0 else 'balance owing'} {_money(abs(refund))} "
                f"(last year {_money(cmp.get('last_year_refund'))}). "
                + ("Over the risk line: see the flags." if cmp.get("over_line") else "Like last year."))
@@ -834,7 +1020,7 @@ def standin_t1_client_letter(ctx):
     ret, client = _the_return(ctx), next(iter(_recs(ctx, "profile", "Client")), None)
     if not ret or not client or ret.get("net_refund") is None:
         return {"answer": {}, "escalate": True, "reason": "the reviewed return is not readable"}
-    refund = float(ret["net_refund"])
+    refund = _dec(ret["net_refund"])
     what = (f"a refund of {_money(refund)}" if refund >= 0 else
             f"a balance owing of {_money(-refund)}, due {ret.get('balance_due_date') or 'April 30'}")
     body = (f"Hello {_first_name(client)},\n\nYour {ret.get('year')} return is ready for your approval. Your total "
@@ -854,7 +1040,7 @@ T1_STANDINS = {"t1-organizer": standin_t1_organizer, "slip-chase": standin_slip_
 def _summary_t1(rec):
     bits = []
     if rec.get("net_refund") is not None:
-        r = float(rec["net_refund"])
+        r = _dec(rec["net_refund"], Decimal(0))
         bits.append(f"refund {_money(r)}" if r >= 0 else f"owing {_money(-r)}")
     if rec.get("missing_slips") and rec.get("status") in T1_GATHERING:
         bits.append(f"{len(rec['missing_slips'])} slip(s) missing")
@@ -915,7 +1101,16 @@ PROVIDERS = {**FOUNDATION_PROVIDERS, **T1_PROVIDERS, **BOOKS_PROVIDERS, **T2_PRO
 GUARDS = {**FOUNDATION_GUARDS, **T1_GUARDS, **BOOKS_GUARDS, **T2_GUARDS, **GST_PAYROLL_GUARDS}
 STANDINS = {**FOUNDATION_STANDINS, **T1_STANDINS, **BOOKS_STANDINS, **T2_STANDINS, **GST_PAYROLL_STANDINS}
 SUMMARIES = {**FOUNDATION_SUMMARIES, **T1_SUMMARIES, **BOOKS_SUMMARIES, **T2_SUMMARIES, **GST_PAYROLL_SUMMARIES}
-UPGRADES: dict = {}
+def upgrade_rates_are_records(hub, actor):
+    """1.7: the rates the pack had in its code (the 2025 brackets, CPP, EI and HST) are TaxRate records, so a hub the
+    pack upgrades has the rates its returns and invoices are worked out with. None until the TaxRate type is in
+    force."""
+    if hub.record_type("TaxRate") is None:
+        return None
+    return {"rates_made": seed_rates(hub, actor)}
+
+
+UPGRADES = {"1.7-rates-are-records": upgrade_rates_are_records}
 
 
 def summarize(rec: dict) -> str | None:
@@ -978,20 +1173,22 @@ DEMO_OWNERS = [("Sarah MacNeil", "Harbourview Bakery Ltd.", "owner", 100), ("Mei
 
 
 def demo_foundation(hub):
-    """The firm's clients: people and their companies, imported from the practice's old system."""
+    """The firm's rates (seed_rates), and its clients: people and their companies, imported from the practice's old
+    system. Each is given the next client number as it is made (Client.toml [number]: TW-0001 on)."""
     DEMO_CLIENTS.clear()
+    seed_rates(hub, IMPORTER)
     n = 0
     for name, born, email, extra in DEMO_PEOPLE:
         n += 1
         rec = hub.create_record(IMPORTER, "Client", {
-            "kind": "person", "name": name, "client_number": f"TW-{1000 + n}", "email": email, "birth_date": born,
+            "kind": "person", "name": name, "email": email, "birth_date": born,
             "phone": f"902-555-{140 + n:04d}", "address": f"{10 + 7 * n} Spring Garden Road, Halifax NS",
             "services": ["t1"], "partner_in_charge": "anne", "active": True, **extra})
         DEMO_CLIENTS[name] = f"Client/{rec['id']}"
     for name, year_end, email, services in DEMO_BUSINESSES:
         n += 1
         rec = hub.create_record(IMPORTER, "Client", {
-            "kind": "business", "name": name, "client_number": f"TW-{1000 + n}", "email": email,
+            "kind": "business", "name": name, "email": email,
             "business_type": "ccpc", "fiscal_year_end": year_end, "services": services,
             "phone": f"902-555-{140 + n:04d}", "address": f"{100 + n} Hollis Street, Halifax NS",
             "partner_in_charge": "anne", "active": True})
@@ -1058,7 +1255,7 @@ def _prior_year(hub, name, year, slips):
              "received_on": f"{year + 1}-03-0{1 + len(made) % 8}", "resourceType": "TaxSlip"}
         hub.create_record(IMPORTER, "TaxSlip", {k: v for k, v in s.items() if k != "resourceType"})
         made.append(s)
-    est = estimate(made)
+    est = estimate(made, year, tax_rates(hub, year))
     se = bool((_read(hub, cref) or {}).get("self_employed"))
     eng = hub.create_record(IMPORTER, "Engagement", {
         "client": cref, "client_name": name, "service": "t1", "year": year, "fee": 350 if not se else 650,
@@ -1078,19 +1275,32 @@ def _prior_year(hub, name, year, slips):
     return f"Engagement/{eng['id']}"
 
 
-def _engage(hub, name, year, previous=None, *, sign=True):
-    """This year's T1 engagement, proposed; the agent writes and sends the letter; the client signs on the portal,
-    and the hub opens the year's return. The return's reference (None if not signed)."""
+ACCEPT_MEANING = "I accept this engagement for the firm"
+
+
+def _engage(hub, name, year, previous=None, *, sign=True, answer="approve"):
+    """This year's T1 engagement: Anne (partner) accepts it for the firm, signed; the agent writes and sends the
+    letter; the client signs on the portal, and the hub opens the year's return. The return's reference (None if not
+    signed)."""
     sophie, portal = hub.member("sophie"), hub.member("client-portal")
     cref = DEMO_CLIENTS[name]
     se = bool((_read(hub, cref) or {}).get("self_employed"))
-    hub.create_record(sophie, "Engagement", {"client": cref, "client_name": name, "service": "t1", "year": year,
-                                             "fee": 350 if not se else 650, "fee_basis": "fixed",
-                                             **({"previous": previous} if previous else {}), "status": "proposed"})
+    eng = hub.create_record(sophie, "Engagement", {"client": cref, "client_name": name, "service": "t1", "year": year,
+                                                   "fee": 350 if not se else 650, "fee_basis": "fixed",
+                                                   **({"previous": previous} if previous else {}),
+                                                   "status": "acceptance"})
+    eref = f"Engagement/{eng['id']}"
+    hub.move_record(hub.member("anne"), eref, "drafting",
+                    {"acceptance_note": "Returning client, no conflicts; the same work as last year."
+                     if previous else "New client: identity checked, no conflicts; a T1 we do every season."},
+                    signature=ACCEPT_MEANING)
     _agents_work(hub)
     if not sign:
+        if answer != "approve":
+            hub.engine.start(portal, "client-sign", record=cref, inputs={"about": eref, "answer": answer})
+            _agents_work(hub)
         return None
-    hub.engine.start(portal, "client-sign", record=cref, inputs={"what": "engagement", "answer": "approve"})
+    hub.engine.start(portal, "client-sign", record=cref, inputs={"about": eref, "answer": "approve"})
     _agents_work(hub)
     got = [r for r in hub.records.search("T1Return", subject=cref, limit=None) if r.get("year") == year]
     return f"T1Return/{got[0]['id']}" if got else None
@@ -1125,9 +1335,10 @@ def _review(hub, ref, notes):
     _agents_work(hub)
 
 
-def _client_approves(hub, name):
-    hub.engine.start(hub.member("client-portal"), "client-sign", record=DEMO_CLIENTS[name],
-                     inputs={"what": "t183", "answer": "approve"})
+def _client_approves(hub, ref):
+    """The client authorises the return they read (T183), on the portal."""
+    hub.engine.start(hub.member("client-portal"), "client-sign", record=_ref((_read(hub, ref) or {}).get("client")),
+                     inputs={"about": ref, "answer": "approve"})
     _agents_work(hub)
 
 
@@ -1198,7 +1409,7 @@ def demo_t1(hub):
     _upload(hub, "James Okafor", year, DEMO_SLIPS["James Okafor"])
     _approve_holds(hub, james)
     _review(hub, james, "RRSP receipt matches the contribution room on last year's NOA.")
-    _client_approves(hub, "James Okafor")
+    _client_approves(hub, james)
 
     # Aisha: filed from the tax software and recorded here (a demo confirmation number), invoiced, waiting for the
     # notice of assessment.
@@ -1206,7 +1417,7 @@ def demo_t1(hub):
     _upload(hub, "Aisha Okafor", year, DEMO_SLIPS["Aisha Okafor"])
     _approve_holds(hub, aisha)
     _review(hub, aisha, "Childcare claimed by the lower-income spouse, as last year.")
-    _client_approves(hub, "Aisha Okafor")
+    _client_approves(hub, aisha)
     _file(hub, aisha)
 
     # Fatima: lost her job in the year (EI): filed; the CRA assessed a different refund: Rob looks into it.
@@ -1214,11 +1425,11 @@ def demo_t1(hub):
     _upload(hub, "Fatima Haddad", year, DEMO_SLIPS["Fatima Haddad"])
     _approve_holds(hub, fatima)
     _review(hub, fatima, "EI repayment threshold checked: none owing.")
-    _client_approves(hub, "Fatima Haddad")
+    _client_approves(hub, fatima)
     _file(hub, fatima)
     filed = _read(hub, fatima)
-    _notice(hub, "Fatima Haddad", year, round(float(filed["net_refund"]) - 412.0, 2),
-            float(filed["taxable_income"]) + 1800.0, hub.engine.now().date().isoformat())
+    _notice(hub, "Fatima Haddad", year, _dec(filed["net_refund"]) - 412,
+            _dec(filed["taxable_income"]) + 1800, hub.engine.now().date().isoformat())
 
     # Daniel: a new client: the letter is out, not signed yet; he uploaded a photo the agent could not read
     # (Ethan types it in). Robert asked a question on the portal instead of signing (Sophie calls him back).
@@ -1227,10 +1438,7 @@ def demo_t1(hub):
         "client": DEMO_CLIENTS["Daniel Boudreau"], "status": "received", "source": "portal",
         "received_on": hub.engine.now().date().isoformat(), "text": "IMG_2291.jpg (photo, blurred)"})
     _agents_work(hub)
-    _engage(hub, "Robert Langille", year, sign=False)
-    hub.engine.start(hub.member("client-portal"), "client-sign", record=DEMO_CLIENTS["Robert Langille"],
-                     inputs={"what": "engagement", "answer": "question"})
-    _agents_work(hub)
+    _engage(hub, "Robert Langille", year, sign=False, answer="question")
     return {"kevin": kevin, "margaret": margaret, "sarah": sarah, "liam": liam, "mei": mei, "james": james,
             "aisha": aisha, "fatima": fatima}
 

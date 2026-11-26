@@ -9,6 +9,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from . import decimals
 
 ACCEPT = "application/json, text/event-stream"
 
@@ -23,7 +24,7 @@ class Bridge:
 
     def write(self, msg: dict) -> None:
         with self.lock:
-            self.out.write(json.dumps(msg) + "\n")
+            self.out.write(json.dumps(msg, default=decimals.jsonable) + "\n")
             self.out.flush()
 
     def post(self, msg) -> list[dict]:
@@ -33,7 +34,7 @@ class Bridge:
             h["Mcp-Session-Id"] = self.session
         if self.version:
             h["MCP-Protocol-Version"] = self.version
-        req = urllib.request.Request(self.url, data=json.dumps(msg).encode(), headers=h, method="POST")
+        req = urllib.request.Request(self.url, data=json.dumps(msg, default=decimals.jsonable).encode(), headers=h, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:  # noqa: S310 - the hub the user named
                 if r.headers.get("Mcp-Session-Id"):

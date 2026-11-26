@@ -1,0 +1,129 @@
+# A rate the firm's work is figured with: a year's income tax brackets (federal, or a province's), CPP or EI for a
+# year, or a sales tax (HST) from the day it applies. Rates are records, not code: a partner or manager enters next
+# year's when the governments publish them, and every estimate and invoice reads the one in force for its year or day.
+# A year with no rates on file is never guessed: the return goes to a person (the comparison flags it), and an invoice
+# waits for a person to enter the rate.
+id = "TaxRate"
+key = "RATE"
+label = "Tax rate"
+plural = "Tax rates"
+data_class = "rates"
+strict = true
+title = "{kind} · {jurisdiction}[ {year}][ from {effective_from}]"
+order = 90
+# one rate per kind and place for a year (income tax, CPP, EI), or from a day (a sales tax)
+unique = [["kind", "jurisdiction", "year"], ["kind", "jurisdiction", "effective_from"]]
+summary = "What a tax or contribution is, for a year or from a day."
+
+[[field]]
+name = "kind"
+label = "Kind"
+type = "choice"
+choices = ["income-tax", "sales-tax", "cpp", "ei"]
+labels = { income-tax = "Income tax", sales-tax = "Sales tax (HST)", cpp = "CPP contributions", ei = "EI premiums" }
+required = true
+
+[[field]]
+name = "jurisdiction"
+label = "Jurisdiction"
+type = "choice"
+choices = ["federal", "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"]
+labels = { federal = "Federal" }
+required = true
+help = "Federal, or the province or territory (NS: Nova Scotia)"
+
+[[field]]
+name = "year"
+label = "Tax year"
+type = "number"
+min = 2000
+max = 2100
+help = "The year it is for (income tax, CPP, EI)"
+
+[[field]]
+name = "effective_from"
+label = "In force from"
+type = "date"
+help = "The day it applies from, until the next one of its kind and place (a sales tax)"
+
+[[field]]
+name = "rate"
+label = "Rate"
+type = "decimal"
+scale = 4
+min = 0
+max = 1
+help = "As a fraction: 0.1400 is 14%. For income tax, the rate its credits are worked at (the lowest bracket's)"
+
+[[field]]
+name = "brackets"
+label = "Brackets"
+type = "table"
+help = "Income tax: the rate on each dollar of taxable income over each amount, from 0"
+
+[[field.column]]
+name = "over"
+label = "On income over"
+type = "decimal"
+scale = 2
+min = 0
+required = true
+
+[[field.column]]
+name = "rate"
+label = "Rate"
+type = "decimal"
+scale = 4
+min = 0
+max = 1
+required = true
+
+[[field]]
+name = "basic_amount"
+label = "Basic amount"
+type = "decimal"
+scale = 2
+min = 0
+help = "Income tax: the basic personal amount. CPP: the basic exemption"
+
+[[field]]
+name = "max_earnings"
+label = "Maximum earnings"
+type = "decimal"
+scale = 2
+min = 0
+help = "CPP: the year's maximum pensionable earnings. EI: the maximum insurable earnings"
+
+[[field]]
+name = "employment_amount"
+label = "Canada employment amount"
+type = "decimal"
+scale = 2
+min = 0
+help = "Federal income tax only"
+
+[[field]]
+name = "source"
+label = "Source"
+type = "string"
+help = "Where the figures come from (the CRA's page, the province's budget)"
+
+[[check]]
+when = "record.kind == 'sales-tax'"
+must = "record.effective_from != null and record.year == null and record.rate != null"
+message = "a sales tax says the day it applies from (no tax year) and its rate"
+
+[[check]]
+when = "record.kind != 'sales-tax'"
+must = "record.year != null and record.effective_from == null and record.rate != null"
+message = "income tax, CPP and EI are for a tax year (no in-force day), with a rate"
+
+[[check]]
+when = "record.kind == 'income-tax'"
+must = "count(record.brackets.*) > 0 and min(record.brackets.*.over) == 0 and record.basic_amount != null"
+message = "income tax has its brackets, the first from 0, and the basic personal amount"
+
+[[check]]
+when = "record.kind in ['cpp', 'ei']"
+must = "record.max_earnings != null"
+message = "CPP and EI have the year's maximum earnings"

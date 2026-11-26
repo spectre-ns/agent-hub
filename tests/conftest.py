@@ -423,39 +423,34 @@ required = true
 [[field]]
 name = "bom"
 label = "Made of"
-type = "list"
-rows = true
+type = "table"
 
-[[field]]
+[[field.column]]
 name = "part"
 label = "Part"
-path = "bom.*.part"
 type = "reference"
 target = ["Kit"]
 rel = "made-of"
 required = true
 graph = { down = "Bill of materials", up = "Used in" }
 
-[[field]]
+[[field.column]]
 name = "quantity"
-path = "bom.*.quantity"
 type = "number"
 required = true
 above = 0
 
-[[field]]
+[[field.column]]
 name = "note"
-path = "bom.*.note"
 
-[[field]]
+[[field.column]]
 name = "checked"
-path = "bom.*.checked"
 type = "datetime"
 '''
 
 
 def kit_module(hub, monkeypatch, tmp_path):
-    """A module of our own, installed: Kit, whose rows (``bom``) name other kits through a graph reference."""
+    """A module of our own, installed: Kit, whose table (``bom``) names other kits through a graph column."""
     import shutil
     from practicehub import pack as packmod
     d = tmp_path / "modules"

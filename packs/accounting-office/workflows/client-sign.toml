@@ -2,10 +2,11 @@ id = "client-sign"
 title = "Client approval on the portal"
 record = "Client"
 summary = """
-A client answers on the portal: they approve their return and authorise filing it (the T183), or sign their
-engagement letter, or they have a question. An approval is recorded on what it approves (the return waiting for the
-client, the engagement letter waiting for a signature), which its own workflow is waiting for. A question, or an
-approval with nothing waiting for it, goes to the office.
+A client answers on the portal about one record of theirs, the one they read and chose (`about`): they approve their
+return and authorise filing it (the T183), or sign their engagement letter, or they have a question. An approval is
+recorded on that record alone (with two years' returns waiting, signing one marks only that one), which its own
+workflow is waiting for. A question, or an approval of a record that is not the client's, not waiting for them or
+signed already, goes to the office, and nothing is written.
 
 The client's approval is theirs: it never stands in for the firm's review or a partner's filing signature.
 """
@@ -14,12 +15,12 @@ The client's approval is theirs: it never stands in for the firm's review or a p
 starters = ["client-portal", "admin", "partner", "manager"]
 
 [[input]]
-name = "what"
+name = "about"
 label = "What the client is answering"
-type = "choice"
-choices = ["t183", "engagement"]
-labels = { t183 = "My tax return (authorise filing, T183)", engagement = "My engagement letter" }
+type = "reference"
+target = ["T1Return", "Engagement"]
 required = true
+help = "Their return (authorise filing, T183), or their engagement letter"
 
 [[input]]
 name = "answer"
@@ -46,7 +47,7 @@ title = "Record the client's approval"
 kind = "automation"
 action = "client.sign"
 [state.work.params]
-what = "{{input.what}}"
+about = "{{input.about}}"
 answer = "{{input.answer}}"
 
 [[edge]]

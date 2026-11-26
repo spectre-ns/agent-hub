@@ -33,6 +33,8 @@ _DARK = """color-scheme:dark;
 --shadow-raised:0 0 0 1px var(--card-edge),0 1px 1px #03040480;
 --shadow-overlay:0 0 0 1px #BCD6F00A,0 8px 12px #0304045C,0 0 1px 1px #03040480;
 --backdrop:#10121499;
+--series-1:#338ced;--series-2:#e76624;--series-3:#00a888;--series-4:#d28e05;--series-5:#e24d8b;--series-6:#0aac23;
+--series-7:#9887ef;--series-8:#eb6263;--grid:#2C333A;
 """
 
 CSS = (r"""
@@ -61,6 +63,9 @@ CSS = (r"""
 --shadow-raised:0 0 0 1px var(--card-edge),0 1px 1px #091E4240;
 --shadow-overlay:0 8px 12px #091E4226,0 0 1px #091E424F;
 --backdrop:#091E427A;
+/* a chart's series, in a fixed order (each mode's steps checked against its surface), and its hairline grid */
+--series-1:#257de0;--series-2:#f47230;--series-3:#00b894;--series-4:#f2a600;--series-5:#ee7fac;--series-6:#008a17;
+--series-7:#6a4ce2;--series-8:#ec4647;--grid:#DCDFE4;
 /* older names, kept so existing markup and the diagram keep working; they follow the tokens above */
 --muted:var(--subtlest);--line:var(--border);--line-2:var(--border-bold);--hover:var(--neutral);--brand-soft:var(--selected-bg);
 --shadow:var(--shadow-raised);--todo:var(--loz-default-fg);--todo-bg:var(--loz-default-bg);
@@ -502,10 +507,11 @@ label.radio{font-weight:400;color:var(--fg);display:inline-flex;align-items:cent
 textarea.code{font:13px/20px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 fieldset.choices{border:0;margin:12px 0 0;padding:0;min-width:0}
 fieldset.slot-picker{border:0;margin:12px 0 0;padding:0;min-width:0}
-fieldset.rows-edit{border:0;margin:12px 0 0;padding:0;min-width:0}
-fieldset.rows-edit>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
-fieldset.rows-edit .tablewrap{margin:0 0 4px}fieldset.rows-edit td{padding:4px;vertical-align:middle}
-fieldset.rows-edit td input:not([type=checkbox]),fieldset.rows-edit td select{width:100%;min-width:6em;margin:0}
+fieldset.grid{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.grid>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
+fieldset.grid td{padding:2px 4px}fieldset.grid input,fieldset.grid select{width:100%;min-width:6em;margin:0}
+table.rows td.num,table.rows th.num{text-align:right;font-variant-numeric:tabular-nums}
+.unit{color:var(--subtle);margin-left:4px}
 fieldset.slot-picker>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
 .slot-filters{display:flex;flex-wrap:wrap;gap:0 12px}.slot-filters label{flex:1 1 160px;margin-top:0}
 /* a screen's tabs: every part stays in the form (a required field is never hidden); the tab links jump to a part */
@@ -626,6 +632,19 @@ color:var(--subtle);background:var(--neutral)}
 /* ---- board */
 .stat{font-size:32px;line-height:40px;font-weight:600;margin:0}
 table.chart th{width:30%;font-weight:400}.bar{display:inline-block;height:12px;border-radius:2px;background:var(--brand);vertical-align:middle}
+.vl{margin:0}.line-chart{width:100%;height:auto;display:block;overflow:visible}
+.vl-grid{stroke:var(--grid);stroke-width:1}.vl-zero{stroke:var(--border-bold);stroke-width:1}
+.vl-tick{fill:var(--subtlest);font-size:12px}.vl-label{fill:var(--fg);font-size:12px}
+.vl-line{fill:none;stroke:currentColor;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.vl-dot,.vl-end{fill:currentColor;stroke:var(--surface);stroke-width:2}
+.vl-hit{fill:transparent}.vl-hit:hover{fill:var(--neutral)}
+.vl-s1{color:var(--series-1)}.vl-s2{color:var(--series-2)}.vl-s3{color:var(--series-3)}.vl-s4{color:var(--series-4)}
+.vl-s5{color:var(--series-5)}.vl-s6{color:var(--series-6)}.vl-s7{color:var(--series-7)}.vl-s8{color:var(--series-8)}
+.vl-legend{display:flex;flex-wrap:wrap;gap:4px 16px;list-style:none;margin:0 0 8px;padding:0;font-size:12px;color:var(--subtle)}
+.vl-key{display:inline-block;width:14px;height:3px;margin-right:6px;vertical-align:middle;border-radius:2px;background:currentColor}
+.vl-data{margin-top:4px}.vl-data summary{cursor:pointer;color:var(--subtle);font-size:12px}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.dash-aside{font-size:12px;margin:4px 0 0}
 .board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(208px,1fr);gap:8px;overflow-x:auto;padding-bottom:8px;position:relative;min-width:0}
 .col{background:var(--sunken);border-radius:3px;padding:8px;min-height:200px}
 .col>header{display:flex;align-items:center;gap:8px;padding:4px 4px 12px;font-size:12px;line-height:16px;font-weight:600;
@@ -1978,7 +1997,7 @@ function editor(root) {
     return el("label", { class: "radio" }, el("input", { type: "checkbox", checked: !!obj[k],
       onchange: (ev) => { obj[k] = ev.target.checked; changed(!!(o && o.rebuild)); } }), label);
   }
-  const TYPES = ["string", "text", "number", "boolean", "choice", "list", "date", "datetime", "member"];
+  const TYPES = ["string", "text", "number", "decimal", "boolean", "choice", "list", "date", "datetime", "member"];
   function fieldsEditor(obj, k, title, help) {
     const wrap = el("div");
     function draw() {
@@ -1986,15 +2005,23 @@ function editor(root) {
       const rows = (obj[k] || []).map((f, i) => el("tr", {},
         el("td", {}, el("input", { value: f.name || "", placeholder: "name", "aria-label": "field name",
           oninput: (ev) => { f.name = ev.target.value; changed(false); } })),
-        el("td", {}, el("select", { "aria-label": "field type", onchange: (ev) => { f.type = ev.target.value; changed(false); draw(); } },
+        el("td", {}, el("select", { "aria-label": "field type", onchange: (ev) => {
+            f.type = ev.target.value;
+            if (f.type === "decimal" && f.scale === undefined) f.scale = 2;  // an exact number keeps its places
+            if (f.type !== "decimal") delete f.scale;
+            changed(false); draw(); } },
           TYPES.map((t) => el("option", { value: t, selected: (f.type || "string") === t ? "selected" : null }, t)))),
         el("td", { title: "required" }, el("input", { type: "checkbox", "aria-label": "required", checked: !!f.required,
           onchange: (ev) => { f.required = ev.target.checked; changed(false); } })),
         el("td", {}, f.type === "choice" && !f.choices_from
           ? el("input", { value: (f.choices || []).join(", "), placeholder: "a, b, c", "aria-label": "choices",
               oninput: (ev) => { f.choices = ev.target.value.split(",").map((x) => x.trim()).filter(Boolean); changed(false); } })
-          : el("input", { value: f.label || "", placeholder: "label", "aria-label": "field label",
-              oninput: (ev) => { f.label = ev.target.value; changed(false); } })),
+          : el("span", {}, el("input", { value: f.label || "", placeholder: "label", "aria-label": "field label",
+              oninput: (ev) => { f.label = ev.target.value; changed(false); } }),
+            f.type === "decimal" ? el("input", { type: "number", min: "0", max: "10", value: String(f.scale ?? 2),
+              class: "dz-n", title: "places kept", "aria-label": "places kept",
+              oninput: (ev) => { const n = parseInt(ev.target.value, 10); if (n >= 0 && n <= 10) { f.scale = n; changed(false); } } })
+              : null)),
         el("td", {}, el("button", { type: "button", class: "subtle", title: "remove", "aria-label": "remove field",
           onclick: () => { obj[k].splice(i, 1); changed(false); draw(); } }, "×"))));
       wrap.append(el("table", { class: "ed-fields" },
@@ -2029,6 +2056,7 @@ function editor(root) {
     if (raw === "") return undefined;
     if (raw.includes("{{")) return raw;  // read from the run
     if (f.type === "number" && raw.trim() !== "" && !isNaN(Number(raw))) return Number(raw);
+    if (f.type === "decimal" && /^-?\d+(\.\d+)?$/.test(raw.trim())) return raw.trim();  // as text: exact
     if (f.type === "boolean" && (raw === "true" || raw === "false")) return raw === "true";
     return raw;
   }
@@ -2493,6 +2521,29 @@ function slotPickers(root) {  // a day and a person narrow the times offered; th
     sync();
   });
 }
+function grids(root) {  // "Add a row": a blank row more, its cells named for its place; without the script, save and edit
+  root.querySelectorAll("[data-grid]").forEach((box) => {
+    if (box.dataset.ready) return;
+    box.dataset.ready = "1";
+    const add = box.querySelector("[data-grid-add]"), body = box.querySelector("tbody");
+    if (!add || !body || !body.rows.length) return;
+    add.hidden = false;
+    add.addEventListener("click", () => {
+      const n = body.rows.length;
+      if (n >= Number(box.dataset.max || 1000)) { add.disabled = true; return; }
+      const row = body.rows[n - 1].cloneNode(true), name = box.dataset.grid;
+      row.querySelectorAll("input, select").forEach((c) => {
+        c.name = c.name.replace(new RegExp("^" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.\\d+\\."), name + "." + n + ".");
+        if (c.tagName === "SELECT") c.selectedIndex = 0; else c.value = "";
+        const lab = c.getAttribute("aria-label");
+        if (lab) c.setAttribute("aria-label", lab.replace(/row \d+$/, "row " + (n + 1)));
+      });
+      body.appendChild(row);
+      const first = row.querySelector("input, select");
+      if (first) first.focus();
+    });
+  });
+}
 function kindFields(root) {
   root.querySelectorAll("[data-kinds]").forEach((box) => {
     const form = box.closest("form");
@@ -2561,6 +2612,7 @@ function formModal() {
     formTabs(body);
     kindFields(body);
     slotPickers(body);
+    grids(body);
     body.querySelectorAll("[data-modal-close]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); close(); }));
     if (back) body.querySelectorAll("form[method=post]").forEach((f) => {  // opened from a board: back to it after
       if (!f.querySelector("input[name=_back]")) f.appendChild(el("input", { type: "hidden", name: "_back", value: back }));
@@ -2890,6 +2942,7 @@ document.addEventListener("DOMContentLoaded", () => {
   formTabs(document);
   kindFields(document);
   slotPickers(document);
+  grids(document);
   document.querySelectorAll("svg[data-flow]").forEach((svg) => {
     const src = document.getElementById(svg.dataset.flow);
     if (src) drawFlow(svg, JSON.parse(src.textContent));
@@ -4553,8 +4606,14 @@ function dashEditor(root) {
   // columns, group_by and sort name a record type's field by its name; a filter reads the stored path
   const colKey = (w, f) => (src(w) === "records" ? f.name : f.path);
   const fieldBy = (w, key) => fieldsOf(w).find((f) => f.name === key || f.path === key);
-  const labelOf = (w, key) => { const f = fieldBy(w, key); return f ? f.label : key; };
+  const labelOf = (w, key) => { const f = fieldBy(w, key) || hopsOf(w).find((h) => h.name === key); return f ? f.label : key; };
   const isDate = (f) => f && /^date/.test(f.type);
+  // a computed widget (a measure, a line, a bar chart of records) may also read a field one reference reaches
+  const hopsOf = (w) => (src(w) === "records" && (typeOf(w) || {}).hops) || [];
+  const pathOf = (key) => String(key || "").split(":")[0];
+  const bucketOf = (key) => String(key || "").split(":")[1] || "";
+  const anyField = (w, key) => fieldBy(w, pathOf(key)) || hopsOf(w).find((h) => h.name === pathOf(key));
+  const BUCKET_WORDS = { month: "Each month", quarter: "Each quarter", year: "Each year" };
 
   // ---- layout: no two widgets overlap; the moved one keeps its place, the others make room, all float up
   const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
@@ -4582,7 +4641,7 @@ function dashEditor(root) {
   }
 
   // ---- the palette
-  const glyph = { count: "123", table: "▤", list: "☰", board: "▥", chart: "▮▮", tree: "⌥", links: "↗" };
+  const glyph = { count: "123", table: "▤", list: "☰", board: "▥", chart: "▮▮", line: "∿", tree: "⌥", links: "↗" };
   const pal = $("dz-palette");
   for (const [k, ks] of Object.entries(spec.kinds)) {
     const b = el("button", { type: "button", class: "dz-kind", draggable: "true", "data-kind": k,
@@ -4610,8 +4669,12 @@ function dashEditor(root) {
     if ((w.kind === "board" || w.kind === "chart") && !w.group_by) {
       const tt = typeOf(w);
       const f = src(w) === "records" ? (tt && (fieldBy(w, tt.lifecycle || "") || tt.fields.find((x) => x.choices.length)))
-        : fieldsOf(w).find((x) => x.name === "status" || x.name === "role");
+        : fieldsOf(w).find((x) => x.name === "status" || x.name === "role" || x.name === "by");
       if (f) w.group_by = colKey(w, f);
+    }
+    if (w.kind === "line" && !w.x) {  // a line runs over a date: the type's first, by month
+      const f = fieldsOf(w).find((x) => isDate(x) && x.filter !== false);
+      if (f) w.x = colKey(w, f) + ":month";
     }
     if (w.kind === "links" && !(w.links || []).length) w.links = cat.pages.length ? [{ ...cat.pages[0] }] : [{ label: "Inbox", href: "/" }];
   }
@@ -4831,14 +4894,17 @@ function dashEditor(root) {
       w.kind = v;
       const allowed = spec.kinds[v].sources;
       if (allowed.length && !allowed.includes(src(w) || "records")) w.source = allowed[0];
-      if (v === "links") for (const k of ["source", "type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort", "descending", "limit"]) delete w[k];
+      if (v === "links") for (const k of ["source", "type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort", "descending", "limit", "measure", "x", "series"]) delete w[k];
+      for (const k of ["group_by", "columns", "sort", "limit", "measure", "x", "series"]) if (!has(w, k)) delete w[k];
+      if (!has(w, "sort")) delete w.descending;
+      if (w.kind === "board" && w.group_by && (bucketOf(w.group_by) || !fieldBy(w, w.group_by))) delete w.group_by;
       defaults(w);
       changed(); drawCanvas(); drawPanel();
     }, undefined), ks.about));
     if (w.kind === "links") return linksPanel(w);
     if (ks.sources.length > 1) {
       panel.append(field("Shows", select_(ks.sources.map((k) => [k, spec.sources[k]]), s, (v) => {
-        for (const k of ["type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort"]) delete w[k];
+        for (const k of ["type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort", "measure", "x", "series"]) delete w[k];
         w.source = v === "records" ? undefined : v;
         if (v === "records") delete w.source;
         defaults(w); changed(); drawCanvas(); drawPanel();
@@ -4846,9 +4912,12 @@ function dashEditor(root) {
     }
     if (s === "records") {
       panel.append(field("Record type", select_(cat.types.map((t) => [t.id, t.label]), w.type, (v) => {
-        for (const k of ["where", "filter", "columns", "group_by", "sort"]) delete w[k];
+        for (const k of ["where", "filter", "columns", "group_by", "sort", "measure", "x", "series"]) delete w[k];
         w.type = v; defaults(w); changed(); drawCanvas(); drawPanel();
       }, w.type ? undefined : "Choose a type")));
+    } else if (s === "signatures") {
+      panel.append(field("Signed on", select_(cat.types.map((t) => [t.id, t.label]), w.type,
+        (v) => set(w, "type", v, true), "Any type"), "Sign-offs on the records you may read"));
     } else {
       panel.append(field("Workflow", select_(cat.workflows.map((x) => [x.id, x.title]), w.workflow,
         (v) => set(w, "workflow", v), "Any workflow")));
@@ -4859,10 +4928,36 @@ function dashEditor(root) {
         (v) => set(w, "role", v), "Any role")));
     }
     if (has(w, "filter")) filterPanel(w);
+    if (has(w, "measure") && s === "records") measurePanel(w);
     if (has(w, "group_by")) {
       const fs = fieldsOf(w).filter((f) => f.filter !== false);
-      panel.append(field(w.kind === "board" ? "A column for each" : "A bar for each",
-        select_(fs.map((f) => [colKey(w, f), f.label]), w.group_by, (v) => set(w, "group_by", v), "Choose a field")));
+      const far = w.kind === "chart" ? hopsOf(w) : [];  // a board's columns are its records' own values
+      const opts = fs.map((f) => [colKey(w, f), f.label]).concat(far.map((h) => [h.name, h.label]));
+      const g = pathOf(w.group_by), gf = anyField(w, w.group_by);
+      const box = el("div", { class: "dz-row" }, select_(opts, g, (v) => {
+        const f = anyField(w, v), b = bucketOf(w.group_by);
+        set(w, "group_by", v && b && isDate(f) ? `${v}:${b}` : v, true);
+      }, "Choose a field"));
+      box.firstChild.id = "dz-group";
+      if (w.kind === "chart" && isDate(gf)) box.append(select_(spec.buckets.map((b) => [b, BUCKET_WORDS[b] || b]), bucketOf(w.group_by),
+        (v) => set(w, "group_by", v ? `${g}:${v}` : g), "Each day"));
+      panel.append(el("div", { class: "dz-field" }, el("label", { for: "dz-group" }, w.kind === "board" ? "A column for each" : "A bar for each"), box));
+    }
+    if (has(w, "x")) {
+      const dates = fieldsOf(w).filter((f) => isDate(f) && f.filter !== false).map((f) => [colKey(w, f), f.label])
+        .concat(hopsOf(w).filter(isDate).map((h) => [h.name, h.label]));
+      const box = el("div", { class: "dz-row" },
+        select_(dates, pathOf(w.x), (v) => set(w, "x", v ? `${v}:${bucketOf(w.x) || "month"}` : undefined, true), "Choose a date"),
+        select_(spec.buckets.map((b) => [b, BUCKET_WORDS[b] || b]), bucketOf(w.x) || "month",
+          (v) => { if (w.x) set(w, "x", `${pathOf(w.x)}:${v}`); }));
+      box.firstChild.id = "dz-x";
+      panel.append(el("div", { class: "dz-field" }, el("label", { for: "dz-x" }, "Along the bottom"), box));
+    }
+    if (has(w, "series")) {
+      const fs = fieldsOf(w).filter((f) => f.filter !== false && !isDate(f) && !["text", "markdown", "number", "decimal"].includes(f.type))
+        .map((f) => [colKey(w, f), f.label]).concat(hopsOf(w).filter((h) => !isDate(h) && !["number", "decimal"].includes(h.type)).map((h) => [h.name, h.label]));
+      panel.append(field("A line for each", select_(fs, w.series, (v) => set(w, "series", v), "One line"),
+        "At most eight lines; the rest are added up as Other."));
     }
     if (has(w, "columns")) columnsPanel(w);
     if (has(w, "sort")) {
@@ -4877,6 +4972,22 @@ function dashEditor(root) {
     if (has(w, "limit")) panel.append(field("At most", input(w.limit, (v) => set(w, "limit", v === "" ? undefined : Math.max(1, parseInt(v, 10) || 1)),
       { type: "number", min: "1", max: "1000", placeholder: w.kind === "tree" ? "500" : "25", id: "dz-limit" }), "rows shown"));
     placePanel(w);
+  }
+  function measurePanel(w) {  // how many, or a total, an average, the least or the most of a number
+    const t = typeOf(w) || { fields: [], hops: [], cells: [] };
+    const m = /^(sum|avg|min|max)\((.+)\)$/.exec(w.measure || "");
+    const fn = m ? m[1] : "", on = m ? m[2] : "";
+    const nums = t.fields.filter((f) => ["number", "decimal"].includes(f.type) && !f.list).map((f) => [f.name, f.label])
+      .concat((t.cells || []).map((c) => [c.name, c.label]))
+      .concat((t.hops || []).filter((h) => ["number", "decimal"].includes(h.type)).map((h) => [h.name, h.label]));
+    const words = { sum: "The total of", avg: "The average of", min: "The least", max: "The most" };
+    const box = el("div", { class: "dz-row" }, select_(spec.measures.map((x) => [x, words[x] || x]), fn, (v) => {
+      set(w, "measure", v ? `${v}(${on || (nums[0] || [""])[0]})` : undefined, true);
+    }, "How many"));
+    box.firstChild.id = "dz-measure";
+    if (fn) box.append(select_(nums, on, (v) => set(w, "measure", v ? `${fn}(${v})` : undefined, true), "Choose a number"));
+    panel.append(el("div", { class: "dz-field" }, el("label", { for: "dz-measure" }, "Show"), box,
+      fn && !nums.length ? el("small", { class: "help muted" }, "This type has no number to add up.") : null));
   }
   function placePanel(w) {
     const g = w.grid, num = (k, label, min, max, off) => field(label, input(g[k] + off, (v) => {
@@ -4897,7 +5008,7 @@ function dashEditor(root) {
     if (!f) ks = all;
     else if (f.choices && f.choices.length || f.type === "role" || f.type === "choice") ks = ["==", "!=", "in", "not in", "empty", "set"];
     else if (f.type === "boolean") ks = ["==", "!=", "empty", "set"];
-    else if (f.type === "number" || f.type === "integer" || isDate(f)) ks = ["==", "!=", "<", "<=", ">", ">=", "empty", "set"];
+    else if (f.type === "number" || f.type === "decimal" || f.type === "integer" || isDate(f)) ks = ["==", "!=", "<", "<=", ">", ">=", "empty", "set"];
     else ks = ["==", "!=", "in", "not in", "empty", "set"];
     const dated = { "<": "is before", "<=": "is on or before", ">": "is after", ">=": "is on or after" };
     return ks.map((k) => [k, isDate(f) && dated[k] ? dated[k] : o[k]]);
@@ -5010,7 +5121,7 @@ function dashEditor(root) {
       draw();
       return wrap;
     }
-    const numeric = fd && (fd.type === "number" || fd.type === "integer");
+    const numeric = fd && (fd.type === "number" || fd.type === "decimal" || fd.type === "integer");
     return input(r.value, (v) => { r.value = numeric && v !== "" && !Number.isNaN(Number(v)) ? Number(v) : v; commit(); },
       { type: numeric ? "number" : "text", "aria-label": lab });
   }

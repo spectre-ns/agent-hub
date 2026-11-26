@@ -1,7 +1,9 @@
 # What the firm agreed to do for a client: one service for one year (a T1 for 2025, the 2025 bookkeeping, a T2 for
-# the year ending 2025-12-31). It is part of its client. The engagement workflow sends the letter, waits for the
-# client's signature (on the portal, or recorded from paper), then opens the work (for a T1, the year's T1 return) and,
-# once the work is done, closes and plans next year's, which waits for its season.
+# the year ending 2025-12-31). It is part of its client. A partner accepts it for the firm first, signed (CSQM 1: the
+# firm takes on, or keeps, only work it can do and a client it can act for), every year: no letter goes out before.
+# The engagement workflow then sends the letter, waits for the client's signature (on the portal, or recorded from
+# paper), opens the work (for a T1, the year's T1 return) and, once the work is done, closes and plans next year's,
+# which waits for its season and is accepted again.
 id = "Engagement"
 key = "ENG"
 label = "Engagement"
@@ -13,8 +15,10 @@ short_title = "{service} {year}[ · {client_name}]"
 date = "sent_on"
 part_of = "client"
 order = 30
+# one engagement per service per year for a client: next year's is its own
+unique = [["client", "service", "year"]]
 summary = "One service for one year, as the client signed it."
-workflow = { id = "engagement", when = "record.status in ['proposed', 'planned']" }
+workflow = { id = "engagement", when = "record.status in ['acceptance', 'planned']" }
 
 [[field]]
 name = "client"
@@ -50,13 +54,14 @@ help = "The tax year (T1), the fiscal year (T2), or the calendar year the servic
 name = "status"
 label = "Status"
 type = "choice"
-choices = ["planned", "drafting", "proposed", "overdue", "signed", "active", "closed", "declined"]
+choices = ["planned", "acceptance", "not-accepted", "drafting", "proposed", "overdue", "signed", "active", "closed", "declined"]
 required = true
 
 [[field]]
 name = "fee"
 label = "Fee (before HST)"
-type = "number"
+type = "decimal"
+scale = 2
 min = 0
 
 [[field]]
@@ -69,6 +74,23 @@ choices = ["fixed", "monthly", "hourly"]
 name = "scope"
 label = "What we do"
 type = "text"
+
+[[field]]
+name = "acceptance_note"
+label = "Acceptance: what the partner considered"
+type = "text"
+help = "Independence, conflicts, the firm's competence and time, the client's integrity: why the firm takes it on, or not"
+
+[[field]]
+name = "accepted_by"
+label = "Accepted by"
+type = "member"
+help = "The partner who accepted the engagement for the firm: the move that accepts it says so"
+
+[[field]]
+name = "accepted_on"
+label = "Accepted on"
+type = "date"
 
 [[field]]
 name = "letter"
@@ -124,9 +146,31 @@ name = "note"
 label = "Note"
 type = "text"
 
+[[signature]]
+meaning = "I accept this engagement for the firm"
+roles = ["partner"]
+states = ["acceptance"]
+
 [lifecycle]
 field = "status"
-initial = "proposed"
+initial = "acceptance"
+
+# A partner accepts it, signed, and the letter is written; or does not, and that is the end of it.
+[[lifecycle.transition]]
+from = ["acceptance"]
+to = "drafting"
+label = "Accept the engagement"
+sign = "I accept this engagement for the firm"
+asks = ["acceptance_note"]
+requires = ["acceptance_note"]
+stamp = ["accepted_by", "accepted_on"]
+
+[[lifecycle.transition]]
+from = ["acceptance"]
+to = "not-accepted"
+label = "Do not accept it"
+asks = ["acceptance_note"]
+requires = ["acceptance_note"]
 
 [[lifecycle.transition]]
 from = ["proposed", "overdue"]
@@ -142,7 +186,7 @@ label = "Close: the work is done"
 asks = ["completed_on"]
 
 [[lifecycle.transition]]
-from = ["planned", "drafting", "proposed", "overdue", "signed"]
+from = ["planned", "acceptance", "drafting", "proposed", "overdue", "signed"]
 to = "declined"
 label = "Declined by the client"
 asks = ["note"]

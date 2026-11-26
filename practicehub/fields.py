@@ -9,9 +9,10 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 
+from . import decimals
 from .expr import lookup
 
-TYPES = {"text", "string", "number", "boolean", "choice", "list", "date", "datetime", "member", "reference"}
+TYPES = {"text", "string", "number", "decimal", "boolean", "choice", "list", "date", "datetime", "member", "reference"}
 REF = re.compile(r"[A-Za-z][A-Za-z0-9_]*/[A-Za-z0-9_.-]+")
 
 
@@ -27,7 +28,7 @@ def normalize(spec: dict) -> dict:
          "help": spec.get("help", "")}
     # ``hidden``: a workflow input another page fills (not asked on the start form)
     for k in ("choices", "choices_from", "default", "max_length", "min", "max", "target", "of_record", "active",
-              "hidden"):
+              "hidden", "scale", "unit"):
         if k in spec:
             f[k] = spec[k]
     return f
@@ -41,6 +42,13 @@ def check_spec(spec: dict) -> list[str]:
         problems.append(f"field {spec.get('name')!r}: unknown type {spec.get('type')!r} (one of {', '.join(sorted(TYPES))})")
     if spec.get("type") == "choice" and not (spec.get("choices") or spec.get("choices_from")):
         problems.append(f"field {spec.get('name')!r}: a choice needs choices or choices_from")
+    scale = spec.get("scale")
+    if spec.get("type") == "decimal":
+        if isinstance(scale, bool) or not isinstance(scale, int) or not 0 <= scale <= decimals.MAX_SCALE:
+            problems.append(f"field {spec.get('name')!r}: a decimal keeps a set number of places: scale = 2 (0 to "
+                            f"{decimals.MAX_SCALE})")
+    elif scale is not None:
+        problems.append(f"field {spec.get('name')!r}: scale is for a decimal")
     return problems
 
 
@@ -81,6 +89,16 @@ def coerce(fields: list[dict], raw: dict, ctx: dict | None = None) -> dict:
                     problems.append(f"{f['label']} is below {f['min']}")
                 if "max" in f and val > f["max"]:
                     problems.append(f"{f['label']} is above {f['max']}")
+            elif typ == "decimal":  # exact, at its places: an answer of 12.345 at 2 places is 12.35
+                try:
+                    val = decimals.to_decimal(val, f.get("scale", 2))
+                except ValueError:
+                    problems.append(f"{f['label']}: expected a number like {decimals.example(f.get('scale', 2))}")
+                    continue
+                if f.get("min") is not None and val < decimals.to_decimal(f["min"]):
+                    problems.append(f"{f['label']} is below {f['min']}")
+                if f.get("max") is not None and val > decimals.to_decimal(f["max"]):
+                    problems.append(f"{f['label']} is above {f['max']}")
             elif typ == "boolean":
                 val = val if isinstance(val, bool) else str(val).lower() in ("1", "true", "yes", "on")
             elif typ == "list":
@@ -120,6 +138,8 @@ def json_schema(fields: list[dict], ctx: dict | None = None) -> dict:
         typ = f["type"]
         if typ == "number":
             p = {"type": "number"}
+        elif typ == "decimal":  # a number, which a model fills (a string with a pattern it can leave empty);
+            p = {"type": "number"}  # read back exactly: at most 15 digits, which a float keeps (decimals.to_decimal)
         elif typ == "boolean":
             p = {"type": "boolean"}
         elif typ == "list":

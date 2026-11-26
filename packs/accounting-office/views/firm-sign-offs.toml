@@ -1,0 +1,23 @@
+id = "firm-sign-offs"
+title = "Sign-offs"
+summary = "Who signed what for the firm: reviews, filing authorisations and engagement acceptances, and how many a month."
+roles = ["partner"]
+
+[[widget]]
+kind = "line"
+title = "Sign-offs each month"
+source = "signatures"
+x = "at:month"
+
+[[widget]]
+kind = "chart"
+title = "Sign-offs by person"
+source = "signatures"
+group_by = "by"
+
+[[widget]]
+kind = "table"
+title = "Latest sign-offs"
+source = "signatures"
+columns = ["at", "by", "meaning", "record", "title", "current"]
+limit = 50

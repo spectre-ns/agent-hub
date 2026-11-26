@@ -17,7 +17,8 @@ help = "the claim's reference, e.g. Claim/123"
 
 [[input]]
 name = "amount"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 
 [[output]]

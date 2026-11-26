@@ -64,14 +64,16 @@ help = "set it and every delivery must give its expiry date; expired stock is ne
 [[field]]
 name = "minimum_stock"
 label = "Reorder at"
-type = "number"
+type = "decimal"
+scale = 3
 min = 0
 help = "when what is available falls to this, more is ordered"
 
 [[field]]
 name = "reorder_quantity"
 label = "Order quantity"
-type = "number"
+type = "decimal"
+scale = 3
 min = 0
 
 [[field]]
@@ -84,38 +86,32 @@ rel = "usually-in"
 [[field]]
 name = "bom"
 label = "Bill of materials"
-type = "list"
-rows = true
+type = "table"
 help = "what goes into one of it; a build takes these from stock"
 
-[[field]]
-name = "bom_part"
-path = "bom.*.part"
-label = "Part"
+[[field.column]]
+name = "part"
 type = "reference"
 target = ["Part"]
 rel = "made-of"
 required = true
 graph = { down = "Bill of materials", up = "Used in" }
 
-[[field]]
-name = "bom_quantity"
-path = "bom.*.quantity"
-label = "Quantity"
-type = "number"
+[[field.column]]
+name = "quantity"
+type = "decimal"
+scale = 3
 required = true
 above = 0
 help = "how many go into one, in the component's own unit (more than nothing)"
 
-[[field]]
+[[field.column]]
 name = "designators"
-path = "bom.*.designators"
 max_length = 200
 help = "where each one goes: R1, R2; left pouch"
 
-[[field]]
-name = "bom_note"
-path = "bom.*.note"
+[[field.column]]
+name = "note"
 label = "Line note"
 max_length = 200
 
@@ -136,20 +132,23 @@ help = "the documents that say what it must be: a drawing, a specification, a st
 [[field]]
 name = "on_hand"
 label = "On hand"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 help = "every lot with stock in it, held or not: summed when a stock move or a build posts"
 
 [[field]]
 name = "available"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 help = "what may be used: not held, not waiting for inspection, not expired"
 
 [[field]]
 name = "quarantined"
 label = "Held"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 
 [[field]]

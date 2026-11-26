@@ -32,6 +32,7 @@ from xml.sax.saxutils import escape as _xml_escape
 from . import schema, visibility
 from .db import utcnow
 from .hub import Invalid, NotFound
+from . import decimals
 
 FHIR = "fhir-r4"
 ODT = "application/vnd.oasis.opendocument.text"
@@ -114,6 +115,8 @@ def safe_filename(base: str, ext: str) -> str:
 
 def csv_cell(v) -> str:
     """A value for a CSV cell that a spreadsheet must not read as a formula (=, +, -, @, tab, return first)."""
+    if isinstance(v, decimals.Decimal):  # its exact text: 12.30, never 12.3 or 1.23E+1
+        return decimals.text(v)
     v = str(v if v is not None else "")
     return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
 
@@ -165,20 +168,33 @@ def fhir_resource(hub, rt, rec: dict) -> dict:
             return {"reference": f"{member_type}/{v.removeprefix('member:')}"}
         return v
 
+    def as_number(v):  # FHIR's decimal is a JSON number: the same value (15 digits at most), its trailing zeros gone
+        return float(v) if isinstance(v, decimals.Decimal) else v
+
     def as_attachment(v):
         if isinstance(v, dict) and "blob" in v:
             return {k: x for k, x in (("contentType", v.get("contentType")), ("title", v.get("name")),
                                      ("size", v.get("size"))) if x not in (None, "")}
         return v
     own = [k for k in list(out) if k not in ("resourceType", "id", "meta") and not schema.FHIR_ELEMENT.fullmatch(k)]
-    for f in rt.fields:
-        fn = {"reference": as_ref, "member": as_member, "attachment": as_attachment}.get(f["type"])
+    for f in rt.fields + rt.cells():
+        fn = {"reference": as_ref, "member": as_member, "attachment": as_attachment, "decimal": as_number}.get(f["type"])
         if fn:
             parts = f["path"].split(".")
             if parts[0] in out:
                 out = _walk(out, parts, lambda v, fn=fn: [fn(x) for x in v] if isinstance(v, list) else fn(v))
     if own:  # the practice's own fields (plan_code): FHIR keeps them as extensions, never as unknown elements
-        ext = [{"url": f"urn:practicehub:{rt.id}:{k}", **_extension_value(out.pop(k))} for k in own]
+        tables = {f["path"] for f in rt.fields if f["type"] == "table"}
+        ext = []
+        for k in own:
+            v = out.pop(k)
+            if k in tables and isinstance(v, list):  # a table: one extension for each row, its cells inside it
+                ext += [{"url": f"urn:practicehub:{rt.id}:{k}",
+                         "extension": [{"url": c, **_extension_value(x)} for c, x in row.items()
+                                       if x not in (None, "", [], {})]}
+                        for row in v if isinstance(row, dict)]
+            else:
+                ext.append({"url": f"urn:practicehub:{rt.id}:{k}", **_extension_value(v)})
         out["extension"] = list(out.get("extension") or []) + ext
     return out
 
@@ -190,9 +206,9 @@ def _extension_value(v) -> dict:
         return {"valueReference": v}
     if isinstance(v, bool):
         return {"valueBoolean": v}
-    if isinstance(v, (int, float)):
-        return {"valueDecimal": v}
-    return {"valueString": v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}
+    if isinstance(v, (int, float, decimals.Decimal)):
+        return {"valueDecimal": float(v) if isinstance(v, decimals.Decimal) else v}
+    return {"valueString": v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=decimals.jsonable)}
 
 
 def plain_json(rec: dict) -> dict:
@@ -219,6 +235,10 @@ def _item_words(hub, member, f, item) -> str:
     """A value as plain words for a cell: a record by its title (when the member may read it), a member by name."""
     if item in (None, "", [], {}):
         return ""
+    if f and f["type"] == "table" and isinstance(item, list):  # a cell holds its count; the record shows the rows
+        return f"{len(item)} row" + ("" if len(item) == 1 else "s")
+    if isinstance(item, decimals.Decimal):
+        return decimals.text(item) + (f" {f['unit']}" if f and f.get("unit") else "")
     if isinstance(item, list):
         return "; ".join(w for w in (_item_words(hub, member, f, x) for x in item) if w)
     if f and f["type"] == "member" and isinstance(item, str):
@@ -298,8 +318,8 @@ def list_table(hub, member, rt, recs) -> tuple[list[str], list[list]]:
         meta = r.get("meta") or {}
         row = [hub.title(r)] + ([str(schema.first(r, lc["path"]) or "")] if lc else [])
         for f in cols:
-            v = schema.first(r, f["path"]) if f["type"] == "number" and "*" not in f["path"] else None
-            row.append(v if isinstance(v, (int, float)) and not isinstance(v, bool)
+            v = schema.first(r, f["path"]) if f["type"] in ("number", "decimal") and "*" not in f["path"] else None
+            row.append(v if isinstance(v, (int, float, decimals.Decimal)) and not isinstance(v, bool)
                        else value_words(hub, member, f, r))
         row += [r.get("id", ""), schema.record_date(rt, r), meta.get("lastUpdated", ""), meta.get("versionId", "")]
         rows.append(row)
@@ -329,9 +349,10 @@ def _paras(text, style: str = "") -> str:
 
 
 def _cell(v, style: str = "C", bold: bool = False) -> str:
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return (f'<table:table-cell table:style-name="{style}" office:value-type="float" office:value="{v}">'
-                f"<text:p>{v}</text:p></table:table-cell>")
+    if isinstance(v, (int, float, decimals.Decimal)) and not isinstance(v, bool):
+        t = decimals.text(v) if isinstance(v, decimals.Decimal) else v  # exact, as written: 12.30
+        return (f'<table:table-cell table:style-name="{style}" office:value-type="float" office:value="{t}">'
+                f"<text:p>{t}</text:p></table:table-cell>")
     return (f'<table:table-cell table:style-name="{style}" office:value-type="string">'
             + _paras(v, "B" if bold else "") + "</table:table-cell>")
 
@@ -523,9 +544,9 @@ def record(hub, member, ref: str, fmt: str) -> Export:
         raise NotFound(f"there is no {ref}")
     base = f"{rtype}-{rid}"
     if fmt == "fhir":
-        body = json.dumps(fhir_resource(hub, rt, rec), indent=1, ensure_ascii=False).encode()
+        body = json.dumps(fhir_resource(hub, rt, rec), indent=1, ensure_ascii=False, default=decimals.jsonable).encode()
     elif fmt == "json":
-        body = json.dumps(plain_json(rec), indent=1, ensure_ascii=False).encode()
+        body = json.dumps(plain_json(rec), indent=1, ensure_ascii=False, default=decimals.jsonable).encode()
     else:
         title = hub.title(rec)
         blocks = [("h1", title), ("note", f"{rt.label} · {_stamp(hub, member)}"), ("kv", record_rows(hub, member, rt, rec))]
@@ -540,8 +561,8 @@ TRACE_ROWS = 20000  # rows a trace export holds at most: a recall's whole reach,
 def trace(hub, member, ref: str, graph: str, way: str) -> Export:
     """Where one of a record's graphs leads from it, every level (``hub.reach``), as CSV: a row per record reached,
     with its level, what it was reached from and by which reference, and the row's other values where the graph is a
-    list of rows (how many). ``graph``: the name of a graph field of the record's type (the group it shares words with
-    is walked whole); ``way``: down or up. Records the member may not read are left out and counted; each one in the
+    table's column (how many). ``graph``: the path (or name) of a graph field of the record's type, a table's column
+    among them (``bom.*.part``; the group it shares words with is walked whole); ``way``: down or up. Records the member may not read are left out and counted; each one in the
     file is a read on the track, and the trace an export of its own."""
     rtype, _, rid = ref.partition("/")
     rt = hub.record_type_for_reading(rtype)
@@ -551,7 +572,7 @@ def trace(hub, member, ref: str, graph: str, way: str) -> Export:
     rec = hub.redact(member, hub.records.read(rtype, rid))
     if not rec:
         raise NotFound(f"there is no {ref}")
-    group = next((g for g in rt.graph_groups if any(f["name"] == graph for f in g["fields"])), None)
+    group = next((g for g in rt.graph_groups if any(graph in (f["path"], f["name"]) for f in g["fields"])), None)
     if group is None or way not in ("down", "up"):
         raise NotFound(f"{a_label(rt)} has no graph {graph!r} to trace {way}")
     got = hub.reach(member, ref, group["rels"], way, limit=TRACE_ROWS)
@@ -563,14 +584,8 @@ def trace(hub, member, ref: str, graph: str, way: str) -> Export:
         target = r if way == "down" else came
         words = []
         for f in group["fields"]:
-            whole = rt.field(f["row_of"]) if f.get("row_of") else None
-            if not whole or f["rel"] != rel or not holder:
-                continue
-            key = f["path"].rsplit(".", 1)[1]
-            for item in schema.first(holder, whole["path"]) or []:
-                if isinstance(item, dict) and schema.ref_of(item.get(key)) == target:
-                    words += [f"{c['label']} {item.get(c['path'].rsplit('.', 1)[1])}" for c in whole["columns"]
-                              if c is not f and item.get(c["path"].rsplit(".", 1)[1]) not in (None, "", [], {})]
+            if f.get("table") and f["rel"] == rel and holder:
+                words += schema.row_words(rt, f, holder, target)
         flag = (hub.record_type(r.split("/", 1)[0]) or rt).flag
         rows.append([depth, r, hub.title(x), x.get(flag, "") if flag else "", came, label.get(rel, rel),
                      " · ".join(words)])
@@ -601,7 +616,7 @@ def records_list(hub, member, rtype: str, fmt: str, *, text: str | None = None, 
     refs = [f"{rtype}/{r['id']}" for r in recs]
     stamp = utcnow()[:10]
     if fmt == "ndjson":
-        body = "".join(json.dumps(fhir_resource(hub, rt, r), ensure_ascii=False) + "\n" for r in recs).encode()
+        body = "".join(json.dumps(fhir_resource(hub, rt, r), ensure_ascii=False, default=decimals.jsonable) + "\n" for r in recs).encode()
     else:
         header, rows = list_table(hub, member, rt, recs)
         if fmt == "csv":
@@ -697,11 +712,11 @@ def subject_file(hub, member, ref: str, fmt: str) -> Export:
             else:
                 other += 1
         kept = [f"{r['resourceType']}/{r['id']}" for r in res]
-        body = json.dumps(bundle(res), indent=1, ensure_ascii=False).encode()
+        body = json.dumps(bundle(res), indent=1, ensure_ascii=False, default=decimals.jsonable).encode()
     elif fmt == "json":
         kept = [f"{r['resourceType']}/{r['id']}" for r in recs]
         body = json.dumps({"subject": ref, "records": [plain_json(r) for r in recs]}, indent=1,
-                          ensure_ascii=False).encode()
+                          ensure_ascii=False, default=decimals.jsonable).encode()
     else:
         kept = [f"{r['resourceType']}/{r['id']}" for r in recs]
         title = hub.title(recs[0])
@@ -749,7 +764,7 @@ def everything(hub, member, fmt: str = "ndjson") -> tuple[dict[str, bytes], dict
         else:
             name = f"{t}.ndjson"
             body = "".join(json.dumps(fhir_resource(hub, rt, r) if is_fhir(rt) else plain_json(r),
-                                      ensure_ascii=False) + "\n" for r in recs).encode()
+                                      ensure_ascii=False, default=decimals.jsonable) + "\n" for r in recs).encode()
         files[safe_filename(name.rsplit(".", 1)[0], name.rsplit(".", 1)[1])] = body
         output.append({"type": t, "url": name, "count": len(recs), "fhir": is_fhir(rt)})
         refs += [f"{t}/{r['id']}" for r in recs]
@@ -758,7 +773,7 @@ def everything(hub, member, fmt: str = "ndjson") -> tuple[dict[str, bytes], dict
                 "practice": hub.practice.get("name")}
     _log(hub, member, refs, fmt, what="records:*", data={"bulk": True, "scope": "hub",
                                                         "left_out": sum(x["count"] for x in left_out)})
-    files["manifest.json"] = json.dumps(manifest, indent=1).encode()
+    files["manifest.json"] = json.dumps(manifest, indent=1, default=decimals.jsonable).encode()
     return files, manifest
 
 

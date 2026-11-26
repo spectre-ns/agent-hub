@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from . import schema, visibility
+from . import expr, schema, visibility
 from .store import ASC
 
 
@@ -91,6 +91,15 @@ class MovesMixin:
                     ok, why = self.engine.eligibility(actor, item)
                     if not ok:
                         return why
+        # the move's checks, said on the button when nothing its screen asks for could make them hold
+        asked = {f"record.{n}" for n in t["asks"]}
+        if t.get("check") and not any(p.split(".")[0:2] == q.split(".") for c in t["check"]
+                                      for src in (c["must"], c.get("when")) if src for p in expr.paths(src)
+                                      for q in asked):
+            moved = self.stamped(rt, t, schema.put(dict(rec), rt.lifecycle["path"], to), actor)  # made by them
+            why = self.move_check_refusal(rt, ref, t, moved)
+            if why:
+                return why
         return self.state_move_refusal(rt, ref, t, rec, None)
 
     # ------------------------------------------------------------------ the move
@@ -173,14 +182,16 @@ class MovesMixin:
                 self.track.append(actor, "access.denied", ref, data={"what": f"move to {to}", "why": why})
                 raise Denied(why)
             sig = signature if isinstance(signature, dict) else {"meaning": signature} if signature else None
-            seq = None
+            seq = at = None
             if t.get("sign"):
                 if not sig or (sig.get("meaning") or t["sign"]) != t["sign"]:
                     raise Invalid(f"moving it to {rt.state_label(to).lower()} is signed {t['sign']!r}: sign it "
                                   f"with that meaning")
                 if sig.get("seen") is not None and sig["seen"] != self._record_digest(rec):
                     raise Invalid("the record changed since you read it: read it again, then sign what it says now")
-                signed_rec = {k: v for k, v in after.items() if v is not None}
+                self.refuse_pins_behind(rt, rec)
+                at = self.engine.instant()  # the stamps the move writes are what the signature covers
+                signed_rec = self.stamped(rt, t, {k: v for k, v in after.items() if v is not None}, actor, at)
                 seq = self.track.append(actor, "record.signed", ref, data={"comment": sig.get("comment") or ""},
                                         signed={"record": ref, "version": self.record_version(ref) + 1,
                                                 "record_sha256": self._record_digest(signed_rec),
@@ -188,7 +199,7 @@ class MovesMixin:
             elif sig:
                 raise Invalid(f"moving it to {rt.state_label(to).lower()} is not signed")
             return self.update_record(actor, ref, after, _signature=seq, comment=comment,
-                                      expected_version=expected_version)
+                                      expected_version=expected_version, _stamp_at=at if seq else None)
 
     def _step_by_move(self, rt, ref: str, rec: dict, member: dict, t: dict, cause: int) -> bool:
         """The record moved to the state its open step makes (``state``): that move is the step, done by whoever
@@ -207,6 +218,7 @@ class MovesMixin:
                 if v not in (None, "", [], {}):
                     answer[n] = v
         run["steps"][step.id]["moved"] = True  # the record is where the step puts it: nothing more to move
+        run["steps"][step.id]["moved_in"] = self.record_version(ref)  # the move's own write: not the mover's revision
         self.db.runs.set(run["id"], {"steps": run["steps"]})
         self.engine.complete(member, item["id"], answer)
         return True
@@ -225,7 +237,7 @@ class MovesMixin:
         raw = self.records.read(rtype, rid)
         cur = schema.first(raw, rt.lifecycle["path"])
         opened = self.open_step(rt, ref) or False
-        exits = [t for t in rt.lifecycle["transition"] if (cur in t["from"] or "*" in t["from"]) and t["to"] != cur
+        exits = [t for t in rt.lifecycle["transition"] if schema.leaves(rt.lifecycle, t, cur) and t["to"] != cur
                  and not t.get("entry")]  # a workflow starting on the record again is no way on from here
         made = opened[2].state if opened and opened[2].kind == "task" and opened[2].state else None
         forward = made or next((t["to"] for t in exits if "*" not in t["from"] and t["by"] != "workflow"), None)
