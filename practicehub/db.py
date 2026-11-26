@@ -14,7 +14,10 @@ The same in every collection:
   field with nothing in it is ``None``.
 * A time is an ISO 8601 string in UTC (``store.utcnow``), named ``at`` or ``..._at``. The live editing collections
   (``live_*``) keep seconds since the epoch instead, since they only compare and subtract them.
-* Numbers in order come from ``store.next_seq(name)``: ``outbox.id`` ("outbox") and ``items.n`` ("items").
+* Numbers in order come from ``store.next_seq(name)``: ``outbox.id`` ("outbox"), ``items.n`` ("items") and a
+  record's key, ``records.key`` (T1-12: its type's key and ``records.kn``, its number within that type, counted as
+  "key:<type key>" and never reset), and a record's own number (``records.number``, for a type with ``[number]``),
+  counted per series as "number:<type>:<series>" (``schema.number_series``).
   ``events.seq`` does not: it is the head's plus one and is the event's ``_id``, so two writers cannot both append
   (``track.py``).
 
@@ -28,8 +31,11 @@ and ``ctx.input``. ``runs.status`` is running, completed or cancelled. ``runs.re
 ``runs.item`` its one work item (None: its workflow asks nothing of anyone); ``runs.at`` where its record is, for a
 workflow state the record's own field has no value for; ``runs.picks`` the people chosen for work not started yet.
 ``items.status`` is open, claimed, held, waiting, done or cancelled;
-``items.kind`` task, gate, wait, notice or hold. ``items.n`` is the item's number in order of creation, shown as
-its key. ``outbox.status`` is queued, sending, sent, delivered, failed, refused or withdrawn.
+``items.kind`` task, gate, wait, notice or hold. ``items.n`` is the item's number in order of creation: work on a
+record shows its record's key, work on no record the practice's code and ``n`` (HFM-12).
+``records.key`` is the record's key (T1-12), kept in its data too (``meta.key``); a record of a type in another
+store (Medplum) has none. ``records.number`` is a numbered type's number (INV-2026-0012), the same as in its data,
+unique within its type. ``outbox.status`` is queued, sending, sent, delivered, failed, refused or withdrawn.
 ``records.words`` is every word of the record's values, folded (a search matches the start of one, by index);
 ``records.search_parts`` the same per data class, for a type with classed fields (the record without any of them as
 ``c = "_"``, then with only one class's), so a reader's search looks only where they may read; ``ix`` stamps what
@@ -79,7 +85,7 @@ SHAPES = {
     "agent_profile_versions": ('"agent_id@version"', "agent_id version status profile source author note created_at "
                                                      "approved_by approved_at based_on reduction"),
     # records
-    "records": ('"Type/id"', "type id subject data version updated_at words search_parts ix"),
+    "records": ('"Type/id"', "type id key kn number subject data version updated_at words search_parts ix"),
     "record_versions": ('"Type/id@version"', "type id version data refs actor run_id at comment authors"),
     "links": ('"from_ref|rel|to_ref"', "from_ref rel to_ref hand"),
     "titles": ('"Type/id"', "type key"),                 # the title folded, for types with formatted text
@@ -122,7 +128,9 @@ INDEXES = {
     "tokens": ["member"],
     "tuples": ["subject", "object"],
     "records": [("type", "updated_at"), ("subject", "updated_at"), "updated_at", ("type", "ix"), "words",
-                ("search_parts.c", "search_parts.w")],
+                ("search_parts.c", "search_parts.w"),
+                {"fields": ["key"], "unique": True, "partial": {"key": {"$type": "string"}}},
+                {"fields": ["number", "type"], "unique": True, "partial": {"number": {"$type": "string"}}}],
     "office_drafts": [("ref", "field", "base"), ("ref", "working")],
     "workflow_versions": [("workflow_id", "status"), "status"],
     "block_versions": [("block_id", "status"), "status"],

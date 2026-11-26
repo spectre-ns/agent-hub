@@ -2,6 +2,7 @@
 # number. Nobody writes one by hand, not even a manager: only a posted stock move makes or changes it, and the move
 # keeps what it changed. So every number here has its history in the moves.
 id = "StockItem"
+key = "STK"
 label = "Stock item"
 plural = "Stock items"
 data_class = "stock-ledger"

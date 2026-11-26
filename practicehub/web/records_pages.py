@@ -843,11 +843,14 @@ class RecordPages:
         hub.note_list(me, recs, how="search" if q else "list", what=f"records:{rtype}", text=q or None)
         lc = rt.lifecycle
         heads = visibility.shown(hub, me, rt, schema.list_columns(rt))  # a part: which record it is part of, first; the export has the same
+        keyed = any((r.get("meta") or {}).get("key") for r in recs)  # a store that keeps keys: a Key column
         rows = "".join(
-            f'<tr><td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
+            "<tr>" + (f'<td class="key">{e((r.get("meta") or {}).get("key") or "")}</td>' if keyed else "")
+            + f'<td><a href="{e(self.record_href(f"{rtype}/{r["id"]}"))}">{e(hub.title(r))}</a></td>'
             + (f'<td>{self._state_loz(schema.first(r, lc["path"]), rt)}</td>' if lc else "")
             + "".join(f"<td>{self._value_html(f, r)}</td>" for f in heads) + "</tr>" for r in recs)
-        table = (f'<div class="tablewrap"><table><tr><th>{e(rt.label)}</th>' + ("<th>Status</th>" if lc else "")
+        table = (f'<div class="tablewrap"><table><tr>' + ("<th>Key</th>" if keyed else "") + f'<th>{e(rt.label)}</th>'
+                 + ("<th>Status</th>" if lc else "")
                  + "".join(f"<th>{e(f['label'])}</th>" for f in heads) + f"</tr>{rows}</table></div>") if recs else (
             f"<p class='muted'>No {e(self._lower(rt.plural))} yet.</p>")
         if req["query"].get("parent"):  # the old way to add under a record: its create form now has its own page

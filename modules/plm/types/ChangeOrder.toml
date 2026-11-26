@@ -3,6 +3,7 @@
 # it, and a change order returned or rejected and revised is walked again from draft. Approved, its documents are
 # revised; once they are all approved again it waits to be released (releasing).
 id = "ChangeOrder"
+key = "ECO"
 label = "Change order"
 plural = "Change orders"
 data_class = "products"

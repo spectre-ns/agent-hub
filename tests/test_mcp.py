@@ -474,3 +474,28 @@ def test_a_call_the_hub_cannot_finish_is_an_error_to_the_agent_and_a_failure_on_
     out = call(hub, "practice", "jo", "read_patient", {"id": pat["id"]})
     assert out["isError"] and out["structuredContent"]["error"] == "busy"
     assert hub.track.verify()["ok"]
+
+
+def test_find_by_key_names_a_record_or_work_and_nothing_to_who_may_not_read_it(hub):
+    """``find_by_key``: a record's key gives its ref, title and state, as a search lists it (and the listing is on
+    the subject's access report); work on no record gives the item to read; a member who may not read the record, or
+    a key nothing has, gets nothing."""
+    assert "find_by_key" in names(hub, "core", "jo")
+    p = hub.db.records.find_one({"type": "Patient"}, sort="kn")
+    before = hub.db.events.count({"action": "records.listed", "actor": "dr-amara"})
+    out = call(hub, "core", "dr-amara", "find_by_key", {"key": f" {p['key'].lower()} "})
+    assert not out["isError"]
+    got = out["structuredContent"]
+    assert (got["key"], got["ref"]) == (p["key"], p["_id"]) and got["title"] and "href" not in got
+    assert hub.db.events.count({"action": "records.listed", "actor": "dr-amara"}) == before + 1
+    hub.add_member(M(hub, "rana"), {"id": "kim", "kind": "person", "name": "Kim Lee", "roles": []})
+    assert not hub.may_read(M(hub, "kim"), "Patient")
+    for mid, key in (("kim", p["key"]), ("dr-amara", "PAT-99999"), ("dr-amara", "not a key")):
+        out = call(hub, "core", mid, "find_by_key", {"key": key})
+        assert out["isError"] and "nothing you may read has the key" in out["content"][0]["text"], (mid, key)
+    code = hub.practice_code()
+    hub.db.runs.insert({"_id": "run-loose", "id": "run-loose", "record": None, "status": "running"})
+    hub.db.items.insert({"_id": "item-loose", "id": "item-loose", "n": 999, "run_id": "run-loose", "kind": "notice",
+                         "role": "physician", "status": "open", "title": "On no record"})
+    got = call(hub, "core", "dr-amara", "find_by_key", {"key": f"{code}-999"})["structuredContent"]
+    assert got == {"key": f"{code}-999", "item": "item-loose"}

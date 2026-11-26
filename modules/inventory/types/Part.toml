@@ -2,6 +2,7 @@
 # items), one quantity of it in one place. What it has on hand, available and held is summed from its lots whenever a
 # stock move posts, never typed in.
 id = "Part"
+key = "PART"
 label = "Part"
 plural = "Parts"
 data_class = "inventory"

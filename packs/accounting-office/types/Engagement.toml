@@ -3,6 +3,7 @@
 # client's signature (on the portal, or recorded from paper), then opens the work (for a T1, the year's T1 return) and,
 # once the work is done, closes and plans next year's, which waits for its season.
 id = "Engagement"
+key = "ENG"
 label = "Engagement"
 plural = "Engagements"
 data_class = "engagement"

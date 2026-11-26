@@ -576,6 +576,13 @@ def _core_tools(member: dict) -> list[dict]:
          "inputSchema": _obj({**item, "note": {"type": "string"}, "escalate": {"type": "boolean", "default": False}},
                              ["item"]),
          "annotations": {**WRITE, "title": "Give an item back"}, "_call": ("release", None)},
+        {"name": "find_by_key", "title": "Find by key",
+         "description": "What a key names: a record (T1-12: its type's key and its number; ref, title, state) or a "
+                        "work item (the practice's code and the item's number; read it with read_item). Nothing "
+                        "found: no such key, or nothing you may read has it.",
+         "inputSchema": _obj({"key": {"type": "string", "maxLength": 20, "description": "a key, like T1-12"}},
+                             ["key"]),
+         "annotations": {**READ, "title": "Find by key"}, "_call": ("key", None)},
     ]
     if is_agent(member):  # people decide and sign on the item's page, with their own credential given for it
         out.insert(4, {
@@ -718,7 +725,8 @@ def _conn_data(conn: dict | None) -> dict:
 def _summary(hub, rt, rec: dict) -> dict:
     st = schema.first(rec, rt.lifecycle["path"]) if rt.lifecycle else None
     gone = visibility.withheld(rec)
-    return {"ref": f"{rt.id}/{rec['id']}", "title": hub.title(rec), "state": st,
+    key = (rec.get("meta") or {}).get("key")
+    return {"ref": f"{rt.id}/{rec['id']}", **({"key": key} if key else {}), "title": hub.title(rec), "state": st,
             "version": str((rec.get("meta") or {}).get("versionId", "")),
             **({"withheld": gone["note"]} if gone else {})}
 
@@ -726,9 +734,21 @@ def _summary(hub, rt, rec: dict) -> dict:
 def _run(hub, sid, member, what, target, a, seq, how) -> dict:
     eng = hub.engine
     if what == "inbox":
-        items = [{k: i.get(k) for k in ("id", "title", "kind", "status", "role", "run_title", "record", "eligible")}
+        items = [{"key": hub.item_key(i["id"]),
+                  **{k: i.get(k) for k in ("id", "title", "kind", "status", "role", "run_title", "record", "eligible")}}
                  for i in eng.inbox(member)]
         return {"items": items, "_text": f"{len(items)} item(s)"}
+    if what == "key":
+        found = hub.find_key(member, a["key"])
+        if not found:
+            raise NotFound(f"nothing you may read has the key {a['key'].strip().upper()}")
+        if "item" in found:
+            return {**found, "_text": f"{found['key']} is a work item: read_item {found['item']}"}
+        rtype, rid = found["ref"].split("/", 1)
+        rt = hub.record_type_for_reading(rtype)
+        rec = hub.redact(member, hub.records.read(rtype, rid))
+        hub.note_list(member, [rec], how="key", what=f"records:{rtype}", text=found.get("was") or found["key"])
+        return {**found, **_summary(hub, rt, rec), "_text": f"{found['key']}: {hub.title(rec)}"}
     if what == "context":
         ctx = eng.context(member, a["item"])
         return {**json.loads(json.dumps(ctx, default=str)), "seen": eng.shown_digest(member, a["item"]),

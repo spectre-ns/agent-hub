@@ -1,6 +1,7 @@
 # A result: a lab value, a vital sign. A lab result is walked by its review (review: to sort, in review, closed); the
 # physician's review is written back (status final, reviewed-by extensions).
 id = "Observation"
+key = "LAB"
 label = "Lab result"
 plural = "Lab results"
 data_class = "clinical"

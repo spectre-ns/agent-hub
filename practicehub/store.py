@@ -292,7 +292,8 @@ class Store:
         return self[name]
 
     def ensure_indexes(self, spec: dict[str, list]) -> None:
-        """``{collection: [field | (field, ...) | {"fields": [...], "unique": True}]}``."""
+        """``{collection: [field | (field, ...) | {"fields": [...], "unique": True, "partial": {filter}}]}``.
+        ``partial``: the index holds only the documents that match the filter (a unique key that only some have)."""
         for coll, idx in spec.items():
             models = []
             for i in idx:
@@ -300,7 +301,8 @@ class Store:
                     i = {"fields": [i]}
                 elif isinstance(i, tuple):
                     i = {"fields": list(i)}
-                models.append(pymongo.IndexModel([(f, ASC) for f in i["fields"]], unique=bool(i.get("unique"))))
+                extra = {"partialFilterExpression": i["partial"]} if i.get("partial") else {}
+                models.append(pymongo.IndexModel([(f, ASC) for f in i["fields"]], unique=bool(i.get("unique")), **extra))
             if models:  # one createIndexes command per collection: one round trip, not one per index
                 self.db[coll].create_indexes(models)
 

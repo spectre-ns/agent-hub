@@ -12,6 +12,7 @@
 # (nobody edits its figures), and the only way to change it is to reopen it, which sends it back to be compared,
 # drafted, reviewed and authorised again.
 id = "T1Return"
+key = "T1"
 label = "T1 return"
 plural = "T1 returns"
 data_class = "tax"

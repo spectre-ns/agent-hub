@@ -1,5 +1,6 @@
 # A completed intake form.
 id = "QuestionnaireResponse"
+key = "INT"
 label = "Intake form"
 plural = "Intake forms"
 data_class = "intake"

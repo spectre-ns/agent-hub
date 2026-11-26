@@ -8,6 +8,7 @@
 # books with them and the calendar shows them. Why the patient comes, why an urgent visit was squeezed in over another
 # and the diagnosis billed (diagnosis, kept apart from the booked reason) are clinical.
 id = "Encounter"
+key = "VIS"
 label = "Visit"
 plural = "Visits"
 data_class = "visits"

@@ -2,6 +2,7 @@
 # purpose says what may go in it: held stock goes only to quarantine or reject, and nothing is received there. A
 # structural one (a site, a building) only groups others and holds no stock itself.
 id = "Location"
+key = "LOC"
 label = "Storage location"
 plural = "Storage locations"
 data_class = "inventory"

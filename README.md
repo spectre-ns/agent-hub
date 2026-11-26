@@ -327,6 +327,22 @@ reassigned to each step's role as the run goes on, says what it waits on while a
 closing back into it. The board can show one workflow with a column per step (**Group by: one workflow, by
 step**).
 
+Every record has a **key**, numbered in its type as a Jira issue is in its project: the 12th T1 return is `T1-12`,
+an engagement `ENG-3`, each type counting on its own. The key is given when the record is made and never changes;
+the record page shows it beside the title, and the records list in a column of its own. Work on a record shows the
+record's key, so a return's work, its reviews and a reopened return all read `T1-12`. Work on no record (a notice
+about your account, an approval) shows the practice's code and the item's number, `HFM-40`.
+
+A key finds what it names: `/T1-12` opens the return (any case), the search box takes a key as it takes a name,
+`GET /api/keys/T1-12` says what the key names, and MCP's `find_by_key` does the same for agents. A record
+converted into another type is still found by its old key. A key names nothing to a member who may not read what
+has it: they are told no more than for a key nothing has.
+
+A record type sets its key with `key = "T1"`: one to eight capital letters and digits, starting with a letter. A type
+that sets none takes one from its label (Engagement: `ENG`, Change order: `CO`). Once its records carry a key, a type
+keeps it: a new label does not change it, no other type may take it, even after the type is retired, and no type's
+key is ever the practice's code.
+
 The diagram editor's step panel sets a wait's condition, duration, moment and timeout; the workflow panel its
 schedule and deadline. The workflow's page says them in words.
 
@@ -525,7 +541,7 @@ servers (JSON-RPC 2.0, revision 2025-06-18 and later, negotiated at `initialize`
 
 | server     | tools |
 |------------|-------|
-| `core`     | `list_inbox`, `read_item`, `claim_item`, `complete_item`, `release_item`, and for agents `propose_decision` |
+| `core`     | `list_inbox`, `read_item`, `claim_item`, `complete_item`, `release_item`, `find_by_key`, and for agents `propose_decision` |
 | `practice` | the pack's record types, workflows and views |
 | `<module>` | each installed module's (`/mcp/dms`, `/mcp/qms`, ...) |
 

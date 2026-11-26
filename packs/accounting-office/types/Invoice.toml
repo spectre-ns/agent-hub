@@ -1,11 +1,13 @@
 # A bill to a client for an engagement's work. It is part of its client. The work's workflow raises it when the work
-# is done (a T1 once it is filed); the office marks it paid.
+# is done (a T1 once it is filed); the office marks it paid. It is numbered when it is sent, in a series per year with
+# no gaps (TW-2026-0001); a sent invoice keeps its number and its date, and is voided, never deleted.
 id = "Invoice"
+key = "INV"
 label = "Invoice"
 plural = "Invoices"
 data_class = "engagement"
 strict = true
-title = "Invoice {number}[ · {client_name}]"
+title = "Invoice[ {number}][ · {client_name}]"
 date = "issued_on"
 part_of = "client"
 order = 40
@@ -28,7 +30,6 @@ type = "string"
 name = "number"
 label = "Invoice number"
 type = "string"
-required = true
 
 [[field]]
 name = "engagement"
@@ -91,6 +92,12 @@ type = "choice"
 choices = ["draft", "sent", "paid", "void"]
 required = true
 
+[number]
+field = "number"
+pattern = "TW-{year}-{seq:04}"
+date = "issued_on"
+when = ["sent"]
+
 [lifecycle]
 field = "status"
 initial = "draft"
@@ -102,6 +109,8 @@ tones = { draft = "active", sent = "waiting", paid = "done", void = "ended" }
 from = ["draft"]
 to = "sent"
 label = "Send"
+asks = ["issued_on"]
+requires = ["issued_on"]
 
 [[lifecycle.transition]]
 from = ["sent"]

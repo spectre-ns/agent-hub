@@ -1,5 +1,6 @@
 # A vaccine given to a patient, here or elsewhere.
 id = "Immunization"
+key = "IMM"
 label = "Immunization"
 plural = "Immunizations"
 data_class = "clinical"

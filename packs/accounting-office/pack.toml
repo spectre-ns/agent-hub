@@ -25,7 +25,10 @@
 # compared, drafted, reviewed and authorised (T183) again.
 # 1.3: the office administrator reads tax records (they take the organizer and the chasing when the agent cannot, and
 # chase the T183), and an organizer may expect no slips: a client's first year with the firm has none on file.
-version = "1.3"
+# 1.4: each record is keyed in its type, as an issue is in its project (T1, ENG, SLIP...): T1-12 is the 12th, and work on
+#  it shows that key. An invoice is numbered by the hub when it is sent ([number]: TW-2026-0001, a series per year
+#  with no gaps), no longer by the pack's own counter, and keeps its number and its date.
+version = "1.4"
 
 [practice]
 requires_core = "1.0"

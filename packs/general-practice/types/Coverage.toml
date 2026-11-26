@@ -1,5 +1,6 @@
 # Insurance: MSI (provincial) or a private plan.
 id = "Coverage"
+key = "COV"
 label = "Coverage"
 plural = "Coverage"
 data_class = "demographics"

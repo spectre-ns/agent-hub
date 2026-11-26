@@ -110,7 +110,10 @@ def test_a_t1_walks_from_organizer_to_assessed_agents_doing_the_routine_and_peop
     assert ret["status"] == "filed"
     assert (ret["efile_confirmation"], ret["filed_on"]) == ("CRA-7K2M9Q41", "2026-04-21")
     assert _run_on(firm, ref, "t1-return")["ctx"]["filing-check"]["signed_by"] == "anne"
-    assert firm.records.search("Invoice", subject=cref, limit=None)
+    (inv,) = firm.records.search("Invoice", subject=cref, limit=None)
+    # numbered by the hub as it was sent: the first of its year's series, found by that number
+    year = inv["issued_on"][:4]
+    assert inv["number"] == f"TW-{year}-0001" == firm.find_key(anne, inv["number"].lower())["number"]
     # the notice of assessment agrees: assessed as filed, and the engagement closes
     firm.create_record(portal, "TaxSlip", {"client": cref, "status": "received", "source": "portal",
                                            "text": f"Notice of Assessment\nTax year: 2025\nIssued by: Canada Revenue "
@@ -465,3 +468,23 @@ def test_the_demo_has_every_t1_state_and_work_in_each_person_s_inbox(monkeypatch
     # a return the demo shows as filed carries a confirmation marked as demo data: the hub made none of its own
     filed = [r for r in hub.records.search("T1Return", limit=None) if r.get("efile_confirmation")]
     assert filed and all(r["efile_confirmation"].startswith("DEMO-") and r.get("filed_on") for r in filed)
+
+
+def test_a_return_is_keyed_once_and_all_its_work_and_a_reopen_show_that_key(firm):
+    """A return is T1-n from the day it is made, counted among T1 returns only (an engagement is ENG-n), as a Jira
+    issue is in its project. Every piece of its work shows that key, and so does the next pass when a late slip reopens
+    it: staff quote one key for the return, whatever is being done to it."""
+    cref, ref = _in_review(firm)
+    key = firm.key_of(ref)
+    returns = sorted(r["meta"]["key"] for r in firm.records.search("T1Return", limit=None))
+    assert key.startswith("T1-") and returns == sorted(f"T1-{n}" for n in range(1, len(returns) + 1))
+    assert all(e["meta"]["key"].startswith("ENG-") for e in firm.records.search("Engagement", limit=None))
+    first = [i["_id"] for r in firm.db.runs.find({"record": ref}) for i in firm.db.items.find({"run_id": r["id"]})]
+    firm.create_record(firm.member("client-portal"), "TaxSlip", {"client": cref, "status": "received",
+                                                                 "source": "portal", "text": LATE_T5})
+    _draft(firm, cref)  # the late slip reopens it: a new pass
+    runs = list(firm.db.runs.find({"workflow_id": "t1-return", "record": ref}))
+    work = [i["_id"] for r in runs for i in firm.db.items.find({"run_id": r["id"]})]
+    assert len(runs) > 1 and set(work) > set(first)
+    assert {firm.item_key(i) for i in work} == {key} == {firm.key_of(ref)}
+    assert firm.read_record(firm.member("anne"), ref)["meta"]["key"] == key

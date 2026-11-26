@@ -1,6 +1,7 @@
 # A client of the firm: a person or a business. It extends the core's Subject, so the core's pages, pickers and any
 # module (crm, dms) see it. Who owns a company, and who is married to whom, are Relationships.
 id = "Client"
+key = "CLI"
 label = "Client"
 plural = "Clients"
 data_class = "profile"

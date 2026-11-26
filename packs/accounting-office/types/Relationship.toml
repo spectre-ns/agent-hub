@@ -1,6 +1,7 @@
 # Who a client is to another client: the owner or a shareholder of a company, a director, a spouse, a dependant.
 # It is part of the client it is about (`client`) and names the other (`other`).
 id = "Relationship"
+key = "REL"
 label = "Relationship"
 plural = "Relationships"
 data_class = "profile"

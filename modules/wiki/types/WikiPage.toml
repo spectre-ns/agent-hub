@@ -1,5 +1,6 @@
 # A wiki page. A page with no parent is the home page of a space; the pages under it are the space's tree.
 id = "WikiPage"
+key = "WIKI"
 label = "Wiki page"
 plural = "Wiki pages"
 data_class = "wiki"

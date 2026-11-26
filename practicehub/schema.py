@@ -8,6 +8,21 @@ answer that becomes a record, an engine calling the API.
     id = "Observation"            # the record type (FHIR resource names, or a module's own: Document, CAPA, Part)
     label = "Result"
     plural = "Results"
+    key = "LAB"                   # its records' keys, counted per type: LAB-1, LAB-2... (one to eight capital letters
+                                  #   and digits, starting with a letter). Given when a record is made and never
+                                  #   changed; work on the record shows it. None set: taken from the label (Result:
+                                  #   RES). Once records carry it, the type keeps it, and no other type may take it.
+    [number]                      # optional: a number of its own the hub gives each record once, in a series with no
+    field = "number"              #   gaps (a document number). A string field, not required: the hub writes it, and
+                                  #   nobody else (no person, workflow or import) does
+    pattern = "TW-{year}-{seq:04}"  # {seq} once ({seq:04}: at least four digits); {year} and {month} of its date; between
+                                  #   them letters, digits and - / . _. Each year (or month) the pattern names counts
+                                  #   from 1 again
+    date = "issued_on"            #   the date field it reads (default: the type's date); a record numbered by its date
+                                  #   keeps that date
+    when = ["sent"]               #   given by the write that puts the record in one of these states (default: when it
+                                  #   is made). A numbered record keeps its number and is never converted into another
+                                  #   type: no number is skipped or given twice
     data_class = "clinical"       # who may read and write it (grants are per data class)
     subject = false               # true: work is about records of this type (Patient, Client, Matter)
     strict = true                 # refuse top-level keys no field declares
@@ -104,6 +119,7 @@ from __future__ import annotations
 import difflib
 import re
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -112,6 +128,62 @@ from . import expr
 from .workflows import DefinitionError
 
 TYPE_ID = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
+# A type's key: the start of its records' keys (T1-12, ENG-3), as a Jira project's key starts its issues'.
+TYPE_KEY = re.compile(r"[A-Z][A-Z0-9]{0,7}")
+_KEY_SMALL_WORDS = {"a", "an", "and", "of", "or", "the", "to", "for", "in", "on"}
+
+
+def default_key(label: str) -> str:
+    """The key of a type that does not set one, from its label: a word's first three letters (Engagement: ENG), or the
+    first letter of each word (Change order: CO), a word with digits in it whole (T1 return: T1R)."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", label or "") if not unicodedata.combining(c))
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", plain) if w and w.lower() not in _KEY_SMALL_WORDS]
+    if len(words) == 1:
+        key = words[0][:3].upper()
+    else:
+        key = "".join(w.upper() if any(c.isdigit() for c in w) else w[0].upper() for w in words[:4])[:8]
+    key = key.lstrip("0123456789")  # a key starts with a letter (2024 file: F)
+    return key or "REC"
+
+
+# A ``[number]`` pattern: {seq} once, {year} and {month} of the record's date, and between them these characters only.
+NUMBER_TOKEN = re.compile(r"\{(year|month|seq(?::0([1-9]))?)\}")
+NUMBER_TEXT = re.compile(r"[A-Za-z0-9\-/._]*")
+
+
+def number_reads_date(pattern: str) -> bool:
+    """Whether a ``[number]`` pattern names its record's date ({year} or {month})."""
+    return any(m.group(1) in ("year", "month") for m in NUMBER_TOKEN.finditer(pattern))
+
+
+def number_series(pattern: str, d: date | None) -> str:
+    """The series a number of this pattern dated ``d`` is counted in: the pattern with its year and month filled in
+    ("TW-{year}-{seq:04}" on 2026-03-04: "TW-2026-{seq}"). Each series counts from 1."""
+    def fill(m):
+        return {"year": f"{d.year:04d}" if d else "", "month": f"{d.month:02d}" if d else ""}.get(m.group(1), "{seq}")
+    return NUMBER_TOKEN.sub(fill, pattern)
+
+
+def render_number(pattern: str, d: date | None, seq: int) -> str:
+    """The ``seq``-th number of its series ("TW-{year}-{seq:04}", 2026-03-04, 12: "TW-2026-0012")."""
+    def fill(m):
+        if m.group(1) == "year":
+            return f"{d.year:04d}"
+        if m.group(1) == "month":
+            return f"{d.month:02d}"
+        return str(seq).zfill(int(m.group(2) or 1))
+    return NUMBER_TOKEN.sub(fill, pattern)
+
+
+def number_in_series(series: str, number) -> int | None:
+    """The place of ``number`` in ``series`` (``number_series``), or None when it is not one of the series'."""
+    if not isinstance(number, str):
+        return None
+    head, _, tail = series.partition("{seq}")
+    m = re.fullmatch(re.escape(head) + r"([0-9]{1,18})" + re.escape(tail), number)
+    return int(m.group(1)) if m else None
+
+
 FIELD_TYPES = {"string", "text", "markdown", "number", "boolean", "date", "datetime", "choice", "member", "reference",
                "attachment", "json", "object", "list"}
 RESERVED = {"resourceType", "id", "meta"}
@@ -152,6 +224,7 @@ class RecordType:
     base_map: dict = field(default_factory=dict)   # base field -> {"fields": [own field names]} or {"when": expr}
     title: str | None = None  # how a record of it is named: "{name}", "{start}[ {reason}]"
     short_title: str | None = None  # how it is named in navigation (tab title, crumbs, headings, tooltips); else title
+    key: str = ""  # the start of its records' keys (T1-12): set, or default_key(label)
     screens: dict = field(default_factory=dict)  # id -> {"id", "on": [ops], "tabs": [{"label", "fields": [names]}]}
     parent: str | None = None  # the path of a reference to its own type: its records form a tree
     part_of: dict | None = None  # {"field", "path", "target"}: the reference to the one record that owns it
@@ -164,6 +237,7 @@ class RecordType:
     booking: dict = field(default_factory=dict)  # a Booking type's [booking]: see _check_booking
     workflow: dict | None = None  # {"id", "when"}: the workflow a new record of it starts, about it (_check_workflow)
     unique: list[list[str]] = field(default_factory=list)  # keys (field names) no two of its records share (_check_unique)
+    number: dict | None = None  # [number]: {field, path, pattern, date (a field's name, or None), when}: _check_number
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -242,8 +316,8 @@ RESERVED_SEGMENTS = frozenset({"new", "export", "edit", "move", "sign", "attach"
 KEYS = {
     "": {"id", "label", "plural", "data_class", "subject", "strict", "date", "flag", "alert", "active", "order",
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
-         "part_of", "slug", "link",
-         "navigator", "layout", "standard", "consent", "booking", "workflow", "unique"},
+         "part_of", "slug", "link", "key",
+         "navigator", "layout", "standard", "consent", "booking", "workflow", "unique", "number"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class",
               "roles", "required_unless"},
@@ -256,6 +330,7 @@ KEYS = {
     "tab": {"label", "fields"},
     "navigator": {"tops", "hide"},
     "consent": {"kind", "date", "source", "withdrawn", "lasts"},
+    "number": {"field", "pattern", "date", "when"},
     "booking": {"marked", "overbook", "overbook_label", "overbook_reason", "overbook_priority", "request",
                 "request_inputs"},
 }
@@ -681,6 +756,14 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                     lifecycle=lc, summary=str(doc.get("summary", "")), source=source, signatures=sigs,
                     abstract=abstract, extends=base.id if base else None, base_map=base_map,
                     title=doc.get("title"), short_title=doc.get("short_title"), screens=screens)
+    if "key" in doc:
+        if isinstance(doc["key"], str) and TYPE_KEY.fullmatch(doc["key"]):
+            rt.key = doc["key"]
+        else:
+            problems.append(f"key: one to eight capital letters and digits, starting with a letter (T1, ENG), not "
+                            f"{doc['key']!r}")
+    if not rt.key:
+        rt.key = default_key(label)
     if base is not None:
         rt.date = rt.date or base.date
         rt.subject = doc.get("subject", base.id == "Subject") is True
@@ -750,6 +833,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         problems += _check_workflow(rt, doc["workflow"])
     if doc.get("unique") is not None:
         problems += _check_unique(rt, doc["unique"])
+    if doc.get("number") is not None:
+        problems += _check_number(rt, doc["number"])
     std = doc.get("standard")
     if std is not None:
         problems += _check_standard(rt, std)
@@ -842,6 +927,60 @@ def _check_unique(rt: RecordType, raw) -> list[str]:
     if not problems:
         rt.unique = keys
     return problems
+
+
+def _check_number(rt: RecordType, raw) -> list[str]:
+    """``[number]``: the number the hub gives each record of the type once, in a series with no gaps. Sets
+    ``rt.number`` when sound, and marks its field as written by no one's hand (off every form)."""
+    if not isinstance(raw, dict):
+        return ['number: a table naming its field and pattern, e.g. { field = "number", pattern = "INV-{seq:04}" }']
+    out = _unknown("number", raw, "number")
+    f = rt.field(str(raw.get("field") or ""))
+    if f is None:
+        out.append(f"number.field: name the string field that holds it ({raw.get('field')!r} is not one of its fields)")
+    elif f["type"] != "string" or f.get("list") or "*" in f["path"]:
+        out.append(f"number.field: {f['name']} is a {f['type']} field{' of several values' if f.get('list') else ''}"
+                   f"; a number is held in a string field, one per record")
+    elif f.get("required"):
+        out.append(f"number.field: {f['name']} is not required: the hub writes it, when the record is numbered")
+    elif rt.lifecycle and f["path"] == rt.lifecycle["path"]:
+        out.append(f"number.field: {f['name']} holds the record's state")
+    pattern = raw.get("pattern")
+    if not isinstance(pattern, str) or not pattern or len(pattern) > 40:
+        out.append('number.pattern: text of at most 40 characters, e.g. "INV-{year}-{seq:04}"')
+        pattern = ""
+    elif sum(1 for m in NUMBER_TOKEN.finditer(pattern) if m.group(1).startswith("seq")) != 1:
+        out.append(f"number.pattern: {pattern!r} names {{seq}} (the number in its series) once, e.g. "
+                   f"\"INV-{{seq:04}}\"")
+    elif not NUMBER_TEXT.fullmatch(NUMBER_TOKEN.sub("", pattern)) or NUMBER_TOKEN.sub("", pattern).count("{"):
+        out.append(f"number.pattern: {pattern!r}: between {{seq}}, {{year}} and {{month}}, only letters, digits and "
+                   f"- / . _")
+    dated = None
+    if raw.get("date") is not None:
+        df = rt.field(str(raw["date"]))
+        if df is None or df["type"] not in ("date", "datetime") or df.get("list") or "*" in df["path"]:
+            out.append(f"number.date: name its date field ({raw['date']!r} is not one)")
+        else:
+            dated = df["name"]
+    else:
+        dated = next((x["name"] for x in rt.fields if rt.date and x["path"] == rt.date
+                      and x["type"] in ("date", "datetime") and not x.get("list")), None)
+        if pattern and number_reads_date(pattern) and not dated:
+            out.append(f"number.date: {pattern!r} names the year or month: say which date field it reads")
+    when = raw.get("when", [])
+    states = (rt.lifecycle or {}).get("states") or []
+    if not _strings(when):
+        out.append("number.when: a list of states")
+        when = []
+    elif when and not rt.lifecycle:
+        out.append("number.when: states of its lifecycle, and it has none")
+    for st in when if rt.lifecycle else []:
+        if st not in states:
+            out.append(f"number.when: {st!r} is not one of its states ({', '.join(states)})")
+    if not out:
+        f["by"] = "workflow"  # off every form and every tool's input: the hub alone writes it
+        rt.number = {"field": f["name"], "path": f["path"], "pattern": pattern, "date": dated, "when": list(when)}
+    return out
 
 
 def starts_workflow(rt: RecordType, rec: dict) -> str | None:

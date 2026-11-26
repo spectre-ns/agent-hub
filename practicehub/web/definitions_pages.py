@@ -367,7 +367,7 @@ class DefinitionPages:
 # into the same document the TOML holds (``doc_from_form``), written as TOML (``toml_dumps``) and checked by the same
 # validator; what the form does not show (a field's path, a type's signatures...) rides along, unchanged, in hidden
 # inputs and is listed, so nothing is lost on the way through. Every button is a plain submit (``op``).
-TOP_FORM = ("id", "label", "plural", "summary", "data_class", "order", "field", "lifecycle", "screen")
+TOP_FORM = ("id", "label", "plural", "key", "summary", "data_class", "order", "field", "lifecycle", "screen")
 FIELD_FORM = ("name", "label", "type", "required", "choices", "target", "help")
 LC_FORM = ("field", "states", "initial", "locked", "transition")
 TR_FORM = ("from", "to", "by", "label", "requires")
@@ -465,6 +465,8 @@ def doc_from_form(f: dict) -> dict:
     for k in ("id", "label", "plural", "summary", "data_class"):
         if s(f"t.{k}"):
             doc[k] = s(f"t.{k}")
+    if s("t.key"):
+        doc["key"] = s("t.key").upper()
     if s("t.order"):
         doc["order"] = int(s("t.order")) if re.fullmatch(r"-?\d{1,9}", s("t.order")) else s("t.order")
     keep = _json(_one(f, "t.keep"))
@@ -687,7 +689,7 @@ def locate(problem: str, doc: dict) -> str | None:
         i = next((k for k, sc in enumerate(screens) if f" {sc.get('id')} " in f" {problem} "
                   or repr(str(sc.get("id"))) in problem), None)
         return f"b-s{i}" if i is not None else None
-    for k in ("id", "label", "plural", "summary", "data_class", "order"):
+    for k in ("id", "label", "plural", "key", "summary", "data_class", "order"):
         if problem.startswith(f"{k}:"):
             return f"b-{k}"
     if problem.startswith("part_of:"):
@@ -791,6 +793,11 @@ def render_builder(doc: dict, *, did, types, classes, module_fields, problems, n
     form.append('<div class="fb-grid">' + idf
                 + text("b-label", "t.label", "Label", doc.get("label", ""), help_="What one record is called, e.g. Visit.")
                 + text("b-plural", "t.plural", "Plural", doc.get("plural", ""), help_="What several are called, e.g. Visits.")
+                + text("b-key", "t.key", "Key", doc.get("key", ""),
+                       extra=f' placeholder="{e(schema.default_key(str(doc.get("label") or "")))}" maxlength="8" '
+                             'pattern="[A-Za-z][A-Za-z0-9]{0,7}" autocapitalize="characters"',
+                       help_="Starts each of its records&#39; keys, as T1 starts T1-12: one to eight letters and digits. "
+                             "Left blank, it is taken from the label. Once records have it, it stays.")
                 + select("b-data_class", "t.data_class", "Data class", classes, doc.get("data_class", ""),
                          blank="Choose…", help_="Who may read and write its records.")
                 + text("b-order", "t.order", "Order", doc.get("order", ""), extra=' inputmode="numeric"',

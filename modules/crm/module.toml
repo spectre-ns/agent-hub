@@ -21,7 +21,9 @@
 requires_core = "1.0"
 id = "crm"
 name = "Relationships"
-version = "4"
+# 5: each record is keyed in its type, as an issue is in its project (ENQ...): ENQ-12 is the 12th, and work on
+#  it shows that key.
+version = "5"
 changes = """Follow-ups and consent expiry are written as states and edges; a drafted follow-up waits as To send until a
 person sends it. The follow-up-due check is a workflow that only acts."""
 summary = "Organisations, contacts, their interactions and enquiries, with consent to commercial messages (CASL)."

@@ -1,5 +1,6 @@
 # A signed clinical note. Notes enter the chart only once a physician signs them.
 id = "Composition"
+key = "NOTE"
 label = "Note"
 plural = "Notes"
 data_class = "clinical"

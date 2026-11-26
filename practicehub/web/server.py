@@ -81,6 +81,9 @@ class _NoType:
     part_of = None
 
 
+KEY_PATH = r"[A-Za-z][A-Za-z0-9]{0,7}-[0-9]{1,9}"  # a key in an address: /T1-12
+
+
 class Redirect(Exception):
     def __init__(self, to: str, cookie: str | list[str] | None = None):
         self.to, self.cookie = to, cookie
@@ -226,6 +229,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         self.mcp_routes(R)
         self.analytics_routes(R)
         self.bpmn_routes(R)
+        R("GET", rf"/api/keys/(?P<key>{KEY_PATH})", self.api_key)
+        R("GET", rf"/(?P<key>{KEY_PATH})", self.page_key)  # last: every page with a name of its own first
 
     def route(self, method, pattern, fn, auth=True):
         self.routes.append((method, re.compile(pattern + r"/?$"), fn, auth))
@@ -403,22 +408,26 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             return None
         return self.record_href(ref) + "#work"
 
+    def _key_href(self, found: dict) -> str:
+        return self.record_href(found["ref"]) if "ref" in found else f"/items/{found['item']}"
+
+    def page_key(self, req, key):
+        """A key's own address (/T1-12): the record or the work it names, for whoever may see it."""
+        found = self.hub.find_key(req["me"], key)
+        if not found:
+            raise NotFound(f"nothing you may open has the key {key.upper()}")
+        raise Redirect(self._key_href(found))
+
+    def api_key(self, req, key):
+        """``GET /api/keys/T1-12``: what the key names (``ref`` or ``item``), and its page."""
+        found = self.hub.find_key(req["me"], key)
+        if not found:
+            raise NotFound(f"nothing you may open has the key {key.upper()}")
+        return {**found, "href": self._key_href(found)}
+
     def may_see_item(self, me, item: dict, run: dict) -> bool:
-        from ..visibility import Viewer
-        if item["kind"] == "notice":
-            ok = item.get("assignee") == me.get("id") or (item.get("role") or None) in (me.get("roles") or [])
-        else:
-            viewer = Viewer(self.hub, me)
-            wf = viewer.workflow_of_run(run["id"])
-            ok = item.get("assignee") == me.get("id") or (bool(wf) and (
-                viewer.step_visible(wf, item["step_id"])[0] if item.get("step_id") else True))  # between steps: the run
-        if item["kind"] == "notice" and item.get("assignee") == me.get("id"):
-            return True  # told by name (a break-glass review goes to whom it is for)
-        if item.get("assignee") == me.get("id") or (ok and item.get("role") and item["role"] in (me.get("roles") or [])):
-            # whoever it is for opens it, directive or not, so urgent work on a lockboxed file is not a dead end: the
-            # page then shows the directive's note in place of the content, and points to emergency access
-            return True
-        return ok and not self.hub.restrictions.withholds_from(me, run.get("record"))
+        from ..visibility import may_see_item
+        return may_see_item(self.hub, me, item, run)
 
     # ================================================================================================ API
     def api_me(self, req):
@@ -947,16 +956,13 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             return False
 
     def _code(self) -> str:
-        """The practice's short code: its mark and the start of every work item's key (HFM-12). A policy owner may set
-        it on the practice settings page; else the initials of its name."""
-        p = self.hub.practice
-        return p.get("code") or self._initials(p.get("name", ""))
+        """The practice's short code (``Hub.practice_code``)."""
+        return self.hub.practice_code()
 
     @staticmethod
     def _initials(name: str) -> str:
-        words = [w for w in re.split(r"[\s,.\-]+", name or "") if w and w[0].isalpha()]
-        caps = [w for w in words if w[0].isupper()] or words
-        return "".join(w[0].upper() for w in caps[:3]) or "PH"
+        from ..hub import initials
+        return initials(name)
 
     AV_COLORS = ("#2f6fd6", "#1f8a5b", "#b5482c", "#7b4fc9", "#b07d12", "#2a8a9a", "#c03d77", "#5b6b84")
 
@@ -978,9 +984,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                 f'{e(self._initials(m["name"])[:2])}</span>')
 
     def _key(self, iid: str) -> str:
-        """A short, readable key for a work item, like HFM-12."""
-        row = self.hub.db.items.find_one({"_id": iid}, fields=["n"])
-        return f'{self._code()}-{row["n"] if row else "?"}'
+        """A work item's key: its record's (T1-12), or the practice's code and its number (``Hub.item_key``)."""
+        return self.hub.item_key(iid)
 
     ITEM_STATUS = {"open": ("To do", ""), "claimed": ("In progress", "prog"), "held": ("Waiting for sponsor", "wait"),
                    "done": ("Done", "done"), "cancelled": ("Cancelled", ""), "waiting": ("Waiting", "wait")}
@@ -3317,6 +3322,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
 
     def page_subjects(self, req):
         me, st, label = req["me"], self.subj["type"], self.subj["label"].lower()
+        found = self.hub.find_key(me, req["query"].get("q", ""))  # the search box takes a key too: T1-12 opens it
+        if found:
+            raise Redirect(self._key_href(found))
         if not self.hub.may_read(me, st):
             raise Denied(f"{me['name']} may not read {label} records")
         q = req["query"].get("q", "").lower()
@@ -3332,8 +3340,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         body = (f'<form class="inline"><input name="q" value="{e(q)}" placeholder="search"><button class="secondary">'
                 f'Search</button></form><table><tr><th>{e(self.subj["label"])}</th>'
                 + "".join(f"<th>{e(h.capitalize())}</th>" for h in heads) + f"</tr>{rows}</table>"
-                + (f"<p class='muted'>The {SHOWN} most recently changed are shown. Search by name, date of birth or "
-                   f"health number to find any other.</p>" if more else "")
+                + (f"<p class='muted'>The {SHOWN} most recently changed are shown. Search by a name, a key or "
+                   f"another detail to find any other.</p>" if more else "")
                 + ("<p class='muted'>No one matches. Check the spelling, or search by another detail.</p>"
                    if q and not subs else "") + reg)
         return self.layout(req, self.subj["plural"], body)

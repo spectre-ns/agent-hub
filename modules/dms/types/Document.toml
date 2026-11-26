@@ -3,6 +3,7 @@
 # Collabora Online while the document is a draft (read only once it is sent for review); a PDF is kept as it was filed
 # (a wiki page made a controlled document, with the wiki-sop module, is a PDF of that page).
 id = "Document"
+key = "DOC"
 label = "Controlled document"
 plural = "Controlled documents"
 data_class = "documents"

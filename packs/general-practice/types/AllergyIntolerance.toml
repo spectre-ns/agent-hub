@@ -1,5 +1,6 @@
 # An allergy or intolerance. Active ones are shown in a banner on the patient's page.
 id = "AllergyIntolerance"
+key = "ALG"
 label = "Allergy"
 plural = "Allergies"
 data_class = "clinical"

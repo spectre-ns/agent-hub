@@ -1,5 +1,6 @@
 # A billable service, from the fee schedule.
 id = "ChargeItem"
+key = "CHG"
 label = "Charge"
 plural = "Charges"
 data_class = "billing"

@@ -14,6 +14,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import logging
+import re
 import tomllib
 
 from . import schema
@@ -444,6 +445,29 @@ class CatalogMixin:
     def role_ids(self) -> set[str]:
         return set(self.db.roles.distinct("id")) | (self.pack.role_ids() if self.pack else set())
 
+    def _key_problems(self, rt: schema.RecordType) -> list[str]:
+        """A type's key is its own for good: no other type has it or ever gave it to its records, its own records keep
+        the one they were given (a type that sets none takes one from its label, and a new label would change it),
+        and it is not the practice's code (which begins the key of work on no record)."""
+        same = [o for t, o in self.record_types().items() if t != rt.id and o.key == rt.key]
+        if same:
+            return [f"key: {same[0].label} ({same[0].id}) already has the key {rt.key!r}: their records would have the "
+                    f"same keys; give this type a key of its own (key = \"...\")"]
+        held = self.db.records.find_one({"key": {"$type": "string", "$regex": f"^{re.escape(rt.key)}-[0-9]+$"},
+                                         "type": {"$ne": rt.id}}, fields=["type", "key"])
+        if held:
+            return [f"key: {held['type']} records were keyed {rt.key} ({held['key']}); a key stays with the type that "
+                    f"gave it: give this type a key of its own (key = \"...\")"]
+        mine = self.db.records.find_one({"type": rt.id, "key": {"$type": "string"}}, fields=["key"])
+        if mine and mine["key"].rsplit("-", 1)[0] != rt.key:
+            was = mine["key"].rsplit("-", 1)[0]
+            return [f"key: its records are keyed {was} ({mine['key']}), and a type keeps its key (one that sets none "
+                    f"takes it from its label, so a new label would change it): write key = \"{was}\""]
+        if rt.key == self.practice_code():
+            return [f"key: {rt.key} is the practice's code, which begins the key of work on no record "
+                    f"({rt.key}-12); give this type another key (key = \"...\")"]
+        return []
+
     def check_type(self, rt: schema.RecordType) -> list[str]:
         problems = []
         classes = self.data_class_ids()
@@ -479,6 +503,10 @@ class CatalogMixin:
                             (rt.is_a(x) if t == rt.id else self.is_a(t, x)) for x in bf["target"]):
                         problems.append(f"base.{bname}: {base.id}'s {bname} is a {' or '.join(bf['target'])}; "
                                         f"{t} does not extend it")
+        problems += self._key_problems(rt)
+        if rt.number and not hasattr(self.records, "number_fn"):
+            problems.append("number: this hub keeps its records in a store of their own (a FHIR server), which numbers "
+                            "nothing: a type numbers its records ([number]) only in the hub's own store")
         wf = self._own_workflow(rt)  # its own workflow, as in force: what the two may not both say
         if wf is not None:
             problems += lifecycle_fit(rt, wf)

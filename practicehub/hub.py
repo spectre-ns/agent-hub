@@ -14,7 +14,7 @@ import re
 import secrets
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import blocks as blockmod
@@ -85,6 +85,17 @@ class Duplicate(Conflict):
 EVERYONE = "everyone"  # a role every person holds, and nobody assigns: [grants.everyone] gives it read access only
 
 
+def initials(name: str) -> str:
+    """The initials of a name, at most three, its capitalised words first (Harbour Family Medicine: HFM); PH for none."""
+    words = [w for w in re.split(r"[\s,.\-]+", name or "") if w and w[0].isalpha()]
+    caps = [w for w in words if w[0].isupper()] or words
+    return "".join(w[0].upper() for w in caps[:3]) or "PH"
+
+
+# a key as someone types it: a type's key (or the practice's code) and a number, T1-12 or hfm-40
+KEY_TEXT = re.compile(r"\s*([A-Za-z][A-Za-z0-9]{0,7})-([0-9]{1,9})\s*")
+
+
 def member_ref(mid: str) -> str:
     return f"member:{mid}"
 
@@ -102,6 +113,14 @@ def hmac_ok(track, kept: dict) -> bool:
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _day(v):
+    """The day of a date or time value as stored ("2026-03-04", "2026-03-04T09:30:00Z"), or None."""
+    try:
+        return date.fromisoformat(v[:10]) if isinstance(v, str) else None
+    except ValueError:
+        return None
 
 
 def _files_in(value) -> list[dict]:
@@ -197,6 +216,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         self._subjects()
         if self.pack and pack is None:
             self._search_ready(self.db.records.distinct("type"))  # a type's classes may have changed while it was down
+            self._keys_ready()
         from .models import ModelGateway
         self.models = models or ModelGateway(self)
         from .engine import Engine
@@ -499,6 +519,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             before = self.records.read(old_type, rid)
             if not before:
                 raise NotFound(f"there is no {ref}")
+            numbered = self._number_of(old_type, before)
+            if numbered:  # it would leave its series with a gap, or be given a second number
+                raise Invalid(f"{ref} has a number of its own ({numbered}): it keeps its type and is not converted")
             there = self.records.read(rtype, new_id)
             if bool(there) != bool(into):
                 raise Invalid(f"there is a {new_ref} already" if there else f"there is no {new_ref}")
@@ -528,12 +551,15 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     if ort is not None:
                         self._write_version(ort, upd, actor, None)
             self.db.records.delete({"_id": ref})
+            self._keys.pop(ref, None)  # its key went with it: the new record has one of its own type
             self.db.links.delete({"from_ref": ref})
             self.db.titles.delete({"_id": ref})
             if repoint:
                 self.repoint_work({ref: new_ref})
+            keys = {"key": (rec.get("meta") or {}).get("key"), "from_key": (before.get("meta") or {}).get("key")}
             self.track.append(actor, "record.converted", new_ref,
-                              data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec)})
+                              data={"from": ref, "subject": self.subject_of(rec), "summary": self.title(rec),
+                                    **{k: v for k, v in keys.items() if v}})
         return rec
 
     REPOINT = (("runs", {"status": "running"}),
@@ -740,7 +766,116 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             self.records.subject_fn = self.subject_of
         if hasattr(self.records, "parts_fn"):
             self.records.parts_fn = self._search_parts
+        if hasattr(self.records, "key_fn"):
+            self.records.key_fn = self._type_key
+        if hasattr(self.records, "number_fn"):
+            self.records.number_fn = self._number_of
         self._indexed_types: dict[str, str] = {}
+        self._keys: dict[str, str] = {}  # record ref -> its key: a key never changes, so it is kept once read
+
+    def _type_key(self, rtype: str) -> str | None:
+        """The key of a type's records (T1), for the record store to number them by."""
+        rt = self.record_type_for_reading(rtype)
+        return rt.key if rt is not None else None
+
+    def _number_of(self, rtype: str, rec: dict) -> str | None:
+        """A record's own number ([number]: INV-2026-0012), or None: its type numbers none, or it has none yet."""
+        rt = self.record_type_for_reading(rtype)
+        n = (rt.number if rt is not None else None) or {}
+        v = schema.first(rec, n["path"]) if n else None
+        return v if isinstance(v, str) and v else None
+
+    def _keys_ready(self) -> None:
+        """Records made before records had keys are given theirs, once, oldest first."""
+        if hasattr(self.records, "give_keys") and not self.db.get_setting("records_keyed"):
+            with self.db:
+                self.records.give_keys()
+                self.db.set_setting("records_keyed", 1)
+
+    def key_of(self, ref: str | None) -> str | None:
+        """A record's key (T1-12): its type's key and its number among that type's records. None: there is no such
+        record, or its store keeps no keys."""
+        if not ref:
+            return None
+        key = self._keys.get(ref)
+        if key is None:
+            row = self.db.records.find_one({"_id": ref}, fields=["key"])
+            key = (row or {}).get("key")
+            if key:
+                if len(self._keys) > 50000:
+                    self._keys.clear()
+                self._keys[ref] = key
+        return key
+
+    def practice_code(self) -> str:
+        """The practice's short code: its mark, and the start of the key of work on no record (HFM-12). A policy owner
+        may set it on the practice settings page; else the initials of its name."""
+        p = self.practice
+        return p.get("code") or initials(p.get("name", ""))
+
+    def item_key(self, iid: str) -> str:
+        """A work item's key: the key of the record it is about (T1-12, the same for every piece of work on that
+        return), or, for work on no record, the practice's code and the item's number (HFM-12)."""
+        row = self.db.items.find_one({"_id": iid}, fields=["n", "run_id"])
+        if not row:
+            return f"{self.practice_code()}-?"
+        run = self.db.runs.find_one({"_id": row["run_id"]}, fields=["record"]) if row.get("run_id") else None
+        return self.key_of((run or {}).get("record")) or f"{self.practice_code()}-{row['n']}"
+
+    def type_keys(self) -> dict[str, str]:
+        """Every key a type has or had: {key: the type's label}. A key once given to a type's records is that type's
+        for good, even once the type is retired."""
+        out = {k: "" for k in (str(i)[4:] for i in self.db.counters.distinct("_id") if str(i).startswith("key:"))}
+        for rt in self.record_types().values():
+            out[rt.key] = rt.label
+        return out
+
+    def find_key(self, member: dict | None, text: str) -> dict | None:
+        """What a key names, for a member who may see it: ``{"key", "ref"}`` for a record (T1-12, in any case, with
+        or without spaces around it; the key a record had before it was converted into another type finds the record
+        it became), ``{"key", "ref", "number"}`` for a record by its own number (``[number]``: INV-2026-0012),
+        ``{"key", "item"}`` for work on no record by the practice's code and its number (HFM-40). None: the text names
+        nothing, or the member may not see what it names (told no more than that nothing has it). ``member`` None: the
+        hub's own lookup, unchecked."""
+        m = KEY_TEXT.fullmatch(text or "")
+        if m:
+            asked = key = f"{m.group(1).upper()}-{int(m.group(2))}"
+            for _ in range(8):  # converted, and converted again: each conversion names the key it gave
+                row = self.db.records.find_one({"key": key}, fields=["_id"])
+                if row:
+                    if not self._may_find(member, row["_id"].split("/", 1)[0]):
+                        return None
+                    return {"key": key, "ref": row["_id"], **({"was": asked} if key != asked else {})}
+                ev = self.db.events.find_one({"action": "record.converted", "data.from_key": key}, sort=[("seq", -1)])
+                if not ev or not (ev.get("data") or {}).get("key"):
+                    break
+                key = ev["data"]["key"]
+        number = (text or "").strip()
+        if 0 < len(number) <= 60 and schema.NUMBER_TEXT.fullmatch(number) and any(c.isdigit() for c in number):
+            for row in self.db.records.find({"number": {"$in": sorted({number, number.upper()})}},
+                                            sort=[("type", ASC)], limit=10, fields=["_id", "key", "number"]):
+                rtype = row["_id"].split("/", 1)[0]
+                rt = self.record_type_for_reading(rtype)
+                if rt is not None and rt.number and self._may_find(member, rtype, rt.field(rt.number["field"])):
+                    return {"key": row.get("key") or row["number"], "ref": row["_id"], "number": row["number"]}
+        if not m or m.group(1).upper() != self.practice_code():
+            return None
+        item = self.db.items.find_one({"n": int(m.group(2))})
+        run = self.db.runs.find_one({"_id": item["run_id"]}) if item and item.get("run_id") else None
+        if not item or not run or run.get("record"):  # work on a record goes by the record's key, not this one
+            return None
+        if member is not None and not visibility.may_see_item(self, member, item, run):
+            return None
+        return {"key": asked, "item": item["id"]}
+
+    def _may_find(self, member: dict | None, rtype: str, field: dict | None = None) -> bool:
+        """Whether a member may be told which record a key or a number names: they read records of its type (and the
+        field the number is in, when that has a class of its own)."""
+        if member is None:
+            return True
+        if not self.can(member, "reader", f"data_class:{self.class_of(rtype)}"):
+            return False
+        return not (field or {}).get("data_class") or self.can(member, "reader", f"data_class:{field['data_class']}")
 
     SEARCH_INDEX = "w1"  # bump when the words a record is found by are built differently: every record is redone
 
@@ -1450,8 +1585,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             if k == "name" and len(v) > 120:
                 raise Invalid("name: at most 120 characters")
             if k == "code" and v and not re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", v):
-                raise Invalid("code: 2 to 6 capital letters or digits, starting with a letter (it begins every work "
-                              "item's key, like HFM-12)")
+                raise Invalid("code: 2 to 6 capital letters or digits, starting with a letter (it begins the key of "
+                              "work on no record, like HFM-12)")
             if k == "timezone":  # it decides the practice's "now" and "today" (``clock``): never left empty
                 if not v:
                     raise Invalid("timezone: the practice needs a time zone (a name like America/Halifax)")
@@ -1468,6 +1603,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 raise Invalid(f"escalation_role: there is no role {v!r}")
             if now.get(k, "" if k != "shortcuts" else []) != v:
                 clean[k] = v
+        if "code" in clean or "name" in clean:
+            code = clean.get("code", now.get("code")) or initials(clean.get("name", now.get("name", "")))
+            keys = self.type_keys()
+            if code in keys:
+                raise Invalid(f"code: {code} is the key of {keys[code] or 'a type'}'s records ({code}-1, {code}-2...); "
+                              f"the practice's code begins the key of work on no record, so it is no type's key: choose "
+                              f"another" + ("" if clean.get("code") else " (the code is the name's initials when none is set)"))
         if clean:
             local = {**(self.db.get_setting("practice_local", {}) or {}), **clean}
             with self.db:
@@ -3530,6 +3672,52 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             if f.get("by") == "workflow" and schema.get(before, f["path"]) != schema.get(after, f["path"]):
                 raise Denied(f"{f['label']} changes only through a workflow (it is not edited by hand)")
 
+    def _check_number_kept(self, rt, before: dict | None, after: dict) -> None:
+        """A type's own number (``[number]``) is the hub's to give, once: nobody writes it (no person, workflow or
+        import), it never changes once given, and a record numbered by its date keeps that date. So no number is ever
+        skipped or given twice. Records carried over by a pack upgrade are taken as they were."""
+        n = rt.number
+        if not n or getattr(self, "_upgrading", False):
+            return
+        had = schema.first(before, n["path"]) if before else None
+        if schema.first(after, n["path"]) != had:
+            raise Invalid(f"{rt.field(n['field'])['label']}: the hub gives a {rt.label.lower()} its number"
+                          + (f" ({had}), and it is not changed" if had else ", and nobody writes it"))
+        df = rt.field(n["date"]) if n["date"] else None
+        if had and df and schema.number_reads_date(n["pattern"]) \
+                and _day(schema.first(before, df["path"])) != _day(schema.first(after, df["path"])):
+            raise Invalid(f"{df['label']}: {had} is numbered by its date, which it keeps")
+
+    def _take_number(self, rt, before: dict | None, after: dict) -> dict:
+        """``after`` with its number, when this write is the one that numbers it: the write that makes it, or, for a
+        type that numbers its records in some states (``when``), the write that moves it into one. The number is the
+        next in its series (a year's, for a pattern with {year}), taken in this write's transaction: a write undone
+        gives it back."""
+        n = rt.number
+        if not n or getattr(self, "_upgrading", False) or schema.first(after, n["path"]):
+            return after
+        if n["when"]:
+            state = schema.first(after, rt.lifecycle["path"])
+            if state not in n["when"] or before is not None and schema.first(before, rt.lifecycle["path"]) == state:
+                return after
+        elif before is not None:
+            return after
+        df = rt.field(n["date"]) if n["date"] else None
+        d = _day(schema.first(after, df["path"])) if df else None
+        if d is None and schema.number_reads_date(n["pattern"]):
+            raise Invalid(f"to number a {rt.label.lower()}, fill in {df['label'] if df else 'its date'}")
+        series = schema.number_series(n["pattern"], d)
+        name = f"number:{rt.id}:{series}"
+        if not self.db.counters.exists({"_id": name}):  # a series goes on after the numbers its records already carry
+            head = series.partition("{seq}")[0]
+            top = 0
+            for row in self.db.records.find({"type": rt.id, f"data.{n['path']}": {"$regex": "^" + re.escape(head)}},
+                                            fields=["data"]):
+                top = max(top, schema.number_in_series(series, schema.first(row["data"], n["path"])) or 0)
+            if top:
+                self.db.counters.replace({"_id": name, "n": top})
+        return schema.put(after, n["path"], schema.render_number(n["pattern"], d, self.db.next_seq(name)))
+
     def state_move_refusal(self, rt, ref: str, t: dict, after: dict, run_id: str | None) -> str | None:
         """Why a move of a record whose type names its workflow is refused, or None. That workflow alone moves its
         state while a run of it walks the record: its own run, or a person or another workflow's run (an import, the
@@ -3866,6 +4054,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     raise Invalid(f"a new {rt.label.lower()} starts as {lc['initial']!r}, not {st!r}")
                 if t["by"] == "workflow" and not self._by_workflow(member, run_id):
                     raise Denied(f"only a workflow makes a {rt.label.lower()} {st!r}")
+        self._check_number_kept(rt, None, data)
         self._workflow_fields(rt, member, run_id, {}, data)
         data = visibility.guard_write(self, member, rt, None, data)  # a field of a class they may not write
         over = overbook.strip() if overbook and overbook.strip() and rt.is_a("Booking") else None
@@ -3874,6 +4063,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         self._check_record(rt, {"resourceType": rtype, **data})
         named = self._check_files_named(member, data, None)
         with self.db:  # the clash check and the write are one step: two people booking one time are never both told yes
+            data = self._take_number(rt, None, data)
             self._check_unique(rt, {"resourceType": rtype, **data})
             clashes = self._check_clashes(rt, {"resourceType": rtype, **data}, member, over)
             rec = self.records.create(rtype, data)
@@ -3881,8 +4071,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 self.db.note_file(blob, records=f"{rtype}/{rec['id']}")
             self._write_version(rt, rec, member, run_id)
             ev = self.track.append(member, "record.created", f"{rtype}/{rec['id']}", cause=cause, run_id=run_id,
-                                   data={"subject": self.subject_of(rec),
-                                         "summary": self.title(rec)})
+                                   data={"subject": self.subject_of(rec), "summary": self.title(rec),
+                                         **({"key": rec["meta"]["key"]} if (rec.get("meta") or {}).get("key") else {})})
             if clashes:
                 ev = self._note_overbook(member, rt, f"{rtype}/{rec['id']}", clashes, over, cause=ev, run_id=run_id)
             self.engine.on_record("created", rt, rec, None, member, ev)
@@ -3944,6 +4134,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                f"your change.")
             after = {**before, **{k: v for k, v in data.items() if k not in ("resourceType", "id", "meta")}}
             after = {k: v for k, v in after.items() if v is not None}  # None clears a field
+            self._check_number_kept(rt, before, after)
             self._workflow_fields(rt, member, run_id, before, after)
             after = visibility.guard_write(self, member, rt, before, after)  # untouched: kept; changed: refused
             if rt.part_of and schema.first(before, rt.part_of["path"]) != schema.first(after, rt.part_of["path"]):
@@ -4001,6 +4192,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 if over and self.may_overbook(member, rt):
                     after = self._overbooked(rt, after, over)
                     now_held = self._held_time(rt, after)
+            after = self._take_number(rt, before, after)
             self._check_record(rt, after, before)
             named = self._check_files_named(member, after, before, _files)
             self._check_unique(rt, after, before)
@@ -4047,7 +4239,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     # ------------------------------------------------------------------ signatures on any record
     def _record_digest(self, rec: dict) -> str:
-        """What a signature covers: the record's contents, without its bookkeeping (meta) or where it is in its
+        """What a signature covers: the record's contents, without its housekeeping (meta) or where it is in its
         lifecycle, so the move a signature makes (approved, closed) does not leave it covering nothing."""
         from .track import canonical
         rt = self.record_type_for_reading(rec.get("resourceType", "")) if rec.get("resourceType") else None

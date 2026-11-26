@@ -12,6 +12,7 @@ pack.toml          the practice, its subject, roles, data classes and grants, se
 workflows/*.toml   the first version of each workflow (the practice changes them through change control)
 skills/*.toml      what agents know how to do: instructions, and the shape of the answer
 blocks/*.toml      the first version of each block: python, prompt or engine steps workflows can reuse
+types/*.toml       the first version of each record type: fields, lifecycle, screens, signatures, key
 pack.py            optional Python: summaries, registration, actions, providers, guards, stand-in answers
 ```
 
@@ -73,6 +74,38 @@ profile = { model = "litellm/firm-local", max_risk = "medium", skills = ["return
 
 **Design the data classes first.** They decide what each agent can ever see. Give every agent the narrowest grants
 that let it do its job. A scheduling agent needs demographics and appointments, nothing else.
+
+## Record types
+
+`types/*.toml` holds the first version of each record type: its fields, lifecycle, screens and signatures. The whole
+language is in the docstring of `practicehub/schema.py`. A type's records are keyed in it:
+
+```toml
+id = "T1Return"
+label = "T1 return"
+key = "T1"            # its records are T1-1, T1-2...: one to eight capital letters and digits, starting with a letter
+```
+
+The key is given when a record is made, counted per type, and never changes. Work on the record shows it. A type
+that sets no key takes one from its label (`Engagement`: `ENG`). Once records carry a key, the type keeps it: a
+change, another type taking it (even after this one is retired), or the practice's code as a key is refused. The
+key opens the record (`/T1-12`, the search box, `GET /api/keys/T1-12`, the MCP tool `find_by_key`).
+
+A type whose records need a number of their own, in a series with no gaps (a document number), says so:
+
+```toml
+[number]
+field = "number"                # a string field, not required: the hub writes it, and nobody else does
+pattern = "INV-{year}-{seq:04}" # {seq} once ({seq:04}: at least four digits); {year}, {month}; letters, digits, - / . _
+date = "issued_on"              # the date it reads (default: the type's date); needed when the pattern names one
+when = ["sent"]                 # given by the move into one of these states (default: when the record is made)
+```
+
+The number is the next in its series (each year or month the pattern names starts again at 1), taken in the write
+that numbers the record, so a write that fails gives it back. It never changes, a record numbered by its date keeps
+that date, and a numbered record is never converted into another type: no number is skipped or given twice. A series
+goes on after the highest number its records already carry. Numbers are unique within the type, and find the record
+as its key does (not in the address). Only the hub's own record store numbers records.
 
 ## Skills
 

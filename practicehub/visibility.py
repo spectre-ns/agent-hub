@@ -228,6 +228,25 @@ def workflow_classes(wf: Workflow) -> set[str]:
     return {c[7:] for s in wf.steps for c in s.context if c.startswith("record:")}
 
 
+def may_see_item(hub, me: dict, item: dict, run: dict) -> bool:
+    """Whether a member may see a work item: a notice only whom (or whose role) it is for; a step only who may see
+    that step on its run's page; neither past a subject's directive on the record it is about, except for whom the
+    item is (urgent work on a lockboxed file is not a dead end: its page shows the directive's note in place of the
+    content, and points to emergency access)."""
+    if item["kind"] == "notice":
+        ok = item.get("assignee") == me.get("id") or (item.get("role") or None) in (me.get("roles") or [])
+    else:
+        viewer = Viewer(hub, me)
+        wf = viewer.workflow_of_run(run["id"])
+        ok = item.get("assignee") == me.get("id") or (bool(wf) and (
+            viewer.step_visible(wf, item["step_id"])[0] if item.get("step_id") else True))  # between steps: the run
+    if item["kind"] == "notice" and item.get("assignee") == me.get("id"):
+        return True  # told by name (a break-glass review goes to whom it is for)
+    if item.get("assignee") == me.get("id") or (ok and item.get("role") and item["role"] in (me.get("roles") or [])):
+        return True
+    return ok and not hub.restrictions.withholds_from(me, run.get("record"))
+
+
 class Viewer:
     """One member's view; caches workflow lookups, and what the member may read, for a page's worth of events (a
     Viewer lives for one page or call, so a grant changed meanwhile applies from the next)."""

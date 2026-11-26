@@ -1,4 +1,4 @@
-"""Practice packs: what makes a hub a general practice, a dental office, a law firm or an accounting practice.
+"""Practice packs: what makes a hub a general practice, a dental office, a law firm or any other practice.
 
 A pack is a directory:
 

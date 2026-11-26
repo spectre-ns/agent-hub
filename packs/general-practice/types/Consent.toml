@@ -4,6 +4,7 @@
 # nurse may open it in an emergency, giving a reason that the privacy officer reviews.
 # Only the privacy officer (the practice manager: grants.practice-manager writes "privacy") records or changes one.
 id = "Consent"
+key = "CONS"
 label = "Consent directive"
 plural = "Consent directives"
 data_class = "privacy"

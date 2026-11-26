@@ -1,6 +1,7 @@
 # A message to or from a client: an organizer, a request for a missing slip, a return's summary for approval, a
 # question from the portal. It is part of its client. What the firm sends is also queued on the outbox for delivery.
 id = "Communication"
+key = "MSG"
 label = "Message"
 plural = "Messages"
 data_class = "correspondence"

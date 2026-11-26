@@ -258,13 +258,12 @@ def act_invoice(engine, run, step, params, actor, *, description: str, fee=None)
     amount = float(fee if fee is not None else (eng or {}).get("fee") or DEFAULT_FEES.get((eng or {}).get("service"), 0))
     hst = round(amount * HST_RATE, 2)
     today = _today(engine)
-    number = f"TW-{today.year}-{hub.db.next_seq('tidewater-invoice'):04d}"
-    inv = hub.create_record(actor, "Invoice", {
-        "client": client, "client_name": work.get("client_name") or "", "number": number, "description": description,
+    inv = hub.create_record(actor, "Invoice", {  # numbered by the hub as it is made sent (Invoice.toml [number])
+        "client": client, "client_name": work.get("client_name") or "", "description": description,
         "amount": amount, "hst": hst, "total": round(amount + hst, 2), "issued_on": today.isoformat(),
         "due_on": (today + timedelta(days=30)).isoformat(), "status": "sent", "about": run["record"],
         **({"engagement": f"Engagement/{eng['id']}"} if eng else {})}, run_id=run["id"])
-    ref = f"Invoice/{inv['id']}"
+    ref, number = f"Invoice/{inv['id']}", inv["number"]
     _communication(engine, run, actor, client, step=step, channel="email", about=ref, subject=f"Invoice {number}",
                    body=f"Thank you for choosing {FIRM}. Invoice {number} for {description}: "
                         f"{_money(amount)} plus HST {_money(hst)}, total {_money(amount + hst)}, due "

@@ -1,5 +1,6 @@
 # A patient of the practice: who the practice's work is about.
 id = "Patient"
+key = "PAT"
 label = "Patient"
 plural = "Patients"
 data_class = "demographics"

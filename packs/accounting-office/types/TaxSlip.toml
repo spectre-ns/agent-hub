@@ -2,6 +2,7 @@
 # client. It arrives (portal, email, upload) as received, with its file and what could be read of it (`text`); the
 # documents agent reads it (the slip-intake workflow), and the client's return for that year counts it.
 id = "TaxSlip"
+key = "SLIP"
 label = "Slip or document"
 plural = "Slips and documents"
 data_class = "documents"

@@ -3,6 +3,7 @@
 # A visit a clinician asked for that was not held (missed or cancelled) comes back as one too, naming the visit: it
 # waits first on the clinician who asked for the visit (visit-missed), who decides what happens now.
 id = "Task"
+key = "FU"
 label = "Follow-up"
 plural = "Follow-ups"
 data_class = "clinical"

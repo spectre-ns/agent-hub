@@ -1,5 +1,6 @@
 # A corrective or preventive action. It points at the controlled documents (dms) it changes.
 id = "CAPA"
+key = "CAPA"
 label = "CAPA"
 plural = "CAPAs"
 data_class = "quality"

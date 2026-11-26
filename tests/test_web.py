@@ -1795,7 +1795,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """The clinic has one record for a booking and the visit it becomes, the Visit; there is no Appointment type."""
-    assert hub.pack.version == "5.0" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "5.1" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert hub.db.get_setting("pack_upgrades_done") == list(hub.pack.upgrades)  # a new practice has none left to run
@@ -2126,7 +2126,7 @@ def test_a_patients_title_crumbs_and_work_leave_out_the_health_card_number(hub, 
 def test_the_visit_list_names_the_patient_and_says_codes_in_words(hub, server):
     page = call(server, "GET", "/records/Encounter", token(hub, "dr-amara"))[1]
     heads = re.findall(r"<th>(.*?)</th>", page)
-    assert heads[:3] == ["Visit", "Status", "Patient"]
+    assert heads[:4] == ["Key", "Visit", "Status", "Patient"]
     assert ">In clinic<" in page and ">AMB<" not in page and "(born " in page
     assert '<span class="loz' in page and ">in-progress<" not in page and ">planned<" not in page  # states in words
     assert re.search(r'<span class="loz [a-z]+">(Booked|In progress|Note being drafted|Completed)</span>', page)
@@ -2165,7 +2165,7 @@ def test_a_long_link_group_offers_every_one_on_a_list_of_its_own(hub, server):
     q = urllib.parse.quote(ref, safe="")
     assert f'href="/records/DiagnosticReport?linked={q}">Show all ' in page
     code, all_ = call(server, "GET", f"/records/DiagnosticReport?linked={q}", tok)
-    assert code == 200 and all_.count('<tr><td><a href="') >= 51
+    assert code == 200 and all_.count('<tr><td class="key">') >= 51  # a row each, its key first
     assert call(server, "GET", "/records/DiagnosticReport?linked=Patient/nope", tok)[0] == 404
 
 
@@ -2833,3 +2833,25 @@ def test_a_records_history_is_fetched_alone_and_answers_304_until_something_chan
     assert _get_with(server, f"/records/{ref.split('/')[0]}/nothing-here/journey", tok)[0] == 404
     js = call(server, "GET", "/static/app.js", tok)[1]
     assert "function liveSections()" in js and 'section[data-live][id]' in js and "data-busy" in js
+
+
+def test_a_keys_own_address_and_the_search_box_open_what_it_names_for_who_may_see_it(hub, server):
+    """``/PAT-1`` (any case) goes to the record that has the key, and ``/api/keys/PAT-1`` says what it names; the
+    search box takes a key as well. A member who may not read the record is told nothing is there, as for a key no
+    record has."""
+    p = hub.db.records.find_one({"type": "Patient"}, sort="kn")
+    key, href = p["key"], f"/patients/{p['_id'].split('/', 1)[1]}"
+    amara = token(hub, "dr-amara")
+    for path in (f"/{key}", f"/{key.lower()}", f"/{hub.pack.subject['path']}?q=+{key}+"):
+        code, head, _ = _get_with(server, path, amara)
+        assert code == 303 and urllib.parse.urlsplit(head["Location"]).path == href, path
+    code, body = call(server, "GET", f"/api/keys/{key.lower()}", amara)
+    assert code == 200 and json.loads(body) == {"key": key, "ref": p["_id"], "href": href}
+    hub.add_member(M(hub, "rana"), {"id": "kim", "kind": "person", "name": "Kim Lee", "roles": []})
+    assert not hub.may_read(M(hub, "kim"), "Patient")
+    kim = token(hub, "kim")
+    for tok, path in ((kim, f"/{key}"), (kim, f"/api/keys/{key}"), (amara, "/PAT-99999"), (amara, "/api/keys/PAT-0")):
+        code, page = call(server, "GET", path, tok)
+        assert code == 404 and "nothing you may open has the key" in page, path
+    code, _, _ = _get_with(server, f"/{hub.pack.subject['path']}?q=Ellen", amara)
+    assert code == 200  # a name is searched as before

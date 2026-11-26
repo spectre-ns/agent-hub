@@ -114,6 +114,10 @@ class LocalRecordStore:
         # each reader sees it (``[("_", without any of them), (class, with only that class's)]``) and a stamp of the
         # type's classes; a search by someone who may not read a class looks only in the parts they may read
         self.parts_fn = lambda rec: ([], "")
+        # and this: the key of a type's records (T1), or None for a type whose records have none
+        self.key_fn = lambda rtype: None
+        # and this: a record's own number, for a type that numbers its records ([number]): kept beside it, unique
+        self.number_fn = lambda rtype, rec: None
 
     def _indexed(self, rec: dict) -> dict:
         parts, stamp = self.parts_fn(rec)
@@ -130,12 +134,39 @@ class LocalRecordStore:
         return n
 
     def create(self, rtype, data):
+        """A new record. It is given its key here (T1-12: its type's key and the next number in that type, never
+        reused), in the transaction of the write that makes it: a write undone gives its number back."""
         rec = {**data, "resourceType": rtype, "id": data.get("id") or new_id()}
         rec["meta"] = {"versionId": "1", "lastUpdated": utcnow()}
+        code, kn = self.key_fn(rtype), None
+        if code:
+            kn = self.db.next_seq(f"key:{code}")
+            rec["meta"]["key"] = f"{code}-{kn}"
         self.db.records.insert({"_id": f"{rtype}/{rec['id']}", "type": rtype, "id": rec["id"],
+                                "key": rec["meta"].get("key"), "kn": kn, "number": self.number_fn(rtype, rec),
                                 "subject": self.subject_fn(rec), "data": rec, "version": 1,
                                 "updated_at": rec["meta"]["lastUpdated"], **self._indexed(rec)})
         return rec
+
+    def by_key(self, key: str) -> dict | None:
+        """The record with this key (T1-12), or None."""
+        row = self.db.records.find_one({"key": key}, fields=["data"])
+        return row["data"] if row else None
+
+    def give_keys(self) -> int:
+        """Give a key to every record that has none (made before records had keys), in the order they were made (their
+        first versions' times). Returns how many were keyed."""
+        todo = []
+        for row in self.db.records.find({"key": None}, fields=["type", "id"]):
+            code = self.key_fn(row["type"])
+            if code:
+                first = self.db.record_versions.find_one({"type": row["type"], "id": row["id"]}, sort="version",
+                                                         fields=["at"])
+                todo.append(((first or {}).get("at") or "", row["_id"], code))
+        for _, _id, code in sorted(todo):
+            kn = self.db.next_seq(f"key:{code}")
+            self.db.records.update({"_id": _id}, {"$set": {"key": f"{code}-{kn}", "kn": kn, "data.meta.key": f"{code}-{kn}"}})
+        return len(todo)
 
     def read(self, rtype, rid):
         row = self.db.records.get(f"{rtype}/{rid}")
@@ -147,8 +178,10 @@ class LocalRecordStore:
             if not row:
                 raise KeyError(f"{rtype}/{rid}")
             version = row["version"] + 1
-            rec = {**data, "resourceType": rtype, "id": rid, "meta": {"versionId": str(version), "lastUpdated": utcnow()}}
+            rec = {**data, "resourceType": rtype, "id": rid, "meta": {"versionId": str(version), "lastUpdated": utcnow(),
+                                                                      **({"key": row["key"]} if row.get("key") else {})}}
             self.db.records.set(row["_id"], {"data": rec, "subject": self.subject_fn(rec), "version": version,
+                                             "number": self.number_fn(rtype, rec),
                                              "updated_at": rec["meta"]["lastUpdated"], **self._indexed(rec)})
             return rec
 

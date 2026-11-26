@@ -1,5 +1,6 @@
 # A referral to a specialist (or a requisition), signed by the referring physician.
 id = "ServiceRequest"
+key = "REF"
 label = "Referral"
 plural = "Referrals"
 data_class = "clinical"

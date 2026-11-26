@@ -223,7 +223,7 @@ def test_a_long_parts_section_shows_the_latest_fifty_and_lists_every_one(hub, se
     section = page.split('id="part-Observation"', 1)[1].split("</section>", 1)[0]
     assert f'href="/records/Observation?linked={q}">Show all ' in section
     code, all_ = call(server, "GET", f"/records/Observation?linked={q}", tok)
-    assert code == 200 and all_.count('<tr><td><a href="') >= 51
+    assert code == 200 and all_.count('<tr><td class="key">') >= 51  # a row each, its key first
 
 
 def test_a_decision_on_the_record_is_a_button_per_outcome_each_opening_its_own_dialog(hub, server):

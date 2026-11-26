@@ -1,5 +1,6 @@
 # A report that groups results (a lab panel, imaging), with the reporting clinician's conclusion.
 id = "DiagnosticReport"
+key = "RPT"
 label = "Report"
 plural = "Reports"
 data_class = "clinical"

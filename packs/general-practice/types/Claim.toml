@@ -1,5 +1,6 @@
 # A claim to MSI or an insurer.
 id = "Claim"
+key = "CLM"
 label = "Claim"
 plural = "Claims"
 data_class = "billing"

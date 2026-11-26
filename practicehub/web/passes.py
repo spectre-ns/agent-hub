@@ -260,7 +260,7 @@ class PassPages:
         """A record's history as sentences, newest first: one row per change, each changed field with what it was
         and what it became; the decisions its workflows took about it (who, how, the comment, what they signed)
         between them; each row with the pass it belongs to; and who did it by name, or the workflow that did it
-        (never the bookkeeping actor). The stored versions stay behind a Raw toggle."""
+        (never the housekeeping actor). The stored versions stay behind a Raw toggle."""
         import json
         runs, wfs = {}, {}
 

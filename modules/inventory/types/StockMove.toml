@@ -3,6 +3,7 @@
 # it checks it and, when the policy in force asks for a signature, waits for one; posting it changes the stock, and
 # what it changed is kept on it (each lot before and after). One refused goes back to its author with the reason.
 id = "StockMove"
+key = "MOVE"
 label = "Stock move"
 plural = "Stock moves"
 data_class = "inventory"

@@ -1,6 +1,7 @@
 # A product: something the practice makes, assembles or supplies. Products sit in families (a tree), so a product
 # line is a top of the tree with its products under it.
 id = "Product"
+key = "PRD"
 label = "Product"
 plural = "Products"
 data_class = "products"

@@ -1,5 +1,6 @@
 # A problem on the problem list, or a diagnosis.
 id = "Condition"
+key = "PROB"
 label = "Problem"
 plural = "Problems"
 data_class = "clinical"

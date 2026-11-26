@@ -148,6 +148,9 @@ class RecordWork:
         for m in screen["may_not"]:
             quiet.append(f"<li><b>{e(m['label'])}</b>: {e(m['why'])}</li>")
         moved_err = again.get("error") if not again.get("iid") else None
+        key = hub.key_of(ref)  # its key first, as an issue's (T1-12): what people quote for it
+        if key:
+            status.insert(0, f'<a class="rs-item key" href="/{e(key)}" title="Its key: this address opens it">{e(key)}</a>')
         head = (f'<div class="rec-status" aria-label="Where it is">{"".join(status)}</div>' if status else "")
         parts = [p for p in stuck if p]
         if moved_err is not None:

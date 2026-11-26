@@ -1,5 +1,6 @@
 # A medication the patient says they take (over the counter, from another prescriber).
 id = "MedicationStatement"
+key = "MED"
 label = "Medication taken"
 plural = "Medications taken"
 data_class = "clinical"

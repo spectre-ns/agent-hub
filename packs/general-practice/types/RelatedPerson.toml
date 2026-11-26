@@ -1,5 +1,6 @@
 # Someone related to a patient: a parent, a substitute decision-maker, a caregiver.
 id = "RelatedPerson"
+key = "REL"
 label = "Related person"
 plural = "Related people"
 data_class = "demographics"

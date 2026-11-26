@@ -3,6 +3,7 @@
 # approved, deliveries inspected and released, held stock leaves only by a nonconformance). A switch left empty takes
 # its level's setting; one set may be stricter than the level, never looser. With no policy signed, basic holds.
 id = "InventoryPolicy"
+key = "IPOL"
 label = "Inventory policy"
 plural = "Inventory policies"
 data_class = "inventory"

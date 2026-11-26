@@ -6,6 +6,7 @@
 # waits for the follow-up date, and the follow-up is one pass; followed up, the next run waits for the next date. The
 # daily crm-follow-up-due sweep only marks a date that has come (follow_up_asked), which that wait watches.
 id = "Interaction"
+key = "INTR"
 label = "Interaction"
 plural = "Interactions"
 data_class = "relationships"

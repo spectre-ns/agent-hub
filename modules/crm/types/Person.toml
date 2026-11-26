@@ -3,6 +3,7 @@
 # Consent to commercial messages (CASL) is recorded here, and the hub checks it before any commercial message goes.
 # Business data only: no health information.
 id = "Person"
+key = "CON"
 label = "Contact"
 plural = "Contacts"
 data_class = "directory"

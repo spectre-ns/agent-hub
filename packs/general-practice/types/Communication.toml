@@ -1,5 +1,6 @@
 # A message or letter to or from a patient, a pharmacy, a specialist.
 id = "Communication"
+key = "MSG"
 label = "Message"
 plural = "Messages"
 data_class = "correspondence"

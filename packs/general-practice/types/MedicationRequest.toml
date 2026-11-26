@@ -1,6 +1,7 @@
 # A prescription. A renewal request is a proposal (draft) that its workflow walks: prescribed, it becomes the active
 # order and the one it replaces is marked completed; declined, or a visit booked instead, it is cancelled.
 id = "MedicationRequest"
+key = "RX"
 label = "Prescription"
 plural = "Prescriptions"
 data_class = "clinical"

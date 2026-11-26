@@ -177,3 +177,86 @@ def test_part_of_names_the_one_record_that_owns_it():
 def test_part_of_must_be_a_required_reference_to_another_type(src, want):
     assert any(want in p for p in problems(src))
 
+
+
+def test_a_type_s_key_is_its_own_or_one_taken_from_its_label():
+    """The key starts its records' keys (T1-12), as a Jira project's starts its issues'. One taken from a label always
+    starts with a letter."""
+    assert ok(HEAD + 'key = "T1"\n').key == "T1"
+    assert ok(HEAD + 'label = "Engagement"\n').key == "ENG"
+    assert ok(HEAD + 'label = "Change order"\n').key == "CO"
+    assert ok(HEAD + 'label = "T1 return"\n').key == "T1R"
+    assert ok(HEAD + 'label = "Slip or document"\n').key == "SD"
+    assert schema.default_key("Résumé") == "RES" and schema.default_key("2024 file") == "F"
+    for bad in ('"t1"', '"1T"', '"TOOLONGKEY"', '"T-1"', "1"):
+        assert any(p.startswith("key: one to eight capital letters") for p in problems(HEAD + f"key = {bad}\n"))
+
+
+def test_every_shipped_type_has_a_key_no_other_shipped_type_has():
+    """Shipped types set their keys, unlike in any pack and module they may be installed beside: a module installs
+    into any practice. (Two packs are never in one hub, so a pack's type may share a key with another pack's.)"""
+    owners = {}
+    for p in sorted(glob.glob(str(ROOT / "packs/*/types/*.toml")) + glob.glob(str(ROOT / "modules/*/types/*.toml"))):
+        assert "\nkey = " in Path(p).read_text(), f"{p}: no key of its own"
+        owners.setdefault(schema.parse(Path(p).read_text()).key, set()).add(Path(p).parts[-3])
+    modules = {d.name for d in (ROOT / "modules").iterdir()}
+    clash = {k: o for k, o in owners.items() if len(o) > 1 and o & modules}
+    assert clash == {}
+
+
+def test_two_types_with_one_key_are_refused(hub):
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), 'id = "Pet"\nkey = "PAT"\ndata_class = "clinical"\n')
+    assert any("already has the key 'PAT'" in p for p in e.value.problems)
+
+
+NUMBERED = ('[[field]]\nname = "no"\ntype = "string"\n[[field]]\nname = "on"\ntype = "date"\n'
+            '[[field]]\nname = "many"\ntype = "string"\nlist = true\n')
+
+
+def numbered(table: str) -> str:
+    return HEAD + "[number]\n" + table + NUMBERED + STATUS
+
+
+def test_a_number_names_a_string_field_a_sound_pattern_its_date_and_states():
+    """``[number]``: the field the hub writes it in (a string, one per record, not required), a pattern naming {seq}
+    once and only letters, digits and - / . _ around it, the date a pattern with {year} or {month} reads, and states
+    of its lifecycle. Its field leaves every form: the hub alone writes it."""
+    rt = ok(numbered('field = "no"\npattern = "N-{year}{month}-{seq:05}"\ndate = "on"\nwhen = ["final"]\n'))
+    assert rt.number == {"field": "no", "path": "no", "pattern": "N-{year}{month}-{seq:05}", "date": "on",
+                         "when": ["final"]}
+    assert rt.field("no")["by"] == "workflow"
+    assert ok(numbered('field = "no"\npattern = "N{seq}"\n')).number["when"] == []  # given when the record is made
+    assert ok(HEAD + 'date = "on"\n[number]\nfield = "no"\npattern = "{year}/{seq}"\n' + NUMBERED + STATUS
+              ).number["date"] == "on"  # the type's own date by default
+    for table, want in (
+            ('pattern = "N{seq}"\n', "number.field: name the string field"),
+            ('field = "many"\npattern = "N{seq}"\n', "number.field: many is a string field of several values"),
+            ('field = "on"\npattern = "N{seq}"\n', "number.field: on is a date field"),
+            ('field = "status"\npattern = "N{seq}"\n', "number.field: status is a choice field"),
+            ('field = "no"\npattern = "N-{year}"\n', "number.pattern: 'N-{year}' names {seq}"),
+            ('field = "no"\npattern = "{seq}{seq}"\n', "names {seq}"),
+            ('field = "no"\npattern = "N {seq}"\n', "only letters, digits and - / . _"),
+            ('field = "no"\npattern = "N{day}{seq}"\n', "only letters, digits"),
+            ('field = "no"\npattern = "N-{year}-{seq}"\n', "number.date: 'N-{year}-{seq}' names the year or month"),
+            ('field = "no"\npattern = "N{seq}"\ndate = "no"\n', "number.date: name its date field"),
+            ('field = "no"\npattern = "N{seq}"\nwhen = ["sent"]\n', "number.when: 'sent' is not one of its states"),
+            ('field = "no"\npattern = "N{seq}"\nwhen = "final"\n', "number.when: a list of states"),
+            ('field = "no"\npatern = "N{seq}"\n', 'unknown key "patern" (did you mean "pattern"?)')):
+        assert any(want in p for p in problems(numbered(table))), (table, problems(numbered(table)))
+    req = numbered('field = "no"\npattern = "N{seq}"\n').replace('name = "no"\ntype = "string"\n',
+                                                                 'name = "no"\ntype = "string"\nrequired = true\n')
+    assert any("number.field: no is not required" in p for p in problems(req))
+
+
+def test_a_number_is_counted_in_its_series():
+    """Each year (or month) a pattern names is a series of its own, counted from 1; a number is read back as its
+    place in its series."""
+    from datetime import date
+    d = date(2026, 3, 4)
+    assert schema.number_series("TW-{year}-{seq:04}", d) == "TW-2026-{seq}"
+    assert schema.render_number("TW-{year}-{seq:04}", d, 12) == "TW-2026-0012"
+    assert schema.render_number("{year}{month}/{seq}", d, 12345) == "202603/12345"
+    assert schema.number_in_series("TW-2026-{seq}", "TW-2026-0012") == 12
+    assert schema.number_in_series("TW-2026-{seq}", "TW-2025-0012") is None
+    assert schema.number_series("C-{seq:05}", None) == "C-{seq}" and schema.render_number("C-{seq:05}", None, 7) == "C-00007"

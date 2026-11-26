@@ -1,6 +1,7 @@
 # An organisation the practice works with. A FHIR R4 Organization: its own fields (owner, status) go out as
 # extensions. Business data only: no health information.
 id = "Organization"
+key = "ORG"
 label = "Organisation"
 plural = "Organisations"
 data_class = "directory"

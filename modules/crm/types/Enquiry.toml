@@ -2,6 +2,7 @@
 # the record it became, whatever type the practice keeps for that (a generic reference). Not a FHIR resource.
 # Business data only: what they asked about, never health information about anyone.
 id = "Enquiry"
+key = "ENQ"
 label = "Enquiry"
 plural = "Enquiries"
 data_class = "relationships"

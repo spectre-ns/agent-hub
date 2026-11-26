@@ -7671,3 +7671,276 @@ def test_a_run_that_never_moved_its_record_starts_nothing_when_it_ends_whatever_
     assert picked["version"] == w2["version"] and picked["ctx"]["run"]["previous"] == old["id"]
     hub.update_record(amara, other, {"title": "A new fridge for the vaccines"})
     assert len(hub.engine.runs(record=other, status="running")) == 1
+
+
+# ------------------------------------------------------------------------------------------------- record keys
+def _widget(hub, extra=""):
+    """A type of the hub's own, keyed WID unless ``extra`` says otherwise."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    src = 'id = "Widget"\nlabel = "Widget"\ndata_class = "clinical"\n' + extra + '[[field]]\nname = "x"\n'
+    p = hub.propose("type", rana, src)
+    hub.approve(amara, "type", "Widget", p["version"])
+    return src
+
+
+def test_a_record_is_numbered_in_its_type_when_it_is_made_and_keeps_that_key(hub):
+    """Every record is keyed in its type when it is made, as an issue is in its project: its type's key and its number
+    among that type's records, each type counting on its own. Writing it again never changes the key, and a write that
+    fails gives its number back."""
+    amara = M(hub, "dr-amara")
+    _widget(hub, 'key = "WID"\n')
+    a = hub.create_record(amara, "Widget", {"x": "1"})
+    b = hub.create_record(amara, "Widget", {"x": "2"})
+    assert (a["meta"]["key"], b["meta"]["key"]) == ("WID-1", "WID-2")
+    ref = f"Widget/{a['id']}"
+    assert hub.key_of(ref) == "WID-1" and hub.records.by_key("WID-1")["id"] == a["id"]
+    hub.update_record(amara, ref, {"x": "3"})
+    assert hub.read_record(amara, ref)["meta"]["key"] == "WID-1" == hub.key_of(ref)
+    ev = hub.db.events.find_one({"action": "record.created", "subject": f"Widget/{b['id']}"})
+    assert ev["data"]["key"] == "WID-2"
+    patients = hub.db.records.count({"type": "Patient"})
+    p = hub.create_record(M(hub, "jo"), "Patient", {"name": [{"family": "Keyed", "given": ["Kit"]}],
+                                                    "birthDate": "1990-01-01"})
+    assert p["meta"]["key"] == f"PAT-{patients + 1}"  # its own type's count, untouched by the widgets
+    real = hub.engine.on_record
+
+    def fail(*a, **k):
+        raise RuntimeError("the write fails after the key was taken")
+    hub.engine.on_record = fail
+    with pytest.raises(RuntimeError):
+        hub.create_record(amara, "Widget", {"x": "4"})
+    hub.engine.on_record = real
+    assert hub.create_record(amara, "Widget", {"x": "4"})["meta"]["key"] == "WID-3"  # 3 was given back
+
+
+def test_two_records_never_share_a_key(hub):
+    """No two records have one key: the database refuses it, and records made before records had keys are given
+    theirs once, oldest first, after the keys already given."""
+    amara = M(hub, "dr-amara")
+    keys = [r["key"] for r in hub.db.records.find({}, fields=["key"])]
+    assert keys and None not in keys and len(keys) == len(set(keys))
+    one, two = hub.db.records.find({"type": "Patient"}, fields=["_id", "key"], sort="kn", limit=2)
+    with pytest.raises(Exception):
+        hub.db.records.update({"_id": two["_id"]}, {"$set": {"key": one["key"]}})
+    _widget(hub, 'key = "WID"\n')
+    old = [hub.create_record(amara, "Widget", {"x": str(i)}) for i in range(3)]
+    for w, made in zip(old[:2], ("2020-02-01T09:00:00Z", "2020-01-01T09:00:00Z")):  # as kept before records had keys
+        hub.db.records.update({"_id": f"Widget/{w['id']}"}, {"$set": {"key": None, "kn": None},
+                                                             "$unset": {"data.meta.key": 1}})
+        hub.db.record_versions.update({"type": "Widget", "id": w["id"], "version": 1}, {"$set": {"at": made}})
+    hub.db.del_setting("records_keyed")
+    hub._keys.clear()
+    hub._keys_ready()
+    assert [hub.key_of(f"Widget/{w['id']}") for w in old] == ["WID-5", "WID-4", "WID-3"]  # the older one first
+    assert hub.read_record(amara, f"Widget/{old[0]['id']}")["meta"]["key"] == "WID-5"
+    hub.db.records.update({"_id": f"Widget/{old[0]['id']}"}, {"$set": {"key": None}})
+    hub._keys_ready()  # once only
+    assert hub.db.records.find_one({"_id": f"Widget/{old[0]['id']}"})["key"] is None
+
+
+def test_a_type_keeps_its_key_and_no_other_type_takes_it_even_once_retired(hub):
+    """A key once given to a type's records is that type's for good: a new version keeps it (one that sets none takes
+    it from its label, so a new label is refused unless it writes the key), and no other type takes it, even once the
+    type is retired."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    src = _widget(hub)  # no key: WID, from its label
+    hub.create_record(amara, "Widget", {"x": "1"})
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", rana, src.replace('label = "Widget"', 'label = "Gadget"'))
+    assert any('its records are keyed WID' in p and 'key = "WID"' in p for p in e.value.problems)
+    p = hub.propose("type", rana, src.replace('label = "Widget"', 'label = "Gadget"\nkey = "WID"'))
+    hub.approve(amara, "type", "Widget", p["version"])
+    with pytest.raises(Invalid):
+        hub.propose("type", rana, src.replace('label = "Widget"', 'label = "Gadget"\nkey = "GAD"'))
+    with pytest.raises(Invalid) as e:  # another type, while this one is in use
+        hub.propose("type", rana, 'id = "Wodget"\nkey = "WID"\ndata_class = "clinical"\n')
+    assert any("already has the key 'WID'" in p for p in e.value.problems)
+    hub.retire(amara, "type", "Widget")
+    hub.approve_retirement(rana, "type", "Widget")
+    with pytest.raises(Invalid) as e:  # and once it is retired: its records still carry the key
+        hub.propose("type", rana, 'id = "Wodget"\nkey = "WID"\ndata_class = "clinical"\n')
+    assert any("WID" in p for p in e.value.problems)
+
+
+def test_a_type_key_and_the_practice_code_never_meet(hub):
+    """The practice's code begins the key of work on no record (HFM-12), so no type's key is the practice's code, and
+    the practice never takes a code a type has (or had)."""
+    rana = M(hub, "rana")
+    code = hub.practice_code()
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", rana, f'id = "Widget"\nkey = "{code}"\ndata_class = "clinical"\n')
+    assert any("the practice's code" in p for p in e.value.problems)
+    with pytest.raises(Invalid):
+        hub.set_practice(rana, {"code": "PAT"})
+    with pytest.raises(Invalid):  # nor by a new name whose initials are a type's key, with no code of its own
+        hub.set_practice(rana, {"code": "", "name": "Visiting In Society"})  # VIS: a visit's key
+    hub.set_practice(rana, {"code": "HFX"})
+    assert hub.practice_code() == "HFX"
+
+
+def test_work_on_a_record_shows_its_key_and_work_on_no_record_the_practice_code(hub):
+    """Every piece of work on a record (its run's item, its child items, notices about it) shows the record's key, as
+    one issue in a tracker; work on no record shows the practice's code and the item's number."""
+    on_record = {}
+    for it in hub.db.items.find({}, fields=["_id", "run_id"]):
+        run = hub.db.runs.find_one({"_id": it["run_id"]}, fields=["record"]) or {}
+        if run.get("record"):
+            on_record.setdefault(run["record"], []).append(it["_id"])
+    assert on_record
+    for ref, iids in on_record.items():
+        assert {hub.item_key(i) for i in iids} == {hub.key_of(ref)}
+    hub.db.items.insert({"_id": "item-loose", "id": "item-loose", "n": 999, "run_id": None, "status": "open"})
+    assert hub.item_key("item-loose") == f"{hub.practice_code()}-999"
+
+
+def test_a_key_names_one_record_and_only_to_who_may_read_it(hub):
+    """A key, typed in any case and with spaces around it, names the one record that has it, and only to a member who
+    may read that record's type: to anyone else it names nothing, as a key no record has. The key a record had before
+    it was converted into another type names the record it became; the practice's code names work on no record, and
+    only to who may see that work; work on a record goes by the record's key."""
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    _widget(hub, 'key = "WID"\n')
+    w = hub.create_record(amara, "Widget", {"x": "1"})
+    ref = f"Widget/{w['id']}"
+    assert hub.find_key(amara, " wid-1 ") == {"key": "WID-1", "ref": ref} == hub.find_key(amara, "WID-01")
+    for nothing in ("WID-2", "WID-1x", "WID", "-1", "", "WID-1 OR 1", "W I D-1"):
+        assert hub.find_key(amara, nothing) is None, nothing
+    outsider = M(hub, "scheduling-agent")
+    assert not hub.can(outsider, "reader", "data_class:clinical")
+    assert hub.find_key(outsider, "WID-1") is None  # not told the record is there
+    p = hub.propose("type", rana, 'id = "Gadget"\nkey = "GAD"\ndata_class = "clinical"\n[[field]]\nname = "x"\n')
+    hub.approve(amara, "type", "Gadget", p["version"])
+    hub.convert_record(amara, ref, "Gadget", {"x": "1"})
+    assert hub.find_key(amara, "WID-1") == {"key": "GAD-1", "ref": f"Gadget/{w['id']}", "was": "WID-1"}
+    assert hub.find_key(outsider, "WID-1") is None
+    code = hub.practice_code()
+    on_record = hub.db.items.find_one({"kind": "task"}, fields=["_id", "id", "n", "run_id"])
+    assert hub.find_key(amara, f"{code}-{on_record['n']}") is None
+    assert hub.find_key(None, hub.item_key(on_record["id"]))["ref"] == hub.db.runs.find_one(
+        {"_id": on_record["run_id"]})["record"]
+    hub.db.runs.insert({"_id": "run-loose", "id": "run-loose", "record": None, "status": "running"})
+    hub.db.items.insert({"_id": "item-loose", "id": "item-loose", "n": 999, "run_id": "run-loose", "kind": "notice",
+                         "role": "physician", "status": "open", "title": "On no record"})
+    assert "physician" in amara["roles"] and "physician" not in M(hub, "jo")["roles"]
+    assert hub.find_key(amara, f"{code.lower()}-999") == {"key": f"{code}-999", "item": "item-loose"}
+    assert hub.find_key(M(hub, "jo"), f"{code}-999") is None
+
+
+# ------------------------------------------------------------------------------------------- a type's own numbers
+LETTER = '''id = "Letter"
+label = "Letter"
+key = "LET"
+data_class = "clinical"
+date = "sent_on"
+[number]
+field = "ref_no"
+pattern = "L-{year}-{seq:03}"
+when = ["sent"]
+[[field]]
+name = "ref_no"
+label = "Reference"
+type = "string"
+[[field]]
+name = "sent_on"
+label = "Sent on"
+type = "date"
+[[field]]
+name = "body"
+type = "string"
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "sent", "void"]
+[lifecycle]
+field = "status"
+initial = "draft"
+starts = ["sent"]
+[[lifecycle.transition]]
+from = ["draft"]
+to = "sent"
+label = "Send"
+asks = ["sent_on"]
+[[lifecycle.transition]]
+from = ["draft", "sent"]
+to = "void"
+label = "Void"
+'''
+HUB_ITSELF = {"id": "hub", "kind": "automation", "name": "Practice Hub", "status": "active"}
+
+
+def _letters(hub):
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    hub.approve(amara, "type", "Letter", hub.propose("type", rana, LETTER)["version"])
+    return amara
+
+
+def _send(hub, member, ref, on):
+    return hub.update_record(member, ref, {"status": "sent", "sent_on": on})
+
+
+def test_a_number_is_given_once_by_the_write_that_numbers_it_and_never_changes(hub):
+    """A type's own number ([number]) is the hub's to give: the write that puts a record in a numbering state takes the
+    next in its series, and nobody (a person, a workflow, an import) writes it, changes it or clears it. A record
+    numbered by its date keeps that date; a numbered record keeps its type (never converted) and its number when it is
+    voided. The number finds the record as its key does, and only for who may read it."""
+    amara = _letters(hub)
+    d = hub.create_record(amara, "Letter", {"body": "draft"})
+    ref = f"Letter/{d['id']}"
+    assert "ref_no" not in d  # a draft has none
+    for who in (amara, HUB_ITSELF):
+        with pytest.raises(Invalid, match="the hub gives a letter its number, and nobody writes it"):
+            hub.create_record(who, "Letter", {"body": "x", "ref_no": "L-2026-001"})
+        with pytest.raises(Invalid, match="nobody writes it"):
+            hub.update_record(who, ref, {"ref_no": "L-2026-001"})
+    sent = _send(hub, amara, ref, "2026-03-04")
+    assert sent["ref_no"] == "L-2026-001" and hub.db.records.find_one({"_id": ref})["number"] == "L-2026-001"
+    made_sent = hub.create_record(HUB_ITSELF, "Letter", {"body": "b", "status": "sent", "sent_on": "2026-05-01"})
+    assert made_sent["ref_no"] == "L-2026-002"  # made in a numbering state: numbered as it is made
+    assert hub.update_record(amara, ref, {"body": "edited"})["ref_no"] == "L-2026-001"
+    for change in ({"ref_no": "L-2026-009"}, {"ref_no": None}):
+        with pytest.raises(Invalid, match=r"its number \(L-2026-001\), and it is not changed"):
+            hub.update_record(HUB_ITSELF, ref, change)
+    with pytest.raises(Invalid, match="L-2026-001 is numbered by its date, which it keeps"):
+        hub.update_record(amara, ref, {"sent_on": "2026-03-05"})
+    assert hub.update_record(amara, ref, {"status": "void"})["ref_no"] == "L-2026-001"
+    p = hub.propose("type", M(hub, "rana"), 'id = "Note2"\nkey = "NTE"\ndata_class = "clinical"\n[[field]]\nname = "x"\n')
+    hub.approve(amara, "type", "Note2", p["version"])
+    with pytest.raises(Invalid, match="has a number of its own"):
+        hub.convert_record(amara, ref, "Note2", {"x": "1"})
+    assert hub.find_key(amara, " l-2026-001 ") == {"key": hub.key_of(ref), "ref": ref, "number": "L-2026-001"}
+    assert hub.find_key(M(hub, "scheduling-agent"), "L-2026-001") is None
+    assert hub.find_key(amara, "L-2026-003") is None
+
+
+def test_numbers_in_a_series_have_no_gaps_and_each_year_starts_again(hub):
+    """Numbers are given in order within a series (a year, for a pattern with {year}), each year starting at 1. A write
+    that fails gives its number back, so none is skipped; a record without the date its number reads is not numbered;
+    no two records of a type share a number; and a series goes on after the highest number its records carry."""
+    amara = _letters(hub)
+
+    def letter(on=None):
+        ref = f"Letter/{hub.create_record(amara, 'Letter', {'body': 'x'})['id']}"
+        return ref, (_send(hub, amara, ref, on)["ref_no"] if on else None)
+    assert [letter(on)[1] for on in ("2026-01-02", "2026-12-31", "2027-01-01", "2026-06-30")] == \
+        ["L-2026-001", "L-2026-002", "L-2027-001", "L-2026-003"]
+    real = hub.engine.on_record
+
+    def fail(*a, **k):
+        raise RuntimeError("the write fails after its number was taken")
+    ref, _ = letter()
+    hub.engine.on_record = fail
+    with pytest.raises(RuntimeError):
+        _send(hub, amara, ref, "2026-07-01")
+    with pytest.raises(RuntimeError):
+        hub.create_record(HUB_ITSELF, "Letter", {"body": "b", "status": "sent", "sent_on": "2026-07-01"})
+    hub.engine.on_record = real
+    assert hub.read_record(amara, ref).get("ref_no") is None
+    assert _send(hub, amara, ref, "2026-07-01")["ref_no"] == "L-2026-004"  # given back, then given
+    undated, _ = letter()
+    with pytest.raises(Invalid, match="to number a letter, fill in Sent on"):
+        hub.update_record(amara, undated, {"status": "sent"})
+    other = hub.db.records.find_one({"type": "Letter", "number": "L-2026-001"})
+    with pytest.raises(Exception):  # the database itself refuses a second record with one number
+        hub.db.records.update({"_id": undated}, {"$set": {"number": other["number"]}})
+    hub.db.counters.delete({"_id": "number:Letter:L-2027-{seq}"})  # a series begun before its count was kept
+    assert letter("2027-02-01")[1] == "L-2027-002"
