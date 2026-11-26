@@ -328,15 +328,20 @@ class Chat:
         return list((pack.practice.get("agent_rules") if pack else None) or [])
 
     def _menu(self, offer: Offer) -> dict:
+        """What both may use, and the kinds of records the agent reads that this conversation does not reach (the
+        person may not read them): named so the agent says it cannot see them, rather than that they hold nothing."""
         hub = self.hub
         types = [{"id": t, "label": hub.record_type(t).plural} for t in offer.having("search")]
+        both = {t["id"] for t in types}
+        own = sorted({t["_call"][1] for ts in offer.ts.values() for t in ts if t["_call"][0] == "search"} - both)
+        unseen = [{"id": t, "label": hub.record_type(t).plural} for t in own if hub.record_type(t)]
         flows = []
         for w in offer.having("start"):
             try:
                 flows.append({"id": w, "label": hub.workflow(w)[0].title})
             except HubError:
                 continue
-        return {"types": types, "workflows": flows}
+        return {"types": types, "workflows": flows, "unseen": unseen}
 
     def _history(self, cid: str) -> list[dict]:
         """The conversation the model is given: its last ``HISTORY`` messages, from a message of the person's."""
@@ -362,7 +367,8 @@ class Chat:
                                  "state": {"type": "string", "maxLength": 80,
                                            "description": "one of the type's states (describe lists them); leave "
                                                           "it out for records in any state"},
-                                 "about": REF,
+                                 "about": {**REF, "description": "the record they are about: its ref (Type/id) "
+                                                                 "from an earlier search or read, never made up"},
                                  "limit": {"type": "integer", "minimum": 1, "maximum": SEARCH_LIMIT}}, ["type"])},
                 {"name": "read", "description": "Read one record, whole, by its ref.",
                  "schema": _obj({"ref": REF}, ["ref"])},
@@ -473,7 +479,8 @@ class Chat:
                               f"them by words or state")
             about = self.hub.resolve_ref(a["about"])
             if not about:
-                raise NotFound(f"there is no {a['about']}")
+                raise NotFound(f"there is no {a['about']}: a ref comes from a search or a read, never made up; "
+                               f"search for that record first and use the ref it gives")
             self._reach(person, agent, about)
         q = {k: v for k, v in {"text": a.get("text"), "state": a.get("state"), "about": about,
                                "limit": limit}.items() if v}

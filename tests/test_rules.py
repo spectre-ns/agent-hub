@@ -9685,6 +9685,14 @@ def test_a_chat_finds_the_records_about_one_both_may_reach(hub):
     assert nadia["error"] and "may both read" in nadia["body"]  # her directive keeps her file from them
     assert {(r["ref"], r["how"]) for r in ch.get(amara, c["id"])["resources"]} == {(r, "listed") for r in found}
     assert "never answer as if they held nothing" in given[0]["system"]
+    jo = M(hub, "jo")  # the desk reads no clinical record: the agent is told which of its own it cannot look up here
+    ch, given = _chat(hub, _calls(("search", {"type": "Encounter", "about": "Patient/123456"})), {"text": "Done."})
+    c = ch.start(jo, agent["id"])
+    ch.say(jo, c["id"], "What came back for Ellen?")
+    unseen = next(x for x in given[0]["system"].splitlines() if x.startswith("Records you may not look up"))
+    assert "Observation" in unseen and "Encounter" not in unseen
+    made_up = _tool_messages(ch, jo, c["id"])[0]
+    assert made_up["error"] and "never made up" in made_up["body"]
     sam = M(hub, "sam")
     assert Offer(hub, sam, agent).having("start") == []
     ch, given = _chat(hub, {"text": "I cannot start that."})

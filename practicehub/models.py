@@ -132,13 +132,18 @@ goes through its steps and their reviews; say so rather than promise an outcome.
 
 
 def chat_system(agent: dict, person: dict, practice: str = "the practice", rules=(), menu: dict | None = None) -> str:
-    """The system prompt of a chat with ``person``; ``menu``: the types and workflows both may use."""
+    """The system prompt of a chat with ``person``; ``menu``: the types and workflows both may use, and the types
+    the agent reads that the person may not (``unseen``)."""
     extra = "".join(f"\n- {str(r).strip()}" for r in rules or () if str(r).strip())
     menu = menu or {}
     lines = []
     if menu.get("types"):
         lines.append("Records you may both look up (type: what they are): "
                      + "; ".join(f"{t['id']}: {t['label']}" for t in menu["types"]) + ".")
+    if menu.get("unseen"):
+        lines.append(f"Records you may not look up in this conversation, as {person.get('name') or 'they'} may not "
+                     "read them: " + "; ".join(f"{t['id']}: {t['label']}" for t in menu["unseen"]) + ". Asked about "
+                     "them, say you cannot see them here; do not offer to look.")
     if menu.get("workflows"):
         lines.append("Workflows you may start: " + "; ".join(f"{w['id']}: {w['label']}" for w in menu["workflows"])
                      + ".")
