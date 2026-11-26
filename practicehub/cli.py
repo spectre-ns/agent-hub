@@ -865,8 +865,7 @@ def cmd_contract_export(args):
             d = find(args.pack, "practice")
         except FileNotFoundError:
             d = find(args.pack, "module")
-        for f in sorted((d / "types").glob("*.toml")):
-            types.append(schema.parse(f.read_text()))
+        types = list(schema.parse_all({f.name: f.read_text() for f in sorted((d / "types").glob("*.toml"))}).values())
     print(json.dumps(contract.export(types), indent=2, default=decimals.jsonable))
 
 

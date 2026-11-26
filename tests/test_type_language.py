@@ -388,3 +388,100 @@ def test_a_moves_stamp_is_one_member_date_or_time_field_the_move_alone_sets():
                       ('stamp = [3]', where + 'stamp is a list of fields the move sets to who made it and when, e.g. '
                                               'stamp = ["reviewed_by", "reviewed_on"]')):
         assert want in problems(HEAD + flds + STATUS + bad + "\n"), (bad, problems(HEAD + flds + STATUS + bad + "\n"))
+
+
+# ------------------------------------------------------------------ inheritance
+
+PARENT = HEAD.replace('"Part"', '"Kit"') + '''abstract = true
+extends = "Subject"
+key = "KIT"
+[[field]]
+name = "code"
+required = true
+max_length = 12
+[[field]]
+name = "grade"
+type = "choice"
+choices = ["a", "b", "c"]
+[[field]]
+name = "weight"
+type = "number"
+min = 0
+max = 100
+[[field]]
+name = "lead"
+type = "reference"
+target = ["Practitioner"]
+roles = ["clinician", "nurse"]
+[[field]]
+name = "tags"
+type = "string"
+list = true
+[[signature]]
+meaning = "Checked"
+roles = ["clinician"]
+''' + STATUS.replace("draft", "open").replace("final", "shut")
+UNDER = 'id = "Part"\nextends = "Kit"\n'
+
+
+def under(src: str) -> schema.RecordType:
+    return schema.parse(UNDER + src, parent=schema.parse(PARENT))
+
+
+def under_problems(src: str) -> list[str]:
+    with pytest.raises(DefinitionError) as e:
+        under(src)
+    return e.value.problems
+
+
+def test_a_type_under_another_is_read_under_it():
+    """Its parent's fields first, then its own; the parent's key, data class, lifecycle and signatures; its own id,
+    label and plural; abstract only if it says so. The core base at the root is its base."""
+    rt = under('[[field]]\nname = "colour"\n[[field]]\nname = "grade"\nchoices = ["a", "b"]\nrequired = true\n')
+    names = [f["name"] for f in rt.fields]
+    assert names == ["code", "grade", "weight", "lead", "tags", "status", "colour",
+                     "name", "identifier", "contact", "responsible"]  # the parent's, its own, then the base's
+    assert (rt.key, rt.data_class, rt.label, rt.plural, rt.abstract) == ("KIT", "clinical", "Part", "Parts", False)
+    assert (rt.extends, rt.ancestors, rt.base) == ("Kit", ("Kit", "Subject"), "Subject")
+    assert rt.field("grade")["choices"] == ["a", "b"] and rt.field("grade")["required"]
+    assert rt.lifecycle["initial"] == "open" and [s["meaning"] for s in rt.signatures] == ["Checked"]
+    assert under('key = "PT"\nabstract = true\n').key == "PT" and under('abstract = true\n').abstract
+
+
+@pytest.mark.parametrize("src, want", [
+    ('data_class = "demographics"\n', "data_class is Kit's: a type under it adds to it, never changes it"),
+    ('[lifecycle]\nfield = "status"\ninitial = "shut"\n', "lifecycle is Kit's"),
+    ('[[field]]\nname = "code"\ntype = "number"\n', "field code: its type is Kit's"),
+    ('[[field]]\nname = "tags"\nlist = false\n', "field tags: its list is Kit's"),
+    ('[[field]]\nname = "code"\npath = "c.0"\n', "field code: its path is Kit's"),
+    ('[[field]]\nname = "code"\nrequired = false\n', "field code: Kit requires it, and so does every type under it"),
+    ('[[field]]\nname = "code"\nmax_length = 20\n', "field code: max_length is 12 at Kit"),
+    ('[[field]]\nname = "grade"\nchoices = ["a", "z"]\n', "a type under Kit gives fewer of its choices, never others ('z')"),
+    ('[[field]]\nname = "weight"\nmin = -1\n', "field weight: min is 0 at Kit"),
+    ('[[field]]\nname = "weight"\nmax = 101\n', "field weight: max is 100 at Kit"),
+    ('[[field]]\nname = "lead"\nroles = ["clinician", "admin"]\n', "field lead: Kit lets members of clinician, nurse"),
+    ('[[field]]\nname = "status"\nchoices = ["open"]\n', "its choices are the states of Kit's lifecycle"),
+    ('[[field]]\nname = "name"\nlabel = "Kit name"\n', "field name: it is Subject's, as Kit has it"),
+    ('[[signature]]\nmeaning = "Checked"\nroles = ["nurse"]\n', "signature 'Checked' is Kit's"),
+])
+def test_a_type_under_another_narrows_and_never_changes_it(src, want):
+    assert any(want in p for p in under_problems(src)), under_problems(src)
+
+
+def test_narrowing_a_field_keeps_what_it_does_not_say():
+    """A field named again gives only what it changes: the rest is its parent's. Fewer choices keep their labels."""
+    rt = under('[[field]]\nname = "code"\nlabel = "Part code"\nmax_length = 8\n'
+               '[[field]]\nname = "weight"\nmin = 5\nmax = 50\n[[field]]\nname = "lead"\nroles = ["nurse"]\n')
+    assert rt.field("code")["required"] and rt.field("code")["max_length"] == 8 and rt.field("code")["label"] == "Part code"
+    assert (rt.field("weight")["min"], rt.field("weight")["max"]) == (5, 50) and rt.field("lead")["roles"] == ["nurse"]
+
+
+def test_types_read_together_resolve_their_own_chains():
+    """A pack's files, read without a hub: a type under another of them is read under it; a loop is refused."""
+    leaf = 'id = "Leaf"\nextends = "Part"\n[[field]]\nname = "vein"\n'
+    rts = schema.parse_all({"leaf": leaf, "part": UNDER, "kit": PARENT})
+    assert rts["Leaf"].ancestors == ("Part", "Kit", "Subject") and rts["Leaf"].key == "KIT"
+    assert rts["Leaf"].field("code")["required"] and rts["Leaf"].field("vein")
+    with pytest.raises(DefinitionError, match="would be under itself"):
+        schema.parse_all({"a": 'id = "A"\nextends = "B"\n', "b": 'id = "B"\nextends = "A"\ndata_class = "x"\n'})
+    assert any("nor a record type in force here" in p for p in problems('id = "Lone"\nextends = "Nowhere"\n'))

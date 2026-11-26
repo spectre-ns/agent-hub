@@ -111,6 +111,56 @@ that date, and a numbered record is never converted into another type: no number
 goes on after the highest number its records already carry. Numbers are unique within the type, and find the record
 as its key does (not in the address). Only the hub's own record store numbers records.
 
+### Types under types
+
+A type may extend another: one of the core's base types (`Subject`, `Booking`...), a module's type, the practice's or
+an overlay's. It is its parent and more, and a chain runs from a core base through as many as eight types:
+
+```toml
+id = "Party"            # the parent: no record is ever only a Party
+abstract = true
+extends = "Subject"
+data_class = "contacts"
+key = "PTY"
+[base]
+name = "name"
+[[field]]
+name = "name"
+required = true
+[[field]]
+name = "email"
+
+# types/Person.toml
+id = "Person"
+extends = "Party"
+[[field]]
+name = "birth_date"      # its own
+type = "date"
+[[field]]
+name = "email"           # its parent's, narrowed
+required = true
+```
+
+- **It inherits everything.** The parent's fields come first, then its own; its checks, signatures, links, unique keys
+  and screens are added to the parent's (a screen of the same id replaces the parent's). Its id, label, plural, slug
+  and `abstract` are its own.
+- **It never changes what is its parent's.** Its data class, `[base]`, lifecycle, workflow, `[number]`, `reverses`,
+  `covers`, `[period]`, `[closing]`, `part_of`, `parent`, `[consent]`, `[booking]`, `standard`, `strict`, `subject`,
+  `active`, `date` and `flag` are the parent's; saying another is refused. A signature or link meaning what one of the
+  parent's means is refused.
+- **A field named again is narrowed.** It gives only what it changes: it may make the field required, give fewer
+  choices (not of the lifecycle's field), tighten `min`, `max`, `max_length` or a table's rows, let fewer roles be
+  picked, point at types under the parent's target, and say its own label, help or default. Its type, path, list-ness,
+  data class, `by`, `pin`, scale and unit stay. A field of the core base the parent did not write is the base's.
+- **Its key is its parent's** unless it sets its own: a family shares one count (`PTY-1` a person, `PTY-2` another).
+- **Any type may be abstract** (`abstract = true`): nothing creates a record of it, whoever asks (a person, an agent, a
+  workflow, a conversion). Its records are of the types under it, and a reference to it takes any of them.
+- **A parent's change holds for its family.** A new version is checked with every type under it read again under it,
+  and refused if one would no longer hold ("Person would no longer hold: ..."). A type with types under it is not
+  retired. A chain has no loops.
+- A module's type extends only the core's types, its own and those of the modules it `requires`. A hub on the Medplum
+  store reads a type under a core base only.
+
 ### Sign-off that holds
 
 A state can be **final**: once a record is in it, nothing changes it, not a person, its workflow, a pack upgrade or a

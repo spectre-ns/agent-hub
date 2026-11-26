@@ -23,7 +23,8 @@ from datetime import date, datetime
 from . import schema
 from . import decimals
 
-CORE_CONTRACT = "1.1"  # 1.1: a decimal field (exact text) and a table field (an array of rows)
+CORE_CONTRACT = "1.2"  # 1.1: a decimal field (exact text) and a table field (an array of rows); 1.2: a type under
+# another of the pack's (its extends names that type, its core the base at the root) and abstract types
 NAMESPACE = "ca.practicehub.core"
 
 # a base field's type, as Avro (datetimes and dates are ISO text: a booking keeps its local time as written)
@@ -84,12 +85,21 @@ def avro(rt: schema.RecordType) -> dict:
 
 
 def pack_type(rt: schema.RecordType) -> dict:
-    """A pack's type, as the contract sees it: the base it extends, and which of its own fields hold each base field.
-    The record schema of its own fields is the pack's affair; this is what the core relies on."""
+    """A pack's type, as the contract sees it: what it extends (a core base type, or another of the pack's types,
+    with the core base at the root of its chain as ``core``), which of its own fields hold each base field, and
+    whether it is abstract (no records of its own). The record schema of its own fields is the pack's affair; this
+    is what the core relies on."""
     mapping = {}
     for name, m in rt.base_map.items():
         mapping[name] = {"when": m["when"]} if "when" in m else {"fields": list(m["fields"])}
-    return {"type": rt.id, "extends": f"{NAMESPACE}.{rt.extends}", "base": mapping}
+    direct = rt.extends in schema.bases()
+    out = {"type": rt.id, "extends": f"{NAMESPACE}.{rt.extends}" if direct else rt.extends}
+    if not direct and rt.base:
+        out["core"] = f"{NAMESPACE}.{rt.base}"
+    out["base"] = mapping
+    if rt.abstract:
+        out["abstract"] = True
+    return out
 
 
 def export(types=None) -> dict:

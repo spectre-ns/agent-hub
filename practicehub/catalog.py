@@ -112,8 +112,9 @@ class CatalogMixin:
         return self.db[table].find_one({col: did, "version": version})
 
     def _def_parse(self, kind: str, source: str, catalog=None):
-        if kind == "type":
-            return schema.parse(source, catalog)
+        if kind == "type":  # under one of the hub's types: that type as in force (checked when it was approved)
+            parent = None if catalog is not None else self._parent_read(source)
+            return schema.parse(source, catalog, parent=parent)
         if kind == "view":
             return viewmod.parse(source, catalog)
         return parse_skill(source)
@@ -124,12 +125,66 @@ class CatalogMixin:
     def _def_of_row(self, kind: str, row: dict | None):
         if not row:
             return None
-        key = (kind, row[DEFINITIONS[kind][1]], row["version"], hashlib.sha256(row["source"].encode()).hexdigest())
+        did, sha = row[DEFINITIONS[kind][1]], hashlib.sha256(row["source"].encode()).hexdigest()
+        parent = self._parent_read(row["source"], did) if kind == "type" else None
+        key = (kind, did, row["version"], sha) + ((parent.chain,) if parent is not None else ())
         if key not in self._defs:
             if row["status"] in ("active", "retired"):
                 self._require_sealed(kind, row)
-            self._defs[key] = self._def_parse(kind, row["source"])
+            d = self._def_parse(kind, row["source"])
+            if kind == "type":  # its chain: itself, then its parent's (whose new version makes it anew)
+                d.chain = ((did, row["version"], sha),) + (parent.chain if parent is not None else ())
+            self._defs[key] = d
         return self._defs[key]
+
+    def _extends_of(self, source: str) -> str | None:
+        """What a type's text says it extends (read before the type is: its parent is read first)."""
+        key = ("extends", hashlib.sha256(source.encode()).hexdigest())
+        if key not in self._defs:
+            try:
+                ext = tomllib.loads(source).get("extends")
+            except tomllib.TOMLDecodeError:
+                ext = None
+            self._defs[key] = ext if isinstance(ext, str) else None
+        return self._defs[key]
+
+    def _parent_read(self, source: str, did: str | None = None) -> schema.RecordType | None:
+        """The type a type's text extends, as in force, when that is one of the hub's types (not a core base type);
+        None when it extends none of them or that type cannot be read (the parse then says why). A chain that loops
+        is never read round: the type met again cannot be read."""
+        ext = self._extends_of(source)
+        if not ext or ext in schema.bases():
+            return None
+        resolving = self.__dict__.setdefault("_resolving", set())
+        if ext in resolving or ext == did:
+            return None
+        resolving.add(ext)
+        try:
+            return self.record_type(ext)
+        finally:
+            resolving.discard(ext)
+
+    def type_parent(self, ext: str, child: str) -> tuple[schema.RecordType | None, str | None]:
+        """The type ``child`` extends, as in force, and None with why when it cannot: there is no such type, the
+        chain would loop or would run through more than ``schema.MAX_CHAIN`` types, or that type cannot be read."""
+        chain, t = [child], ext
+        while t is not None and t not in schema.bases():
+            if t in chain:
+                return None, f"extends: {child} would be under itself ({' → '.join([*chain, t])})"
+            chain.append(t)
+            if len(chain) > schema.MAX_CHAIN:
+                return None, (f"extends: a chain runs through at most {schema.MAX_CHAIN} types, and "
+                              f"{' → '.join(chain)} ... is longer")
+            row = self._def_row("type", t)
+            if row is None:
+                return None, (f"extends: there is no record type {t!r}" if t == ext else
+                              f"extends: {chain[-2]}, which it is under, extends {t!r}, which is not a record type here")
+            t = self._extends_of(row["source"])
+        rt = self.record_type(ext)
+        if rt is None:
+            why = self.__dict__.get("broken_types", {}).get(ext)
+            return None, f"extends: {ext} cannot be read" + (f" ({why})" if why else "")
+        return rt, None
 
     def _def_ids(self, kind: str, statuses=("active",)) -> list[str]:
         table, col, _ = DEFINITIONS[kind]
@@ -198,7 +253,8 @@ class CatalogMixin:
         wf = self._own_workflow(rt)
         if wf is None:
             return rt
-        key = ("type+moves", row["_id"] if row else rt.id, wf.id, hashlib.sha256(wf.source.encode()).hexdigest())
+        key = ("type+moves", row["_id"] if row else rt.id, rt.chain, wf.id,
+               hashlib.sha256(wf.source.encode()).hexdigest())
         if key in self._defs:
             return self._defs[key]
         import copy
@@ -272,34 +328,40 @@ class CatalogMixin:
         return set(self.record_types())
 
     def subject_types(self) -> set[str]:
-        """The types work is about: those that extend the core's Subject (or say ``subject = true``)."""
+        """The types work is about: those under the core's Subject (or that say ``subject = true``)."""
         rts = self.record_types()
-        out = {t for t, rt in rts.items() if rt.subject or rt.extends == "Subject"}
+        out = {t for t, rt in rts.items() if rt.subject or rt.is_a("Subject")}
         if self.pack and self.pack.subject_type in rts:
             out.add(self.pack.subject_type)
         return out
 
     def is_a(self, tid: str, base: str) -> bool:
-        """Whether records of ``tid`` stand where ``base`` is asked for: itself, a core base type it extends, or
-        any record (``Record``, ``*``). A module's reference to ``Subject`` takes whatever the practice's subjects are."""
+        """Whether records of ``tid`` stand where ``base`` is asked for: itself, any type above it (a core base type
+        or one of the hub's), or any record (``Record``, ``*``). A module's reference to ``Subject`` takes whatever
+        the practice's subjects are."""
         if tid == base or base in ("*", schema.ROOT):
             return True
-        if base not in schema.bases():
-            return False
         rt = self.record_type_for_reading(tid)
         return bool(rt and rt.is_a(base))
 
+    def family(self, tid: str) -> list[str]:
+        """A type and every type under it, abstract ones too: what naming the type takes in."""
+        return [t for t, rt in self.record_types().items() if rt.is_a(tid)] or [tid]
+
     def of_base(self, base: str) -> list[str]:
-        """The practice's types that extend a core base type (or the type itself, when ``base`` is not one)."""
-        if base not in schema.bases():
-            return [base]
-        return [t for t, rt in self.record_types().items() if rt.is_a(base)]
+        """The types records of ``base`` are created as: the type and those under it that are not abstract (the
+        type itself when the hub has no such type)."""
+        return self.concrete([base])
 
     def concrete(self, targets) -> list[str]:
-        """Reference targets with each base type replaced by the practice's types that extend it."""
-        out = []
+        """Reference targets with each replaced by its family's types that records are created as (none abstract)."""
+        rts, out = None, []
         for t in targets:
-            for c in self.of_base(t):
+            if rts is None and t not in ("*", schema.ROOT):
+                rts = self.record_types()
+            members = [c for c, rt in (rts or {}).items() if rt.is_a(t) and not rt.abstract] \
+                if t in (rts or {}) or t in schema.bases() else [t]
+            for c in members:
                 if c not in out:
                     out.append(c)
         return out
@@ -338,7 +400,7 @@ class CatalogMixin:
         text = self.pack.summarize(rec) if self.pack else None
         if text:
             return text
-        base = schema.bases().get(rt.extends or "") if rt is not None else None
+        base = schema.bases().get(rt.base or "") if rt is not None else None
         if base is not None and base.title:
             text = schema.render_title(base.title, values or vals())
             if text:
@@ -391,7 +453,7 @@ class CatalogMixin:
         marked = [f for f in rt.fields if f.get("fact")]
         if marked:
             return {f["label"].lower(): schema.words(schema.first(rec, f["path"])) or None for f in marked}
-        base = schema.bases().get(rt.extends or "")
+        base = schema.bases().get(rt.base or "")
         seen = schema.project(rt, rec, self.member_types())
         return {bf["label"].lower(): seen.get(bf["name"]) for bf in (base.fields if base else [])
                 if bf["name"] in ("identifier", "contact")}
@@ -400,7 +462,7 @@ class CatalogMixin:
         """Subjects that may be this one already: the same identifier, or the same name and the same values in
         every ``match = true`` field both have. Accents and case aside (Côté is Cote)."""
         rt = self.record_type(rtype)
-        if rt is None or not rt.extends:
+        if rt is None or not rt.base:
             return []
         mine = schema.project(rt, rec, self.member_types())
         name, ident = _plain(mine.get("name")), _plain(mine.get("identifier"))
@@ -464,12 +526,18 @@ class CatalogMixin:
         """A type's key is its own for good: no other type has it or ever gave it to its records, its own records keep
         the one they were given (a type that sets none takes one from its label, and a new label would change it),
         and it is not the practice's code (which begins the key of work on no record)."""
-        same = [o for t, o in self.record_types().items() if t != rt.id and o.key == rt.key]
+        rts = self.record_types()
+        mine_up = {rt.id, *rt.ancestors}
+
+        def kin(o):  # a type under one with this key, as rt is: the two share it, and its counter
+            return any(a in rts and rts[a].key == rt.key for a in mine_up & {o.id, *o.ancestors})
+        same = [o for t, o in rts.items() if t != rt.id and o.key == rt.key and not kin(o)]
         if same:
             return [f"key: {same[0].label} ({same[0].id}) already has the key {rt.key!r}: their records would have the "
                     f"same keys; give this type a key of its own (key = \"...\")"]
+        sharing = [rt.id, *(t for t, o in rts.items() if t != rt.id and o.key == rt.key)]
         held = self.db.records.find_one({"key": {"$type": "string", "$regex": f"^{re.escape(rt.key)}-[0-9]+$"},
-                                         "type": {"$ne": rt.id}}, fields=["type", "key"])
+                                         "type": {"$nin": sharing}}, fields=["type", "key"])
         if held:
             return [f"key: {held['type']} records were keyed {rt.key} ({held['key']}); a key stays with the type that "
                     f"gave it: give this type a key of its own (key = \"...\")"]
@@ -507,7 +575,7 @@ class CatalogMixin:
             for t in x["to"]:
                 if t != "*" and t not in known:
                     problems.append(f"link {x['rel']!r}: there is no record type {t!r} to point at")
-        base = schema.bases().get(rt.extends or "")
+        base = schema.bases().get(rt.base or "")
         for bname, m in (rt.base_map.items() if base else ()):
             bf = base.field(bname)
             if bf["type"] != "reference":
@@ -523,10 +591,56 @@ class CatalogMixin:
         if rt.number and not hasattr(self.records, "number_fn"):
             problems.append("number: this hub keeps its records in a store of their own (a FHIR server), which numbers "
                             "nothing: a type numbers its records ([number]) only in the hub's own store")
+        if rt.extends and rt.extends not in schema.bases():
+            problems += self._chain_problems(rt)
+        problems += self._descendant_problems(rt)
         wf = self._own_workflow(rt)  # its own workflow, as in force: what the two may not both say
         if wf is not None:
             problems += lifecycle_fit(rt, wf)
         return problems
+
+    def _chain_problems(self, rt: schema.RecordType) -> list[str]:
+        """Where a type under one of the hub's may be: a module's type is under the core's, its own module's or
+        those of the modules it requires (a module stands on its own); and only in the hub's own store, which finds
+        a family's records at once."""
+        out = []
+        if not hasattr(self.records, "number_fn"):
+            out.append(f"extends: this hub keeps its records in a store of their own (a FHIR server), where a type "
+                       f"extends only the core's base types ({', '.join(sorted(schema.bases()))}), not {rt.extends}")
+        mine, theirs = self._owner_of("type", rt.id), self._owner_of("type", rt.extends)
+        if mine and theirs != mine:
+            reach, todo = set(), [mine]
+            while todo:
+                for r in self.module_requires(todo.pop()):
+                    if r not in reach:
+                        reach.add(r)
+                        todo.append(r)
+            if theirs not in reach:
+                whose = f"the {theirs} module's" if theirs else "the practice's own"
+                out.append(f"extends: {rt.extends} is {whose}, and the {mine} module stands on its own: its types "
+                           f"extend the core's, its own and those of the modules it requires")
+        return out
+
+    def _descendant_problems(self, rt: schema.RecordType) -> list[str]:
+        """Each type under this one, read again under it as checked: a new version that one of them would no longer
+        hold under is refused. The types under those are read the same way, under them."""
+        checking = self.__dict__.setdefault("_rechecking", set())
+        if rt.id in checking:
+            return []
+        checking.add(rt.id)
+        out = []
+        try:
+            table, col, _ = DEFINITIONS["type"]
+            for row in self.db[table].find({"status": "active"}):
+                if row[col] == rt.id or self._extends_of(row["source"]) != rt.id:
+                    continue
+                try:
+                    schema.parse(row["source"], self, parent=rt)
+                except DefinitionError as exc:
+                    out.append(f"{row[col]} would no longer hold: {'; '.join(exc.problems)}")
+        finally:
+            checking.discard(rt.id)
+        return out
 
     def _part_problems(self, rt: schema.RecordType, known: set) -> list[str]:
         """What ``covers`` and ``[period]`` name must be so: a covered type is part of this one (its ``part_of``
@@ -900,6 +1014,12 @@ class CatalogMixin:
                 users.append(wf.title)
         if users:
             raise Invalid(f"active workflows still use it: {', '.join(users)}")
+        if kind == "type":
+            under = sorted(r[col] for r in self.db[table].find({"status": "active"})
+                           if r[col] != did and self._extends_of(r["source"]) == did)
+            if under:
+                raise Invalid(f"record types are under it ({', '.join(under)}): retire those first, or move them "
+                              f"under another type")
         return row
 
     def _retire_now(self, actor: dict, kind: str, did: str, reason: str = "", proposed_by: str | None = None) -> None:

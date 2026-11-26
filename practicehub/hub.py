@@ -514,7 +514,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         runs, work items and queued messages that name it name the new record (``repoint_work``; ``repoint=False``
         leaves that to a caller converting many records, which repoints them all at once)."""
         old_type, rid = ref.split("/", 1)
-        rt = self._type(rtype)
+        rt = self._creatable(rtype)
         new_id = into.split("/", 1)[1] if into else rid
         new_ref = f"{rtype}/{new_id}"
         with self.db:
@@ -945,9 +945,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 self._create_member(installer, m, cause=root)
                 if m.get("owner"):
                     self.authz.write([("practice:main", "owner", member_ref(m["id"]))])
-            self._install_definitions(installer, p, "", root)
+            # every part's types first: a practice's type may extend a module's, and each is checked with all in
+            self._install_types(installer, [(p, ""), *((m, m.id) for m in p.modules)], root)
+            self._install_definitions(installer, p, "", root, types=False)
             for m in p.modules:
-                self._install_definitions(installer, m, m.id, root)
+                self._install_definitions(installer, m, m.id, root, types=False)
             self._modules_changed()
         self._modules_noted()
         if demo and p.module is not None and hasattr(p.module, "demo"):
@@ -1439,6 +1441,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                      signed={"module": name, "meaning": f"I remove the {name} module"})
             for r in resting:
                 self.engine.stop(actor, r["id"], f"the {name} module was removed", root)
+            owned["type"].sort(key=lambda t: -len(getattr(self.record_type(t), "ancestors", ())))  # under ones first
             for kind in ("view", "workflow", "block", "skill", "type"):
                 table, col = self.KINDS[kind]
                 for did in owned[kind]:
@@ -1493,38 +1496,52 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             self.track.append(installer, "grants.installed", f"module:{module}" if module else "practice:main",
                               cause=root, data={"tuples": [list(t) for t in tuples]})
 
-    def _install_definitions(self, installer: dict, p: packmod.Pack, module: str, root: int) -> None:
-        """Version 1 of each definition, active, in dependency order: types, skills, blocks, workflows, views."""
+    def _install_put(self, installer: dict, module: str, root: int, kind: str, did: str, src: str, title: str,
+                     extra: dict | None = None) -> None:
+        """Version 1 of a definition, active, installed with the practice or a module."""
+        table, col = self.KINDS[kind]
+        if self.db[table].exists({col: did}):
+            if not (module and self._owner_of(kind, did) == module and not self._active_row(kind, did)):
+                raise Invalid(f"the {kind} {did} already exists in this practice")
+            # this module had it before and was removed: it comes back as a new version
+            self._put_version(installer, kind, did, src, f"Installed again with the {module} module", module,
+                              root, f"{kind}.installed")
+            return
+        self.db[table].insert({"_id": f"{did}@1", col: did, "version": 1, "status": "active", "source": src,
+                               "author": installer["id"],
+                               "note": "Installed" + (f" with the {module} module" if module else " with the practice"),
+                               "created_at": utcnow(), "approved_by": installer["id"], "approved_at": utcnow(),
+                               "module": module})
+        self.track.append(installer, f"{kind}.installed", f"{kind}:{did}", cause=root,
+                          data={"version": 1, "title": title, "module": module,
+                                "source_sha256": hashlib.sha256(src.encode()).hexdigest(), **(extra or {})})
+
+    def _install_types(self, installer: dict, parts: list, root: int) -> None:
+        """The record types of each part (``(pack, module id)``), all put in, then each checked: types point at each
+        other, and a type may extend one of another part's."""
+        for p, module in parts:
+            for tid, src in p.type_sources.items():
+                self._install_put(installer, module, root, "type", tid, src, tid)
+        self._defs_reset()
+        for p, _ in parts:
+            for tid in p.type_sources:
+                try:
+                    schema.parse(self._def_row("type", tid)["source"], self)
+                except wfmod.DefinitionError as exc:
+                    raise Invalid(f"the record type {tid} in {p.id} has problems", exc.problems) from None
+
+    def _install_definitions(self, installer: dict, p: packmod.Pack, module: str, root: int, *,
+                             types: bool = True) -> None:
+        """Version 1 of each definition, active, in dependency order: types (unless ``types=False``: they are in
+        already), skills, blocks, workflows, views."""
         def put(kind, did, src, title, extra=None):
-            table, col = self.KINDS[kind]
-            if self.db[table].exists({col: did}):
-                if not (module and self._owner_of(kind, did) == module and not self._active_row(kind, did)):
-                    raise Invalid(f"the {kind} {did} already exists in this practice")
-                # this module had it before and was removed: it comes back as a new version
-                self._put_version(installer, kind, did, src, f"Installed again with the {module} module", module,
-                                  root, f"{kind}.installed")
-                return
-            self.db[table].insert({"_id": f"{did}@1", col: did, "version": 1, "status": "active", "source": src,
-                                   "author": installer["id"],
-                                   "note": "Installed" + (f" with the {module} module" if module else
-                                                          " with the practice"),
-                                   "created_at": utcnow(), "approved_by": installer["id"], "approved_at": utcnow(),
-                                   "module": module})
-            self.track.append(installer, f"{kind}.installed", f"{kind}:{did}", cause=root,
-                              data={"version": 1, "title": title, "module": module,
-                                    "source_sha256": hashlib.sha256(src.encode()).hexdigest(), **(extra or {})})
+            self._install_put(installer, module, root, kind, did, src, title, extra)
 
         def problems_of(kind, did, exc):
             return Invalid(f"the {kind} {did} in {p.id} has problems", exc.problems)
 
-        for tid, src in p.type_sources.items():
-            put("type", tid, src, tid)
-        self._defs_reset()
-        for tid in p.type_sources:  # check once every type is in: types may point at each other
-            try:
-                schema.parse(self._def_row("type", tid)["source"], self)
-            except wfmod.DefinitionError as exc:
-                raise problems_of("record type", tid, exc) from None
+        if types:
+            self._install_types(installer, [(p, module)], root)
         for sid, sk in p.skills.items():
             put("skill", sid, sk.source, sk.title)
         self._defs_reset()
@@ -2807,6 +2824,16 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             raise Invalid(f"{rtype} is not a record type of this practice")
         return rt
 
+    def _creatable(self, rtype: str) -> schema.RecordType:
+        """A type records are created as: one of this practice's, not abstract (its records are of the types under
+        it), whoever creates it: a form, the API, an agent, a workflow, the portal or a conversion."""
+        rt = self._type(rtype)
+        if rt.abstract:
+            under = [self.record_type(t).label for t in self.of_base(rtype)]
+            raise Invalid(f"{rt.label} is abstract: no record is created as one, only as a type under it"
+                          + (f" ({', '.join(under)})" if under else " (it has none yet)"))
+        return rt
+
     def class_of(self, rtype: str) -> str:
         """The data class a record belongs to; a retired type's records keep theirs, so they can still be read."""
         rt = self.record_type_for_reading(rtype)
@@ -4063,7 +4090,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         its record's lifecycle state is then where that work is. ``start_workflow=False``: the run making it is that
         workflow's own. Made by a run's step (``run_id``), the workflow started on it is that run's child, and
         ``origin`` (``{step, edge}``) says which step, on which edge, made it."""
-        rt = self._type(rtype)
+        rt = self._creatable(rtype)
         if member.get("kind") != "automation":
             self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
         data = schema.exact(rt, dict(data))  # its decimals exact, at their places

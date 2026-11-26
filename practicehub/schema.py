@@ -164,8 +164,10 @@ a ``check`` to: an edge making that move keeps what the row says.
 
 A path may use ``*`` for every item of a list (``participant.*.actor``).
 
-Base types. The core ships abstract record types (``practicehub/base/*.toml``: ``Subject``, ``Booking``) that say what
-the core and its modules need from a record, and nothing about any practice. A pack's type extends one:
+Inheritance. A type may extend another (``extends = "<Type>"``): one of the core's base types, or any type of the
+hub. The core ships abstract base types (``practicehub/base/*.toml``: ``Subject``, ``Booking``) that say what the core
+and its modules need from a record, and nothing about any practice. A type that extends one says which of its fields
+holds each of the base's fields:
 
     id = "Appointment"
     extends = "Booking"           # the core's calendar, free slots and booking.book now handle it
@@ -179,6 +181,47 @@ the core and its modules need from a record, and nothing about any practice. A p
 
 The core reads such a record only through ``project`` (the base fields, as the base declares them) and writes one
 through ``compose``. That is the contract between core and pack (``contract.py`` exports it as Avro schemas).
+
+A type may extend any of the hub's own types as well: a module's, the practice's or an overlay's. A chain runs from a
+type that extends nothing or a core base, through at most eight types, and never loops; a module's types extend only
+the core's, the module's own and those of the modules it requires. A type under another is its parent and more: its
+definition is its parent's as in force, with what it says itself merged in.
+
+    id = "Party"                  # abstract: no records of its own; the types under it have them
+    abstract = true
+    extends = "Subject"
+    data_class = "parties"
+    key = "PTY"                   # shared: a person's and an organization's keys are PTY-1, PTY-2, ...
+    [[field]]
+    name = "name"
+    [[field]]
+    name = "email"
+
+    id = "Person"
+    extends = "Party"
+    [[field]]                     # a field of its own
+    name = "birth_date"
+    type = "date"
+    [[field]]                     # one of its parent's, narrowed: it says only what it changes
+    name = "email"
+    required = true
+
+- Fixed, the parent's: data_class, [base], lifecycle, workflow, [number], reverses, covers, [period], [closing],
+  part_of, parent, consent, booking, standard, strict, subject, active, date and flag. A type under it that says one
+  otherwise is refused.
+- Added to: its fields, checks, signatures (each a meaning of its own), links (each a rel of its own) and unique keys
+  come after its parent's.
+- Narrowed: a field named as one of its parent's says only what it changes. It may make it required, give fewer
+  choices (not of the lifecycle's field), a tighter min, max, max_length, min_rows or max_rows, fewer roles, a target
+  that is under the parent's, and its own label and help. Its type, path, list, data class, by, pin, rel, with,
+  live, scale, unit, required_unless and columns stay.
+- Its own when it says one, else its parent's: summary, title, short_title, order, layout, navigator, alert, its
+  screens (one of the same id replaces the parent's) and key. A type that sets no key shares its parent's, and so
+  the counter its records' keys are given from.
+- Never inherited: id, label, plural and slug (each from its own id when it says none), and abstract.
+
+``abstract = true``: nothing creates a record of the type; the types under it have the records. Naming a type (a
+reference's target, a view, a data class, a workflow's record) takes in every type under it, its family.
 """
 
 from __future__ import annotations
@@ -289,8 +332,8 @@ class RecordType:
     summary: str = ""
     source: str = ""
     signatures: list[dict] = field(default_factory=list)  # [{meaning, roles, states}]: who signs it, and for what
-    abstract: bool = False   # a core base type: records are never of it, types extend it
-    extends: str | None = None   # the core base type it extends
+    abstract: bool = False   # nothing creates a record of it; the types under it have them (a core base type, say)
+    extends: str | None = None   # the type it extends: its parent, a core base type or one of the hub's
     base_map: dict = field(default_factory=dict)   # base field -> {"fields": [own field names]} or {"when": expr}
     title: str | None = None  # how a record of it is named: "{name}", "{start}[ {reason}]"
     short_title: str | None = None  # how it is named in navigation (tab title, crumbs, headings, tooltips); else title
@@ -313,6 +356,10 @@ class RecordType:
     period: dict | None = None  # [period]: {closed_by, date, path, scope, scope_path}: _check_period
     closing: dict | None = None  # [closing]: {through, path, states, scope, scope_path}: what closes a period
     checks: list[dict] = field(default_factory=list)  # [[check]]: {when, must, message, parts}: every write keeps them
+    ancestors: tuple = ()  # the types above it, its parent first, up to the core base type at the root (if any)
+    base: str | None = None  # the core base type at the root of its chain: what project and compose read it through
+    doc: dict = field(default_factory=dict, repr=False, compare=False)  # its definition merged with its parents'
+    chain: tuple = field(default=(), repr=False, compare=False)  # ((id, version, sha), ...): itself and its parents
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -320,8 +367,8 @@ class RecordType:
         return sc["tabs"] if sc else None
 
     def is_a(self, base: str) -> bool:
-        """Whether its records may stand where ``base`` is asked for (itself, the base it extends, or any record)."""
-        return base in ("*", ROOT) or base == self.id or base == self.extends
+        """Whether its records may stand where ``base`` is asked for: itself, any type above it, or any record."""
+        return base in ("*", ROOT) or base == self.id or base in self.ancestors
 
     def signature(self, meaning: str) -> dict | None:
         return next((g for g in self.signatures if g["meaning"] == meaning), None)
@@ -610,16 +657,17 @@ def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]
     return f, []
 
 
-def parse(source: str, catalog=None, *, base_ok: bool = False) -> RecordType:
-    """Parse and check a record type. ``catalog`` (the hub) checks the data class and reference targets exist.
-    ``base_ok``: the core's own base types (``abstract = true``), which keep no records and need no data class.
-    Every problem is a DefinitionError, whatever shape the document has."""
+def parse(source: str, catalog=None, *, base_ok: bool = False, parent: RecordType | None = None) -> RecordType:
+    """Parse and check a record type. ``catalog`` (the hub) checks the data class and reference targets exist, and
+    gives the type it extends when that is one of the hub's. ``parent``: that type, given (read as in force, or
+    another version of it being checked). ``base_ok``: the core's own base types, which keep no records and need no
+    data class. Every problem is a DefinitionError, whatever shape the document has."""
     try:
         doc = tomllib.loads(source)
     except tomllib.TOMLDecodeError as exc:
         raise DefinitionError([f"The record type is not valid TOML: {exc}"]) from None
     try:
-        return _parse(doc, source, catalog, base_ok)
+        return _parse(doc, source, catalog, base_ok, parent)
     except DefinitionError:
         raise
     except (TypeError, ValueError, AttributeError, KeyError, IndexError) as exc:  # a shape no check below foresaw
@@ -677,7 +725,7 @@ def revising_states(states: list, trans: list, in_use, final=()) -> list:
     return [x for x in states if x in reach and x != in_use]
 
 
-def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
+def _parse(doc: dict, source: str, catalog, base_ok: bool, parent: RecordType | None) -> RecordType:
     problems: list[str] = _unknown("top level", doc, "")
     tid = str(doc.get("id", ""))
     if not TYPE_ID.fullmatch(tid) or tid.lower() == "new":
@@ -690,14 +738,26 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         if k in doc and not isinstance(doc[k], str):
             problems.append(f"{k}: text, not {doc[k]!r}")
             doc.pop(k)
+    abstract = doc.get("abstract") is True
+    own, ext = doc, doc.get("extends")
+    unresolved = False
+    if ext is not None and ext not in bases() and not base_ok:  # one of the hub's types: its definition, then ours
+        if parent is None or parent.id != ext:
+            parent, why = catalog.type_parent(ext, tid) if catalog is not None else (None, None)
+            if parent is None:
+                unresolved = True
+                problems.append(why or f"extends: {ext!r} is neither one of the core's base types "
+                                       f"({', '.join(sorted(bases()))}) nor a record type in force here")
+        if parent is not None:
+            doc, more = _merge(parent, own)
+            problems += more
+    else:
+        parent = None
     order = doc.get("order", 100)
     if isinstance(order, bool) or not isinstance(order, int):
         problems.append(f"order: a whole number (where it sits on a subject's page), not {order!r}")
         order = 100
-    abstract = doc.get("abstract") is True
-    if abstract and not base_ok:
-        problems.append("abstract: only the core's base types are abstract; a pack's type extends one (extends = ...)")
-    if not doc.get("data_class") and not abstract:
+    if not doc.get("data_class") and not base_ok and not unresolved:  # unresolved: its parent's, when it is read
         problems.append("data_class: say which data class the records belong to (permissions are per class)")
     fields, names, paths = [], set(), set()
     for i, raw in enumerate(_tables(doc, "field", problems, "field")):
@@ -711,20 +771,20 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             names.add(f["name"])
             paths.add(f["path"])
             fields.append(f)
-    ext, base_map, base = doc.get("extends"), {}, None
+    if parent is not None:  # a field of its parent's it names again: narrowed, never changed
+        problems += _narrowed(parent, own, fields, doc, catalog)
+    ext, base_map, base = doc.get("extends"), {}, None  # under one of the hub's types: the core base at its root
     spec = doc.get("base")
     if spec is not None and not isinstance(spec, dict):
         problems.append("base: a table of base field = the field that holds it")
         spec = None
-    if ext is not None:
-        base = bases().get(str(ext))
-        if base is None or base_ok:
-            problems.append(f"extends: {ext!r} is not one of the core's base types ({', '.join(sorted(bases()))})")
-            base = None
-        else:
-            fields, base_map, ps = _inherit(base, fields, spec or {})
-            problems += ps
-    elif spec:
+    if ext is not None and base_ok:
+        problems.append("extends: a core base type extends nothing")
+    elif ext is not None and ext in bases():
+        base = bases()[ext]
+        fields, base_map, ps = _inherit(base, fields, spec or {})
+        problems += ps
+    elif spec and ext is None:
         problems.append("base: says which fields hold a base type's fields; say which type it extends")
     seen: dict = {}
     for f in fields:  # a form with two "Status" boxes: nobody can tell which is which
@@ -935,8 +995,10 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                     strict=doc.get("strict", True) is not False, date=doc.get("date"), flag=doc.get("flag"),
                     alert=doc.get("alert") is True, active=active, order=order,
                     lifecycle=lc, summary=str(doc.get("summary", "")), source=source, signatures=sigs,
-                    abstract=abstract, extends=base.id if base else None, base_map=base_map,
-                    title=doc.get("title"), short_title=doc.get("short_title"), screens=screens)
+                    abstract=abstract, extends=parent.id if parent else base.id if base else None, base_map=base_map,
+                    title=doc.get("title"), short_title=doc.get("short_title"), screens=screens,
+                    ancestors=(parent.id, *parent.ancestors) if parent else (base.id,) if base else (),
+                    base=base.id if base else None, doc=doc)
     if "key" in doc:
         if isinstance(doc["key"], str) and TYPE_KEY.fullmatch(doc["key"]):
             rt.key = doc["key"]
@@ -959,9 +1021,10 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                 near = difflib.get_close_matches(n, sorted(known), n=1)
                 problems.append(f"{key}: {{{n}}} is not one of its fields" + (f" (did you mean {{{near[0]}}}?)"
                                                                            if near else ""))
+    kin = {tid, *rt.ancestors}  # its own kind: itself and the types above it
     if doc.get("parent"):
         pf = rt.field(str(doc["parent"]))
-        if not pf or pf["type"] != "reference" or pf.get("list") or "*" in pf["path"] or tid not in pf["target"]:
+        if not pf or pf["type"] != "reference" or pf.get("list") or "*" in pf["path"] or not kin & set(pf["target"]):
             problems.append(f"parent: {doc['parent']!r} is not a field that refers to one other {tid}")
         else:
             rt.parent = pf["path"]
@@ -973,7 +1036,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             problems.append(f"part_of: {name!r} is not a field that refers to one record (the one that owns it)")
         elif not pf.get("required"):
             problems.append(f"part_of: {name!r} must be required: a {rt.label.lower()} never exists without its owner")
-        elif tid in pf["target"]:
+        elif kin & set(pf["target"]):
             problems.append("part_of: a record is not part of its own kind; for a tree, say parent")
         else:
             rt.part_of = {"field": pf["name"], "path": pf["path"], "target": list(pf["target"])}
@@ -1479,7 +1542,7 @@ def _check_booking(rt: RecordType, b) -> list[str]:
     if not isinstance(b, dict):
         return ["booking: a table (marked, overbook, overbook_label, overbook_reason, overbook_priority, request)"]
     out = _unknown("booking", b, "booking")
-    if rt.extends != "Booking":
+    if not rt.is_a("Booking"):
         out.append("booking: only a type that extends Booking says how it is booked")
     for k in ("marked", "overbook", "request_inputs"):
         if k in b and not _strings(b[k]):
@@ -1582,8 +1645,6 @@ def _check_standard(rt: RecordType, std) -> list[str]:
     if std not in STANDARDS:
         return [f"standard: {std!r} is not a standard the hub exports ({', '.join(sorted(STANDARDS))})"]
     out = []
-    if rt.abstract:
-        out.append("standard: a base type has no records of its own; the type that extends it says its standard")
     if not FHIR_NAME.fullmatch(rt.id):
         out.append(f"standard: {rt.id!r} is not a FHIR resource name (letters only, a capital first)")
     if not rt.strict:
@@ -1828,6 +1889,138 @@ def _inherit(base: RecordType, fields: list[dict], spec: dict) -> tuple[list[dic
     return out, bmap, problems
 
 
+MAX_CHAIN = 8  # the most types a chain runs through, the core base at its root aside
+# What a type under another says of its own: each of these is its parent's, and it may not say it otherwise.
+FIXED_KEYS = ("data_class", "base", "lifecycle", "workflow", "number", "reverses", "covers", "period", "closing",
+              "part_of", "parent", "consent", "booking", "standard", "strict", "subject", "active", "date", "flag")
+NEVER_INHERITED = ("id", "label", "plural", "slug", "abstract")
+ADDED_KEYS = ("field", "check", "signature", "link", "unique", "screen")  # the parent's, then its own
+# A field it narrows keeps these as its parent's field has them.
+FIELD_STAYS = ("type", "path", "list", "data_class", "by", "pin", "rel", "with", "live", "scale", "unit",
+               "required_unless", "columns")
+
+
+def parse_all(sources: dict[str, str]) -> dict[str, RecordType]:
+    """Record types read together without a hub (a pack's, from its files), by id: one under another of them is
+    read under it. A DefinitionError names the type it is about."""
+    docs: dict[str, tuple[str, object]] = {}
+    for name, src in sources.items():
+        try:
+            doc = tomllib.loads(src)
+        except tomllib.TOMLDecodeError as exc:
+            raise DefinitionError([f"{name}: not valid TOML: {exc}"]) from None
+        docs[str(doc.get("id", name))] = (src, doc.get("extends"))
+    out: dict[str, RecordType] = {}
+
+    def one(tid: str, under: tuple) -> RecordType:
+        if tid not in out:
+            src, ext = docs[tid]
+            if tid in under:
+                raise DefinitionError([f"{tid}: extends: it would be under itself ({' → '.join([*under, tid])})"])
+            parent = one(ext, (*under, tid)) if isinstance(ext, str) and ext in docs and ext not in bases() else None
+            try:
+                out[tid] = parse(src, parent=parent)
+            except DefinitionError as exc:
+                raise DefinitionError([f"{tid}: {p}" for p in exc.problems]) from None
+        return out[tid]
+    for tid in docs:
+        one(tid, ())
+    return out
+
+
+def _merge(parent: RecordType, own: dict) -> tuple[dict, list[str]]:
+    """A type's definition under ``parent``: its parent's (as merged with its own parents'), with what it says itself
+    merged in, and what it says that would change its parent's. ``extends`` becomes the core base at the root, if
+    any, which ``_inherit`` reads the base fields of."""
+    pdoc, problems = parent.doc, []
+    out = {k: v for k, v in pdoc.items() if k not in NEVER_INHERITED and k not in ADDED_KEYS}
+    out["key"] = parent.key  # shared, unless it sets its own
+    for k, v in own.items():
+        if k in FIXED_KEYS:
+            if v != pdoc.get(k) and not (k in ("subject", "strict") and v == getattr(parent, k)):
+                problems.append(f"{k} is {parent.id}'s: a type under it adds to it, never changes it")
+        elif k not in ADDED_KEYS and k != "extends":
+            out[k] = v
+    for k in ADDED_KEYS:
+        mine, theirs = own.get(k), pdoc.get(k)
+        if mine is None or theirs is None or not isinstance(mine, list) or not isinstance(theirs, list):
+            if mine is not None or theirs is not None:
+                out[k] = mine if mine is not None else theirs  # a shape of its own is said by the check of it
+            continue
+        merged = [dict(x) if isinstance(x, dict) else x for x in theirs]
+        name = {"field": "name", "signature": "meaning", "link": "rel", "screen": "id"}.get(k)
+        at = {x.get(name): i for i, x in enumerate(merged) if name and isinstance(x, dict)}
+        for x in mine:
+            i = at.get(x.get(name)) if name and isinstance(x, dict) else None
+            if k == "unique" and x in merged:
+                continue
+            if i is None:
+                merged.append(x)
+            elif k == "field":  # a field it narrows: its parent's, with what it changes
+                old, new = merged[i], {**merged[i], **x}
+                if "choices" in x and "labels" not in x and isinstance(old.get("labels"), dict) \
+                        and isinstance(x["choices"], list):
+                    new["labels"] = {c: w for c, w in old["labels"].items() if c in x["choices"]}
+                merged[i] = new
+            elif k == "screen":  # a screen of the same id is its own
+                merged[i] = x
+            else:
+                what = {"signature": "signatures", "link": "links"}[k]
+                problems.append(f"{k} {x.get(name)!r} is {parent.id}'s: a type under it adds {what}, never changes one")
+        out[k] = merged
+    return out, problems
+
+
+def _narrowed(parent: RecordType, own: dict, fields: list[dict], doc: dict, catalog) -> list[str]:
+    """What a type under ``parent`` says of the fields it names again that would widen or change them: it may only
+    narrow one (``_narrows``), and only a field one of its parents wrote (a base type's field stays the base's)."""
+    raw = own.get("field") if isinstance(own.get("field"), list) else []
+    written = {x.get("name") for x in parent.doc.get("field") or [] if isinstance(x, dict)}
+    lc = doc.get("lifecycle")
+    lf = lc.get("field", "status") if isinstance(lc, dict) else None
+    out = []
+    for x in raw:
+        n = x.get("name") if isinstance(x, dict) else None
+        pf, f = parent.field(n) if n else None, next((f for f in fields if f["name"] == n), None)
+        if pf is None:
+            continue
+        if n not in written:
+            out.append(f"field {n}: it is {parent.base}'s, as {parent.id} has it: a type under it does not change it")
+        elif f is not None:
+            out += _narrows(pf, f, parent.id, lf, catalog)
+    return out
+
+
+def _narrows(pf: dict, f: dict, who: str, lf: str | None, catalog) -> list[str]:
+    """What field ``f`` changes of ``pf``, its parent's field of the same name, beyond narrowing it: required, fewer
+    choices or roles, tighter bounds, a target under the parent's, and its own label and help."""
+    where = f"field {f['name']}"
+    out = [f"{where}: its {k} is {who}'s: a type under it narrows a field, never changes it"
+           for k in FIELD_STAYS if pf.get(k) != f.get(k)]
+    if pf["required"] and not f["required"]:
+        out.append(f"{where}: {who} requires it, and so does every type under it")
+    if f["choices"] != pf["choices"]:
+        if f["name"] == lf:
+            out.append(f"{where}: its choices are the states of {who}'s lifecycle: a type under it keeps them")
+        elif not set(f["choices"]) <= set(pf["choices"]):
+            out.append(f"{where}: a type under {who} gives fewer of its choices, never others "
+                       f"({', '.join(repr(c) for c in f['choices'] if c not in pf['choices'])})")
+    for k, tighter in (("min", True), ("max", False), ("max_length", False), ("min_rows", True), ("max_rows", False)):
+        old, new = pf.get(k), f.get(k)
+        if old is not None and (new is None or (new < old if tighter else new > old)):
+            out.append(f"{where}: {k} is {old} at {who}: a type under it keeps it or makes it tighter")
+    if pf["roles"] and not (f["roles"] and set(f["roles"]) <= set(pf["roles"])):
+        out.append(f"{where}: {who} lets members of {', '.join(pf['roles'])} be picked: a type under it lets some "
+                   f"of them")
+    if f["target"] != pf["target"] and catalog is not None:
+        wider = [t for t in f["target"]
+                 if not any(t == o or o in ("*", ROOT) or catalog.is_a(t, o) for o in pf["target"])]
+        if wider:
+            out.append(f"{where}: {who}'s refers to a {' or '.join(pf['target'])}: a type under it refers to the "
+                       f"types under that, and {', '.join(wider)} is not one")
+    return out
+
+
 _BASES: dict | None = None
 
 
@@ -1891,7 +2084,7 @@ def _contract(bf: dict, f: dict, item, member_types) -> object:
 def project(rt: RecordType | None, rec: dict, member_types=()) -> dict:
     """The record as its base type sees it: ``{base field: value}`` in the base's own types (text is words, a member
     is a member id, a reference is ``Type/id``). The core and modules read a pack's records only this way."""
-    base = bases().get(rt.extends) if rt is not None and rt.extends else None
+    base = bases().get(rt.base) if rt is not None and rt.base else None
     if base is None:
         return {}
     out = {}
@@ -1925,7 +2118,7 @@ def project(rt: RecordType | None, rec: dict, member_types=()) -> dict:
 def compose(rt: RecordType, values: dict, member_ref: str, rec: dict | None = None) -> dict:
     """A record of ``rt`` from base-field values (the inverse of ``project``), on top of ``rec``. A member becomes a
     reference to ``member_ref``/id where the pack keeps references; a ``*`` path or a list adds an item."""
-    base = bases().get(rt.extends or "")
+    base = bases().get(rt.base or "")
     if base is None:
         raise ValueError(f"{rt.label} extends no base type")
     rec = dict(rec or {})

@@ -97,8 +97,8 @@ def test_a_pack_type_keeps_the_base_contract_or_is_refused():
                       (head + '[base]\nstart = false\n', "Booking needs it"),
                       (head + '[base]\ncolour = "x"\n', "has no field 'colour'"),
                       (head + '[base]\ncancelled = { when = "record.status ==" }\n', "base.cancelled"),
-                      ('id = "Lot"\ndata_class = "x"\nextends = "Patient"\n', "not one of the core's base types"),
-                      ('id = "Lot"\ndata_class = "x"\nabstract = true\n', "only the core's base types")):
+                      ('id = "Lot"\ndata_class = "x"\nextends = "Patient"\n', "neither one of the core's base types"),
+                      ('id = "Lot"\nabstract = true\n', "data_class: say which data class")):
         with pytest.raises(DefinitionError, match=says):
             schema.parse(bad)
     # the base fields it does not name are inherited, as the base declares them

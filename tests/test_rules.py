@@ -8954,3 +8954,179 @@ def test_unique_over_a_reference_compares_the_record_it_names_however_it_is_writ
             exc.value.problems
     hub.create_record(liam, "Tag", {"gauge": other, "side": "front"})
     assert len(hub.records.search("Tag", limit=None)) == 2
+
+
+# ------------------------------------------------------------------ record types inherit
+
+PARTY = '''id = "Party"
+abstract = true
+data_class = "clinical"
+key = "PTY"
+unique = ["code"]
+[[field]]
+name = "name"
+required = true
+[[field]]
+name = "code"
+[[field]]
+name = "email"
+[[field]]
+name = "tier"
+type = "choice"
+choices = ["gold", "silver", "bronze"]
+labels = { gold = "Gold", silver = "Silver", bronze = "Bronze" }
+[[field]]
+name = "score"
+type = "number"
+min = 0
+max = 100
+'''
+PERSON = '''id = "Person"
+extends = "Party"
+[[field]]
+name = "birth_date"
+type = "date"
+[[field]]
+name = "email"
+label = "E-mail"
+required = true
+[[field]]
+name = "tier"
+choices = ["gold", "silver"]
+[[field]]
+name = "score"
+max = 50
+'''
+
+
+def _in_force(hub, src: str, note: str = ""):
+    """A record type proposed by one policy owner and approved by another; the type as in force."""
+    import tomllib
+    tid = tomllib.loads(src)["id"]
+    p = hub.propose("type", M(hub, "rana"), src, note)
+    hub.approve(M(hub, "dr-amara"), "type", tid, p["version"])
+    return hub.record_type(tid)
+
+
+def _refused(hub, src: str) -> list[str]:
+    with pytest.raises(Invalid) as e:
+        hub.propose("type", M(hub, "rana"), src)
+    return e.value.problems
+
+
+def test_a_type_inherits_everything_and_only_adds_or_narrows(hub):
+    """A type under another is its parent and more: its parent's fields, data class, key and unique keys, with its
+    own fields after them; a field it names again is narrowed (required, fewer choices, a tighter bound, its own
+    label), never changed. Its own id, label and abstract are its own."""
+    from practicehub import contract
+    _in_force(hub, PARTY)
+    person = _in_force(hub, PERSON)
+    assert [f["name"] for f in person.fields] == ["name", "code", "email", "tier", "score", "birth_date"]
+    email, tier, score = person.field("email"), person.field("tier"), person.field("score")
+    assert email["required"] and email["label"] == "E-mail" and email["type"] == "string"
+    assert tier["choices"] == ["gold", "silver"] and tier["labels"] == {"gold": "Gold", "silver": "Silver"}
+    assert score["min"] == 0 and score["max"] == 50
+    assert (person.data_class, person.key, person.unique, person.label) == ("clinical", "PTY", [["code"]], "Person")
+    assert not person.abstract and person.extends == "Party" and person.ancestors == ("Party",)
+    assert person.is_a("Party") and hub.is_a("Person", "Party") and not hub.is_a("Party", "Person")
+    assert hub.family("Party") == ["Party", "Person"] or set(hub.family("Party")) == {"Party", "Person"}
+    assert hub.of_base("Party") == ["Person"] and hub.concrete(["Party", "Patient"]) == ["Person", "Patient"]
+    assert contract.pack_type(person) == {"type": "Person", "extends": "Party", "base": {}}
+    amara = M(hub, "dr-amara")
+    rec = hub.create_record(amara, "Person", {"name": "Ann", "email": "ann@example.org", "tier": "gold"})
+    assert rec["meta"]["key"].startswith("PTY-")
+    with pytest.raises(Invalid):  # the parent's unique key holds for it
+        hub.create_record(amara, "Person", {"name": "Bo", "email": "bo@example.org", "code": "A1"}) and \
+            hub.create_record(amara, "Person", {"name": "Cy", "email": "cy@example.org", "code": "A1"})
+    with pytest.raises(Invalid):  # narrowed: required, and only its own choices
+        hub.create_record(amara, "Person", {"name": "Di", "tier": "gold"})
+    with pytest.raises(Invalid):
+        hub.create_record(amara, "Person", {"name": "Ed", "email": "ed@example.org", "tier": "bronze"})
+
+
+def test_a_subtype_never_changes_what_is_its_parent_s(hub):
+    """What a type under another says that would change its parent's is refused: a key the parent fixes (its data
+    class, lifecycle, number...), a field's type, a requirement dropped, a choice the parent has not, a looser bound,
+    a reference to a type not under the parent's target."""
+    _in_force(hub, PARTY)
+    head = 'id = "Person"\nextends = "Party"\n'
+    for bad, says in ((head + 'data_class = "demographics"\n', "data_class is Party's"),
+                      (head + '[[field]]\nname = "email"\ntype = "number"\n', "its type is Party's"),
+                      (head + '[[field]]\nname = "name"\nrequired = false\n', "Party requires it"),
+                      (head + '[[field]]\nname = "tier"\nchoices = ["gold", "platinum"]\n', "'platinum'"),
+                      (head + '[[field]]\nname = "score"\nmax = 200\n', "max is 100 at Party"),
+                      (head + '[[field]]\nname = "score"\nmin = -5\n', "min is 0 at Party")):
+        assert any(says in p for p in _refused(hub, bad)), (says, _refused(hub, bad))
+    refs = 'id = "Note"\ndata_class = "clinical"\n[[field]]\nname = "about"\ntype = "reference"\ntarget = ["Party"]\n'
+    _in_force(hub, refs)
+    _in_force(hub, PERSON)
+    _in_force(hub, 'id = "Memo"\nextends = "Note"\n[[field]]\nname = "about"\ntarget = ["Person"]\n')  # under Party
+    problems = _refused(hub, 'id = "Memo"\nextends = "Note"\n[[field]]\nname = "about"\ntarget = ["Patient"]\n')
+    assert any("Patient is not one" in p for p in problems), problems
+
+
+def test_a_chain_runs_from_a_core_base_through_a_pack_s_type_to_an_overlay_s(hub):
+    """A type may extend one of the hub's own: the practice's Patient (under the core's Subject) is the parent of a
+    type of the practice's own, which is the parent of a third. Each is a Subject, read through the core's base the
+    way its root says, and a subject work is about."""
+    res = _in_force(hub, 'id = "Resident"\nextends = "Patient"\n[[field]]\nname = "farm"\nlabel = "Farm"\n')
+    grower = _in_force(hub, 'id = "Grower"\nextends = "Resident"\n[[field]]\nname = "crop"\nlabel = "Crop"\n')
+    assert res.ancestors == ("Patient", "Subject") and res.base == "Subject" and res.key == "PAT"
+    assert grower.ancestors == ("Resident", "Patient", "Subject") and grower.is_a("Subject") and grower.is_a("Patient")
+    assert grower.field("given")["required"] and grower.field("farm") and grower.field("crop")
+    assert grower.base_map == hub.record_type("Patient").base_map
+    assert {"Resident", "Grower"} <= hub.subject_types() and {"Patient", "Resident", "Grower"} <= set(hub.of_base("Subject"))
+    rec = hub.create_record(M(hub, "jo"), "Grower", {"name": [{"given": ["Ida"], "family": "Roy"}],
+                                                    "birthDate": "1970-02-03", "farm": "North 40", "crop": "barley"})
+    assert hub.project(rec)["name"] == "Ida Roy" and rec["meta"]["key"].startswith("PAT-")
+    assert "Ida Roy" in hub.title(rec)
+
+
+def test_inheritance_has_no_loops(hub):
+    """A type is never under itself, however far round, and a chain runs through at most eight types."""
+    _in_force(hub, PARTY)
+    _in_force(hub, PERSON)
+    problems = _refused(hub, PARTY.replace('abstract = true\n', 'abstract = true\nextends = "Person"\n'))
+    assert any("Party would be under itself (Party → Person → Party)" in p for p in problems), problems
+    assert any("would be under itself" in p for p in _refused(hub, 'id = "Loop"\nextends = "Loop"\n'))
+    _in_force(hub, 'id = "T0"\ndata_class = "clinical"\n')
+    for i in range(1, 8):
+        _in_force(hub, f'id = "T{i}"\nextends = "T{i - 1}"\n')
+    assert any("at most 8 types" in p for p in _refused(hub, 'id = "T8"\nextends = "T7"\n'))
+    assert any("there is no record type 'Nope'" in p for p in _refused(hub, 'id = "T9"\nextends = "Nope"\n'))
+
+
+def test_an_abstract_type_has_no_records_of_its_own(hub):
+    """Any type may be abstract: nothing creates a record of it (a person, an agent, a workflow or a conversion);
+    its records are of the types under it, which a reference to it takes."""
+    amara = M(hub, "dr-amara")
+    _in_force(hub, PARTY)
+    with pytest.raises(Invalid, match="Party is abstract.*it has none yet"):
+        hub.create_record(amara, "Party", {"name": "Ann"})
+    _in_force(hub, PERSON)
+    with pytest.raises(Invalid, match=r"Party is abstract.*\(Person\)"):
+        hub.create_record(amara, "Party", {"name": "Ann"})
+    with pytest.raises(Invalid, match="abstract"):
+        hub.create_record({"id": "import", "kind": "automation"}, "Party", {"name": "Ann"})
+    person = hub.create_record(amara, "Person", {"name": "Ann", "email": "ann@example.org"})
+    with pytest.raises(Invalid, match="abstract"):
+        hub.convert_record(amara, f"Person/{person['id']}", "Party", {"name": "Ann"})
+    _in_force(hub, 'id = "Note"\ndata_class = "clinical"\n[[field]]\nname = "about"\ntype = "reference"\n'
+                   'target = ["Party"]\n')
+    note = hub.create_record(amara, "Note", {"about": f"Person/{person['id']}"})
+    assert note["about"] == f"Person/{person['id']}"
+
+
+def test_a_parent_s_change_that_breaks_a_subtype_is_refused(hub):
+    """A parent's new version is checked with every type under it read under it again: one they would no longer
+    hold under is refused, naming them. One they hold under is theirs at once. A type with types under it is not
+    retired."""
+    _in_force(hub, PARTY)
+    _in_force(hub, PERSON)
+    problems = _refused(hub, PARTY.replace('choices = ["gold", "silver", "bronze"]', 'choices = ["gold", "bronze"]')
+                        .replace(', silver = "Silver"', ''))
+    assert any(p.startswith("Person would no longer hold: field tier") and "'silver'" in p for p in problems), problems
+    _in_force(hub, PARTY + '[[field]]\nname = "phone"\nlabel = "Phone"\n', "a phone")
+    assert hub.record_type("Person").field("phone") and hub.record_type("Person").field("birth_date")
+    with pytest.raises(Invalid, match=r"record types are under it \(Person\)"):
+        hub.retire(M(hub, "rana"), "type", "Party")
