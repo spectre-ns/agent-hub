@@ -1,7 +1,8 @@
-# A change order: why a product changes, which products and documents it changes, and (when it came from one) the
-# CAPA it answers. It names the plm-change workflow, which walks its status from draft to implemented: making one starts
-# it, and a change order returned or rejected and revised is walked again from draft. Approved, its documents are
-# revised; once they are all approved again it waits to be released (releasing).
+# A change order: why parts change, which parts (inventory's) and documents it changes, and (when it came from one)
+# the CAPA it answers. It names the plm-change workflow, which walks its status from draft to implemented: making one
+# starts it, and a change order returned or rejected and revised is walked again from draft. Approved, its parts are
+# held in draft for their next revision and its documents are revised; once the documents are all approved again it
+# waits to be released (releasing), and releasing puts its parts back in use at the next revision.
 id = "ChangeOrder"
 key = "ECO"
 label = "Change order"
@@ -11,7 +12,7 @@ date = "raised"
 flag = "status"
 order = 31
 workflow = { id = "plm-change", when = "record.status in ['draft', 'review', 'approved', 'releasing', 'rejected']" }
-summary = "A change to released products and their documents: reviewed, implemented at new revisions, released."
+summary = "A change to parts in use and their documents: reviewed, made at new revisions, released."
 
 [[field]]
 name = "title"
@@ -34,7 +35,7 @@ type = "member"
 
 [[field]]
 name = "opened"
-label = "Products and documents opened"
+label = "Parts and documents opened"
 type = "boolean"
 by = "workflow"
 
@@ -44,16 +45,17 @@ type = "choice"
 choices = ["draft", "review", "approved", "releasing", "implemented", "rejected", "cancelled"]
 
 [[field]]
-name = "products"
-label = "Products changed"
+name = "parts"
+label = "Parts changed"
 type = "list"
+help = "the parts (assemblies included) it changes: held in draft once it is approved, released at their next revision"
 
 [[field]]
-name = "product"
-label = "Product changed"
-path = "products.*"
+name = "part"
+label = "Part changed"
+path = "parts.*"
 type = "reference"
-target = ["Product"]
+target = ["Part"]
 rel = "changes"
 
 [[field]]
@@ -80,7 +82,7 @@ rel = "answers"
 name = "impact"
 label = "Impact"
 type = "markdown"
-help = "what else it touches: stock on hand, training, suppliers, patients already given the product"
+help = "what else it touches: stock on hand, assemblies the parts are used in, training, suppliers, patients already given the product"
 
 [[field]]
 name = "decision"

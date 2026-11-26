@@ -3490,32 +3490,41 @@ def test_a_page_flagged_out_of_date_is_checked_and_signed_by_a_wiki_owner(wiki):
 
 @pytest.fixture
 def products(hub):
-    """The demo practice with document control, quality and product lifecycle, and their demo data."""
-    for name in ("dms", "qms", "plm"):
+    """The demo practice with document control, quality, inventory and product lifecycle, and their demo data."""
+    for name in ("dms", "qms", "inventory", "plm"):
         install(hub, name)
     for m in hub.pack.modules:
         m.module.demo(hub)
     return hub
 
 
-def test_plm_needs_quality_and_document_control(hub):
+def test_plm_needs_quality_document_control_and_inventory(hub):
     install(hub, "dms")
     with pytest.raises(Invalid):
         install(hub, "plm")
+    install(hub, "qms")
+    with pytest.raises(Invalid) as e:   # its item is inventory's part
+        install(hub, "plm")
+    assert "inventory" in str(e.value) + " ".join(getattr(e.value, "problems", []) or [])
 
 
-def test_a_released_product_changes_only_through_a_signed_change_order(products):
+def test_a_part_a_change_order_names_is_held_until_the_change_is_released(products):
+    """The product is inventory's part. Approved, a change order holds each part it names in draft: stock and builds
+    keep using the revision last released, the part's own workflow does not put it back in use (not even under a basic
+    policy, which puts any other draft part in use at once), and it is not approved on its own. The release puts it
+    back in use at its next revision."""
     hub = products
     rana, amara = M(hub, "rana"), M(hub, "dr-amara")
-    kit = next(p for p in hub.records.search("Product", limit=None) if p["number"] == "WC-100")
-    kref = f"Product/{kit['id']}"
-    assert kit["status"] == "released" and kit["revision"] == 1
-    with pytest.raises(Denied):  # a person does not move a released product back to design: a change order does
-        hub.update_record(rana, kref, {"status": "design"})
+    assert hub.record_type("Product") is None                        # folded into inventory's part
+    kit = next(p for p in hub.records.search("Part", limit=None) if p["code"] == "WC-100")
+    kref = f"Part/{kit['id']}"
+    gauze = next(p for p in hub.records.search("Part", limit=None) if p["code"] == "WC-201")
+    assert kit["status"] == "active" and not kit.get("revision")
+    assert [(r["part"], r["quantity"]) for r in kit["bom"]] == [(f"Part/{gauze['id']}", 2), (kit["bom"][1]["part"], 1)]
     co = next(c for c in hub.records.search("ChangeOrder", limit=None))
     cref = f"ChangeOrder/{co['id']}"
     spec = co["documents"][0]
-    assert {"rel": "changes", "ref": cref} in hub.linked(rana, kref)  # the product shows the change on its Linked tab
+    assert {"rel": "changes", "ref": cref} in hub.linked(rana, kref)  # the part shows the change on its Linked tab
 
     hub.update_record(rana, cref, {"reason": co["reason"] + " Agreed at the clinical meeting."})  # rana writes it
     hub.update_record(rana, cref, {"status": "review"})
@@ -3526,8 +3535,14 @@ def test_a_released_product_changes_only_through_a_signed_change_order(products)
     hub.engine.claim(amara, i)
     hub.engine.decide(amara, i, "approve")
     assert hub.records.read("ChangeOrder", co["id"])["status"] == "approved"
-    kit = hub.records.read("Product", kit["id"])
-    assert kit["status"] == "design" and kit["revision"] == 2       # opened at its next revision
+    kit = hub.records.read("Part", kit["id"])
+    assert (kit["status"], kit["held_by"]) == ("draft", cref)        # held for its next revision, basic policy or not
+    assert [x["to_ref"] for x in hub.db.links.find({"from_ref": kref, "rel": "held-by"})] == [cref]
+    with pytest.raises((Denied, Invalid)):                            # held: never approved on its own
+        hub.update_record(rana, kref, {"status": "in-review"})
+    larger = hub.create_record(rana, "Part", {"code": "WC-203", "name": "Sterile gauze 15x15"})
+    hub.update_record(rana, kref, {"bom": [{"part": f"Part/{larger['id']}", "quantity": 1}, kit["bom"][1]]})
+    assert _inv(hub).part_in_use(hub, hub.records.read("Part", kit["id"]))["bom"] == kit["bom"]   # stock: as released
     doc = hub.records.read(*spec.split("/"))
     assert doc["status"] == "draft" and doc["revision"] == 2
     assert hub.engine.run(run["id"])["steps"]["documents-approved"]["state"] == "waiting"
@@ -3544,11 +3559,90 @@ def test_a_released_product_changes_only_through_a_signed_change_order(products)
     r = item_for(hub, run, "release")
     with pytest.raises(Denied):  # the board member who approved it does not also release it
         hub.engine.claim(amara, r)
-    hub.engine.claim(rana, r)
-    hub.engine.decide(rana, r, "release")
-    kit = hub.records.read("Product", kit["id"])
-    assert kit["status"] == "released" and kit["revision"] == 2
+    with pytest.raises(Denied) as e:  # nor whoever revised a part it names: the release checks their revision
+        hub.engine.claim(rana, r)
+    assert "WC-100" in str(e.value) and "parts" in str(e.value)
+    hub.authz.write([("role:product-owner", "assignee", member_ref("noor"))])
+    noor = M(hub, "noor")
+    hub.engine.claim(noor, r)
+    hub.engine.decide(noor, r, "release")
+    kit = hub.records.read("Part", kit["id"])
+    assert (kit["status"], kit["revision"], kit.get("held_by") or "") == ("active", 1, "")
+    assert kit["bom"][0]["part"] == f"Part/{larger['id']}"                            # the new revision, in use
+    assert not list(hub.db.links.find({"from_ref": kref, "rel": "held-by"}))
+    assert not [r for r in hub.engine.runs(limit=1000) if r["workflow_id"] == "inventory-part"
+                and r["record"] == kref and r["status"] == "running"]             # its own run ended with it
     assert hub.records.read("ChangeOrder", co["id"])["status"] == "implemented"
+
+
+def _change(hub, who, *codes, title="Change the kit"):
+    """A change order naming the parts ``codes``, and no documents, written by ``who`` and sent for review."""
+    co = hub.create_record(who, "ChangeOrder", {"title": title, "reason": "Clinicians asked for it.",
+                                                "parts": [_part_ref(hub, c) for c in codes]})
+    cref = f"ChangeOrder/{co['id']}"
+    hub.update_record(who, cref, {"status": "review"})
+    return cref
+
+
+def test_a_part_is_changed_by_one_change_at_a_time_and_not_while_in_its_own_review(products):
+    """Rule: a change order is approved only if each part it names is free: not held by another change, and not in a
+    review of its own. Otherwise it goes back to its author, saying which part and why, and holds nothing."""
+    hub = products
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    first = _change(hub, rana, "WC-100", title="Larger gauze")
+    _sign(hub, amara, first, "plm-change", "review", "approve", "Agreed")
+    second = _change(hub, rana, "WC-100", "WC-202", title="Smaller saline")
+    _sign(hub, amara, second, "plm-change", "review", "approve", "Agreed too")
+    co = hub.records.read(*second.split("/"))
+    assert co["status"] == "rejected"
+    assert co["decision"] == (f"Not approved: WC-100 Wound care kit is held by {hub.key_of(first)} Larger gauze: one "
+                              f"change at a time changes a part")
+    assert _part(hub, "WC-202")["status"] == "active" and not _part(hub, "WC-202").get("held_by")  # held nothing
+    assert _part(hub, "WC-100")["held_by"] == first
+
+    _policy(hub, rana, "basic", part_approval=True)  # each part is approved before it is used
+    gauze = _part_ref(hub, "WC-201")
+    hub.update_record(rana, gauze, {"status": "draft"})
+    hub.update_record(rana, gauze, {"status": "in-review"})
+    third = _change(hub, rana, "WC-201", title="New gauze supplier")
+    _sign(hub, amara, third, "plm-change", "review", "approve")
+    co = hub.records.read(*third.split("/"))
+    assert co["status"] == "rejected" and "WC-201 Sterile gauze 10x10 is in review on its own: approve it or send it " \
+        "back first" in co["decision"]
+
+
+def test_a_change_lets_go_of_a_part_as_it_was_when_it_no_longer_names_it_or_is_cancelled(products):
+    """Rule: a part a change holds and no longer names (dropped after the change was returned), and every part a
+    cancelled change holds, is let go as it was before the change held it: in use, at its revision, its edits under
+    the change undone (they stay in its history)."""
+    hub = products
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    hub.authz.write([("role:product-owner", "assignee", member_ref("noor"))])
+    noor = M(hub, "noor")
+    kit, gauze = _part(hub, "WC-100"), _part(hub, "WC-201")
+    cref = _change(hub, rana, "WC-100")
+    _sign(hub, amara, cref, "plm-change", "review", "approve", "Agreed")
+    hub.update_record(rana, _part_ref(hub, "WC-100"), {"name": "Wound care kit, small", "bom": kit["bom"][:1]})
+    _sign(hub, noor, cref, "plm-change", "release", "return", "Not yet")
+    assert hub.records.read(*cref.split("/"))["status"] == "draft"
+    assert _part(hub, "WC-100")["held_by"] == cref  # returned: it still holds the kit
+
+    hub.update_record(rana, cref, {"parts": [_part_ref(hub, "WC-201")]})  # the gauze, not the kit
+    hub.update_record(rana, cref, {"status": "review"})
+    _sign(hub, amara, cref, "plm-change", "review", "approve", "Agreed again")
+    back = _part(hub, "WC-100")
+    assert (back["status"], back.get("held_by"), back["name"], back["bom"], back.get("revision")) == \
+        ("active", None, kit["name"], kit["bom"], kit.get("revision"))
+    assert any(v["data"].get("name") == "Wound care kit, small"  # the edit stays in its history
+               for v in hub.db.record_versions.find({"type": "Part", "id": kit["id"]}))
+    assert (_part(hub, "WC-201")["status"], _part(hub, "WC-201")["held_by"]) == ("draft", cref)
+
+    _sign(hub, noor, cref, "plm-change", "release", "return", "Not now")
+    hub.update_record(rana, _part_ref(hub, "WC-201"), {"unit": "pack of 10"})
+    hub.update_record(rana, cref, {"status": "cancelled", "cancel_reason": "Kept as it is"})
+    after = _part(hub, "WC-201")
+    assert (after["status"], after.get("held_by"), after.get("unit")) == ("active", None, gauze.get("unit"))
+    assert not list(hub.db.links.find({"rel": "held-by", "to_ref": cref}))
 
 
 def test_a_navigator_is_only_for_a_tree_and_hides_only_its_own_states(hub):
@@ -3917,6 +4011,267 @@ def test_a_part_is_approved_before_use_when_the_policy_asks_and_never_by_its_wri
         hub.create_record(rana, "Part", {"code": "iv-1", "name": "Another"})
     hub.update_record(amara, ref, {"status": "draft"})   # revised: still received as it was last approved
     assert _move(hub, rana, "receive", 1, part=ref, location=_place(hub, "Supply room"))["status"] == "posted"
+
+
+# ------------------------------------------------------------------------------------------- assemblies and builds
+def _build(hub, who, code, quantity, **more):
+    """A build of the part ``code``, written and submitted by ``who``."""
+    b = hub.create_record(who, "Build", {"part": _part_ref(hub, code), "quantity": quantity, **more})
+    hub.update_record(who, f"Build/{b['id']}", {"status": "submitted"})
+    return hub.records.read("Build", b["id"])
+
+
+def _stk(rec):
+    return f"StockItem/{rec['id']}"
+
+
+def _receive(hub, who, code, quantity, **more):
+    got = _move(hub, who, "receive", quantity, part=_part_ref(hub, code), location=_place(hub, "Supply room"), **more)
+    assert got["status"] == "posted", got.get("reject_reason")
+    return got
+
+
+def test_a_build_takes_its_bill_from_stock_and_what_it_makes_knows_what_went_in(stock):
+    """The demo's dressing kits (DK-1: 2 × PAD-5, 1 × SAL-10) were built five at once by a posted build, with inventory
+    installed alone. Each line of the bill is taken times the build's quantity, the first lot to expire first unless the
+    build names its lots; one short of anything is refused whole, saying every part it is short of."""
+    hub, rana = stock, M(stock, "rana")
+    pack = _inv(hub)
+    assert not {"plm", "dms", "qms"} & {m.id for m in hub.pack.modules}
+    demo = next(iter(hub.records.search("Build", limit=None)))
+    kits, pads, saline = _lot(hub, "DK-1"), _lot(hub, "PAD-5"), _lot(hub, "SAL-10")
+    assert demo["status"] == "posted" and demo["makes"] == "DK-1 lot DK0001" and demo["made"] == [_stk(kits)]
+    assert [(r["code"], r["quantity"]) for r in demo["bom_used"]] == [("PAD-5", 2), ("SAL-10", 1)]
+    assert (kits["quantity"], kits["built_by"], pads["quantity"], saline["quantity"]) == (5, f"Build/{demo['id']}", 20,
+                                                                                         15)
+    assert kits["contains"] == [{"lot": _stk(pads), "quantity": 10}, {"lot": _stk(saline), "quantity": 5}]
+    assert (_part(hub, "DK-1")["available"], _part(hub, "PAD-5")["available"]) == (5, 20)
+    for lot in (kits, pads, saline):
+        assert pack.ledger_problems(hub, _stk(lot)) == []
+    with pytest.raises(Invalid) as e:   # a bill never leads back to its own part, at any depth
+        hub.update_record(rana, _part_ref(hub, "PAD-5"), {"bom": [{"part": _part_ref(hub, "DK-1"), "quantity": 1}]})
+    assert any("would lead back to itself: PAD-5" in p and "DK-1" in p for p in e.value.problems)
+
+    year = int(pads["expiry"][:4])
+    _receive(hub, rana, "PAD-5", 4, lot_number="PD0900", expiry=f"{year - 1}-01-31")   # expires before PD1180
+    first = _build(hub, rana, "DK-1", 3, lot_number="DK0002", location=_place(hub, "Supply room"))
+    early = _lot(hub, "PAD-5", "PD1180")
+    assert first["status"] == "posted" and first["needs_signoff"] == ""   # basic: nothing is signed
+    got = {e["lot"]: [e["quantity_before"], e["quantity_after"]] for e in first["entries"]
+           if e["lot"] in (_stk(early), _stk(pads), _stk(saline))}
+    gone = next(e for e in first["entries"] if (e["status_before"], e["status_after"]) == ("available", "depleted"))
+    assert got == {_stk(pads): [20, 18], _stk(saline): [15, 12]} and \
+        [gone["quantity_before"], gone["quantity_after"]] == [4, 0]
+    _receive(hub, rana, "SAL-10", 10, lot_number="SA9000", expiry=f"{year}-01-31")
+    later = _lot(hub, "SAL-10", "SA9000")
+    named = _build(hub, rana, "DK-1", 1, consume=[{"lot": _stk(later)}])
+    assert named["status"] == "posted"
+    assert hub.records.read("StockItem", later["id"])["quantity"] == 9 and _lot(hub, "SAL-10", "SA7731")["quantity"] == 12
+    assert _lot(hub, "DK-1", named["makes"].split(" lot ")[1])["lot"].startswith("LOT-")   # numbered when none is given
+
+    short = _build(hub, rana, "DK-1", 100)
+    assert short["status"] == "rejected"
+    assert "short: 200 × PAD-5 (16 available), 100 × SAL-10 (21 available)" in short["reject_reason"]
+    gauze = _lot(hub, "GZ-10")
+    wrong = _build(hub, rana, "DK-1", 1, consume=[{"lot": _stk(gauze)}, {"lot": _stk(later), "quantity": 2}])
+    assert "GZ-10 lot GZ2291 is not in the bill of materials of DK-1" in wrong["reject_reason"]
+    assert "it names 2 of SAL-10; the build needs 1" in wrong["reject_reason"]   # and every other reason at once
+    assert _move(hub, rana, "hold", 1, lot=later)["status"] == "posted"
+    held = next(x for x in hub.records.search("StockItem", limit=None) if x.get("parent") == _stk(later))
+    assert "SAL-10 lot SA9000 is quarantined: only available stock goes into a build" in \
+        _build(hub, rana, "DK-1", 1, consume=[{"lot": _stk(held)}])["reject_reason"]
+    old = hub.create_record(rana, "Part", {"code": "OLD-1", "name": "Old pad", "tracking": "none"})
+    hub.update_record(rana, f"Part/{old['id']}", {"status": "obsolete", "obsolete_reason": "replaced"})
+    box = hub.create_record(rana, "Part", {"code": "BOX-1", "name": "Box", "bom": [
+        {"part": f"Part/{old['id']}", "quantity": 1}, {"part": _part_ref(hub, "SAL-10"), "quantity": 1}]})
+    boxed = _build(hub, rana, "BOX-1", 1)["reject_reason"]    # no place to keep it, and a part out of use: both said
+    assert "say which location" in boxed and "OLD-1 Old pad is obsolete: only a part in use goes into a build" in boxed
+    assert "has no approved bill of materials" in _build(hub, rana, "GZ-10", 1)["reject_reason"]
+    assert box["code"] == "BOX-1"
+    from datetime import datetime
+    hub.engine._now = datetime(year, 2, 5, 9, 0)   # SA9000 is past its expiry
+    try:
+        assert f"expired on {year}-01-31" in _build(hub, rana, "DK-1", 1, consume=[{"lot": _stk(later)}])["reject_reason"]
+    finally:
+        hub.engine._now = None
+    for lot in hub.records.search("StockItem", limit=None):
+        assert pack.ledger_problems(hub, _stk(lot)) == [], lot
+
+
+def test_a_serial_traces_back_to_everything_in_it_and_a_component_lot_forward_to_every_unit(stock):
+    """A monitor (serial) is built from a sensor (serial) and a dressing kit (itself built from pads and saline). A
+    serial that goes in is built-in; a row tied to one serial (into) goes into that one only, the rest into each."""
+    hub, rana, noor = stock, M(stock, "rana"), M(stock, "noor")
+    for code, tracking, bom in (("SEN-1", "serial", []), ("MON-1", "serial", [("SEN-1", 1), ("DK-1", 1)])):
+        hub.create_record(rana, "Part", {"code": code, "name": code, "tracking": tracking,
+                                         "bom": [{"part": _part_ref(hub, c), "quantity": q} for c, q in bom]})
+    _receive(hub, rana, "SEN-1", 3, serials="S1\nS2\nS3")
+    s1, s2 = (next(x for x in hub.records.search("StockItem", limit=None) if x.get("serial") == s) for s in ("S1", "S2"))
+    kits, pads = _lot(hub, "DK-1"), _lot(hub, "PAD-5")
+    miscount = _build(hub, rana, "MON-1", 2, serials="M1", location=_place(hub, "Supply room"))
+    assert "give one for each of the 2 made (1 given)" in miscount["reject_reason"]
+    stray = _build(hub, rana, "MON-1", 2, serials="M1\nM2", location=_place(hub, "Supply room"),
+                   consume=[{"lot": _stk(s1), "into": "M9"}])
+    assert "M9 is not a serial number this build makes (M1, M2)" in stray["reject_reason"]
+    built = _build(hub, rana, "MON-1", 2, serials="M1\nM2", location=_place(hub, "Supply room"),
+                   consume=[{"lot": _stk(s1), "into": "M1"}, {"lot": _stk(s2), "into": "M2"}])
+    assert built["status"] == "posted" and built["makes"] == "MON-1 serials M1, M2"
+    m1, m2 = (next(x for x in hub.records.search("StockItem", limit=None) if x.get("serial") == s) for s in ("M1", "M2"))
+    assert [(x["status"], x["quantity"]) for x in map(lambda r: hub.records.read("StockItem", r["id"]), (s1, s2))] == \
+        [("built-in", 0), ("built-in", 0)]
+    assert m1["contains"] == [{"lot": _stk(s1), "quantity": 1}, {"lot": _stk(kits)}]   # the kits: shared by both
+    assert m2["contains"] == [{"lot": _stk(s2), "quantity": 1}, {"lot": _stk(kits)}]
+    assert _part(hub, "SEN-1")["on_hand"] == 1 and _lot(hub, "DK-1")["quantity"] == 3
+
+    got = hub.reach(noor, _stk(m1), "contains", "down")     # back: what is in M1, every level
+    rows, hidden = got["rows"], got["hidden"]
+    assert hidden == 0 and not got["more"] and {(d, ref) for d, ref, *_ in rows} == {
+        (1, _stk(s1)), (1, _stk(kits)), (2, _stk(pads)), (2, _stk(_lot(hub, "SAL-10")))}
+    rows = hub.reach(noor, _stk(pads), "contains", "up")["rows"]      # forward: every unit the pads went into
+    assert {(d, ref) for d, ref, *_ in rows} == {(1, _stk(kits)), (2, _stk(m1)), (2, _stk(m2))}
+    rows = hub.reach(noor, _stk(s1), "contains", "up")["rows"]
+    assert [ref for _, ref, *_ in rows] == [_stk(m1)]                # tied to M1: never in M2
+    for lot in (s1, s2, kits, m1, m2):
+        assert _inv(hub).ledger_problems(hub, _stk(lot)) == []
+
+
+def test_a_build_is_signed_when_the_policy_inspects_and_uses_the_bill_last_approved(stock):
+    hub, rana, amara = stock, M(stock, "rana"), M(stock, "dr-amara")
+    _policy(hub, rana, "tracked", inspection=True, signoff="self")   # one person, still inspecting what is made
+    own = _build(hub, rana, "DK-1", 1)
+    assert own["status"] == "submitted" and "inspects" in own["needs_signoff"]
+    assert _lot(hub, "DK-1")["quantity"] == 5                           # nothing moves before it is signed
+    assert _sign(hub, rana, f"Build/{own['id']}", "inventory-build", "sign-own", "post")["status"] == "posted"
+
+    _policy(hub, rana, "regulated")                                     # tighter: its writer signs it in
+    ref = _part_ref(hub, "DK-1")
+    hub.update_record(rana, ref, {"status": "draft"})                    # revised: built as last approved
+    hub.update_record(rana, ref, {"bom": [{"part": _part_ref(hub, "PAD-5"), "quantity": 3},
+                                          {"part": _part_ref(hub, "SAL-10"), "quantity": 1}]})
+    other = _build(hub, rana, "DK-1", 1)
+    assert other["status"] == "submitted" and [r["quantity"] for r in other["bom_used"]] == [2, 1]
+    i = item_for(hub, _run(hub, f"Build/{other['id']}", "inventory-build"), "sign-other")
+    with pytest.raises(Denied):                                         # regulated: never its own writer
+        hub.engine.claim(rana, i)
+    assert _sign(hub, amara, f"Build/{other['id']}", "inventory-build", "sign-other", "post")["status"] == "posted"
+    assert _lot(hub, "PAD-5")["quantity"] == 16
+
+    hub.update_record(rana, ref, {"status": "in-review"})
+    _sign(hub, amara, ref, "inventory-part", "approve", "approve")
+    assert _part(hub, "DK-1")["revision"] == 1
+    third = _build(hub, rana, "DK-1", 1)
+    assert [r["quantity"] for r in third["bom_used"]] == [3, 1] and third["part_revision"] == 1
+    stale = _build(hub, rana, "DK-1", 1)
+    _move(hub, rana, "issue", 1, lot=_lot(hub, "SAL-10"))               # the stock changes before it is signed
+    _sign(hub, amara, f"Build/{stale['id']}", "inventory-build", "sign-other", "post")
+    assert "the stock changed after this build was checked" in hub.records.read("Build", stale["id"])["reject_reason"]
+    _sign(hub, amara, f"Build/{third['id']}", "inventory-build", "sign-other", "post")
+    for lot in hub.records.search("StockItem", limit=None):
+        assert _inv(hub).ledger_problems(hub, _stk(lot)) == [], lot
+
+
+def test_what_a_build_makes_expires_with_the_first_of_what_went_in_and_its_count_follows_what_it_took(stock):
+    """Rule: what a build makes expires no later than the first lot in it: given no expiry it takes that one's, and a
+    later one is refused. A lot a build takes from is not missing at its next count (its count baseline drops by what
+    was taken), and a build that gives no day it was built is stamped with the day it posted."""
+    hub, rana = stock, M(stock, "rana")
+    pads, saline = _lot(hub, "PAD-5"), _lot(hub, "SAL-10")
+    first = min(pads["expiry"], saline["expiry"])
+    late = _build(hub, rana, "DK-1", 1, lot_number="DK0009", expiry="2999-12-31")
+    assert late["status"] == "rejected" and f"in it expires on {first}: give that date or earlier as its expiry" in \
+        late["reject_reason"]
+    built = _build(hub, rana, "DK-1", 2, lot_number="DK0010")
+    assert built["status"] == "posted" and built["built"] == hub.engine.now().date().isoformat()
+    assert _lot(hub, "DK-1", "DK0010")["expiry"] == first
+    assert hub.records.read("StockItem", pads["id"])["count_baseline"] == 16  # 20 counted, 4 taken
+    line = next(e for e in built["entries"] if e["lot"] == _stk(pads))
+    assert [line["baseline_before"], line["baseline_after"]] == [20, 16]
+    assert _move(hub, rana, "issue", 6, lot=hub.records.read("StockItem", pads["id"]))["status"] == "posted"
+    assert hub.records.read("StockItem", pads["id"])["count_baseline"] == 10  # an issue too: not missing at a count
+
+
+def test_a_part_being_revised_still_runs_low(stock):
+    """Rule: a part being revised is stocked as last approved, so it shows as running low like any part in use; an
+    obsolete one does not."""
+    from practicehub import views
+    hub, rana = stock, M(stock, "rana")
+    w = next(x for x in hub.view("inventory-stock").widgets if x.get("title") == "Running low")
+    low = lambda: {r["code"] for r in views.rows_for(hub, rana, w)[0]}
+    for code in ("PAD-5", "GZ-10"):
+        hub.update_record(rana, _part_ref(hub, code), {"minimum_stock": 1000})
+    assert {"PAD-5", "GZ-10"} <= low()
+    _policy(hub, rana, "basic", part_approval=True)  # a revised part waits in draft for its approval
+    hub.update_record(rana, _part_ref(hub, "PAD-5"), {"status": "draft"})
+    hub.update_record(rana, _part_ref(hub, "GZ-10"), {"status": "obsolete", "obsolete_reason": "replaced"})
+    assert _part(hub, "PAD-5")["status"] == "draft"
+    assert "PAD-5" in low() and "GZ-10" not in low()
+
+
+def test_a_build_named_past_a_lot_that_expires_first_is_refused_unless_it_empties_that_lot(stock):
+    """Rule: under first expiry, first out (enforce), a build that names a lot passes over one that expires first only
+    if the build itself takes all of that one."""
+    hub, rana = stock, M(stock, "rana")
+    _policy(hub, rana, "basic", fefo="enforce")
+    from datetime import timedelta
+    early = _lot(hub, "SAL-10")
+    soon = (hub.engine.now().date() + timedelta(days=30)).isoformat()
+    assert soon < early["expiry"]
+    _receive(hub, rana, "SAL-10", 3, lot_number="SA0100", expiry=soon)  # expires first
+    first = _lot(hub, "SAL-10", "SA0100")
+    skipped = _build(hub, rana, "DK-1", 1, consume=[{"lot": _stk(early)}])
+    assert skipped["status"] == "rejected"
+    assert f"SAL-10 lot SA0100 expires first ({soon}): use that first" in skipped["reject_reason"]
+    both = _build(hub, rana, "DK-1", 4, consume=[{"lot": _stk(first), "quantity": 3}, {"lot": _stk(early), "quantity": 1}])
+    assert both["status"] == "posted", both.get("reject_reason")
+    assert hub.records.read("StockItem", first["id"])["status"] == "depleted"
+
+
+def test_a_build_of_several_serials_says_which_each_serial_goes_into_when_the_policy_asks(stock):
+    """Rule: a serial goes into one unit. A build making several serials links a component serial it does not tie
+    to one (``into``) to each of them, unless the policy asks for exact genealogy (regulated does): then it is refused
+    until each is tied. A serial built in is gone: nothing of it is moved again."""
+    hub, rana = stock, M(stock, "rana")
+    for code, bom in (("SEN-1", []), ("MON-1", [("SEN-1", 1)])):
+        hub.create_record(rana, "Part", {"code": code, "name": code, "tracking": "serial",
+                                         "bom": [{"part": _part_ref(hub, c), "quantity": q} for c, q in bom]})
+    _receive(hub, rana, "SEN-1", 4, serials="S1\nS2\nS3\nS4")
+    sen = {s: next(x for x in hub.records.search("StockItem", limit=None) if x.get("serial") == s)
+           for s in ("S1", "S2", "S3", "S4")}
+    here = _place(hub, "Supply room")
+    loose = _build(hub, rana, "MON-1", 2, serials="M1\nM2", location=here,
+                   consume=[{"lot": _stk(sen["S1"])}, {"lot": _stk(sen["S2"])}])
+    assert loose["status"] == "posted", loose.get("reject_reason")  # basic: each unit names both (over-includes)
+    m1 = next(x for x in hub.records.search("StockItem", limit=None) if x.get("serial") == "M1")
+    assert {r["lot"] for r in m1["contains"]} == {_stk(sen["S1"]), _stk(sen["S2"])}
+    gone = _move(hub, rana, "issue", 1, lot=hub.records.read("StockItem", sen["S1"]["id"]))
+    assert gone["status"] == "rejected" and "is built-in: nothing of it is left to move" in gone["reject_reason"]
+
+    _policy(hub, rana, "regulated")
+    exact = _build(hub, rana, "MON-1", 2, serials="M3\nM4", location=here,
+                   consume=[{"lot": _stk(sen["S3"])}, {"lot": _stk(sen["S4"]), "into": "M4"}])
+    assert exact["status"] == "rejected"
+    assert "SEN-1 serial S3 is one serial and this build makes 2 (M3, M4): say which each goes into" in \
+        exact["reject_reason"]
+    tied = _build(hub, rana, "MON-1", 2, serials="M3\nM4", location=here,
+                  consume=[{"lot": _stk(sen["S3"]), "into": "M3"}, {"lot": _stk(sen["S4"]), "into": "M4"}])
+    assert tied["status"] == "submitted", tied.get("reject_reason")  # regulated: signed by a second person
+
+
+def test_stock_split_off_a_built_lot_keeps_where_it_was_built_and_traces_back_through_the_split(stock):
+    """Rule: stock split off a built lot (a part of it held) keeps the build that made it, and its trace back ("Made
+    from") goes through the lot it was split from to what went into that one."""
+    hub, rana = stock, M(stock, "rana")
+    kits, pads, saline = _lot(hub, "DK-1"), _lot(hub, "PAD-5"), _lot(hub, "SAL-10")
+    assert _move(hub, rana, "hold", 1, lot=kits, location=_place(hub, "Quarantine shelf"),
+                 reason="torn pouch")["status"] == "posted"
+    held = next(x for x in hub.records.search("StockItem", limit=None) if x.get("parent") == _stk(kits))
+    assert held["built_by"] == kits["built_by"] and held["built_by"].startswith("Build/")
+    rt = hub.record_type("StockItem")
+    group = next(g for g in rt.graph_groups if g["down"] == "Made from")
+    got = hub.reach(rana, _stk(held), group["rels"], "down")
+    assert [(d, ref) for d, ref, *_ in got["rows"]] == [(1, _stk(kits)), (2, _stk(pads)), (2, _stk(saline))]
+    up = hub.reach(rana, _stk(pads), group["rels"], "up")["rows"]
+    assert {(d, ref) for d, ref, *_ in up} == {(1, _stk(kits)), (2, _stk(held))}
 
 
 # ------------------------------------------------------------------------------------------- a record walked by its workflow
@@ -5142,11 +5497,12 @@ def test_the_visit_a_note_is_for_is_one_of_this_patients_active_visits(hub):
     now = hub.engine.now().replace(second=0, microsecond=0)
     at = lambda m: (now + __import__("datetime").timedelta(minutes=m)).isoformat(timespec="minutes")
     here = hub.create_record(amara, "Encounter", _visit(pat, "dr-amara", at(-600)))
-    later = hub.create_record(amara, "Encounter", _visit(pat, "dr-liam", at(1440 * 3)))
+    # the visits ahead are booked past the demo calendar (its next three working days), so no time of day clashes
+    later = hub.create_record(amara, "Encounter", _visit(pat, "dr-liam", at(1440 * 20)))
     for st in ("arrived", "in-progress"):
         hub.update_record(amara, f"Encounter/{here['id']}", {"status": st})
     done = hub.records.create("Encounter", _visit(pat, "dr-amara", at(-3000), status="finished"))
-    theirs = hub.create_record(amara, "Encounter", _visit(other, "dr-amara", at(1440 * 4)))
+    theirs = hub.create_record(amara, "Encounter", _visit(other, "dr-amara", at(1440 * 21)))
     f = {"name": "appointment", "path": "appointment", "label": "Visit", "type": "reference",
          "target": ["Encounter"], "active": True}
     page = App(hub)._active_ref_input(amara, f, pat, None)
@@ -5901,10 +6257,14 @@ def test_a_search_matches_only_what_the_member_may_read_and_is_answered_by_the_d
     calls = []
     real = hub.records.search
     monkeypatch.setattr(hub.records, "search", lambda *a, **k: calls.append(k) or real(*a, **k))
+    # the restrictions in force are read again every few seconds, which a slow run can land between these searches:
+    # read them every time, so that read is always among the calls, and only the searches by words are pages
+    monkeypatch.setattr("practicehub.restrictions._TTL", 0)
     assert [r["id"] for r in hub.search_records(amara, "Encounter", text="quokka")] == [v["id"]]  # by its start
     assert hub.search_records(jo, "Encounter", text="quokkaburn") == []
     assert hub.search_records(jo, None, text="quokkaburn cough") == []
-    assert all(k.get("limit") == 200 for k in calls)  # a page, never every record
+    words = [k for k in calls if k.get("text")]
+    assert len(words) == 3 and all(k.get("limit") == 200 for k in words)  # a page, never every record
     # what jo may read of the same visit still finds it
     pat = hub.records.read(*pat_ref.split("/"))
     family = pat["name"][0]["family"]
@@ -8060,6 +8420,258 @@ def test_numbers_in_a_series_have_no_gaps_and_each_year_starts_again(hub):
     assert letter("2027-02-01")[1] == "L-2027-002"
 
 
+# ----------------------------------------------------------------------------------- references that make a graph
+_KIT_HEAD = 'id = "Kit"\ndata_class = "products"\n[[field]]\nname = "code"\n'
+
+
+@pytest.mark.parametrize("fields, words", [
+    ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\ngraph = "Used in"\n',
+     "graph is a table"),
+    ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\ngraph = { down = "Has" }\n',
+     "graph is a table"),
+    ('[[field]]\nname = "up"\ngraph = { down = "Has", up = "In" }\n', "graph is for a reference"),
+    ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Document"]\nrel = "made-of"\n'
+     'graph = { down = "Has", up = "In" }\n', "its own type"),
+    ('[[field]]\nname = "bom"\ntype = "table"\n[[field.column]]\nname = "part"\ntype = "reference"\n'
+     'target = ["Document"]\nrel = "made-of"\ngraph = { down = "Has", up = "In" }\n', "its own type"),  # a column too
+    ('[[field]]\nname = "x"\ntype = "object"\n[[field]]\nname = "up"\npath = "x.up"\ntype = "reference"\n'
+     'target = ["Kit"]\nrel = "made-of"\ngraph = { down = "Has", up = "In" }\n', "a table's column"),
+    ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\ndata_class = "billing"\n'
+     'graph = { down = "Has", up = "In" }\n', "is traced for whoever reads"),
+    ('[[field]]\nname = "up"\ntype = "reference"\ntarget = ["Kit"]\nrel = "made-of"\n'
+     'graph = { down = "Has", up = "In" }\n[[field]]\nname = "down"\ntype = "reference"\ntarget = ["Kit"]\n'
+     'rel = "fits"\ngraph = { down = "Has", up = "Fits" }\n', "already names a way of another graph field"),
+    ('[[field]]\nname = "n"\ntype = "number"\nmin = 0\nabove = 0\n', "give min (that number or more) or above"),
+    ('[[field]]\nname = "n"\ntype = "number"\nabove = 5\nmax = 5\n', "leaves nothing up to max"),
+])
+def test_graph_references_are_declared_right(fields, words):
+    """Rule: a graph reference (``graph``) names its two ways and points at records of its own type, from a field of
+    its own, a list of them, or a table's column; a number more than a bound (``above``) leaves room up to its max."""
+    from practicehub import schema
+    with pytest.raises(schema.DefinitionError) as exc:
+        schema.parse(_KIT_HEAD + fields)
+    assert words in str(exc.value), str(exc.value)
+
+
+def test_a_graph_reference_never_leads_a_record_back_to_itself(hub, monkeypatch, tmp_path):
+    """Rule: a write that would make a record reach itself through a graph reference (a kit inside itself, at any
+    depth) is refused, and the refusal names the way round."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = M(hub, "rana")
+    c = kit(hub, "KC")
+    b = kit(hub, "KB", (c, 2))
+    a = kit(hub, "KA", (b, 1))
+    with pytest.raises(Invalid) as exc:
+        hub.update_record(rana, f"Kit/{c['id']}", {"bom": [{"part": f"Kit/{a['id']}", "quantity": 1}]})
+    assert any("KC → KA → KB → KC" in p for p in exc.value.problems), exc.value.problems
+    with pytest.raises(Invalid) as exc:
+        hub.update_record(rana, f"Kit/{c['id']}", {"bom": [{"part": f"Kit/{c['id']}", "quantity": 1}]})
+    assert any("KC → KC" in p for p in exc.value.problems), exc.value.problems
+    d = kit(hub, "KD")  # the same kit twice in one tree is not a loop
+    hub.update_record(rana, f"Kit/{a['id']}", {"bom": [{"part": f"Kit/{b['id']}", "quantity": 1},
+                                                      {"part": f"Kit/{d['id']}", "quantity": 1}]})
+    hub.update_record(rana, f"Kit/{c['id']}", {"bom": [{"part": f"Kit/{d['id']}", "quantity": 3}]})
+
+
+def test_each_row_is_checked_and_its_references_are_links(hub, monkeypatch, tmp_path):
+    """Rule: a table's graph column is required in each row, and the refusal names the row; a reference in a row is
+    a link like any other, gone when its row is."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = M(hub, "rana")
+    b, c = kit(hub, "KB"), kit(hub, "KC")
+    with pytest.raises(Invalid) as exc:
+        hub.create_record(rana, "Kit", {"code": "KA", "bom": [{"part": f"Kit/{b['id']}", "quantity": 1},
+                                                              {"part": f"Kit/{c['id']}"}]})
+    assert any("row 2: quantity is required" in p.lower() for p in exc.value.problems), exc.value.problems
+    a = kit(hub, "KA", (b, 1), (c, 2))
+    made_of = lambda: {x["to_ref"] for x in hub.db.links.find({"from_ref": f"Kit/{a['id']}", "rel": "made-of"})}
+    assert made_of() == {f"Kit/{b['id']}", f"Kit/{c['id']}"}
+    hub.update_record(rana, f"Kit/{a['id']}", {"bom": [{"part": f"Kit/{c['id']}", "quantity": 2}]})
+    assert made_of() == {f"Kit/{c['id']}"}
+
+
+def test_a_graph_is_walked_both_ways_and_what_a_member_may_not_read_is_counted(hub, monkeypatch, tmp_path):
+    """Rule: a graph reference is followed at every level, down (what a record is made of) and up (where it is
+    used); each level is in title order under the one it came from. A record the member may not read is counted,
+    never shown, and not walked past."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    c = kit(hub, "KC")
+    b = kit(hub, "KB", (c, 2))
+    d = kit(hub, "KD")
+    a = kit(hub, "KA", (d, 1), (b, 1))
+    rana = M(hub, "rana")
+    title = lambda rows: [(depth, hub.title(rec)) for depth, _, rec, *_ in rows]
+    got = hub.reach(rana, f"Kit/{a['id']}", "made-of", "down")
+    assert title(got["rows"]) == [(1, "KB"), (2, "KC"), (1, "KD")] and got["hidden"] == 0 and not got["more"]
+    up = hub.reach(rana, f"Kit/{c['id']}", "made-of", "up")["rows"]
+    assert title(up) == [(1, "KB"), (2, "KA")]
+    got = hub.reach(M(hub, "jo"), f"Kit/{a['id']}", "made-of", "down")  # jo may not read kits
+    assert got["rows"] == [] and got["hidden"] == 2
+
+
+def test_a_write_walks_only_the_references_it_adds_and_stops_at_a_loop_already_there(hub, monkeypatch, tmp_path):
+    """Rule: a write is checked for the graph references it adds: one that adds none is not walked (a loop that older
+    data already holds does not stop the record being edited), a walk through such a loop ends, and a reference that
+    would close a loop is refused."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = M(hub, "rana")
+    b = kit(hub, "KB")
+    a = kit(hub, "KA", (b, 1))
+    hub.db.links.insert({"_id": f"Kit/{b['id']}|made-of|Kit/{a['id']}", "from_ref": f"Kit/{b['id']}",
+                         "rel": "made-of", "to_ref": f"Kit/{a['id']}"})  # older data: KB made of KA
+    hub.update_record(rana, f"Kit/{a['id']}", {"code": "KA-1"})  # adds no reference: not walked
+    c = kit(hub, "KC", (a, 1))  # the walk down from KC goes round KA → KB → KA, and ends
+    with pytest.raises(Invalid) as exc:
+        hub.update_record(rana, f"Kit/{a['id']}", {"bom": [{"part": f"Kit/{b['id']}", "quantity": 1},
+                                                          {"part": f"Kit/{c['id']}", "quantity": 1}]})
+    assert any("KA-1 → KC → KA-1" in p for p in exc.value.problems), exc.value.problems
+
+
+def test_a_graph_deeper_than_any_real_one_is_refused_and_a_trace_says_what_it_left_out(hub, monkeypatch, tmp_path):
+    """Rule: a reference that would make a graph go more than ``GRAPH_DEPTH`` levels down is refused (a level named
+    twice, most likely); a trace shows at most ``limit`` rows, and below ``GRAPH_DEPTH`` it stops, and says there is
+    more either way."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    monkeypatch.setattr(type(hub), "GRAPH_DEPTH", 3)
+    rana = M(hub, "rana")
+    k1 = kit(hub, "K1")
+    k2 = kit(hub, "K2", (k1, 1))
+    k3 = kit(hub, "K3", (k2, 1))
+    k4 = kit(hub, "K4", (k3, 1))  # three levels down: as deep as allowed
+    k5 = kit(hub, "K5")
+    with pytest.raises(Invalid) as exc:
+        hub.update_record(rana, f"Kit/{k5['id']}", {"bom": [{"part": f"Kit/{k4['id']}", "quantity": 1}]})
+    assert any("more than 3 levels deep" in p for p in exc.value.problems), exc.value.problems
+    got = hub.reach(rana, f"Kit/{k4['id']}", "made-of", "down")
+    assert [d for d, *_ in got["rows"]] == [1, 2, 3] and not got["more"]
+    got = hub.reach(rana, f"Kit/{k4['id']}", "made-of", "down", limit=1)
+    assert len(got["rows"]) == 1 and got["more"]
+    monkeypatch.setattr(type(hub), "GRAPH_DEPTH", 2)
+    got = hub.reach(rana, f"Kit/{k4['id']}", "made-of", "down")
+    assert [d for d, *_ in got["rows"]] == [1, 2] and got["more"]
+
+
+def test_a_record_withheld_whole_is_counted_once_however_often_a_trace_meets_it(hub, monkeypatch, tmp_path):
+    """Rule: a record withheld whole from the member is not shown in a trace, nor walked past, and is counted once
+    however many ways lead to it."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = M(hub, "rana")
+    e = kit(hub, "KE")
+    d = kit(hub, "KD", (e, 1))
+    b, c = kit(hub, "KB", (d, 1)), kit(hub, "KC", (d, 2))
+    a = kit(hub, "KA", (b, 1), (c, 1))  # a diamond: KA → KB → KD and KA → KC → KD
+    real = type(hub).redact
+
+    def redact(self, member, rec):
+        if rec and rec.get("id") == d["id"]:
+            return {**rec, "meta": {"withheld": {"whole": True, "note": "withheld", "fields": []}}}
+        return real(self, member, rec)
+    monkeypatch.setattr(type(hub), "redact", redact)
+    got = hub.reach(rana, f"Kit/{a['id']}", "made-of", "down")
+    assert [hub.title(r) for _, _, r, *_ in got["rows"]] == ["KB", "KC"] and got["hidden"] == 1
+
+
+def test_a_number_more_than_a_bound_refuses_the_bound(hub, monkeypatch, tmp_path):
+    """Rule: a number with ``above`` must be more than it, in a table's column too (a bill's quantity is more than
+    nothing)."""
+    from conftest import kit, kit_module
+    kit_module(hub, monkeypatch, tmp_path)
+    rana = M(hub, "rana")
+    b = kit(hub, "KB")
+    with pytest.raises(Invalid) as exc:
+        hub.create_record(rana, "Kit", {"code": "KA", "bom": [{"part": f"Kit/{b['id']}", "quantity": 0}]})
+    assert any("row 1: quantity must be more than 0" in p.lower() for p in exc.value.problems), exc.value.problems
+    kit(hub, "KA", (b, 0.5))
+
+
+def test_a_decimal_more_than_a_bound_is_more_than_it_exactly(stock):
+    """Rule: a decimal with ``above`` must be more than it, compared exactly: a part's bill of materials gives each
+    line a quantity more than nothing, and the least it may give is the smallest step of its places."""
+    hub = stock
+    rana = M(hub, "rana")
+    pad = _part(hub, "PAD-5")
+    for q in ("0", "0.000", "-1"):
+        with pytest.raises(Invalid) as exc:
+            hub.create_record(rana, "Part", {"code": "KIT-X", "name": "Kit", "bom": [
+                {"part": f"Part/{pad['id']}", "quantity": q}]})
+        assert any("row 1: quantity must be more than 0" in p.lower() for p in exc.value.problems), exc.value.problems
+    made = hub.create_record(rana, "Part", {"code": "KIT-X", "name": "Kit", "bom": [
+        {"part": f"Part/{pad['id']}", "quantity": "0.001"}]})
+    assert str(made["bom"][0]["quantity"]) == "0.001"
+
+
+def test_a_reference_is_added_only_to_a_record_its_writer_may_read_and_said_alike_whether_it_exists(stock):
+    """Rule: a reference to any record (a part's specifications) is added only to one its writer may read; the refusal
+    says the same whether or not there is such a record, so a write never tells anyone what they may not read. A
+    reference to any record that names a member names one the hub has, or one of the hub's own actors (a workflow
+    that asked for a follow-up)."""
+    from practicehub.hub import member_ref
+    hub = stock
+    hub.authz.write([("role:stock-keeper", "assignee", member_ref("jo"))])  # front desk: no clinical record
+    jo = M(hub, "jo")
+    obs = hub.records.search("Observation", limit=1)[0]
+    for ref in (f"Observation/{obs['id']}", "Observation/no-such-one"):
+        with pytest.raises(Invalid) as exc:
+            hub.create_record(jo, "Part", {"code": "SPEC-1", "name": "Probe", "specs": [ref]})
+        assert exc.value.problems == [f"Part: specified-by names {ref}, which is not a record you may read"]
+    with pytest.raises(Invalid) as exc:
+        hub.create_record(M(hub, "rana"), "Part", {"code": "OWN-1", "name": "Probe", "specs": ["Practitioner/nobody"]})
+    assert exc.value.problems == ["Part: specified-by points at Practitioner/nobody: there is no such member"]
+    made = hub.create_record(M(hub, "rana"), "Part", {"code": "OWN-2", "name": "Probe",  # the hub's own actor: kept
+                                                      "specs": ["Practitioner/workflow:inventory-build@v1"]})
+    assert made["specs"] == ["Practitioner/workflow:inventory-build@v1"]
+    part = hub.create_record(M(hub, "dr-amara"), "Part", {"code": "OWN-1", "name": "Probe",
+                                                          "specs": [f"Observation/{obs['id']}"]})
+    hub.update_record(jo, f"Part/{part['id']}", {"name": "Probe, sterile"})  # what it had before is kept
+
+
+def test_a_module_needs_the_version_it_names_of_what_it_builds_on_and_an_upgrade_keeps_what_is_there(
+        hub, monkeypatch, tmp_path):
+    """Rule: a module that builds on another at a least version (``requires = ["kits>=2"]``) is installed, or loaded,
+    only over that version or a later one; an upgrade that would leave it on an older one is refused, and so is one
+    that drops a record type with records of it."""
+    from conftest import KIT_MODULE, kit, kit_module
+    from practicehub import pack as packmod
+    kit_module(hub, monkeypatch, tmp_path)
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    kits = packmod.MODULES_DIR / "kits"
+    bag = packmod.MODULES_DIR / "kitbag"
+    bag.mkdir()
+    (bag / "module.toml").write_text('[module]\nrequires_core = "1.0"\nid = "kitbag"\nname = "Kit bags"\n'
+                                     'version = "1"\nrequires = ["kits>=2"]\nsummary = "A test module: bags of kits."\n')
+
+    def put_in_force(name, verb):
+        hub.approve_module_code(amara, name)
+        return getattr(hub, f"{verb}_module")(rana, name)
+
+    with pytest.raises(Invalid) as exc:
+        put_in_force("kitbag", "install")
+    assert "builds on kits 1 (needs 2 or later): upgrade it first, then install kitbag" in str(exc.value)
+    with pytest.raises(ValueError, match="upgrade it first"):  # nor is it loaded over an older one
+        packmod.add_module(hub.pack, packmod.load_module("kitbag", run_code=False))
+    assert packmod.needs_words(packmod.load_module("kitbag", run_code=False)) == ["kits 2 or later"]
+    (kits / "module.toml").write_text(KIT_MODULE.replace('version = "1"', 'version = "2"'))
+    put_in_force("kits", "upgrade")
+    put_in_force("kitbag", "install")
+    (kits / "module.toml").write_text(KIT_MODULE)  # back to 1, under what kitbag needs
+    with pytest.raises(Invalid) as exc:
+        put_in_force("kits", "upgrade")
+    assert exc.value.problems == ["kitbag (needs kits 2 or later) builds on it"]
+    kit(hub, "KA")
+    (kits / "module.toml").write_text(KIT_MODULE.replace('version = "1"', 'version = "3"'))
+    (kits / "types" / "Kit.toml").unlink()  # version 3 no longer has kits, and there is one
+    with pytest.raises(Invalid) as exc:
+        put_in_force("kits", "upgrade")
+    assert exc.value.problems == ["it no longer has the record type Kit, and there are Kit records"]
+    assert hub.module_version("kits") == "2"
+
+
 # ------------------------------------------------------------------------------------- sign-off that holds
 POSTING = '''id = "Posting"
 key = "PST"
@@ -9091,6 +9703,28 @@ def test_a_subtype_never_changes_what_is_its_parent_s(hub):
     _in_force(hub, 'id = "Memo"\nextends = "Note"\n[[field]]\nname = "about"\ntarget = ["Person"]\n')  # under Party
     problems = _refused(hub, 'id = "Memo"\nextends = "Note"\n[[field]]\nname = "about"\ntarget = ["Patient"]\n')
     assert any("Patient is not one" in p for p in problems), problems
+
+
+def test_a_type_under_another_keeps_its_graph_and_its_bound_above(hub):
+    """A graph (a reference to the type's own records, traced both ways) is inherited: a type under it points at the
+    family's records, and the trace follows its records too. Its words are the parent's; a bound above, as min, is
+    kept or raised."""
+    _in_force(hub, 'id = "Node"\ndata_class = "clinical"\n[[field]]\nname = "name"\n[[field]]\nname = "next"\n'
+                   'type = "reference"\ntarget = ["Node"]\nrel = "leads-to"\ngraph = { down = "Leads to", up = "Comes from" }\n'
+                   '[[field]]\nname = "weight"\ntype = "number"\nabove = 0\n')
+    leaf = _in_force(hub, 'id = "Leaf"\nextends = "Node"\n[[field]]\nname = "colour"\n')
+    assert leaf.field("next")["graph"] == {"down": "Leads to", "up": "Comes from"} and leaf.graphs
+    head = 'id = "Twig"\nextends = "Node"\n'
+    for bad, says in ((head + '[[field]]\nname = "next"\ngraph = { down = "Holds", up = "Comes from" }\n',
+                       "its graph is Node's"),
+                      (head + '[[field]]\nname = "weight"\nabove = -1\n', "above is 0 at Node")):
+        assert any(says in p for p in _refused(hub, bad)), (says, _refused(hub, bad))
+    assert _in_force(hub, head + '[[field]]\nname = "weight"\nabove = 2\n').field("weight")["above"] == 2
+    amara = M(hub, "dr-amara")
+    root = hub.create_record(amara, "Node", {"name": "root"})
+    tip = hub.create_record(amara, "Leaf", {"name": "tip", "next": f"Node/{root['id']}"})
+    up = hub.reach(amara, f"Node/{root['id']}", "leads-to", "up")
+    assert [r for _, r, *_ in up["rows"]] == [f"Leaf/{tip['id']}"]
 
 
 def test_a_chain_runs_from_a_core_base_through_a_pack_s_type_to_an_overlay_s(hub):

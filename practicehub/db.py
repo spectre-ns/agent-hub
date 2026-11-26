@@ -145,7 +145,7 @@ INDEXES = {
     "skill_versions": [("skill_id", "status"), "status"],
     "agent_profile_versions": [("agent_id", "status")],
     "record_versions": [("type", "id", "version"), "refs"],
-    "links": ["to_ref", "from_ref"],
+    "links": [("to_ref", "rel"), ("from_ref", "rel")],   # what points at a record, and where it points, by rel
     "titles": [("type", "key")],
     "mention_names": [("type", "key"), "from_ref"],
     "mentions": [("ref", "member")],

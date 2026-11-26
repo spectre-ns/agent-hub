@@ -386,3 +386,85 @@ def pytest_collection_modifyitems(config, items):
     keep = [t for k, t in enumerate(items) if k % n == i]
     config.hook.pytest_deselected(items=[t for t in items if t not in keep])
     items[:] = keep
+
+
+KIT_MODULE = '''[module]
+requires_core = "1.0"
+id = "kits"
+name = "Kits"
+version = "1"
+summary = "A test module: kits made of kits."
+
+[[data_classes]]
+id = "kits"
+name = "Kits"
+description = "Kits and what they are made of."
+
+[grants.practice-manager]
+read = ["kits"]
+write = ["kits"]
+
+[grants.nurse]
+read = ["kits"]
+'''
+
+KIT_TYPE = '''id = "Kit"
+key = "KIT"
+label = "Kit"
+plural = "Kits"
+data_class = "kits"
+title = "{code}"
+summary = "A kit, made of other kits."
+
+[[field]]
+name = "code"
+required = true
+
+[[field]]
+name = "bom"
+label = "Made of"
+type = "table"
+
+[[field.column]]
+name = "part"
+label = "Part"
+type = "reference"
+target = ["Kit"]
+rel = "made-of"
+required = true
+graph = { down = "Bill of materials", up = "Used in" }
+
+[[field.column]]
+name = "quantity"
+type = "number"
+required = true
+above = 0
+
+[[field.column]]
+name = "note"
+
+[[field.column]]
+name = "checked"
+type = "datetime"
+'''
+
+
+def kit_module(hub, monkeypatch, tmp_path):
+    """A module of our own, installed: Kit, whose table (``bom``) names other kits through a graph column."""
+    import shutil
+    from practicehub import pack as packmod
+    d = tmp_path / "modules"
+    shutil.copytree(packmod.MODULES_DIR, d)
+    (d / "kits" / "types").mkdir(parents=True)
+    (d / "kits" / "module.toml").write_text(KIT_MODULE)
+    (d / "kits" / "types" / "Kit.toml").write_text(KIT_TYPE)
+    monkeypatch.setattr(packmod, "MODULES_DIR", d)
+    hub.approve_module_code(M(hub, "dr-amara"), "kits")
+    hub.install_module(M(hub, "rana"), "kits")
+    return hub.record_type("Kit")
+
+
+def kit(hub, code, *rows, by="rana"):
+    """A kit, made of (Kit record, quantity) rows."""
+    return hub.create_record(M(hub, by), "Kit", {"code": code,
+                                                 "bom": [{"part": f"Kit/{k['id']}", "quantity": q} for k, q in rows]})

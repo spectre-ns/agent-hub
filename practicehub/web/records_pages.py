@@ -119,6 +119,7 @@ class RecordPages:
         R("GET", r"/create", self.page_create)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/export", self.page_export_list)  # before a record's own page
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/export", self.page_export_record)
+        R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/trace", self.get_trace)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)", self.page_record)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/activity", self.page_record_activity)
         R("GET", r"/records/(?P<rtype>[A-Za-z][\w]*)/(?P<rid>[\w.-]+)/journey", self.page_record_journey)
@@ -187,6 +188,13 @@ class RecordPages:
         return self._export_page(req, "Export", f"Export <b>{e(hub.short_title(rec))}</b> ({e(self._lower(rt.label))}):",
                                  picks, [("/records", "Records"), (f"/records/{rtype}", rt.plural),
                                          (self.record_href(ref), hub.short_title(rec)), (None, "Export")])
+
+    def get_trace(self, req, rtype, rid):
+        """A graph's whole reach from a record, as CSV (``?graph=<field>&way=down|up``): every level, past the rows
+        its page shows (export.trace)."""
+        q = req["query"]
+        return self._download(exportmod.trace(self.hub, req["me"], f"{rtype}/{rid}", q.get("graph") or "",
+                                              q.get("way") or "down"))
 
     def page_export_list(self, req, rtype):
         me, hub, q = req["me"], self.hub, req["query"]
@@ -470,9 +478,12 @@ class RecordPages:
                 f'</div><button type="button" class="btn subtle" data-grid-add hidden>Add a row</button>'
                 f'<small class="help">{" · ".join(e(h) for h in helps)}</small></fieldset>')
 
-    def _rows_from_form(self, f, form: dict) -> list[dict]:
-        """A grid's rows as the form sent them, each cell as its column's type; a blank row is dropped."""
+    def _rows_from_form(self, f, form: dict, before=None) -> list[dict]:
+        """A grid's rows as the form sent them, each cell as its column's type; a blank row is dropped. ``before``:
+        the rows the record holds, which the grid shows in order: a datetime cell sent back as it was shown (to the
+        minute) keeps its seconds and zone."""
         name, found = f["path"], {}
+        old = before if isinstance(before, list) else []
         for k in form:
             m = re.fullmatch(re.escape(name) + r"\.(\d{1,4})\.([A-Za-z_][A-Za-z0-9_]*)", k)
             if m:
@@ -485,6 +496,11 @@ class RecordPages:
                 c = cols.get(col)
                 if c is None:
                     continue
+                was = old[i].get(col) if i < len(old) and isinstance(old[i], dict) else None
+                if c["type"] == "datetime" and isinstance(was, str) and isinstance(raw, str) and raw \
+                        and raw == was[:16]:
+                    row[col] = was     # shown to the minute and not changed
+                    continue
                 try:
                     v = self._coerce(c, raw)
                 except Invalid as exc:
@@ -494,6 +510,14 @@ class RecordPages:
             if row:
                 rows.append(row)
         return rows
+
+    @staticmethod
+    def _same_rows(new: list, old) -> bool:
+        """Whether rows as sent are the rows the record holds: a reference held as {reference} or Type/id alike, and
+        an empty cell (which a grid sends back as nothing) the same as none."""
+        flat = lambda rows: [{k: (schema.ref_of(v) or v) if isinstance(v, dict) else v for k, v in x.items()  # noqa: E731
+                              if v not in (None, "")} if isinstance(x, dict) else x for x in (rows or [])]
+        return flat(new) == flat(old)
 
     def _pin_html(self, f, rec, item) -> str:
         """A pinned reference's version, and, when its record has changed since, the version now and a button that
@@ -657,6 +681,10 @@ class RecordPages:
         targets = self.hub.concrete(f["target"])  # a base type's target (Subject) takes each type extending it
         if "/" in typed and typed.split("/", 1)[0] in (set(targets) | self.hub.member_types()):
             return typed
+        if "*" in targets and "/" in typed and self.hub.record_type(typed.split("/", 1)[0]):
+            return typed  # a reference to any record: its address, of a type the hub has
+        if all(t == "*" for t in targets):
+            raise Invalid(f"{f['label']}: {typed!r} is not a record's address (Type/id, as its page's address ends)")
         hits = []
         if " · " in typed:  # picked from the suggestions: the id after the dot decides
             rid = typed.rsplit(" · ", 1)[1].strip()
@@ -679,6 +707,34 @@ class RecordPages:
                                            f"{len(hits)} records are called {typed!r}: type more of it (a date of "
                                            f"birth or number), or open the one you mean and link it from there"))
 
+    def _ref_options(self, f, refs: list[str], me) -> tuple[list[tuple[str, str]], bool]:
+        """The records a reference field may be set to, as (Type/id, title), and whether there are too many to list
+        (then a name is typed). What it points at now (``refs``) is always one, even beyond the list or not readable
+        by this member: saving the form never drops a link the member did not touch."""
+        options, many = [], False
+        members = self.hub.member_types()
+        for t in self.hub.concrete(f["target"]):
+            if t in members and f.get("roles"):  # only the people who hold one of the field's roles
+                held = {f"{t}/{m['id']}": m["name"] for rid in f["roles"]
+                        for m in self.hub.active_holders(rid, persons_only=True)}
+                options += sorted(held.items(), key=lambda o: o[1])
+            elif t in members:  # a reference to a member of the practice: the people on the team
+                options += [(f"{t}/{m['id']}", m["name"]) for m in self.hub.members("person")
+                            if m["status"] == "active"]
+            elif t != "*" and self.hub.record_type(t) and self._may_read(me, t):
+                found = self.hub.records.search(t, limit=PICK + 1)
+                many = many or len(found) > PICK
+                options += [(f"{t}/{r['id']}", self.hub.title(r)) for r in found[:PICK]]
+        have = {v for v, _ in options}
+
+        def shown(r):
+            t, _, rid = r.partition("/")
+            if t in members:
+                m = self.hub.db.members.find_one({"_id": rid}, fields=["name"])
+                return m["name"] if m else r
+            return (self.hub.title(self.hub.records.read(t, rid) or {}) or r) if self._may_read(me, t) else r
+        return [(r, shown(r)) for r in refs if r not in have] + options, many
+
     def _input(self, f, rec, me) -> str:
         """A form control for a field, filled from the record (none for a field of a class they may not write)."""
         if not visibility.may_field(self.hub, me, f, write=True):
@@ -693,34 +749,20 @@ class RecordPages:
             return self._table_grid(f, vals[0] if vals else [], me)
         if f["type"] == "reference":
             refs = [schema.ref_of(v) for v in vals if schema.ref_of(v)]
-            options, many = [], False
-            members = self.hub.member_types()
-            for t in self.hub.concrete(f["target"]):
-                if t in members and f.get("roles"):  # only the people who hold one of the field's roles
-                    held = {f"{t}/{m['id']}": m["name"] for rid in f["roles"]
-                            for m in self.hub.active_holders(rid, persons_only=True)}
-                    options += sorted(held.items(), key=lambda o: o[1])
-                elif t in members:  # a reference to a member of the practice: the people on the team
-                    options += [(f"{t}/{m['id']}", m["name"]) for m in self.hub.members("person")
-                                if m["status"] == "active"]
-                elif t != "*" and self.hub.record_type(t) and self._may_read(me, t):
-                    found = self.hub.records.search(t, limit=PICK + 1)
-                    many = many or len(found) > PICK
-                    options += [(f"{t}/{r['id']}", self.hub.title(r)) for r in found[:PICK]]
-            # what the record points at now is always an option, even beyond the list or not readable by this
-            # member: saving the form never drops a link the member did not touch
-            have = {v for v, _ in options}
-            def shown(r):
-                t, _, rid = r.partition("/")
-                if t in members:
-                    m = self.hub.db.members.find_one({"_id": rid}, fields=["name"])
-                    return m["name"] if m else r
-                return (self.hub.title(self.hub.records.read(t, rid) or {}) or r) if self._may_read(me, t) else r
-            options = [(r, shown(r)) for r in refs if r not in have] + options
+            multi = f["path"].endswith(".*")
+            if all(t == "*" for t in f["target"]):  # any record: nothing to list, so its address is typed
+                req = " required" if f.get("required") else ""
+                cid, ids = self._control_id(name, True)
+                ctl = (f'<input name="{e(name)}"{ids} value="{e(", ".join(refs))}" autocomplete="off" '
+                       f'spellcheck="false" placeholder="Type/id"{req}>')
+                helps = ([f["help"]] if f.get("help") else []) + [
+                    "Its address, Type/id, as its page's address ends" + (": several, separated by commas." if multi
+                                                                          else ".")]
+                return self._labelled(f, ctl, cid, helps)
+            options, many = self._ref_options(f, refs, me)
             own = self.hub.record_type((rec or {}).get("resourceType", ""))
             if own and own.parent == f["path"] and rec.get("id"):  # a record is never its own parent
                 options = [(v, lbl) for v, lbl in options if v != f"{own.id}/{rec['id']}"]
-            multi = f["path"].endswith(".*")
             if many and not multi:  # too many to list: type a name; the store is searched when the form is saved
                 dl = f"dl-{abs(hash(name)) % 10**8}"
                 cur = refs[0] if refs else ""
@@ -797,6 +839,47 @@ class RecordPages:
             out.append(self._labelled(f, f'<input type="file" name="{e(name)}"{ids}{req}>', cid, helps))
         return "".join(out)
 
+    def _graph_panels(self, me, rt, rec, ref: str) -> str:
+        """For each graph (``graph``; fields sharing the same words are one, as a lot's parts and what it was split
+        from), where it leads from this record at every level, both ways: down (what it points at, and what those
+        point at), shown when it goes deeper than the record's own fields; up (everything that leads here). A row's
+        other values (how many, which positions) go beside each record, and the field it came by when the graph has
+        several. Past ``TRACE_ROWS`` the rest are counted, and the trace export has them all."""
+        out = []
+        held = {ref: rec}
+        for g in rt.graph_groups:
+            by_rel = {f["rel"]: f for f in g["fields"]}
+            for way in ("down", "up"):
+                got = self.hub.reach(me, ref, g["rels"], way)
+                rows, hidden, more = got["rows"], got["hidden"], got["more"]
+                if way == "down" and not more and not any(d > 1 for d, *_ in rows):
+                    continue  # one level: the record's own fields show it already
+                if not rows and not hidden:
+                    continue
+                for _, r, x, _, _ in rows:
+                    held[r] = x
+                items = []
+                for d, r, x, via, rel in rows:
+                    f = by_rel.get(rel) or g["fields"][0]
+                    holder, target = (held.get(via), r) if way == "down" else (x, via)
+                    words = [f["label"]] if len(g["fields"]) > 1 and not f.get("table") else []
+                    if f.get("table") and holder:
+                        words += schema.row_words(rt, f, holder, target)
+                    items.append(f'<li style="--depth:{d - 1}">{self.record_link(r)}'
+                                 + (f' <span class="muted">{e(" · ".join(words))}</span>' if words else "") + "</li>")
+                notes = []
+                if more:
+                    href = (f"{self.record_href(ref)}/trace?graph={urllib.parse.quote(g['fields'][0]['path'])}"
+                            f"&amp;way={way}")
+                    notes.append(f"And more: the first {len(rows)} are shown. <a href=\"{href}\">Download the whole "
+                                 f"trace</a> (CSV).")
+                if hidden:
+                    notes.append(f"And {hidden} you may not see.")
+                note = "".join(f"<p class='muted'>{n}</p>" for n in notes)
+                out.append(f"<section class='section graph'><h2>{e(g[way])}</h2>"
+                           + (f"<ul class='tree'>{''.join(items)}</ul>" if items else "") + note + "</section>")
+        return "".join(out)
+
     def _on_screen(self, rt, op: str) -> list[dict] | None:
         """The tabs of the type's screen for ``op``, each with the editable fields it shows (None: no screen)."""
         tabs = rt.screen(op)
@@ -853,6 +936,8 @@ class RecordPages:
         """A form value as the field's type; None clears it."""
         if f["type"] == "reference":
             vals = raw if isinstance(raw, list) else [raw]
+            if all(t == "*" for t in f["target"]):  # addresses typed into one box, several to it
+                vals = [x for v in vals if v for x in re.split(r"[,\s]+", str(v)) if x]
             vals = [self._resolve_ref(f, v) for v in vals if v]
             if f["path"].endswith(".*"):
                 return vals
@@ -937,12 +1022,12 @@ class RecordPages:
                 continue
             if f["type"] == "table":
                 try:
-                    val = self._rows_from_form(f, form)
+                    val = self._rows_from_form(f, form, (before or {}).get(key))
                 except Invalid:
                     if not lenient:
                         raise
                     continue
-                if before is not None and val == (before.get(key) or []):
+                if before is not None and self._same_rows(val, before.get(key)):
                     continue
                 data[key] = val or None
                 continue
@@ -1849,6 +1934,8 @@ class RecordPages:
         if editable and not editing and rt.is_a("Booking") and schema.is_active(rt, rec):  # another time, member
             edit_btn = (f'<a class="btn secondary" href="{url}/reschedule" data-modal>Move</a>' + edit_btn)
         rail: list = []
+        if tab == "details" and rt.graphs and not (gone and gone.get("whole")):
+            main.append(self._graph_panels(me, rt, rec, ref))
         if tab == "details":
             used = hub.in_use_version(me, ref) if not is_page else None  # a page says so in its banner
             if used:
@@ -2714,7 +2801,7 @@ class RecordPages:
             adds = sorted(m.type_sources) + [f"+ {did}" for (_, did) in m.extensions]
             rows.append(f'<tr><td><b>{e(m.practice.get("name", m.id))}</b><br><span class="muted">{e(m.id)} '
                         f'v{e(str(m.version))}</span></td><td>{e(m.practice.get("summary", ""))}</td>'
-                        f'<td>{e(", ".join(adds))}</td><td>{e(", ".join(m.requires) or "—")}</td><td>{act}</td></tr>')
+                        f'<td>{e(", ".join(adds))}</td><td>{e(", ".join(packmod.needs_words(m)) or "—")}</td><td>{act}</td></tr>')
         warn = (f'<div class="card error" role="alert"><b>The practice pack</b>: {e(hub.pack_problem)}</div>'
                 if hub.pack_problem and may else "")
         body = (warn + "<p class='muted'>A module adds roles, record types, workflows and views, and may add fields to "

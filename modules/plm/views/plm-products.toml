@@ -1,13 +1,13 @@
 id = "plm-products"
 title = "Products"
-summary = "Product lines and their products, and the changes in progress."
+summary = "The assemblies the practice makes, and the changes to them in progress."
 
 [[widget]]
-kind = "tree"
-title = "Product lines"
-type = "Product"
-where = "record.status != 'obsolete'"
-columns = ["revision", "status"]
+kind = "table"
+title = "Assemblies"
+type = "Part"
+where = "record.bom and record.status != 'obsolete'"
+columns = ["code", "name", "revision", "status", "held_by"]
 
 [[widget]]
 kind = "board"

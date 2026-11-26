@@ -385,7 +385,7 @@ id = "visitors"
 name = "Visitor log"
 version = "1"
 summary = "Who came to the office, and whom they came to see."
-requires = []                        # modules this one builds on
+requires = []                        # modules this one builds on; "inventory>=6" also names the least version
 shortcuts = ["Visitor"]              # listed in the sidebar
 
 [[roles]]
@@ -487,6 +487,11 @@ practicehub module upgrade --as dr-amara dms
 
 New definitions arrive, and changed ones become proposals for a policy owner to approve. Raise `version` in
 `pack.toml` or `module.toml` when you change one, and say what changed.
+
+A module that builds on a version of another names it (`requires = ["inventory>=6"]`). Installing or upgrading it is
+refused until that module is at least that version, and upgrading that module down below what an installed module
+needs is refused too. An upgrade is refused when it would remove a record type that still has records, or a workflow
+with work under way. Finish the work, then remove the module (its records stay readable) and install it again.
 
 ## A checklist for a new practice
 

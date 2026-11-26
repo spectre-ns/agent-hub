@@ -1,0 +1,308 @@
+# A build: stock of an assembly made from the parts its bill of materials names (InvenTree's build). It names the
+# inventory-build workflow, which posts it as one change to the ledger: each component lot it uses goes down, and the
+# lot or serials it makes come into stock, knowing the build and what went into them. The bill used is the one last
+# approved, copied onto the build, so a later revision of the part never changes what a build says it used. Which
+# component lots go in is the build's own choice (consume) or, for the rest, the first to expire. One that cannot be
+# built (short of a part, a lot that may not be used) goes back to its author with every reason.
+id = "Build"
+key = "BUILD"
+label = "Build"
+plural = "Builds"
+data_class = "inventory"
+title = "Build[ {quantity}][ {makes}]"
+date = "built"
+flag = "status"
+order = 42
+workflow = { id = "inventory-build", when = "record.status in ['draft', 'submitted', 'rejected']" }
+summary = "An assembly made from stock: what went into it, and the lot or serials it made."
+
+[[field]]
+name = "part"
+label = "Assembly"
+type = "reference"
+target = ["Part"]
+rel = "builds"
+required = true
+help = "the part it makes: one with a bill of materials"
+
+[[field]]
+name = "quantity"
+type = "decimal"
+scale = 3
+required = true
+above = 0
+help = "how many it makes"
+
+[[field]]
+name = "location"
+label = "Into"
+type = "reference"
+target = ["Location"]
+rel = "to"
+help = "where what it makes is kept"
+
+[[field]]
+name = "lot_number"
+label = "Lot number"
+max_length = 60
+help = "for a lot-tracked assembly: the lot it makes (one is made up when left empty)"
+
+[[field]]
+name = "serials"
+label = "Serial numbers"
+type = "text"
+help = "for a serial-tracked assembly: one for each it makes, one per line"
+
+[[field]]
+name = "expiry"
+type = "date"
+help = "for an assembly with a shelf life: the expiry on its label"
+
+[[field]]
+name = "built"
+label = "Date"
+type = "date"
+
+[[field]]
+name = "consume"
+label = "Use these"
+type = "table"
+help = "the component lots or serials to use; the rest is taken from the lots that expire first"
+
+[[field.column]]
+name = "lot"
+label = "Stock"
+type = "reference"
+target = ["StockItem"]
+rel = "consumes"
+required = true
+
+[[field.column]]
+name = "quantity"
+label = "Quantity used"
+type = "decimal"
+scale = 3
+above = 0
+help = "empty: a serial's one, or as much of the lot as the build still needs"
+
+[[field.column]]
+name = "into"
+label = "Into serial"
+max_length = 60
+help = "the serial it goes into, when the build makes several; empty: into each it makes"
+
+[[field]]
+name = "note"
+type = "text"
+
+[[field]]
+name = "makes"
+label = "What it makes"
+max_length = 200
+by = "workflow"
+help = "the assembly and its lot or serials, named when the build is checked"
+
+[[field]]
+name = "part_revision"
+label = "Part revision"
+type = "number"
+by = "workflow"
+help = "the revision of the assembly it was built to"
+
+[[field]]
+name = "bom_used"
+label = "Bill used"
+type = "table"
+by = "workflow"
+help = "the bill of materials it was built to, as approved"
+
+[[field.column]]
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "built-to-bom"
+
+[[field.column]]
+name = "code"
+label = "Part code"
+max_length = 40
+
+[[field.column]]
+name = "quantity"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "designators"
+max_length = 200
+
+[[field]]
+name = "made"
+label = "What it made"
+type = "list"
+by = "workflow"
+
+[[field]]
+name = "made_lot"
+label = "Stock made"
+path = "made.*"
+type = "reference"
+target = ["StockItem"]
+rel = "made"
+by = "workflow"
+
+[[field]]
+name = "needs_signoff"
+label = "Why it is signed"
+type = "text"
+by = "workflow"
+
+[[field]]
+name = "entries"
+label = "Ledger lines"
+type = "table"
+by = "workflow"
+help = "each lot it changes: the component lots it used and the lots it made, before and after"
+
+[[field.column]]
+name = "lot"
+label = "Stock"
+type = "reference"
+target = ["StockItem"]
+rel = "entry-lot"
+
+[[field.column]]
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "entry-part"
+
+[[field.column]]
+name = "parent"
+label = "Split from"
+type = "reference"
+target = ["StockItem"]
+rel = "entry-parent"
+
+[[field.column]]
+name = "lot_number"
+label = "Lot number"
+max_length = 60
+
+[[field.column]]
+name = "serial"
+max_length = 60
+
+[[field.column]]
+name = "supplier_lot"
+label = "Supplier's lot"
+max_length = 60
+
+[[field.column]]
+name = "expiry"
+type = "date"
+
+[[field.column]]
+name = "part_revision"
+label = "Part revision"
+type = "number"
+
+[[field.column]]
+name = "quantity_before"
+label = "Quantity before"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "quantity_after"
+label = "Quantity after"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "status_before"
+label = "Status before"
+type = "choice"
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned", "built-in"]
+
+[[field.column]]
+name = "status_after"
+label = "Status after"
+type = "choice"
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned", "built-in"]
+
+[[field.column]]
+name = "location_before"
+label = "From"
+type = "reference"
+target = ["Location"]
+rel = "entry-from"
+
+[[field.column]]
+name = "location_after"
+label = "To"
+type = "reference"
+target = ["Location"]
+rel = "entry-to"
+
+[[field.column]]
+name = "baseline_before"
+label = "Baseline before"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "baseline_after"
+label = "Baseline after"
+type = "decimal"
+scale = 3
+
+[[field]]
+name = "policy"
+label = "Posted under"
+by = "workflow"
+
+[[field]]
+name = "level"
+label = "Control level"
+by = "workflow"
+
+[[field]]
+name = "authority"
+label = "Posted for"
+by = "workflow"
+
+[[field]]
+name = "posted_seq"
+label = "Ledger number"
+type = "number"
+by = "workflow"
+
+[[field]]
+name = "reject_reason"
+label = "Why it was sent back"
+type = "text"
+by = "workflow"
+
+[[field]]
+name = "status"
+type = "choice"
+choices = ["draft", "submitted", "posted", "rejected"]
+
+[lifecycle]
+field = "status"
+initial = "draft"
+abandoned = { "submitted" = "draft" }   # a sign-off that is cancelled hands the build back
+locked = ["submitted", "posted"]        # once sent for posting, people change nothing but the state
+
+[[lifecycle.transition]]
+from = ["draft"]
+to = "submitted"
+label = "Submit for posting"
+
+# Posting it and sending it back are the inventory-build workflow's edges; only the moves people make by hand are
+# listed here.
+[[lifecycle.transition]]
+from = ["rejected"]
+to = "draft"
+label = "Revise"

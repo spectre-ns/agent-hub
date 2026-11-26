@@ -1,6 +1,7 @@
 # A part: something kept in stock, as the catalogue names it (InvenTree's part). Its stock is held as lots (stock
 # items), one quantity of it in one place. What it has on hand, available and held is summed from its lots whenever a
-# stock move posts, never typed in.
+# stock move or a build posts, never typed in. A part with a bill of materials is an assembly: a build makes it from
+# the parts its bill names, and the bill is approved with the part (a build uses the bill last approved).
 id = "Part"
 key = "PART"
 label = "Part"
@@ -30,7 +31,17 @@ max_length = 200
 [[field]]
 name = "category"
 type = "choice"
-choices = ["clinical-supply", "vaccine", "medication", "device", "office", "cleaning", "equipment", "retail"]
+choices = ["clinical-supply", "vaccine", "medication", "device", "office", "cleaning", "equipment", "retail",
+           "component", "assembly"]
+
+[[field]]
+name = "description"
+type = "markdown"
+
+[[field]]
+name = "owner"
+type = "member"
+help = "who answers for the part: its design, its bill of materials, its specifications"
 
 [[field]]
 name = "unit"
@@ -73,12 +84,58 @@ target = ["Location"]
 rel = "usually-in"
 
 [[field]]
+name = "bom"
+label = "Bill of materials"
+type = "table"
+help = "what goes into one of it; a build takes these from stock"
+
+[[field.column]]
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "made-of"
+required = true
+graph = { down = "Bill of materials", up = "Used in" }
+
+[[field.column]]
+name = "quantity"
+type = "decimal"
+scale = 3
+required = true
+above = 0
+help = "how many go into one, in the component's own unit (more than nothing)"
+
+[[field.column]]
+name = "designators"
+max_length = 200
+help = "where each one goes: R1, R2; left pouch"
+
+[[field.column]]
+name = "note"
+label = "Line note"
+max_length = 200
+
+[[field]]
+name = "specs"
+label = "Specifications"
+type = "list"
+
+[[field]]
+name = "spec"
+path = "specs.*"
+label = "Specification"
+type = "reference"
+target = ["*"]
+rel = "specified-by"
+help = "the documents that say what it must be: a drawing, a specification, a standard"
+
+[[field]]
 name = "on_hand"
 label = "On hand"
 type = "decimal"
 scale = 3
 by = "workflow"
-help = "every lot with stock in it, held or not: summed when a stock move posts"
+help = "every lot with stock in it, held or not: summed when a stock move or a build posts"
 
 [[field]]
 name = "available"
@@ -108,6 +165,15 @@ type = "text"
 name = "obsolete_reason"
 label = "Why it is obsolete"
 type = "text"
+
+[[field]]
+name = "held_by"
+label = "Held by"
+type = "reference"
+target = ["*"]
+rel = "held-by"
+by = "workflow"
+help = "the change that holds it in draft (a change order): it is put back in use when that change is released, not approved on its own"
 
 [[field]]
 name = "return_reason"

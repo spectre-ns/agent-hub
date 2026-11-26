@@ -1,6 +1,8 @@
 # A lot: one quantity of one part in one place (InvenTree's stock item). A serial-tracked part has one per serial
-# number. Nobody writes one by hand, not even a manager: only a posted stock move makes or changes it, and the move
-# keeps what it changed. So every number here has its history in the moves.
+# number. Nobody writes one by hand, not even a manager: only a posted stock move or build makes or changes it, and the
+# move or build keeps what it changed. So every number here has its history in the ledger. A lot a build made knows
+# the build and the lots that went into it (contains), so a recall traces forward from a component lot to every unit
+# it went into, and a unit traces back to everything in it, at every level.
 id = "StockItem"
 key = "STK"
 label = "Stock item"
@@ -53,9 +55,9 @@ by = "workflow"
 [[field]]
 name = "status"
 type = "choice"
-choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned"]
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned", "built-in"]
 by = "workflow"
-help = "available: may be used; quarantined: held, used only once released; inspection: received, not yet released"
+help = "available: may be used; quarantined: held, used only once released; inspection: received, not yet released; built-in: a serial a build put into an assembly"
 
 [[field]]
 name = "location"
@@ -87,7 +89,38 @@ label = "Split from"
 type = "reference"
 target = ["StockItem"]
 rel = "split-from"
+graph = { down = "Made from", up = "Went into" }
 by = "workflow"
+help = "the lot this part of it was taken from, when only some of a lot moved; a trace goes through it"
+
+[[field]]
+name = "built_by"
+label = "Built by"
+type = "reference"
+target = ["Build"]
+rel = "built-by"
+by = "workflow"
+
+[[field]]
+name = "contains"
+type = "table"
+by = "workflow"
+help = "the lots and serials its build put into it"
+
+[[field.column]]
+name = "lot"
+label = "Stock"
+type = "reference"
+target = ["StockItem"]
+rel = "contains"
+graph = { down = "Made from", up = "Went into" }
+
+[[field.column]]
+name = "quantity"
+label = "Quantity used"
+type = "decimal"
+scale = 3
+help = "how much of it went into this one; empty when the build shared it among several it made"
 
 [[field]]
 name = "count_baseline"

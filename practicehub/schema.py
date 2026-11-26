@@ -430,6 +430,26 @@ class RecordType:
                  "data_class": t.get("data_class")}
                 for t in self.fields if t["type"] == "table" for c in t["columns"]]
 
+    @property
+    def graphs(self) -> list[dict]:
+        """The references to its own records that never lead back to where they start (``graph``), a table's columns
+        among them."""
+        return [f for f in self.fields + self.cells() if f.get("graph")]
+
+    @property
+    def graph_groups(self) -> list[dict]:
+        """The graph references by the words they are shown under: the fields that share them are walked as one
+        (a lot built from lots, and a lot split off another, are both traced as what it came from). Each: ``down``,
+        ``up``, ``fields`` and their ``rels``."""
+        out: dict[tuple, dict] = {}
+        for f in self.graphs:
+            g = out.setdefault((f["graph"]["down"], f["graph"]["up"]),
+                               {"down": f["graph"]["down"], "up": f["graph"]["up"], "fields": [], "rels": []})
+            g["fields"].append(f)
+            if f["rel"] not in g["rels"]:
+                g["rels"].append(f["rel"])
+        return list(out.values())
+
     def top_keys(self) -> set[str]:
         return {f["path"].split(".")[0] for f in self.fields} | RESERVED
 
@@ -468,8 +488,8 @@ KEYS = {
          "navigator", "layout", "standard", "consent", "booking", "workflow", "unique", "number", "reverses", "covers",
          "period", "closing", "check"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
-              "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class", "pin",
-              "roles", "required_unless", "scale", "unit", "column", "min_rows", "max_rows", "from_file"},
+              "max", "above", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class", "pin",
+              "roles", "required_unless", "scale", "unit", "column", "min_rows", "max_rows", "from_file", "graph"},
     "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "final", "abandoned", "in_use", "labels",
                   "tones"},
     "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm",
@@ -581,7 +601,7 @@ def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]
     ml = raw.get("max_length")
     if ml is not None and (isinstance(ml, bool) or not isinstance(ml, int) or ml < 1):
         problems.append(f"{where}: max_length is a whole number of characters, not {ml!r}")
-    for k in ("min", "max"):
+    for k in ("min", "max", "above"):
         v = raw.get(k)
         if v is None:
             continue
@@ -592,6 +612,11 @@ def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]
     if isinstance(raw.get("min"), (int, float)) and isinstance(raw.get("max"), (int, float)) \
             and raw["min"] > raw["max"]:
         problems.append(f"{where}: min {raw['min']} is above max {raw['max']}")
+    if raw.get("above") is not None and raw.get("min") is not None:
+        problems.append(f"{where}: give min (that number or more) or above (more than it), not both")
+    if isinstance(raw.get("above"), (int, float)) and isinstance(raw.get("max"), (int, float)) \
+            and raw["above"] >= raw["max"]:
+        problems.append(f"{where}: above {raw['above']} leaves nothing up to max {raw['max']}")
     choices = raw.get("choices")
     if choices is not None:
         if not _strings(choices):
@@ -654,26 +679,60 @@ def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]
     path = raw.get("path") or name
     if not isinstance(path, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.([A-Za-z0-9_]+|\*))*", path):
         problems.append(f"{where}: path {path!r} is dotted keys and list positions, e.g. name.0.family")
+    graph = raw.get("graph")
+    if graph is not None:
+        if not isinstance(graph, dict) or set(graph) != {"down", "up"} or not all(
+                isinstance(v, str) and v.strip() for v in graph.values()):
+            problems.append(f"{where}: graph is a table of the words for each way, e.g. "
+                            f"{{ down = \"Bill of materials\", up = \"Used in\" }}")
+        elif typ != "reference":
+            problems.append(f"{where}: graph is for a reference field (this one is {typ})")
     if problems:
         return None, problems
     target = target or []
     f = {"name": name, "path": path, "type": typ, "label": raw.get("label") or default_label(name),
          "required": raw.get("required", False), "help": raw.get("help", ""),
          "target": [target] if isinstance(target, str) else list(target), "rel": raw.get("rel") or None,
-         "choices": list(choices or []), "labels": dict(labels or {}), "max_length": ml, "min": raw.get("min"), "max": raw.get("max"),
+         "choices": list(choices or []), "labels": dict(labels or {}), "max_length": ml, "min": raw.get("min"), "max": raw.get("max"), "above": raw.get("above"),
          "list": raw.get("list", False), "show": raw.get("show", True),
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
          "live": raw.get("live", False), "data_class": raw.get("data_class") or None,
          "roles": list(raw.get("roles") or []), "required_unless": unless or None, "pin": raw.get("pin") is True,
-         "scale": scale if typ == "decimal" else None, "unit": unit or None, "from_file": raw.get("from_file") or None}
+         "scale": scale if typ == "decimal" else None, "unit": unit or None, "from_file": raw.get("from_file") or None,
+         "graph": dict(graph) if graph else None}
     if typ == "decimal":  # its bounds, exactly
-        f["min"], f["max"] = (None if v is None else decimals.to_decimal(v) for v in (f["min"], f["max"]))
+        f["min"], f["max"], f["above"] = (None if v is None else decimals.to_decimal(v)
+                                          for v in (f["min"], f["max"], f["above"]))
     if typ == "table":
         f.update(columns=columns, min_rows=rows.get("min_rows"), max_rows=rows.get("max_rows") or MAX_ROWS)
     if typ == "reference" and not f["rel"]:
         f["rel"] = name
     return f, []
+
+
+def _check_graphs(rt) -> list[str]:
+    """``graph``: a reference to the type's own records that never leads back to the record it starts from (a part
+    made of parts, a lot built into lots), shown on a record's page both ways. It sits at a key, a list or a table's
+    column. A type under another inherits its graph: it points at the family's records (the parent's type, or its
+    own)."""
+    problems = []
+    words: dict[str, tuple] = {}
+    for f in rt.graphs:
+        if f["target"] != [rt.id] and not (len(f["target"]) == 1 and f["target"][0] in rt.ancestors):
+            problems.append(f"field {f['name']}: graph is for a reference to its own type's records ({rt.id})")
+        elif not (f.get("table") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?", f["path"])):
+            problems.append(f"field {f['name']}: a graph's references sit at a key (next), a list (next.*) or a "
+                            f"table's column")
+        if f.get("data_class"):  # the trace shows every level to whoever reads the type
+            problems.append(f"field {f['name']}: a graph is traced for whoever reads {rt.label.lower()} records: it "
+                            f"has the type's data class, not one of its own")
+        both = (f["graph"]["down"], f["graph"]["up"])
+        for way in both:  # fields shown under the same words are walked as one: they share both ways' words
+            if words.setdefault(way, both) != both:
+                problems.append(f"field {f['name']}: {way!r} already names a way of another graph field, whose "
+                                f"words are {' / '.join(words[way])}: graph fields shown together share both words")
+    return problems
 
 
 def parse(source: str, catalog=None, *, base_ok: bool = False, parent: RecordType | None = None) -> RecordType:
@@ -1066,6 +1125,7 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool, parent: RecordType | 
             problems.append("part_of: a record is not part of its own kind; for a tree, say parent")
         else:
             rt.part_of = {"field": pf["name"], "path": pf["path"], "target": list(pf["target"])}
+    problems += _check_graphs(rt)
     rt.slug = str(doc.get("slug") or re.sub(r"[^a-z0-9]+", "-", rt.plural.lower()).strip("-"))
     if not SLUG.fullmatch(rt.slug) or rt.slug in RESERVED_SEGMENTS:
         problems.append(f"slug: {rt.slug!r} cannot be a part of an address: give one of lowercase letters, digits and "
@@ -1923,7 +1983,7 @@ NEVER_INHERITED = ("id", "label", "plural", "slug", "abstract")
 ADDED_KEYS = ("field", "check", "signature", "link", "unique", "screen")  # the parent's, then its own
 # A field it narrows keeps these as its parent's field has them.
 FIELD_STAYS = ("type", "path", "list", "data_class", "by", "pin", "rel", "with", "live", "scale", "unit",
-               "required_unless", "columns", "from_file")
+               "required_unless", "columns", "from_file", "graph")
 
 
 def parse_all(sources: dict[str, str]) -> dict[str, RecordType]:
@@ -2039,7 +2099,8 @@ def _narrows(pf: dict, f: dict, who: str, lf: str | None, catalog) -> list[str]:
         elif not set(f["choices"]) <= set(pf["choices"]):
             out.append(f"{where}: a type under {who} gives fewer of its choices, never others "
                        f"({', '.join(repr(c) for c in f['choices'] if c not in pf['choices'])})")
-    for k, tighter in (("min", True), ("max", False), ("max_length", False), ("min_rows", True), ("max_rows", False)):
+    for k, tighter in (("min", True), ("above", True), ("max", False), ("max_length", False), ("min_rows", True),
+                       ("max_rows", False)):
         old, new = pf.get(k), f.get(k)
         if old is not None and (new is None or (new < old if tighter else new > old)):
             out.append(f"{where}: {k} is {old} at {who}: a type under it keeps it or makes it tighter")
@@ -2353,6 +2414,8 @@ def _check_value(f: dict, v, members=None, is_a=None) -> str | None:
             return f"{label}: expected a number"
         if f.get("min") is not None and v < f["min"]:
             return f"{label} is below {f['min']}"
+        if f.get("above") is not None and v <= f["above"]:
+            return f"{label} must be more than {f['above']:g}"
         if f.get("max") is not None and v > f["max"]:
             return f"{label} is above {f['max']}"
     elif t == "decimal":
@@ -2367,6 +2430,8 @@ def _check_value(f: dict, v, members=None, is_a=None) -> str | None:
             return f"{label}: at most {decimals.DIGITS} digits"
         if f.get("min") is not None and v < f["min"]:
             return f"{label} is below {decimals.text(f['min'])}"
+        if f.get("above") is not None and v <= f["above"]:
+            return f"{label} must be more than {decimals.text(f['above'])}"
         if f.get("max") is not None and v > f["max"]:
             return f"{label} is above {decimals.text(f['max'])}"
     elif t == "table":
@@ -2580,6 +2645,27 @@ FORM_SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?")  # a field a form can
 # or one plain value inside a structure, by keys and list positions (name.0.given.0, telecom.0.value)
 FORM_NESTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.([0-9]+|[A-Za-z_][A-Za-z0-9_]*))+")
 SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "decimal", "boolean")
+
+
+def row_words(rt: RecordType, cell: dict, holder: dict, target: str) -> list[str]:
+    """What else the rows of a graph column's table say beside the record it points at (``target``), in ``holder``
+    (one of ``rt``'s records): "Quantity 2", "Designators R1, R2". Used where a graph is drawn or traced."""
+    table = rt.field(cell["table"])
+    if table is None:
+        return []
+    def word(v) -> str:
+        if isinstance(v, decimals.Decimal):
+            return decimals.text(v)
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return ref_of(v) or str(v)
+    out = []
+    for item in first(holder, table["path"]) or []:
+        if isinstance(item, dict) and ref_of(item.get(cell["name"])) == target:
+            out += [f"{c['label']} {word(item[c['name']])}" for c in table["columns"]
+                    if c["name"] != cell["name"] and c.get("show", True) is not False
+                    and item.get(c["name"]) not in (None, "", [], {})]
+    return out
 
 
 def form_fields(rt: RecordType) -> list[dict]:

@@ -540,11 +540,11 @@ def test_cancelling_a_capa_on_its_page_stops_its_work_and_actions_under_way_are_
 @pytest.fixture
 def products(hub):
     def build(h):
-        for name in ("dms", "qms", "plm"):
+        for name in ("dms", "qms", "inventory", "plm"):
             install(h, name)
         for m in h.pack.modules:
             m.module.demo(h)
-    snapshot_onto(hub, "modwf:products", build, modules=["dms", "qms", "plm"])
+    snapshot_onto(hub, "modwf:products", build, modules=["dms", "qms", "inventory", "plm"])
     return hub
 
 
@@ -577,8 +577,10 @@ def test_a_change_order_is_walked_from_draft_and_a_rejected_or_returned_one_is_w
     hub.update_record(rana, cref, {"impact": "Use up the 10x10 stock first."})
     hub.update_record(rana, cref, {"status": "review"})
     _board(hub, second, "review", amara, "approve")
-    kit = next(p for p in hub.records.search("Product", limit=None) if p["number"] == "WC-100")
-    assert kit["status"] == "design" and kit["revision"] == 2
+    kit = next(p for p in hub.records.search("Part", limit=None) if p["code"] == "WC-100")
+    assert (kit["status"], kit["held_by"]) == ("draft", cref)   # held for its next revision
+    held = open_run(hub, "inventory-part", f"Part/{kit['id']}")   # its own workflow waits; it does not put it in use
+    assert step_state(hub, held, "open") == "skipped" and step_state(hub, held, "submit") == "waiting"
     spec = co["documents"][0]
     assert hub.records.read(*spec.split("/"))["status"] == "draft"  # opened; the document's own workflow numbers it
     hub.update_record(rana, spec, {"status": "in-review"})
@@ -589,13 +591,16 @@ def test_a_change_order_is_walked_from_draft_and_a_rejected_or_returned_one_is_w
     third = open_run(hub, "plm-change", cref)  # returned: the next pass, which does not open the kit again
     hub.update_record(rana, cref, {"status": "review"})
     _board(hub, third, "review", amara, "approve")
-    assert hub.records.read("Product", kit["id"])["revision"] == 2
-    assert step_state(hub, third, "open-products") == "skipped"
+    assert hub.records.read("Part", kit["id"])["held_by"] == cref    # still held, from the pass before
+    assert hub.engine.run(third["id"])["ctx"]["hold"]["held"] == []  # nothing newly held: it holds it already
+    assert step_state(hub, third, "revise-documents") == "skipped"    # nor its documents opened again
     with pytest.raises(Denied):  # amara reviewed this pass: she does not release it
         hub.engine.claim(amara, item_for(hub, third, "release"))
     _board(hub, third, "release", rana, "release")
     assert hub.records.read("ChangeOrder", co["id"])["status"] == "implemented"
-    assert hub.records.read("Product", kit["id"])["status"] == "released"
+    kit = hub.records.read("Part", kit["id"])
+    assert (kit["status"], kit["revision"], kit.get("held_by") or "") == ("active", 1, "")
+    assert hub.engine.run(held["id"])["status"] == "completed" and step_state(hub, held, "released--to") == "done"
     assert not runs(hub, "plm-change", cref, "running")
 
 
@@ -815,6 +820,36 @@ def test_a_part_is_walked_into_use_and_a_revision_is_walked_again(stock):
     _board(hub, second, "approve", amara, "approve")
     got = hub.records.read("Part", p["id"])
     assert (got["status"], got["revision"]) == ("active", 1) and not runs(hub, "inventory-part", ref, "running")
+
+
+
+def test_a_build_is_walked_from_draft_and_a_rejected_one_is_revised_and_walked_again(stock):
+    hub = stock
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    _sign_policy(hub, rana, "regulated")   # what comes into stock is inspected: a build is signed by someone else
+    kit = next(p for p in hub.records.search("Part", limit=None) if p["code"] == "DK-1")
+    b = hub.create_record(rana, "Build", {"part": f"Part/{kit['id']}", "quantity": 2, "lot_number": "DK0100"})
+    ref = f"Build/{b['id']}"
+    first = open_run(hub, "inventory-build", ref)
+    assert step_state(hub, first, "submit") == "waiting"  # with its author until submitted
+    hub.update_record(rana, ref, {"status": "submitted"})
+    assert step_state(hub, first, "sign-own") == "skipped" and "inspects" in hub.records.read("Build", b["id"])[
+        "needs_signoff"]
+    with pytest.raises(Denied):
+        hub.engine.claim(rana, item_for(hub, first, "sign-other"))
+    _board(hub, first, "sign-other", amara, "reject", "build one, the other pouch is torn")
+    assert hub.records.read("Build", b["id"])["status"] == "rejected"
+    second = open_run(hub, "inventory-build", ref)  # back with its author: the next pass
+    assert second["ctx"]["run"]["previous"] == first["id"] and step_state(hub, second, "revise") == "waiting"
+    hub.update_record(rana, ref, {"status": "draft"})
+    hub.update_record(rana, ref, {"quantity": 1})
+    hub.update_record(rana, ref, {"status": "submitted"})
+    _board(hub, second, "sign-other", amara, "post")
+    got = hub.records.read("Build", b["id"])
+    assert got["status"] == "posted" and got["makes"] == "DK-1 lot DK0100"
+    made = hub.records.read("StockItem", got["made"][0].split("/", 1)[1])
+    assert (made["quantity"], made["built_by"]) == (1, ref)
+    assert not runs(hub, "inventory-build", ref, "running")  # posted: no one's work
 
 
 # ------------------------------------------------------------------------------------------- crm: Interaction, Person

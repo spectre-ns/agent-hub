@@ -79,6 +79,8 @@ A task or gate may have a deadline (``due = "2d"``, ``"4h"``, ``"30m"``); when i
 ``not_by`` lists earlier steps whose doer may not also do this one, and may name ``run`` (whoever started the run)
 and ``record.editors`` (whoever wrote the record as it stands: created it or changed its fields since it was last in
 its lifecycle's ``in_use`` state; an author never approves their own revision, and an earlier one does not count).
+``record.<field>.editors`` names the same of each record the run's record names in that reference field (a change
+order's ``parts``): whoever wrote a part as it now stands does not release it.
 With ``escalate_to = "<role>"``, a notice goes to that role. When an agent's work on a task goes back to people
 (its sponsor rejected it, or the agent gave it up), it goes to ``people_role`` (to whoever started the run, if they
 hold it); with no ``people_role`` and no person holding the step's role, to whoever started the run. ``assign_to = "{{run.record.generalPractitioner}}"``
@@ -258,6 +260,12 @@ class Workflow:
 
 # not_by names, besides earlier steps: whoever started the run, and whoever created or changed the run's record
 NOT_BY_PEOPLE = ("run", "record.editors")
+NAMED_EDITORS = re.compile(r"record\.([A-Za-z_][A-Za-z0-9_]*)\.editors")  # whoever wrote the records a field names
+
+
+def not_by_people(name: str) -> bool:
+    """Whether a not_by name is people, not an earlier step: ``run``, ``record.editors``, ``record.<field>.editors``."""
+    return name in NOT_BY_PEOPLE or bool(NAMED_EDITORS.fullmatch(name))
 
 
 def parse(source: str, catalog=None) -> Workflow:
@@ -547,7 +555,7 @@ def parse(source: str, catalog=None) -> Workflow:
         steps.append(step)
     ids = {s.id for s in steps}
     for s in steps:
-        for a in s.after + [n for n in s.not_by if n not in NOT_BY_PEOPLE] + ([s.review_of] if s.review_of else []):
+        for a in s.after + [n for n in s.not_by if not not_by_people(n)] + ([s.review_of] if s.review_of else []):
             if a not in ids:
                 problems.append(f"step {s.id}: refers to a step {a!r} that does not exist")
         for cond in (s.when, s.agent_criteria):

@@ -640,7 +640,7 @@ def cmd_module_list(args):
         m = packmod.load_module(d.parent.name, run_code=False)
         st = hub.module_status(m.id)["state"]
         mark = {"running": "installed", "not_running": "not run"}.get(st, "available")
-        needs = f" (needs {', '.join(m.requires)})" if m.requires else ""
+        needs = f" (needs {', '.join(packmod.needs_words(m))})" if m.requires else ""
         print(f"{m.id:12} {mark:10} {m.practice.get('name', m.id)}: {m.practice.get('summary', '')}{needs}")
 
 
