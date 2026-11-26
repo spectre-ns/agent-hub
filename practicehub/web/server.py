@@ -65,6 +65,7 @@ from .mcp_pages import McpPages
 from .passes import PassPages
 from .office_pages import OfficePages
 from .live_pages import LivePages
+from .chat_pages import ChatPages
 from .record_work import RecordWork
 from .records_pages import Download, RecordPages, a_an
 from .journey_pages import JourneyPages
@@ -109,8 +110,8 @@ def _json(obj) -> bytes:
 
 
 # ================================================================================================== the app
-class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, DashboardPages, DefinitionPages, StructurePages, OfficePages, LivePages, McpPages,
-          AnalyticsPages, BpmnPages, HolderWords, PassPages):
+class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, DashboardPages, DefinitionPages, StructurePages, OfficePages, LivePages, ChatPages,
+          McpPages, AnalyticsPages, BpmnPages, HolderWords, PassPages):
     def __init__(self, hub, *, dev: bool = False, oidc=None):
         self.hub, self.dev, self.oidc = hub, dev, oidc
         self._local = threading.local()  # per request (one thread each): who is reading
@@ -221,6 +222,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         R("POST", r"/outbox/(?P<oid>\d+)/delivered", self.post_outbox_delivered)
         self.calendar_routes(R)
         self.live_routes(R)
+        self.chat_routes(R)
         self.work_routes(R)
         self.record_routes(R)
         self.dashboard_routes(R)
@@ -702,7 +704,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                + self._me_menu(me) + '</header>')
         shell = "shell has-subnav" if subnav else "shell"
         return (f'{head}{top}<div class="{shell}">{side}{subnav}<main id="main" tabindex="-1">{page}</main></div>'
-                f'</body></html>')
+                f'{self.chat_dock(me)}</body></html>')
 
     def _settings(self, me) -> list[tuple[str, list[tuple[str, str, str, str]]]]:
         """The practice's settings, grouped: how it works (set up) and what it did (audit), each link with an icon. The
@@ -769,7 +771,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                f'<a class="btn subtle back-to-work" href="/"><span aria-hidden="true">&larr;</span> Back to work</a>'
                + self._me_menu(me) + "</header>")
         return (f'{top}<div class="admin-shell">{ribbon}<main id="main" tabindex="-1">{page}</main></div>'
-                f'</body></html>')
+                f'{self.chat_dock(me)}</body></html>')
 
     def _practice_menu(self, me, mark: str) -> str:
         """Top left: the practice, and the way to its settings (a screen of their own) and home."""

@@ -34,6 +34,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 
 from . import mcp, visibility
 from .db import utcnow
@@ -55,6 +56,13 @@ VERSION = {"type": "string", "description": "the version you read (from read): a
 
 _RUNNING: set[str] = set()  # the chats this process is answering now
 _LOCK = threading.Lock()
+_NEWS = threading.Condition()  # told whenever a chat of this process has a new message or is free again
+WAIT = 25.0
+
+
+def _news() -> None:
+    with _NEWS:
+        _NEWS.notify_all()
 
 
 class Offer:
@@ -93,10 +101,8 @@ class Chat:
 
     @property
     def gateway(self):
-        if self._gateway is None:
-            from .models import ModelGateway
-            self._gateway = ModelGateway(self.hub)
-        return self._gateway
+        """The hub's models, unless this chat was given its own."""
+        return self._gateway if self._gateway is not None else self.hub.models
 
     @property
     def db(self):
@@ -169,6 +175,18 @@ class Chat:
             c = self.db.chats.get(cid)
         return self._out(c)
 
+    def wait(self, person: dict, cid: str, since: int, busy: bool, wait: float = WAIT) -> dict:
+        """The chat once it has a message after ``since``, or is no longer (or now) answering, or after ``wait``
+        seconds: what a page waiting for the answer asks. A turn another process runs is seen within a second."""
+        deadline = time.monotonic() + max(0.0, min(float(wait), WAIT))
+        while True:
+            c = self.get(person, cid)
+            left = deadline - time.monotonic()
+            if c["n"] > since or c["busy"] != busy or left <= 0:
+                return c
+            with _NEWS:
+                _NEWS.wait(min(left, 1.0))
+
     def messages(self, person: dict, cid: str, since: int = 0) -> list[dict]:
         self.get(person, cid)
         return [self._msg(m) for m in self.db.chat_messages.find({"chat": cid, "n": {"$gt": int(since)}},
@@ -207,6 +225,7 @@ class Chat:
         doc = {"_id": mid, "id": mid, "chat": cid, "n": c["n"], "role": role, "body": body, "at": utcnow(),
                **{k: v for k, v in extra.items() if v not in (None, [], False)}}
         self.db.chat_messages.insert(doc)
+        _news()
         return self._msg(doc)
 
     def _used(self, cid: str, ref: str, how: str, seq: int) -> None:
@@ -249,6 +268,7 @@ class Chat:
     def _idle(self, cid: str) -> None:
         self.db.chats.set(cid, {"busy": None})
         _RUNNING.discard(cid)
+        _news()
 
     def answer(self, person_id: str, cid: str, cause: int) -> dict:
         """The agent's turn: it asks its model, runs the calls the model makes (at most ``MAX_CALLS``), and ends

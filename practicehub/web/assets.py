@@ -5561,3 +5561,237 @@ STRUCTURE_JS = r"""
 """
 JS = JS + STRUCTURE_JS
 
+
+CHAT_JS = r"""
+// ---- talking to an agent: the button bottom right and its panel (practicehub/web/chat_pages.py)
+(function () {
+  "use strict";
+  const dock = document.querySelector("[data-chat-dock]");
+  if (!dock) return;
+  const fab = dock.querySelector(".chat-fab"), panel = dock.querySelector(".chat-panel");
+  const body = panel.querySelector(".chat-body"), form = panel.querySelector(".chat-say");
+  const head = panel.querySelector("#chat-head"), back = panel.querySelector(".chat-back");
+  const text = form.querySelector("textarea"), send = form.querySelector("button[type=submit]");
+  let cur = null, n = 0, busy = false, watch = 0;  // the open conversation, its last message, whether it is answering
+
+  async function ask(method, url, data) {
+    const r = await fetch(url, { method, credentials: "same-origin",
+      headers: data ? { "Content-Type": "application/json" } : {}, body: data ? JSON.stringify(data) : undefined });
+    let got = {};
+    try { got = await r.json(); } catch (_) { /* not JSON */ }
+    if (!r.ok) throw new Error(got.error || ("HTTP " + r.status));
+    return got;
+  }
+  const node = (tag, cls, words) => {
+    const x = document.createElement(tag);
+    if (cls) x.className = cls;
+    if (words != null) x.textContent = words;
+    return x;
+  };
+  const when = (at) => { try { return new Date(at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); }
+                         catch (_) { return ""; } };
+  function problem(err) {
+    const p = node("p", "chat-problem", err.message || String(err));
+    p.setAttribute("role", "alert");
+    body.append(p);
+  }
+
+  function open() {
+    panel.hidden = false;
+    fab.setAttribute("aria-expanded", "true");
+    if (cur) text.focus(); else list();
+  }
+  function close() {
+    panel.hidden = true;
+    fab.setAttribute("aria-expanded", "false");
+    fab.focus();
+  }
+  fab.addEventListener("click", () => (panel.hidden ? open() : close()));
+  panel.querySelector(".chat-close").addEventListener("click", close);
+  panel.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); close(); } });
+  back.addEventListener("click", () => list());
+
+  // ---- the agents and the person's conversations
+  async function list() {
+    cur = null; watch++;
+    back.hidden = true; form.hidden = true;
+    head.textContent = "Talk to an agent";
+    body.replaceChildren(node("p", "chat-quiet", "Loading…"));
+    let got;
+    try { got = await ask("GET", "/api/chats"); } catch (err) { body.replaceChildren(); problem(err); return; }
+    body.replaceChildren();
+    const h = node("h3", "", "Start a conversation");
+    body.append(h);
+    if (!got.agents.length) body.append(node("p", "chat-quiet", "There is no agent you may talk with."));
+    const ul = node("ul", "chat-list");
+    for (const a of got.agents) {
+      const b = node("button", "chat-pick");
+      b.type = "button";
+      b.append(node("strong", "", a.name), node("span", "chat-quiet", a.title || ""));
+      b.addEventListener("click", async () => {
+        try { show((await ask("POST", "/api/chats", { agent: a.id })).chat.id); } catch (err) { problem(err); }
+      });
+      const li = node("li"); li.append(b); ul.append(li);
+    }
+    body.append(ul);
+    if (got.chats.length) {
+      body.append(node("h3", "", "Your conversations"));
+      const past = node("ul", "chat-list");
+      for (const c of got.chats) {
+        const b = node("button", "chat-pick");
+        b.type = "button";
+        b.append(node("strong", "", c.title || "A new conversation"),
+                 node("span", "chat-quiet", c.agent_name + " · " + when(c.updated_at)));
+        b.addEventListener("click", () => show(c.id));
+        const li = node("li"); li.append(b); past.append(li);
+      }
+      body.append(past);
+    }
+    const first = body.querySelector("button");
+    if (first) first.focus();
+  }
+
+  // ---- one conversation
+  let log = null, used = null, working = null;
+  async function show(cid) {
+    cur = cid; n = 0; busy = false;
+    const mine = ++watch;
+    back.hidden = false; form.hidden = false;
+    log = node("ol", "chat-log"); used = node("details", "chat-used"); working = node("p", "chat-quiet chat-working");
+    working.setAttribute("role", "status");
+    body.replaceChildren(log, working, used);
+    let got;
+    try { got = await ask("GET", `/api/chats/${cid}?since=0`); } catch (err) { problem(err); return; }
+    if (mine !== watch) return;
+    take(got);
+    text.focus();
+    if (busy) follow(mine);
+  }
+  function take(got) {
+    const c = got.chat;
+    head.textContent = c.agent_name;
+    for (const m of got.messages) { if (m.n > n) { line(m, c); n = m.n; } }
+    busy = c.busy;
+    working.textContent = busy ? `${c.agent_name} is working on it…` : "";
+    send.disabled = busy;
+    records(c.resources || []);
+    body.scrollTop = body.scrollHeight;
+  }
+  function line(m, c) {
+    const li = node("li", "chat-msg " + m.role + (m.error ? " error" : ""));
+    if (m.role === "tool") {
+      const d = node("details", "chat-tool");
+      d.append(node("summary", "", m.line || m.tool));
+      for (const l of m.links || []) {
+        const a = node("a", "", l.ref); a.href = l.href; d.append(a, document.createTextNode(" "));
+      }
+      d.append(node("pre", "", m.body || ""));
+      li.append(d);
+    } else {
+      li.append(node("span", "chat-who", m.role === "person" ? "You" : c.agent_name), node("div", "chat-text", m.body));
+    }
+    log.append(li);
+  }
+  function records(rs) {
+    used.replaceChildren();
+    if (!rs.length) { used.hidden = true; return; }
+    used.hidden = false;
+    const by = new Map();
+    for (const r of rs) {
+      if (!by.has(r.ref)) by.set(r.ref, { ...r, hows: [] });
+      by.get(r.ref).hows.push(r.how);
+    }
+    used.append(node("summary", "", `Records this conversation used (${by.size})`));
+    const ul = node("ul");
+    for (const r of by.values()) {
+      const li = node("li");
+      if (r.href) { const a = node("a", "", r.label); a.href = r.href; li.append(a); }
+      else li.append(node("span", "", r.label));
+      li.append(node("span", "chat-quiet", " " + r.hows.join(", ")));
+      ul.append(li);
+    }
+    used.append(ul);
+  }
+  async function follow(mine) {  // until the agent has answered: each wait returns once there is something new
+    while (mine === watch && busy) {
+      try {
+        take(await ask("GET", `/api/chats/${cur}?since=${n}&busy=1&wait=25`));
+      } catch (err) {
+        if (mine === watch) problem(err);
+        await new Promise((ok) => setTimeout(ok, 3000));
+      }
+    }
+  }
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const words = text.value.trim();
+    if (!words || busy || !cur) return;
+    send.disabled = true;
+    try {
+      await ask("POST", `/api/chats/${cur}/messages`, { body: words });
+      text.value = "";
+      busy = true;
+      follow(watch);
+    } catch (err) { problem(err); send.disabled = false; }
+  });
+  text.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); form.requestSubmit(); }
+  });
+})();
+"""
+JS = JS + CHAT_JS
+
+CHAT_CSS = r"""
+/* ---- talking to an agent: the button bottom right and its panel */
+.chat-dock{position:fixed;right:16px;bottom:16px;z-index:45;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.chat-fab{width:48px;height:48px;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;
+background:var(--brand);color:var(--brand-fg);box-shadow:var(--shadow-overlay)}
+.chat-fab:hover{background:var(--brand-hover)}
+.chat-fab:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.chat-fab[aria-expanded=true]{background:var(--brand-pressed)}
+.chat-panel{order:-1;width:min(400px,calc(100vw - 32px));height:min(600px,calc(100vh - 96px));display:flex;
+flex-direction:column;background:var(--overlay);color:var(--fg);border-radius:8px;box-shadow:var(--shadow-overlay);overflow:hidden}
+.chat-panel[hidden]{display:none}
+.chat-top{display:flex;align-items:center;gap:4px;padding:8px 8px 8px 16px;border-bottom:1px solid var(--border)}
+.chat-top h2{font-size:15px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-top .spacer{flex:1}
+.chat-top .chat-back[hidden]{display:none}
+.chat-body{flex:1;overflow:auto;padding:12px 16px;font-size:14px}
+.chat-body h3{font-size:13px;margin:12px 0 6px;color:var(--subtle)}
+.chat-body h3:first-child{margin-top:0}
+.chat-quiet{color:var(--subtlest);font-size:12px}
+.chat-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.chat-pick{width:100%;text-align:left;display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:4px;
+border:1px solid var(--border);background:var(--surface);color:var(--fg);cursor:pointer;font:inherit}
+.chat-pick:hover{background:var(--raised-hover)}
+.chat-pick:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.chat-log{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.chat-msg{max-width:92%}
+.chat-msg .chat-who{display:block;font-size:11px;font-weight:600;color:var(--subtle);margin-bottom:2px}
+.chat-msg .chat-text{white-space:pre-wrap;overflow-wrap:anywhere;padding:8px 10px;border-radius:8px;background:var(--sunken)}
+.chat-msg.person{align-self:flex-end}
+.chat-msg.person .chat-who{text-align:right}
+.chat-msg.person .chat-text{background:var(--selected-bg);color:var(--selected-fg)}
+.chat-msg.error .chat-text{background:var(--danger-bg);color:var(--danger-fg)}
+.chat-msg.tool{max-width:100%;font-size:12px;color:var(--subtle)}
+.chat-tool summary{cursor:pointer}
+.chat-tool pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:200px;overflow:auto;margin:4px 0 0;padding:6px;
+background:var(--sunken);border-radius:3px;font-size:11px}
+.chat-msg.tool.error summary{color:var(--danger-fg)}
+.chat-working:empty{display:none}
+.chat-used{margin-top:12px;border-top:1px solid var(--border);padding-top:8px;font-size:13px}
+.chat-used[hidden]{display:none}
+.chat-used summary{cursor:pointer;font-weight:600}
+.chat-used ul{margin:6px 0 0;padding-left:18px}
+.chat-problem{color:var(--danger-fg);background:var(--danger-bg);padding:6px 8px;border-radius:3px}
+.chat-say{display:flex;gap:8px;align-items:flex-end;padding:8px 12px;border-top:1px solid var(--border)}
+.chat-say[hidden]{display:none}
+.chat-say textarea{flex:1;resize:none;font:inherit;padding:6px 8px;border-radius:3px;border:1px solid var(--input-border);
+background:var(--input-bg);color:var(--fg)}
+@media (max-width:640px){
+  .chat-panel{position:fixed;inset:0;width:auto;height:auto;border-radius:0}
+  .chat-dock:has(.chat-panel:not([hidden])) .chat-fab{display:none}
+}
+@media print{.chat-dock{display:none}}
+"""
+CSS = CSS + CHAT_CSS

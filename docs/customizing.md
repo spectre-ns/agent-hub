@@ -164,6 +164,33 @@ For checks a schema cannot express, a pack's `pack.py` adds a **guard** for the 
 returns the problems with an answer, whoever gave it. In the clinic pack, a guard refuses a claim whose amount does
 not match the fee schedule.
 
+### Mentioning an agent
+
+Write `@` and an agent's name in a comment on any record, or in a page's text, and the agent answers in that thread
+with its profile's model. It reads only what its grants let it: the record, redacted for it, the thread and the
+words quoted. When it cannot answer (its model fails, or it escalates), it says so in the thread, so a person sees
+it. Only a person brings an agent into a thread: an agent's own `@` names wake only people, so two agents never
+answer each other in a loop. Nobody can mention an agent on a record it may not read, or one a subject's directive
+keeps from it.
+
+### Talking to an agent
+
+Every page a person works in has a chat button bottom right (Alt+K). It opens a conversation with any active agent
+whose sponsor is active. The conversation is about no one record: ask "what is still missing for this return?" and
+the agent finds, searches and reads the records it needs, and can make, change or move one, or start a workflow, all
+as itself.
+
+What it may do is what **both** of you may do. It is offered a type, a move or a workflow only when both of you have
+it, it reaches a record only when neither of you is kept from it, it writes only fields both of you may write, and
+what comes back is redacted for both. Its own limits still hold: an agent without `direct_writes` makes and changes
+nothing directly (it may still start a workflow, whose steps go under the usual risk tiers and reviews), and no chat
+tool signs or approves.
+
+Each call it makes shows in the conversation as one line ("Searched clients for Kevin", "Read CLI-3"), with what came
+back under it, and the panel lists every record the conversation used. The track has each call, caused by your
+message, but never what either of you said. A conversation is yours: nobody else lists or reads it, and nothing in it
+changes the agent. To change how an agent behaves, change its profile or skills, which are reviewed and approved.
+
 ## 4. Records, workflows and views
 
 These are the three definitions you will change most. Each can be edited in the browser or shipped as a file.
