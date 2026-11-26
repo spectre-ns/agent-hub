@@ -141,3 +141,24 @@ def test_an_agent_mentioned_in_a_comment_answers_in_the_thread_over_the_api(wiki
     assert hub.records.read("WikiPage", p["id"])["body"] == p["body"]
     assert call(srv, "POST", f"{url}/comments/{c['id']}/suggestions/{sug['id']}/accept", jo, form={})[0] == 303
     assert "the IT contractor only" in hub.records.read("WikiPage", p["id"])["body"]
+
+
+def test_a_remote_agent_answers_where_it_was_mentioned_over_the_api(wiki):
+    """The agent loop answers a mention over the API with the agent's own token, as the hub's own agents do in
+    process: the reply is in the thread, marked as an agent's, and the notice is done."""
+    from conftest import quiet
+    from practicehub.agents.runner import AgentRunner, HttpClient
+    from practicehub.models import ModelGateway
+    hub, srv = wiki
+    p = _page(hub, "Backups")
+    url, agent = f"/records/WikiPage/{p['id']}", "scribe-agent"
+    hub.authz.write([("role:wiki-reader", "assignee", member_ref(agent))])
+    assert call(srv, "POST", url + "/comments", token(hub, "jo"), form={"body": f"@{agent} who keeps these?"})[0] == 303
+    gw = ModelGateway(hub, standins={"mention": lambda ctx: {"body": f"{ctx['record']['title']}: IT, says the page."}})
+    assert AgentRunner(HttpClient(srv, token(hub, agent)), gw, quiet).work_once() >= 1
+    row = hub.db.mentions.find_one({"ref": f"WikiPage/{p['id']}", "member": agent})
+    c = hub.db.live_comments.get(row["anchor"])
+    assert [(r["by"], r["agent"], r["body"]) for r in c["replies"]] == [(agent, True, "Backups: IT, says the page.")]
+    row = hub.db.mentions.get(row["_id"])
+    assert row["answered"] and hub.engine.item(row["item"])["status"] == "done"
+    assert 'class=by-agent' in call(srv, "GET", url, token(hub, "jo"))[1]

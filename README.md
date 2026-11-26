@@ -523,6 +523,13 @@ agent the wiki's `wiki-reader` role to let it answer there. The track has `menti
 `mention.answered` and `suggestion.proposed`/`accepted`/`rejected`. An agent never releases a SOP (the release is a
 person's signature) and never signs.
 
+The hub's own agents (`serve --agents`, `practicehub agent`) answer a mention the same way: from what they were given
+there, with the profile's model, in the thread (`AgentRunner.answer_mention`). An agent that cannot answer (its model
+escalates, fails, or its reply is refused twice) says so in the thread, and why, so a person takes it up there. Only a
+person brings an agent into a thread: an `@` an agent writes tells the people it names but never another agent, so two
+agents never answer each other forever. A member whom the subject's directive keeps the file from is not mentioned on
+it, as one whose grants do not reach it is not; a directive made after the mention is respected when it is read.
+
 ### Released documents
 
 A lifecycle with `in_use = "<state>"` keeps a record's approved revision in use while a new one is written.

@@ -419,23 +419,9 @@ class LivePages:
 
     def api_mention_verb(self, req, mid, verb):
         """The mentioned member answers in the thread, or (``suggest``) proposes a change a person accepts."""
-        me, b = req["me"], self.body_json(req)
-        row = self.mentions.get(mid)
-        if row["member"] != me["id"]:
-            raise Denied("this mention is for someone else")
-        ref, anchor = row["ref"], row["anchor"]
-        if not anchor.startswith("c-"):  # mentioned in the text itself: the answer starts a thread on that passage
-            line = next((ln for ln in row["quote"].splitlines() if f"@{me['id']}" in ln), row["quote"])[:500]
-            c = self.live.comment(me, ref, str(b.get("body") or "") or "Suggested a change.", quote=line,
-                                  field=row["field"])
-            self.mentions.answered(me, ref, anchor)
-            anchor = c["id"]
-            if verb == "reply":
-                return c
-        if verb == "suggest":
-            return self.live.suggest(me, ref, anchor, str(b.get("field") or row["field"] or ""),
-                                     str(b.get("find") or ""), str(b.get("text") or ""), str(b.get("body") or ""))
-        return self.live.reply(me, ref, anchor, str(b.get("body") or ""))
+        b = self.body_json(req)
+        return self.mentions.reply(req["me"], mid, str(b.get("body") or ""),
+                                   suggest={k: b.get(k) for k in ("field", "find", "text")} if verb == "suggest" else None)
 
     def post_comment_verb(self, req, rtype, rid, cid, verb):
         ref = f"{rtype}/{rid}"

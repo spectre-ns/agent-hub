@@ -9489,3 +9489,109 @@ def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(h
     # taking it away only lets the agent do less: in force at once
     assert hub.propose_agent_profile(rana, agent, {"vision_model": ""})["status"] == "active"
     assert look()[0] == "words"
+
+
+# ------------------------------------------------------------------ an agent answers where it was mentioned
+def _with_mention(hub, fn):
+    return ModelGateway(hub, standins={**hub.pack.standins, "mention": fn})
+
+
+def test_an_agent_mentioned_in_a_thread_answers_in_it(hub):
+    """Rule: an agent mentioned in a comment answers in that thread, from what it was given there (the record as it
+    may read it, and the thread), through the reply a remote agent posts over the API; the notice is then done."""
+    from practicehub.agents.runner import run_all_local
+    from practicehub.live import live_of
+    _, oref = _ellen_and_her_result(hub)
+    asked = []
+
+    def mention(ctx):
+        asked.append(ctx)
+        return {"body": f"It is {ctx['record']['status']}."}
+
+    c = live_of(hub).comment(M(hub, "dr-amara"), oref, "@clinical-admin-agent is this result final?")
+    row = hub.db.mentions.find_one({"ref": oref, "member": "clinical-admin-agent"})
+    run_all_local(hub, _with_mention(hub, mention), log=quiet)
+    mine = [a for a in asked if a["mention"]["ref"] == oref]
+    assert [a["mention"]["id"] for a in mine] == [row["_id"]]
+    assert mine[0]["thread"]["body"] == "@clinical-admin-agent is this result final?"
+    r = hub.db.live_comments.get(c["id"])["replies"][-1]
+    assert (r["by"], r["agent"], r["body"]) == ("clinical-admin-agent", True, "It is final.")
+    assert hub.db.mentions.get(row["_id"])["answered"]
+    assert hub.engine.item(row["item"])["status"] == "done"
+    assert hub.db.events.find_one({"action": "mention.answered", "actor": "clinical-admin-agent", "subject": oref})
+
+
+def test_only_a_person_brings_an_agent_into_a_thread(hub):
+    """Rule: an @ an agent writes names people (they are told) but never another agent, which is then only a word:
+    agents answering each other would not stop, and what an agent is asked to do is a person's call."""
+    from practicehub.live import live_of
+    _, oref = _ellen_and_her_result(hub)
+    lv, agent = live_of(hub), M(hub, "clinical-admin-agent")
+    c = lv.comment(agent, oref, "@scribe-agent @clinical-admin-agent @dr-liam please check")
+    assert c["mentions"] == ["dr-liam"]
+    assert {m["member"] for m in hub.db.mentions.find({"anchor": c["id"]})} == {"dr-liam"}
+    # answering a person, it wakes no other agent either, even quoting the person's own @
+    d = lv.comment(M(hub, "dr-amara"), oref, "@clinical-admin-agent could you look?")
+    gw = _with_mention(hub, lambda ctx: {"body": "Asking @scribe-agent about: " + ctx["thread"]["body"]})
+    AgentRunner(LocalClient(hub, "clinical-admin-agent"), gw, quiet).work_once()
+    replies = hub.db.live_comments.get(d["id"])["replies"]
+    assert [r["by"] for r in replies] == ["clinical-admin-agent"] and replies[0]["mentions"] == []
+    assert not hub.db.mentions.find_one({"anchor": d["id"], "member": "scribe-agent"})
+
+
+def test_an_agent_that_cannot_answer_says_so_in_the_thread(hub):
+    """Rule: an agent that cannot answer where it was mentioned (it escalates, its reply is refused twice, or its
+    model fails) says so in the thread, and why, for a person to take up; the notice is done either way."""
+    from practicehub.live import live_of
+    _, oref = _ellen_and_her_result(hub)
+    lv, amara, agent = live_of(hub), M(hub, "dr-amara"), M(hub, "clinical-admin-agent")
+    answers = [{"answer": {}, "escalate": True, "reason": "Nothing I was given says who ordered it."},
+               {"body": "x" * 6000}, {"body": "x" * 6000}]
+    gw = _with_mention(hub, lambda ctx: answers.pop(0))
+    runner = AgentRunner(LocalClient(hub, "clinical-admin-agent"), gw, quiet)
+    threads = []
+    for ask in ("who ordered this?", "summarise it", "anything else?"):
+        if ask == "anything else?":  # its model is down
+            class Down:
+                external = False
+
+                def __call__(self, *a, **k):
+                    raise ModelError("cannot reach the model")
+            gw.backends["ollama"] = Down()
+            hub.db.members.set(agent["id"], {"profile": {**agent["profile"], "model": "ollama/qwen3:14b"}})
+        threads.append(lv.comment(amara, oref, f"@clinical-admin-agent {ask}")["id"])
+        runner.work_once()
+    said = [hub.db.live_comments.get(t)["replies"][-1] for t in threads]
+    assert [s["body"] for s in said] == [
+        "I can't answer this: Nothing I was given says who ordered it. A person should look.",
+        "I can't answer this: my answer was not accepted: a reply is at most 5000 characters. A person should look.",
+        "I can't answer this: my model did not answer. A person should look."]
+    assert {s["by"] for s in said} == {"clinical-admin-agent"}
+    rows = hub.db.mentions.find({"ref": oref, "member": "clinical-admin-agent"})
+    assert rows and all(hub.engine.item(r["item"])["status"] == "done" for r in rows)
+
+
+def test_a_mention_respects_the_subject_s_directive(hub):
+    """Rule: a member a subject's directive keeps their file from is not mentioned on it, as one whose grants do not
+    reach it is not; a directive made after a mention is respected when the mention is read."""
+    from practicehub.live import live_of
+    from practicehub.mentions import mentions_of
+    lv, liam, agent = live_of(hub), M(hub, "dr-liam"), M(hub, "clinical-admin-agent")
+    nref = next(c for c in hub.records.search("Consent", limit=None) if c["status"] == "active")["patient"]["reference"]
+    cref = "Condition/" + next(r for r in hub.records.search("Condition", subject=nref))["id"]
+    for who in ("clinical-admin-agent", "dr-amara"):  # both may read the class; her directive keeps it from them
+        with pytest.raises(Invalid, match="may not read this"):
+            lv.comment(liam, cref, f"@{who} anything due?")
+    may = {m["id"]: m["may_read"] for m in mentions_of(hub).candidates(liam, cref)}
+    assert (may["clinical-admin-agent"], may["dr-amara"], may["dr-liam"]) == (False, False, True)
+    # a directive made after the mention: the agent is given nothing of it, and says nothing in the thread
+    eref, oref = _ellen_and_her_result(hub)
+    c = lv.comment(M(hub, "dr-amara"), oref, "@clinical-admin-agent is this final?")
+    row = hub.db.mentions.find_one({"anchor": c["id"]})
+    _lockbox(hub, eref, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-amara"}])
+    AgentRunner(LocalClient(hub, agent["id"]), _with_mention(hub, lambda ctx: {"body": "It is final."}),
+                quiet).work_once()
+    assert hub.db.live_comments.get(c["id"])["replies"] == []
+    assert row["item"] not in {i["id"] for i in hub.engine.inbox(agent)}
+    with pytest.raises(Denied, match="withheld"):
+        mentions_of(hub).context(agent, row["_id"])

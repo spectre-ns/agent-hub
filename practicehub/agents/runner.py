@@ -5,6 +5,10 @@ data its roles may read), asks its model, and submits the answer through the sam
 the same validation, guards and audit apply. When the model is unsure, or its answer is refused twice, the item is
 escalated to people. The runner never decides what an agent may do; the hub does, on every call.
 
+A notice that it was mentioned is answered in the thread it was mentioned in (:meth:`AgentRunner.answer_mention`):
+from what it was given there, and when it cannot answer, it says so there, for a person to take up. Other notices
+are for people.
+
 The kill switch is the member's status: disable the agent (or its sponsor) and its next call is refused; the runner
 notices and stops.
 """
@@ -84,6 +88,14 @@ class LocalClient:
         except NotFound as exc:
             raise Refused(str(exc)) from None
 
+    def reply_mention(self, mid, body):
+        from ..hub import NotFound
+        from ..mentions import mentions_of
+        try:
+            return self._call(mentions_of(self.hub).reply, self._me(), mid, body)
+        except NotFound as exc:
+            raise Refused(str(exc)) from None
+
 
 class HttpClient:
     """Calls the hub's JSON API with the agent's bearer token."""
@@ -139,6 +151,9 @@ class HttpClient:
     def file(self, ref, blob):
         return self._req("GET", f"/api/records/{ref}/files/{blob}", raw=True)
 
+    def reply_mention(self, mid, body):
+        return self._req("POST", f"/api/mentions/{mid}/reply", {"body": body})
+
 
 # ------------------------------------------------------------------------------------------------------ runner
 class AgentRunner:
@@ -154,14 +169,56 @@ class AgentRunner:
             raise Refused(f"{me.get('name')} is not an agent")
         handled = 0
         for item in self.client.inbox():
-            if item["kind"] == "notice":
-                continue  # notices are for people
             try:
-                self.handle(me, item)
+                if item["kind"] == "notice":
+                    if not (item.get("output") or {}).get("mention"):
+                        continue  # other notices are for people
+                    self.answer_mention(me, item)
+                else:
+                    self.handle(me, item)
                 handled += 1
             except Rejected as exc:  # e.g. another member took it first
                 self.log(f"[{me['id']}] skipped {item['id']}: {exc}")
         return handled
+
+    def answer_mention(self, me: dict, item: dict) -> str:
+        """Answer in the thread it was mentioned in, from what it was given there. A reply the hub does not take is
+        tried once more with why; when the model escalates, fails or is refused twice, the agent says in the thread
+        that it cannot answer and why, so a person sees it there. Either way the notice is done."""
+        iid = item["id"]
+        try:
+            ctx = self.client.context(iid)["context"]["mention"]
+        except Refused as exc:  # no longer its to read (a grant taken away, a directive made since)
+            self.log(f"[{me['id']}] cannot read where it was mentioned ({exc}); notice put aside")
+            try:
+                self.client.acknowledge(iid)
+            except (Refused, Rejected) as exc2:
+                self.log(f"[{me['id']}] could not put the notice aside: {exc2}")
+            return "unreadable"
+        mid, feedback, why = ctx["mention"]["id"], [], "I am not sure"
+        for attempt in (1, 2):
+            try:
+                out = self.gateway.reply(me, ctx, me.get("practice", "the practice"), feedback=feedback)
+            except ModelError as exc:
+                self.log(f"[{me['id']}] model failed on mention {mid}: {exc}")
+                why = "my model did not answer"
+                break
+            body = "" if out["escalate"] else str((out.get("answer") or {}).get("body") or "").strip()
+            if not body:
+                why = out.get("reason") or why
+                break
+            try:
+                self.client.reply_mention(mid, body)
+                self.log(f"[{me['id']}] answered mention {mid}. {out.get('reason', '')}")
+                return "answered"
+            except Rejected as exc:
+                feedback = exc.problems or [str(exc)]
+                why = "my answer was not accepted: " + "; ".join(feedback)
+                self.log(f"[{me['id']}] reply refused (attempt {attempt}): {'; '.join(feedback)}")
+        why = why.replace("@", "").strip().rstrip(".")  # says why, naming nobody: never refused for a name in it
+        self.client.reply_mention(mid, f"I can't answer this: {why}. A person should look.")
+        self.log(f"[{me['id']}] could not answer mention {mid}: {why}")
+        return "declined"
 
     def _pictures(self, me: dict, ctx: dict) -> list[dict]:
         """The pictures the step's context names (``file:<field>`` entries that are pictures). For an agent whose

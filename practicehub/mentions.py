@@ -14,6 +14,13 @@ carries is only where to look; the record, the passage and the thread come from 
 again whether that member may read the record. An agent nobody let read the record is not mentioned at all: the
 person typing is told so (:class:`~practicehub.hub.Invalid`), and nothing is sent.
 
+Only a person brings an agent into a thread: an ``@`` an agent writes names the people in it (they are told) but never
+another agent, which is then only a word. Agents answering each other would otherwise go on forever, and what an
+agent is asked to do is a person's call. A record whose subject's directive keeps it from a member (reaching what
+they would otherwise read) is as unreadable to them here as one their grants do not reach.
+
+The hub's own agents answer a mention through :meth:`Mentions.reply` (``agents/runner.py``), as a remote agent does
+over ``/api/mentions/<id>/reply``: it posts in the thread, or starts one on the passage, and the notice is done.
 An agent answers in the thread with its own token, and its answer is marked as an agent's. It may propose a change to
 the text as a *suggestion*; a person who may change the record accepts it (it is then saved as that person's change,
 naming the agent) or rejects it. On a file, nobody's suggestion is applied by the hub: the person makes the change in
@@ -67,7 +74,10 @@ class Mentions:
         return self.hub.class_of(ref.split("/", 1)[0])
 
     def may_see(self, member: dict, ref: str) -> bool:
-        return self.hub.can(member, "reader", f"data_class:{self._class(ref)}")
+        """Whether ``member`` may read ``ref`` here: its class, and no directive of its subject's keeping it from them
+        (a thread's quotes and words are copies of the record)."""
+        return (self.hub.can(member, "reader", f"data_class:{self._class(ref)}")
+                and not self.hub.restrictions.withholds_from(member, ref, reaching=True))
 
     def candidates(self, member: dict, ref: str, q: str = "") -> list[dict]:
         """Whom ``member`` may mention on ``ref``: active people and agents, each with whether they may read it."""
@@ -85,9 +95,11 @@ class Mentions:
         out.sort(key=lambda r: (r["kind"] != "person", not r["may_read"], r["name"].casefold()))
         return out
 
-    def resolve(self, ref: str, text: str) -> tuple[list[dict], list[dict]]:
-        """The members a text mentions: (those who may read ``ref``, those who may not). Ids of nobody are words."""
+    def resolve(self, ref: str, text: str, author: dict | None = None) -> tuple[list[dict], list[dict]]:
+        """The members a text mentions: (those who may read ``ref``, those who may not). Ids of nobody are words, and
+        so is an agent's id in what an agent wrote: only a person brings an agent in."""
         ok, refused = [], []
+        by_agent = (author or {}).get("kind") == "agent"
         for mid in mentioned_ids(text):
             try:
                 m = self.hub.member(mid)
@@ -95,13 +107,15 @@ class Mentions:
                 continue
             if m.get("status") != "active" or m["kind"] not in ("person", "agent"):
                 continue
+            if by_agent and m["kind"] == "agent":
+                continue
             (ok if self.may_see(m, ref) else refused).append(m)
         return ok, refused
 
     def check(self, author: dict, ref: str, text: str) -> list[dict]:
         """Before a comment is saved: every member it mentions, or :class:`Invalid` naming any who may not read
         ``ref`` (an agent is never handed what its grants do not let it read; a person is told so as they write)."""
-        ok, refused = self.resolve(ref, text)
+        ok, refused = self.resolve(ref, text, author)
         if refused:
             who = ", ".join(m["name"] for m in refused)
             self.hub.track.append(author, "mention.refused", ref, data={"who": [m["id"] for m in refused]})
@@ -120,7 +134,7 @@ the file in ``field`` it is about, when it is about a file rather than the field
         ``skip_refused`` (text saved by several people at once), a member who may not read ``ref`` is left out and
         the refusal is tracked, instead of stopping the save."""
         if skip_refused:
-            members, refused = self.resolve(ref, text)
+            members, refused = self.resolve(ref, text, author)
             if refused:
                 self.hub.track.append(author, "mention.refused", ref, cause=cause,
                                       data={"who": [m["id"] for m in refused], "field": field})
@@ -214,6 +228,12 @@ the file in ``field`` it is about, when it is about a file rather than the field
         if row["member"] != member["id"]:
             raise Denied("this mention is for someone else")
         ref = row["ref"]
+        if self.hub.restrictions.withholds_from(member, ref, reaching=True):  # a directive made since is respected
+            self.hub.track.append(member, "access.denied", ref, data={
+                "relation": "reader", "what": f"read where they were mentioned, withheld at the "
+                                              f"{self.hub.subject_word()}'s request"})
+            raise Denied(f"what this mention is about is withheld from {member.get('name') or member['id']} at the "
+                         f"{self.hub.subject_word()}'s request")
         rec = self.hub.read_record(member, ref)  # asks again: a grant taken away since is respected (and redacted)
         thread = self.thread(ref, row["anchor"])
         mention = {k: row[k] for k in ("id", "ref", "by", "anchor", "field", "quote", "around", "at")}
@@ -233,6 +253,27 @@ the file in ``field`` it is about, when it is about a file rather than the field
             out["suggest_how"] = ("A suggestion on a file is words to replace (find, quoted from its text) and what "
                                   "to put instead (text). The hub never changes the file: a person makes the change.")
         return out
+
+    def reply(self, member: dict, mid: str, body: str = "", *, suggest: dict | None = None) -> dict:
+        """The mentioned member answers where they were mentioned: in its thread, or (mentioned in the record's text
+        itself) in a new thread on that line. ``suggest`` ({field, find, text}): the answer proposes a change a person
+        who may change the record accepts. Either way the mention is answered. The comment thread comes back."""
+        from .live import live_of
+        row = self.get(mid)
+        if row["member"] != member["id"]:
+            raise Denied("this mention is for someone else")
+        live, ref, anchor, body = live_of(self.hub), row["ref"], row["anchor"], str(body or "")
+        if not anchor.startswith("c-"):  # mentioned in the text itself: the answer starts a thread on that passage
+            line = next((ln for ln in row["quote"].splitlines() if f"@{member['id']}" in ln), row["quote"])[:500]
+            c = live.comment(member, ref, body or "Suggested a change.", quote=line, field=row["field"])
+            self.answered(member, ref, anchor)
+            if suggest is None:
+                return c
+            anchor = c["id"]
+        if suggest is not None:
+            return live.suggest(member, ref, anchor, str(suggest.get("field") or row["field"] or ""),
+                                str(suggest.get("find") or ""), str(suggest.get("text") or ""), body)
+        return live.reply(member, ref, anchor, body)
 
     def answered(self, member: dict, ref: str, anchor: str, cause: int | None = None) -> None:
         """``member`` answered in the thread at ``anchor``: its open mentions there are done."""
