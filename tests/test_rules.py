@@ -8235,6 +8235,20 @@ def test_signing_is_refused_while_a_pin_is_behind(hub):
     assert hub.sign_record(amara, ref, "I reviewed it")["version"]
 
 
+def test_a_signed_move_is_refused_while_a_pin_is_behind(hub):
+    """A move signed on the record page signs what the record pins too: while a pinned record has changed since, the
+    move is refused, like a signature, until the pin is moved on."""
+    amara, chit, ref = _packet(hub)
+    _type(hub, FILE.replace('to = "reviewed"\n', 'to = "reviewed"\nsign = "I reviewed it"\n', 1), "Packet")
+    hub.update_record(amara, chit, {"amount": 11})
+    with pytest.raises(Invalid, match=r"Packet pins CHT-1 at version 1; it is at version 2: update the pin, then sign"):
+        hub.move_record(amara, ref, "reviewed", signature="I reviewed it")
+    assert hub.records.read(*ref.split("/"))["status"] == "open"
+    hub.repin(amara, ref, "counted", chit)
+    hub.move_record(amara, ref, "reviewed", signature="I reviewed it")
+    assert hub.records.read(*ref.split("/"))["status"] == "reviewed"
+
+
 def test_a_covered_part_is_not_added_or_changed_while_its_record_is_locked(hub):
     """While a record is locked, people do not add or change the parts it covers (its workflow still does); while it
     is final, no one does."""
@@ -8766,3 +8780,118 @@ def test_the_sign_offs_a_view_lists_are_a_person_s_on_records_the_reader_may_rea
     assert not {hers, his} & {r["record"] for r in every["rows"]}
     with pytest.raises(Denied):
         hub.sign_record(M(hub, "scribe-agent"), his, "checked")
+
+
+# ------------------------------------------------------------------ a move's stamp: who made it and when
+STAMPED_JOB = JOB.replace(
+    "[[signature]]\n",
+    '[[field]]\nname = "finished_by"\nlabel = "Finished by"\ntype = "member"\n'
+    '[[field]]\nname = "finished_on"\nlabel = "Finished on"\ntype = "date"\n'
+    '[[field]]\nname = "approved_by"\nlabel = "Approved by"\ntype = "member"\n'
+    '[[field]]\nname = "approved_at"\nlabel = "Approved at"\ntype = "datetime"\n[[signature]]\n', 1).replace(
+    'requires = ["outcome"]\n', 'requires = ["outcome"]\nstamp = ["finished_by", "finished_on"]\n', 1).replace(
+    'sign = "Approved"\n', 'sign = "Approved"\nstamp = ["approved_by", "approved_at"]\n'
+    '[[lifecycle.transition.check]]\nmust = "record.approved_by != record.finished_by"\n'
+    'message = "whoever finished a job does not approve it"\n', 1)
+# the same job's workflow, its edge moving the record once the work is done (the work is not itself the move)
+ARRIVING_JOB_FLOW = JOB_FLOW.replace('id = "finished"\nfrom = "open"\nto = "done"\n',
+                                     'id = "finished"\nfrom = "open"\nto = "done"\n'
+                                     'when = "work.hours == null or work.hours >= 0"\n', 1)
+
+
+def _stamped_jobs(hub, flow=None):
+    rana, amara = M(hub, "rana"), M(hub, "dr-amara")
+    hub.approve(amara, "type", "Job", hub.propose("type", rana, STAMPED_JOB.format(top=""), "jobs")["version"])
+    if flow:
+        hub.approve_workflow(amara, "job-flow", hub.propose_workflow(rana, flow, "jobs")["version"])
+        walked = STAMPED_JOB.format(top='workflow = { id = "job-flow", when = "record.status == \'open\'" }')
+        hub.approve(amara, "type", "Job", hub.propose("type", rana, walked, "walked")["version"])
+
+
+def test_a_moves_stamp_names_who_made_it_and_when_and_nothing_else_writes_it(hub):
+    """A move's ``stamp`` fields are set by that move as it is made, in its own write: a member field to who made it,
+    a date to the practice's today, a time to now (to the second). A signature that makes the move covers them and
+    the move's checks read them, so a check keeps whoever finished a job from approving it. Nobody writes a stamped
+    field by hand, making the record or changing it."""
+    from datetime import datetime
+    _stamped_jobs(hub)
+    rt = hub.record_type("Job")
+    assert {rt.field(n)["by"] for n in ("finished_by", "finished_on", "approved_by", "approved_at")} == {"workflow"}
+    amara, liam = M(hub, "dr-amara"), M(hub, "dr-liam")
+    ref = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    hub.move_record(liam, ref, "doing")
+    hub.move_record(liam, ref, "done", {"outcome": "Fixed", "hours": 2})
+    rec = hub.records.read(*ref.split("/"))
+    assert rec["finished_by"] == "dr-liam" and rec["finished_on"] == hub.engine.now().date().isoformat()
+    hub.move_record(amara, ref, "approved", signature="Approved")
+    rec = hub.records.read(*ref.split("/"))
+    at = datetime.fromisoformat(rec["approved_at"])
+    assert rec["approved_by"] == "dr-amara" and at.microsecond == 0 and at.tzinfo is None
+    assert abs((hub.engine.now() - at).total_seconds()) < 120
+    assert hub.signatures(amara, ref)[0]["current"], "the signature covers what its move stamped"
+
+    other = f"Job/{hub.create_record(amara, 'Job', {'title': 'Fix the sink'})['id']}"
+    hub.move_record(amara, other, "doing")
+    hub.move_record(amara, other, "done", {"outcome": "Fixed"})
+    with pytest.raises(Denied, match="to move a job to approved: whoever finished a job does not approve it"):
+        hub.move_record(amara, other, "approved", signature="Approved")
+    assert hub.records.read(*other.split("/"))["status"] == "done"
+    said = re.escape("Finished by is set by the move that stamps it (Finish), not written by hand")
+    with pytest.raises(Invalid, match=said):
+        hub.create_record(amara, "Job", {"title": "Done already", "finished_by": "dr-liam"})
+    with pytest.raises(Invalid, match=said):
+        hub.update_record(amara, other, {"finished_by": "dr-liam"})
+    assert hub.records.read(*other.split("/"))["finished_by"] == "dr-amara"
+
+
+@pytest.mark.parametrize("flow", [JOB_FLOW, ARRIVING_JOB_FLOW], ids=["the-work-is-the-move", "the-edge-moves-after"])
+def test_a_workflows_move_is_stamped_with_whoever_did_the_work_it_follows(hub, flow):
+    """A move its workflow makes is stamped with a person, never the workflow: whoever did the step that is the move
+    or, when the edge makes the move once the work on the state is done, whoever did that work."""
+    from practicehub import workflows
+    makes = next(s for s in workflows.parse(flow).steps if s.state == "done")
+    assert makes.kind == ("task" if flow is JOB_FLOW else "automation")
+    _stamped_jobs(hub, flow)
+    liam = M(hub, "dr-liam")
+    ref = f"Job/{hub.create_record(liam, 'Job', {'title': 'Fix the autoclave'})['id']}"
+    run = _own_run(hub, ref, "job-flow")
+    hub.move_record(liam, ref, "doing")
+    if flow is not JOB_FLOW:  # the edge's move writes nothing the work answered: what it requires is on the record
+        hub.update_record(liam, ref, {"outcome": "Fixed"})
+    hub.engine.complete(liam, run["item"], {"outcome": "Fixed", "hours": 3})
+    rec = hub.records.read(*ref.split("/"))
+    assert rec["status"] == "done" and rec["finished_by"] == "dr-liam", rec
+    assert rec["finished_on"] == hub.engine.now().date().isoformat()
+
+
+# ------------------------------------------------------------------ unique over a reference
+TAG = """id = "Tag"
+data_class = "visits"
+unique = [["gauge", "side"]]
+[[field]]
+name = "gauge"
+type = "reference"
+target = ["Gauge"]
+required = true
+[[field]]
+name = "side"
+required = true
+"""
+
+
+def test_unique_over_a_reference_compares_the_record_it_names_however_it_is_written(hub):
+    """A ``unique`` key with a reference in it compares the record the reference names: "Gauge/1" and
+    {reference: "Gauge/1", display: ...} (a form's pick, with its name) are one key; another gauge is another."""
+    liam = M(hub, "dr-liam")
+    _type(hub, GAUGE.replace("{top}", ""), "Gauge")
+    _type(hub, TAG, "Tag")
+    g = f"Gauge/{hub.create_record(liam, 'Gauge', {'code': 'GL-M'})['id']}"
+    other = f"Gauge/{hub.create_record(liam, 'Gauge', {'code': 'GZ-10'})['id']}"
+    hub.create_record(liam, "Tag", {"gauge": {"reference": g, "display": "GL-M"}, "side": "front"})
+    for again in (g, {"reference": g}, {"reference": g, "display": "another name"}):
+        with pytest.raises(Invalid, match="not unique") as exc:
+            hub.create_record(liam, "Tag", {"gauge": again, "side": "Front"})
+        assert any(p.startswith(f"Gauge and Side: another tag already has {g}, Front") for p in exc.value.problems), \
+            exc.value.problems
+    hub.create_record(liam, "Tag", {"gauge": other, "side": "front"})
+    assert len(hub.records.search("Tag", limit=None)) == 2

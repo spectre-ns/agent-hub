@@ -1132,7 +1132,12 @@ class Engine:
                 f = rt.field(n)
                 if f and n in names and got.get(n) not in (None, ""):
                     moved = schema.put(moved, f["path"], got[n])
-            hub.update_record(actor, ref, moved, cause=cause, run_id=run["id"])
+            by = (run["steps"].get(step.id) or {}).get("by")  # whoever did the step made the move: its stamp names them
+            if step.kind == "automation" and step.on_edge:  # an edge's own move: whoever did the work it follows
+                by = next((run["steps"][s]["by"] for s in reversed(step.needs or [])
+                           if (run["steps"].get(s) or {}).get("by")), by)
+            mover = hub.db.members.get(by) if isinstance(by, str) and t and t.get("stamp") else None
+            hub.update_record(actor, ref, moved, cause=cause, run_id=run["id"], _mover=mover)
 
     def _signed_move(self, run: dict, step) -> tuple[str, str, str] | None:
         """(record label, state label, meaning) when the move a step with ``state`` makes from where its record is
@@ -1147,7 +1152,7 @@ class Engine:
         t = rt.transition(schema.first(rec, rt.lifecycle["path"]), step.state)
         return (rt.label, rt.state_label(step.state).lower(), t["sign"]) if t and t.get("sign") else None
 
-    def _refused_move(self, run: dict, step, values: dict) -> str | None:
+    def _refused_move(self, run: dict, step, values: dict, member: dict | None = None) -> str | None:
         """Why the move a person's step with ``state`` makes as it is done would be refused by the move's checks
         (``[[lifecycle.transition.check]]``), for the record as it would be with what the answer gives the fields the
         move asks for; None when it would not. The task is then not finished: the move would fail after it."""
@@ -1167,6 +1172,7 @@ class Engine:
             f = rt.field(n)
             if f and values.get(n) not in (None, ""):
                 moved = schema.put(moved, f["path"], values[n])
+        moved = self.hub.stamped(rt, t, moved, member or {})  # as the move would stamp it, made by whoever does it
         return self.hub.move_check_refusal(rt, ref, t, schema.exact(rt, moved))
 
     def _moves_due(self, run: dict, wf, cause) -> bool:
@@ -3184,7 +3190,7 @@ class Engine:
                 problems = guard(values, ctxview) or []
                 if problems:
                     raise Invalid("the answer does not pass the step's checks", problems)
-            refused = self._refused_move(run, step, values)
+            refused = self._refused_move(run, step, values, member)
             if refused:  # finished, its move would fail after it: the record would stay where it is
                 raise Invalid(f"{step.title} is not done yet: {refused}")
             self._require_links(run, step)

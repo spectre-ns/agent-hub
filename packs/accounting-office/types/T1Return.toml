@@ -8,9 +8,13 @@
 # confirmation number and the date. The client's own authorisation (T183) comes in through the portal, or is recorded
 # from paper by the office.
 #
-# What was reviewed is what the client authorises and what is filed: once the review is signed the return is locked
-# (nobody edits its figures), and the only way to change it is to reopen it, which sends it back to be compared,
-# drafted, reviewed and authorised again.
+# What was reviewed is what the client authorises and what is filed: from the review on the return is locked (nobody
+# edits its figures), and the only way to change it is to send it back or reopen it, which takes it back to be
+# compared, drafted, reviewed and authorised again. The return keeps the slips it was drafted from, each as it was then
+# (`slips`): a signature on it covers them too.
+#
+# Separation of duties: each move says who made it (`prepared_by`, `reviewed_by`, `filed_by`), the reviewer did not
+# draft it, and the partner who files it neither drafted, reviewed nor changed it (the t1-return workflow's not_by).
 id = "T1Return"
 key = "T1"
 label = "T1 return"
@@ -23,6 +27,8 @@ date = "due_date"
 flag = "attention"
 part_of = "client"
 order = 10
+# one return per client per year: a reopen is the same return, walked again
+unique = [["client", "year"]]
 summary = "A personal income tax return, from the slips to the notice of assessment."
 # A return reopened for changes (back at comparing) is walked again from there: the next pass, a run of its own.
 workflow = { id = "t1-return", when = "record.status in ['gathering', 'comparing']" }
@@ -101,6 +107,17 @@ label = "All expected slips are in"
 type = "boolean"
 
 [[field]]
+name = "slips"
+label = "Slips counted"
+type = "reference"
+target = ["TaxSlip"]
+list = true
+pin = true
+rel = "counted"
+by = "workflow"
+help = "The slips the return was last compared and drafted from, each as it was then: one that changes since leaves a signature on the return not current"
+
+[[field]]
 name = "total_income"
 label = "Total income (line 15000)"
 type = "decimal"
@@ -147,6 +164,28 @@ label = "Reviewer's notes"
 type = "text"
 
 [[field]]
+name = "review_points"
+label = "Review points"
+type = "text"
+help = "What the return was last sent back to answer (by its reviewer, or a slip that came late): the next draft answers each first"
+
+[[field]]
+name = "prepared_by"
+label = "Prepared by"
+type = "member"
+help = "Who made the draft that went to review: the move to review says so"
+
+[[field]]
+name = "reviewed_by"
+label = "Reviewed by"
+type = "member"
+
+[[field]]
+name = "reviewed_on"
+label = "Reviewed on"
+type = "date"
+
+[[field]]
 name = "t183_signed_on"
 label = "Client authorised filing (T183) on"
 type = "date"
@@ -169,6 +208,12 @@ name = "filed_on"
 label = "Filed on"
 type = "date"
 help = "The day the return was transmitted from the firm's tax software and accepted by the CRA"
+
+[[field]]
+name = "filed_by"
+label = "Filing recorded by"
+type = "member"
+help = "The partner who signed for the filing"
 
 [[field]]
 name = "noa_date"
@@ -215,9 +260,10 @@ states = ["client-signed"]
 [lifecycle]
 field = "status"
 initial = "gathering"
-# What was reviewed is what the client authorises and what is filed: from the signed review on, people change nothing
-# on the return but its state (a move still writes what it asks for). "Reopen for changes" is the way back.
-locked = ["client-approval", "with-client", "t183-overdue", "client-signed", "filing", "filed", "assessment-differs", "assessed", "withdrawn"]
+# What was reviewed is what the client authorises and what is filed: from the review on, people change nothing on the
+# return but its state (a move still writes what it asks for). "Back with review points" and "Reopen for changes" are
+# the ways back.
+locked = ["in-review", "client-approval", "with-client", "t183-overdue", "client-signed", "filing", "filed", "assessment-differs", "assessed", "withdrawn"]
 # Its work cancelled while the filing it recorded is being checked, it waits for a partner again; cancelled while an
 # assessment that differs is being looked at, it stays there.
 abandoned = { filing = "client-signed", assessment-differs = "assessment-differs" }
@@ -233,14 +279,24 @@ to = "in-review"
 label = "Ready for review"
 asks = ["total_income", "taxable_income", "tax_deducted", "net_refund", "flags", "draft_summary"]
 requires = ["total_income", "net_refund", "draft_summary"]
+stamp = ["prepared_by"]
 
 [[lifecycle.transition]]
 from = ["in-review"]
 to = "client-approval"
 label = "Approve the review"
-asks = ["total_income", "taxable_income", "tax_deducted", "net_refund", "review_notes"]
-requires = ["total_income", "net_refund"]
+# the reviewer approves the figures as drafted, or sends them back: a review does not change them
+asks = ["review_notes"]
 sign = "I reviewed this return and it is ready for the client"
+stamp = ["reviewed_by", "reviewed_on"]
+
+# Not ready: back to be compared and drafted again, with what the next draft must answer.
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "comparing"
+label = "Back with review points"
+asks = ["review_points"]
+requires = ["review_points"]
 
 [[lifecycle.transition]]
 from = ["with-client", "t183-overdue"]
@@ -256,8 +312,13 @@ to = "filing"
 label = "Record the filing"
 sign = "I authorise filing this return with the CRA"
 asks = ["efile_confirmation", "filed_on"]
-requires = ["t183_signed_on", "efile_confirmation", "filed_on"]
+requires = ["efile_confirmation", "filed_on"]
+stamp = ["filed_by"]
 confirm = "The hub sends nothing to the CRA. Sign only once the return has been transmitted from the firm's tax software and accepted: you are recording the CRA's confirmation number and the date it was filed."
+# the client's authorisation is a precondition, not something this move asks for (and so could overwrite)
+[[lifecycle.transition.check]]
+must = "record.t183_signed_on != null"
+message = "the client's authorisation (T183) is not on the return"
 
 # The way back once the review is signed: the return is compared and drafted again from the slips on file, and needs
 # the review signature and the client's authorisation (T183) again before it can be filed. Whoever holds the work
@@ -268,9 +329,10 @@ to = "comparing"
 label = "Reopen for changes"
 comment = true
 
-# A slip that came after the draft, before a person could reopen it: only the slip's run makes this move.
+# A slip that came after the review, before a person could reopen it: only the slip's run makes this move (in review,
+# it goes back with the slip as its review point).
 [[lifecycle.transition]]
-from = ["in-review", "client-approval"]
+from = ["client-approval"]
 to = "comparing"
 by = "workflow"
 label = "Back for a slip that came late"

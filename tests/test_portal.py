@@ -1077,3 +1077,88 @@ def test_the_portals_colours_follow_the_theme():
     assert "#9b1c1c" not in pa.PORTAL_CSS and "#fdecec" not in pa.PORTAL_CSS and "#b45309" not in pa.PORTAL_CSS
     assert ".portal .err{display:block;color:var(--danger-fg)" in pa.PORTAL_CSS
     assert "font-size:18px" in pa.PORTAL_CSS and ".portal label,.portal legend{font-size:16px" in pa.PORTAL_CSS
+
+
+# ------------------------------------------------------------------------------------- a kind about one's own record
+def _about(hub, when="record.clinical_status == 'active'"):
+    """new-concern, about one of the person's own active conditions: the request's because_of names it."""
+    pack = _pack(hub)
+    pack.portal["kinds"]["new-concern"]["about"] = {"type": "Condition", "when": when, "input": "because_of"}
+    hub.pack = pack
+    return Portal(hub, dev=True)
+
+
+def _condition(hub, ref, problem, status="active"):
+    rec = hub.create_record(M(hub, "dr-amara"), "Condition", {
+        "clinicalStatus": {"text": status}, "code": {"text": problem}, "subject": {"reference": ref}})
+    return f"Condition/{rec['id']}"
+
+
+@pytest.mark.parametrize("about,says", [
+    ("Condition", "new-concern.about: a table"),
+    ({"type": "Condition", "input": "because_of", "colour": "red"}, "new-concern.about.colour: not a setting"),
+    ({"type": "Nothing", "input": "because_of"}, "new-concern.about.type: there is no record type 'Nothing'"),
+    ({"type": "Patient", "input": "because_of"}, "new-concern.about.type: a Patient is not about a Patient"),
+    ({"type": "Condition", "when": "record.clinical_status ==", "input": "because_of"}, "new-concern.about.when: "),
+    ({"type": "Condition", "when": "input.kind == 'forms'", "input": "because_of"},
+     "new-concern.about.when: reads input.kind; it reads the record (record.<field>) and today"),
+    ({"type": "Condition", "input": "reason"}, "new-concern.about.input: the reference input of the kind's workflow"),
+    ({"type": "Condition", "input": "nope"}, "new-concern.about.input: the reference input of the kind's workflow"),
+    ({"type": "AllergyIntolerance", "input": "because_of"},
+     "new-concern.about.input: because_of takes a Observation or Condition or MedicationRequest, not a "
+     "AllergyIntolerance"),
+])
+def test_a_kind_about_a_record_names_a_type_about_the_person_a_condition_and_a_reference_input(hub, about, says):
+    pack = _pack(hub)
+    pack.portal["kinds"]["new-concern"]["about"] = about
+    problems = check_config(pack)
+    assert any(says in p for p in problems), problems
+
+
+def test_a_kind_about_a_record_offers_only_the_persons_own_that_its_condition_holds_of(hub):
+    """A kind with ``about`` lists the person's own records of its type that its ``when`` holds of now (never
+    another person's), and the one chosen is checked again on sending: one not offered is refused, and with none
+    offered nothing is sent. The choice reaches the workflow as the input ``about`` names."""
+    p = _about(hub)
+    me = person(hub)
+    other = person(hub, card="2222 333 444", born="1980-05-06")
+    asthma = _condition(hub, me, "Asthma")
+    _condition(hub, me, "Old sprain", status="resolved")
+    theirs = _condition(hub, other, "Gout")
+    kind = p.kind("new-concern")
+    assert [k["about"] for k in p.public()["kinds"] if k["id"] == "new-concern"] == [True]
+    assert [c["ref"] for c in p.about_choices(me, kind)] == [asthma]
+    answers = {"reason": "my breathing is worse", "urgency": "routine"}
+    for wrong in (None, theirs, "Condition/nothing"):
+        with pytest.raises(Invalid) as exc:
+            p.book(me, "new-concern", None, answers, wrong)
+        assert p.say("choose_about") in exc.value.problems, exc.value.problems
+    got = p.book(me, "new-concern", None, answers, asthma)
+    run = _run_of(hub, got)
+    assert run["ctx"]["input"]["because_of"] == asthma and run["subject"] == me
+    lone = person(hub, card="3333 444 555", born="1970-07-08")
+    with pytest.raises(Invalid) as exc:
+        p.book(lone, "new-concern", None, answers, asthma)
+    assert p.say("nothing_about") in exc.value.problems, exc.value.problems
+
+
+def test_the_book_form_asks_which_record_it_is_about_and_sends_the_choice(hub):
+    """The book form shows the person's own records the kind is about as one choice each (chosen already when there
+    is one); with none it says so and has nothing to send."""
+    _about(hub)
+    app = portal_app(hub)
+    asthma = _condition(hub, person(hub), "Asthma")
+    b = Browser(app)
+    _sign_in(b)
+    page = b.go("GET", "/book/new-concern")[2]
+    assert html.escape(app.say("about")) in page
+    assert f'name="_about" value="{asthma}" checked required' in page
+    status, h, _ = b.go("POST", "/book/new-concern", {"_form": _field(page, "_form"), "_submit": _field(page, "_submit"),
+                                                      "reason": "my breathing is worse", "urgency": "routine",
+                                                      "_about": asthma})
+    assert status == 303 and h["Location"].startswith("/done/")
+    run = hub.db.runs.find_one({"workflow_id": "appointment-request", "ctx.input.because_of": asthma})
+    assert run is not None
+    hub.update_record(M(hub, "dr-amara"), asthma, {"clinicalStatus": {"text": "resolved"}})
+    page = b.go("GET", "/book/new-concern")[2]
+    assert html.escape(app.say("nothing_about")) in page and 'name="_submit"' not in page

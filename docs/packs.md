@@ -243,6 +243,25 @@ Only a move's check reads its record's parts, `parts.<part type>.*` (a type whos
 its `record` and `signed` (the meanings of its current signatures). They are read for the hub, whatever the mover may
 see; the mover is told only the message. A workflow's edge into the state keeps the same checks.
 
+A move can also record who made it and when (`stamp`):
+
+```toml
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "approved"
+stamp = ["reviewed_by", "reviewed_on"]   # a member field, a date or a time
+[[lifecycle.transition.check]]
+must = "record.reviewed_by != record.prepared_by"
+message = "whoever prepared it does not approve it"
+```
+
+The move sets each stamped field in its own write: a member field to whoever made the move (for a move a workflow's
+step makes, whoever did the step; none, for an automation of its own), a date to the practice's today, a time to now.
+A signature that makes the move covers what it stamps. Nothing else writes a stamped field, not a person, a workflow
+or a tool (only an import that brings a record in as it was), so it always names who made the move; it is off every
+form, it is not asked for, and it is one value (not a list, not the state). The move's checks read the record as
+stamped, so a check can keep two moves apart, as above.
+
 Conditions, here and everywhere, add, subtract, multiply and divide exactly (`0.1 + 0.2 == 0.3`), in brackets too;
 anything over a missing value or text is null, as is dividing by zero. `sum`, `min`, `max` and `count` read every
 item of a list (`sum(record.lines.*.amount)`), or a value or condition over each, `it` being the item

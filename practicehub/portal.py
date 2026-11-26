@@ -10,7 +10,9 @@ to say, in ``[portal]``, which is under the pack's change control (two policy ow
 
 * ``kinds``: what a person may book. Each kind has a length (``minutes``), the roles whose calendars it books, how far
   ahead (``horizon_days``), whether it books straight away (``mode = "book"``) or goes in as a request (``"request"``),
-  the workflow it starts, the questions it asks (that workflow's own inputs) and what it says back.
+  the workflow it starts, the questions it asks (that workflow's own inputs) and what it says back. A kind can be
+  about one of the person's own records (``about``): they choose which, from those of its type about them where its
+  condition holds, and the workflow is given that record.
 * ``identity``: how a person proves who they are: the date of birth field of the practice's subject type, its
   identifier (the core's ``Subject.identifier``) and a one-time code sent to its contact (``Subject.contact``).
 * ``register``: the fields a new person gives, the values that keep their record from signing in or booking until
@@ -36,7 +38,9 @@ from . import expr, schema
 
 KINDS_KEYS = {"label", "description", "mode", "workflow", "roles", "minutes", "horizon_days", "slot", "slot_input",
               "inputs", "questions", "advice", "alarm", "booked", "booking_kind", "cancel_to",
-              "cancel_before_hours", "max_slots", "done", "screen", "max_upcoming"}
+              "cancel_before_hours", "max_slots", "done", "screen", "max_upcoming", "about"}
+ABOUT_KEYS = {"type", "when", "input"}
+ABOUT_LIMIT = 50           # the person's records of the kind's type a choice is made from, newest first
 TOP_KEYS = {"member", "title", "welcome", "privacy", "contact_line", "wording", "identity", "code", "register",
             "intake_workflow", "session_minutes", "kinds", "public_origin", "per_minute", "over_limit"}
 OVER_LIMIT_KEYS = {"workflow", "input"}
@@ -89,6 +93,9 @@ WORDING = {  # what the pages say, unless [portal.wording] says otherwise
     "request_next": "Someone at the practice contacts you to arrange a time.",
     "no_cancel_soon": "Less than {hours} hours away: call the practice to cancel or change it.",
     "no_cancel": "This cannot be cancelled online: call the practice to cancel or change it.",
+    "about": "Which one this is about",
+    "choose_about": "Choose which one this is about.",
+    "nothing_about": "Nothing of yours is waiting for this just now. If you expected something, call the practice.",
 }
 
 
@@ -354,6 +361,10 @@ def check_config(pack) -> list[str]:
                                          for c in sorted(set(words) - set(have))]
             problems += kind_problems(w, k, wf, qs)
             given = {*fixed, *qs}
+            ab = about_problems(w, k.get("about"), pack, subject, names, given) if "about" in k else None
+            problems += ab or []
+            if ab == []:
+                given.add(k["about"]["input"])
             if slot != "none":
                 si = k.get("slot_input", "slot")
                 given.add(si)
@@ -387,6 +398,45 @@ def check_config(pack) -> list[str]:
             except (TypeError, ValueError):
                 problems.append(f"{w}.cancel_before_hours: a number of hours")
     return problems
+
+
+def about_problems(w: str, ab, pack, subject: str, names: dict, given: set) -> list[str]:
+    """A kind's ``about = { type, when, input }``: a record type about the subject type (a ``rel = "subject"``
+    reference to it), a condition over ``record.`` (and ``today``) that says which of a person's records of it the
+    kind is for, and the workflow's reference input the chosen one goes to (not given otherwise)."""
+    if not isinstance(ab, dict):
+        return [f"{w}.about: a table {{ type = ..., when = ..., input = ... }}: which of the person's own records the "
+                f"kind is about"]
+    out = [f"{w}.about.{x}: not a setting (settings: {', '.join(sorted(ABOUT_KEYS))})"
+           for x in sorted(set(ab) - ABOUT_KEYS)]
+    tid = ab.get("type")
+    doc = _type_doc(pack, tid) if isinstance(tid, str) else {}
+    if not doc:
+        out.append(f"{w}.about.type: there is no record type {tid!r}")
+    elif not any(f.get("rel") == "subject" and subject in ([f["target"]] if isinstance(f.get("target"), str)
+                                                           else f.get("target") or [])
+                 for f in doc.get("field") or [] if isinstance(f, dict)):
+        out.append(f"{w}.about.type: a {tid} is not about a {subject} (no rel = \"subject\" reference to one): a "
+                   f"person chooses from their own")
+    when = ab.get("when")
+    if when is not None:
+        try:
+            expr.check(str(when))
+            out += [f"{w}.about.when: reads {x}; it reads the record (record.<field>) and today"
+                    for x in expr.paths(str(when)) if x.split(".")[0] not in ("record", "today")]
+        except expr.ExprError as exc:
+            out.append(f"{w}.about.when: {exc}")
+    name = ab.get("input")
+    i = names.get(name) if isinstance(name, str) else None
+    if not i or i.get("type") != "reference":
+        out.append(f"{w}.about.input: the reference input of the kind's workflow the chosen record goes to, not "
+                   f"{name!r}")
+    elif name in given:
+        out.append(f"{w}.about.input: {name} is given by the kind already (inputs or questions); the person's choice "
+                   f"gives it")
+    elif isinstance(tid, str) and i.get("target") and tid not in i["target"]:
+        out.append(f"{w}.about.input: {name} takes a {' or '.join(i['target'])}, not a {tid}")
+    return out
 
 
 def over_limit_problems(wf, name) -> list[str]:
@@ -638,6 +688,7 @@ class Portal:
         for k in self.kinds().values():
             kinds.append({"id": k["id"], "label": k["label"], "description": k.get("description") or "",
                           "mode": k["mode"], "slot": self.slot_mode(k), "questions": self.questions(k),
+                          "about": bool(k.get("about")),
                           "cancel": bool(k.get("cancel_to")),
                           "cancel_before_hours": float(k.get("cancel_before_hours", 0))})
         fields = []
@@ -1032,12 +1083,13 @@ class Portal:
         return (sum(1 for b in self.upcoming(person) if b.get("kind_id") == k["id"])
                 + len(self._requests(person, k)))
 
-    def book(self, person: str, kid: str, slot: str | None, answers: dict) -> dict:
+    def book(self, person: str, kid: str, slot: str | None, answers: dict, about: str | None = None) -> dict:
         """Book (or ask for) this kind for the signed-in person. The time must be free now (else Clash, with the
-        times that are); the person may have at most the kind's ``max_upcoming`` open; the kind's workflow is started
-        (``_book``). What the person is told comes back: ``{run, kind, mode, advice, alarm, when, with, failed,
-        requested}``. The same request sent again a moment later (the workflow's ``one_open_per``) is not a second
-        one: its answer is the first one's."""
+        times that are); the person may have at most the kind's ``max_upcoming`` open; a kind about one of their
+        records takes one of those it offers them now (``about``, checked again here, whatever the page sent); the
+        kind's workflow is started (``_book``). What the person is told comes back: ``{run, kind, mode, advice,
+        alarm, when, with, failed, requested}``. The same request sent again a moment later (the workflow's
+        ``one_open_per``) is not a second one: its answer is the first one's."""
         from .hub import Duplicate, Invalid
         k = self.kind(kid)
         mode = self.slot_mode(k)
@@ -1055,6 +1107,15 @@ class Portal:
                      and str(answers[q["name"]]) not in {c for c, _ in q["choices"]}]
         problems += [f"{q['label']}: say a little about it" for q in qs
                      if q["required"] and not q["choices"] and not str(answers.get(q["name"]) or "").strip()]
+        about = (about or "").strip() or None
+        if k.get("about") and not full:
+            mine = [c["ref"] for c in self.about_choices(person, k)]
+            if not mine:
+                problems.append(self.say("nothing_about"))
+            elif about not in mine:
+                problems.append(self.say("choose_about"))
+        else:
+            about = None
         if problems:
             raise Invalid("the form has problems", problems)
         if slot and (mode == "none" or not self.slot_free(kid, slot)):
@@ -1062,7 +1123,7 @@ class Portal:
         if full:
             return self.over_limit(k, person, answers)
         try:
-            run = self._book(k, person, slot, answers)
+            run = self._book(k, person, slot, answers, about)
         except Duplicate as dup:  # the same thing sent again a moment ago: the page the first one got
             if (dup.run or {}).get("subject") not in (person, None) and (dup.run or {}).get("record") != person:
                 raise
@@ -1072,6 +1133,22 @@ class Portal:
 
     def limit(self, k: dict) -> int:
         return int(k.get("max_upcoming", MAX_UPCOMING))
+
+    def about_choices(self, person: str, k: dict) -> list[dict]:
+        """The person's own records a kind can be about (its ``about``): of its type, about them, where its ``when``
+        holds now, newest first. Each is named as the hub names it anywhere (its title, never from a field the
+        practice keeps from the portal). Read for the portal, which shows a person only what is theirs."""
+        ab = k.get("about") or {}
+        rt = self.hub.record_type(ab.get("type") or "")
+        if rt is None:
+            return []
+        today = self.hub.engine.now().date().isoformat()
+        out = []
+        for rec in self.hub.records.search(rt.id, subject=person, limit=ABOUT_LIMIT):
+            if ab.get("when") and not expr.holds(ab["when"], schema.check_context(rt, rec, today)):
+                continue
+            out.append({"ref": f"{rt.id}/{rec['id']}", "title": self.hub.title(rec)})
+        return out
 
     def limits(self, person: str) -> dict[str, dict]:
         """Per kind, how many the person has open and the most they may (``max_upcoming``): told up front, on their
@@ -1180,11 +1257,13 @@ class Portal:
             out["requested"] = True  # in as a request: a person reads it first (a flag, or not plainly routine)
         return out
 
-    def _book(self, k: dict, person: str, slot: str | None, answers: dict) -> dict:
+    def _book(self, k: dict, person: str, slot: str | None, answers: dict, about: str | None = None) -> dict:
         """The one place the portal books: it starts the kind's workflow, as the portal's member, on the person, with
-        the kind's own inputs, the answers to its questions and the time chosen. The workflow makes the visit (or
-        whatever its record is) and books it, or hands it to a person, as it says."""
+        the kind's own inputs, the answers to its questions, the record it is about and the time chosen. The
+        workflow makes the visit (or whatever its record is) and books it, or hands it to a person, as it says."""
         inputs = dict(k.get("inputs") or {})
+        if about:
+            inputs[k["about"]["input"]] = about
         for q in self.questions(k):
             if answers.get(q["name"]) not in (None, ""):
                 inputs[q["name"]] = answers[q["name"]]

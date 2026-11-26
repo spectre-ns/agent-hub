@@ -364,3 +364,27 @@ def test_a_types_checks_name_its_fields_and_a_moves_checks_its_parts():
              "lifecycle.transition to 'final': check 1: when: x: a check reads record.<field> and today, and "
              "parts.<part type>")):
         assert want in problems(HEAD + STATUS + bad), (bad, problems(HEAD + STATUS + bad))
+
+
+def test_a_moves_stamp_is_one_member_date_or_time_field_the_move_alone_sets():
+    """``stamp`` on a move names fields the move sets as it is made: each one member, date or datetime field, not the
+    state, not a list and not one the move asks for; each is then off every form (``by = "workflow"``)."""
+    flds = ('[[field]]\nname = "done_by"\ntype = "member"\n[[field]]\nname = "done_on"\ntype = "date"\n'
+            '[[field]]\nname = "done_at"\ntype = "datetime"\n[[field]]\nname = "note"\n'
+            '[[field]]\nname = "helpers"\ntype = "member"\nlist = true\n')
+    rt = ok(HEAD + flds + STATUS + 'stamp = ["done_by", "done_on", "done_at"]\n')
+    assert rt.transition("draft", "final")["stamp"] == ["done_by", "done_on", "done_at"]
+    assert {rt.field(n)["by"] for n in ("done_by", "done_on", "done_at")} == {"workflow"}
+    assert schema.stamped(rt) == {"done_by", "done_on", "done_at"}
+    assert ok(HEAD + flds + STATUS + 'stamp = "done_by"\n').transition("draft", "final")["stamp"] == ["done_by"]
+    where = "lifecycle.transition to 'final': "
+    for bad, want in (('stamp = ["note"]', where + "stamp: note is string; a stamp is one member, date or datetime field"),
+                      ('stamp = ["helpers"]', where + "stamp: helpers is a list; a stamp is one member, date or datetime "
+                                                      "field"),
+                      ('stamp = ["status"]', where + "the move itself sets status"),
+                      ('stamp = ["nobody"]', where + "there is no field 'nobody'"),
+                      ('stamp = ["done_by"]\nasks = ["done_by"]',
+                       where + "stamp: done_by is asked for by the move as well; the move sets it, so it is not asked"),
+                      ('stamp = [3]', where + 'stamp is a list of fields the move sets to who made it and when, e.g. '
+                                              'stamp = ["reviewed_by", "reviewed_on"]')):
+        assert want in problems(HEAD + flds + STATUS + bad + "\n"), (bad, problems(HEAD + flds + STATUS + bad + "\n"))

@@ -1,0 +1,28 @@
+id = "firm-billing"
+title = "Billing"
+summary = "What the firm billed (fees, before HST): each month of the last year by partner, and by service."
+roles = ["partner", "manager"]
+
+[[widget]]
+kind = "line"
+title = "Billed each month, by partner"
+type = "Invoice"
+measure = "sum(amount)"
+x = "issued_on:month"
+series = "client.partner_in_charge"
+where = "record.status in ['sent', 'paid'] and record.issued_on >= today - 12m"
+
+[[widget]]
+kind = "chart"
+title = "Billed in the last year, by service"
+type = "Invoice"
+measure = "sum(amount)"
+group_by = "engagement.service"
+where = "record.status in ['sent', 'paid'] and record.issued_on >= today - 12m"
+
+[[widget]]
+kind = "count"
+title = "Billed in the last year"
+type = "Invoice"
+measure = "sum(amount)"
+where = "record.status in ['sent', 'paid'] and record.issued_on >= today - 12m"

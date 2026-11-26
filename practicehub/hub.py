@@ -3540,28 +3540,37 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         inside the write's transaction, so the check and the write are one step (the store has one writer at a time).
         A key is checked when every field of it is filled in and, on a change, when one of them changed: two records
         that already shared one before the type said unique are not stopped from being edited otherwise. Text is
-        compared as a search compares it (no case, no accents, no surrounding spaces). Records carried over by a pack
-        upgrade are taken as they were."""
+        compared as a search compares it (no case, no accents, no surrounding spaces); a reference by the record it
+        names, whatever else it carries (a display, a pin). Records carried over by a pack upgrade are taken as they
+        were."""
         if not rt.unique or getattr(self, "_upgrading", False):
             return
         from .records import fold
-        same = lambda a, b: (fold(a).strip() == fold(b).strip()) if isinstance(a, str) and isinstance(b, str) \
-            else a == b  # noqa: E731
+
+        def as_key(v, f):
+            if f["type"] == "reference":  # "Type/id", or {reference, display, ...}: the record it names
+                ref = v.get("reference") if isinstance(v, dict) else v
+                return ("ref", ref.strip()) if isinstance(ref, str) else ("value", v)
+            return ("text", fold(v).strip()) if isinstance(v, str) else ("value", v)
+
         problems = []
         for key in rt.unique:
-            paths = [rt.field(n)["path"] for n in key]
-            values = [schema.first(rec, p) for p in paths]
+            fs = [rt.field(n) for n in key]
+            values = [schema.first(rec, f["path"]) for f in fs]
             if any(v in (None, "", [], {}) for v in values):
                 continue
-            if before is not None and all(same(schema.first(before, p), v) for p, v in zip(paths, values)):
+            mine = [as_key(v, f) for v, f in zip(values, fs)]
+            if before is not None and [as_key(schema.first(before, f["path"]), f) for f in fs] == mine:
                 continue
-            text = " ".join(str(v) for v in values if isinstance(v, (str, int, float)) and not isinstance(v, bool))
+            text = " ".join(str(v) for v, f in zip(values, fs)
+                            if isinstance(v, (str, int, float)) and not isinstance(v, bool) and f["type"] != "reference")
             for other in self.records.search(rt.id, text=text or None, limit=None):
                 if other.get("id") == rec.get("id"):
                     continue
-                if all(same(schema.first(other, p), v) for p, v in zip(paths, values)):
+                if [as_key(schema.first(other, f["path"]), f) for f in fs] == mine:
                     labels = " and ".join(rt.field(n)["label"] for n in key)
-                    shown = ", ".join(str(v) for v in values)
+                    shown = ", ".join(v["reference"] if isinstance(v, dict) and "reference" in v else str(v)
+                                      for v in values)
                     problems.append(f"{labels}: another {rt.label.lower()} already has {shown} "
                                     f"({self.title(other) or rt.id + '/' + str(other.get('id'))})")
                     break
@@ -4070,6 +4079,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 if t["by"] == "workflow" and not self._by_workflow(member, run_id):
                     raise Denied(f"only a workflow makes a {rt.label.lower()} {st!r}")
         self._check_number_kept(rt, None, data)
+        if member.get("kind") != "automation":  # an import brings a record in as it was; nobody else stamps one
+            self._check_stamps_kept(rt, {}, data)
         self._workflow_fields(rt, member, run_id, {}, data)
         data = visibility.guard_write(self, member, rt, None, data)  # a field of a class they may not write
         over = overbook.strip() if overbook and overbook.strip() and rt.is_a("Booking") else None
@@ -4126,7 +4137,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                       run_id: str | None = None, _signature: int | None = None,
                       expected_version: str | None = None, comment: str | None = None,
                       authors: list[str] | None = None, overbook: str | None = None,
-                      _files: tuple = (), _repin: dict | None = None) -> dict:
+                      _files: tuple = (), _repin: dict | None = None, _mover: dict | None = None,
+                      _stamp_at: datetime | None = None) -> dict:
         """``comment``: why, kept on the version (and on the move, if the record moves). ``authors``: who wrote the
         change, when several people did (each must be a member who may write the record). ``_files``: files the hub
         itself vouches for in this change (``_check_files_named``).
@@ -4135,7 +4147,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         role was checked for; it may make moves reserved to workflows. ``expected_version``: the version the editor
         saw; when someone changed the record since, nothing is saved (their change is never silently overwritten).
         ``overbook``: a booking moved over another one, and why (as for ``create_record``). ``_repin``: the pins to
-        move to their records' versions now (``repin``), {field: [refs] or None for all of it}.
+        move to their records' versions now (``repin``), {field: [refs] or None for all of it}. ``_mover``: who made
+        a workflow's move (whoever did its step), for its ``stamp``; ``_stamp_at``: the time a signed move's stamp
+        reads, the one its signature covers.
 
         A record in a final state changes for no one: a write that would change it is refused, one that changes
         nothing writes nothing (``schema.sealed``)."""
@@ -4159,6 +4173,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             after = {k: v for k, v in after.items() if v is not None}  # None clears a field
             after = schema.exact(rt, after)
             self._check_number_kept(rt, before, after)
+            self._check_stamps_kept(rt, before, after)
             self._workflow_fields(rt, member, run_id, before, after)
             after = visibility.guard_write(self, member, rt, before, after)  # untouched: kept; changed: refused
             if rt.part_of and schema.first(before, rt.part_of["path"]) != schema.first(after, rt.part_of["path"]):
@@ -4206,6 +4221,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                              if blank(schema.first(after, rt.field(n)["path"]))]
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
+                    after = self.stamped(rt, t, after, _mover or member, _stamp_at)  # before its checks read them
                     why = self.move_check_refusal(rt, ref, t, after)  # the move's own checks, whoever makes it
                     if why:
                         raise Invalid(why)
@@ -4259,6 +4275,35 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             self.restrictions.reset()
             self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)
+
+    def stamped(self, rt, t: dict, rec: dict, mover: dict, at: datetime | None = None) -> dict:
+        """The record as the move ``t`` stamps it (``stamp``): a member field set to who made the move (none, when no
+        member made it: an automation of its own), a date to the practice's today, a time to the instant; ``at``
+        (an instant) is the time they read, so a signature computed first covers what the move then writes."""
+        if not t.get("stamp"):
+            return rec
+        from . import clock
+        wall = clock.local(at or self.engine.instant(), self.engine.zone())  # as records keep times: wall time
+        who = mover.get("id") if mover and mover.get("kind") in ("person", "agent") else None
+        for n in t["stamp"]:
+            f = rt.field(n)
+            value = who if f["type"] == "member" else wall.date().isoformat() if f["type"] == "date" \
+                else wall.replace(microsecond=0).isoformat()
+            rec = schema.put(rec, f["path"], value)
+        return {k: v for k, v in rec.items() if v is not None}
+
+    def _check_stamps_kept(self, rt, before: dict, after: dict) -> None:
+        """A field a move stamps (``stamp``) is written by that move alone, in its own write: no person, workflow or
+        tool sets it otherwise, so it always names who made the move. Records a pack upgrade carries over are taken
+        as they were."""
+        if getattr(self, "_upgrading", False):
+            return
+        for n in sorted(schema.stamped(rt)):
+            f = rt.field(n)
+            if schema.first(before, f["path"]) != schema.first(after, f["path"]):
+                moves = [t["label"] for t in rt.lifecycle["transition"] if n in t.get("stamp", [])]
+                raise Invalid(f"{f['label']} is set by the move that stamps it ({' or '.join(moves)}), "
+                              f"not written by hand")
 
     def move_check_refusal(self, rt, ref: str, t: dict, rec: dict) -> str | None:
         """Why a move's checks (``[[lifecycle.transition.check]]``) refuse it for the record as it would be once
@@ -4384,6 +4429,13 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 if now != x["version"]:
                     out.append({"field": f["name"], "reference": ref, "version": x["version"], "now": now})
         return out
+
+    def refuse_pins_behind(self, rt, rec: dict) -> None:
+        """A signature covers the records a record pins as they are now: while one has changed since it was pinned,
+        nothing is signed (by ``sign_record`` or a signed move) until the pin is moved on."""
+        for b in self.pins_behind(rt, rec):
+            raise Invalid(f"{rt.label} pins {self.key_of(b['reference']) or b['reference']} at version {b['version']}; "
+                          f"it is at version {b['now']}: update the pin, then sign")
 
     def repin(self, member: dict, ref: str, field: str, target: str | None = None, *, cause: int | None = None,
               run_id: str | None = None) -> dict:
@@ -4566,9 +4618,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if any(s["by"] == member["id"] and s["meaning"] == meaning and s["current"]
                for s in self.signatures(member, ref)):
             raise Invalid(f"you have already signed this version as {meaning!r}")
-        for b in self.pins_behind(rt, self.records.read(rtype, rid) or {}):
-            raise Invalid(f"{rt.label} pins {self.key_of(b['reference']) or b['reference']} at version {b['version']}; "
-                          f"it is at version {b['now']}: update the pin, then sign")
+        self.refuse_pins_behind(rt, self.records.read(rtype, rid) or {})
         moves = bool(kind and kind.get("moves_to") and rt.lifecycle)
         with self.db:  # read, check and write as one step, so a change in between cannot slip under the signature
             rec = self.read_record(member, ref, raw=True)
@@ -4580,16 +4630,19 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     raise Invalid(f"this {rt.label.lower()} is in the work {running[0]['title']!r}: its decisions are "
                                   f"made there, and a signature here does not move it on")
                 signed_rec = schema.put(rec, rt.lifecycle["path"], kind["moves_to"])
+                t = rt.transition(schema.first(rec, rt.lifecycle["path"]), kind["moves_to"])
             else:
-                signed_rec = rec
+                signed_rec, t = rec, None
+            at = self.engine.instant()
             version = self.record_version(ref) + (1 if moves else 0)
-            digest = self._record_digest(signed_rec)  # what the record says once the signature has taken effect
+            # what the record says once the signature has taken effect: moved, with what its move stamps
+            digest = self._record_digest(self.stamped(rt, t, signed_rec, member, at) if t else signed_rec)
             seq = self.track.append(member, "record.signed", ref, data={"comment": comment},
                                     signed={"record": ref, "version": version, "record_sha256": digest,
                                             "meaning": meaning})
             if moves:
                 self.update_record(member, ref, signed_rec, cause=seq,
-                                   _signature=seq)
+                                   _signature=seq, _stamp_at=at)
         return {"event": seq, "version": version, "record_sha256": digest}
 
     def attest(self, actor: dict, ref: str, run: dict, step_id: str) -> int:

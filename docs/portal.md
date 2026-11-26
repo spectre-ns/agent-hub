@@ -193,7 +193,7 @@ It is checked when the pack loads, and a mistake stops the load with a clear pro
 | `privacy` | required; shown on every page |
 | `public_origin` | the https address people use (behind a proxy) |
 | `per_minute` | sign-ins and registrations from everyone in a minute (default 60) |
-| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many at_limit over_limit safety busy failed closed visit_next request_next no_cancel_soon no_cancel` |
+| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many at_limit over_limit safety busy failed closed visit_next request_next no_cancel_soon no_cancel about choose_about nothing_about` |
 | `over_limit.workflow`, `over_limit.input` | what takes a person's own words once they are at a kind's limit (below) |
 | `identity.born`, `born_label`, `identifier_label`, `inputmode` | the date-of-birth field; the labels; `numeric` for a number card |
 | `identity.digits`, `identifier_help`, `born_help` | how many digits the identifier has, and the help lines under the sign-in fields. The form checks the date (day 1 to 31, a month, a 4-digit year from 1900, a day that exists) and the digit count before anything is asked of the hub, and keeps what was typed |
@@ -210,6 +210,23 @@ Each `[portal.kinds.<id>]` takes these keys.
 - `workflow`: started about the person. The portal's role must be one of its starters. Its record type is the
   subject type, or it makes its own record about the person (`[new_record]`).
 - `inputs`: fixed inputs.
+
+**What it is about:**
+
+- `about = { type, when, input }`: the kind answers for one of the person's own records, and they choose which.
+  `type` is a record type about the subject type (it has a `rel = "subject"` reference to it), `when` is an `expr`
+  condition over `record.<field>` and `today` that says which of theirs it is for (say, those waiting for them), and
+  `input` is the workflow's reference input the chosen record goes to.
+
+  ```toml
+  [portal.kinds.approve-return]
+  about = { type = "Return", when = "record.status == 'with-client'", input = "about" }
+  ```
+
+- The form lists the person's records of that type where `when` holds now, each by its title, as radio buttons; a
+  single one is chosen already. With none, the form says so (`nothing_about`) and has no button. On sending, the hub
+  checks again that the record chosen is one the person is offered now, whatever the page sent (`choose_about`),
+  and the workflow's engine checks that the record is about the person.
 
 **Its times:**
 

@@ -33,7 +33,27 @@
 # 1.6: money is exact. Fees, invoice amounts, slip amounts and a return's figures are decimals kept to the cent (a
 #  share held to two places, in %), so 0.10 + 0.20 is 0.30 and a total never drifts; the pack works them out in
 #  Decimal and rounds half up, as the hub does. An invoice's total is its fee plus HST, on every write ([[check]]).
-version = "1.6"
+# 1.7: what the firm's review panel asked for.
+#  - A client's documents are their own data class, client-documents (it was documents), so the document control
+#    module installs beside the pack: the firm's controlled documents and a client's slips are kept apart.
+#  - One return a client a year, one engagement a service a year, one client a client number (unique).
+#  - A read slip is locked (read it again to correct it), and a return keeps the slips it counted, pinned: a slip read
+#    again since leaves the review signature not current.
+#  - Who did what is kept apart: the reviewer did not draft, the partner filing did not draft or review; each move
+#    stamps who made it (prepared_by, reviewed_by, filed_by); a reviewer approves the figures as drafted, or sends the
+#    return back with review points. Filing waits for the client's authorisation and never writes it.
+#  - The client answers on the portal about the one record they read and chose (their return, or their engagement
+#    letter); an answer about anything else, or anything not waiting for them, goes to the office.
+#  - A partner accepts each engagement for the firm, signed, before its letter goes out, and next year's again.
+#  - Rates are records (TaxRate, the rates data class): income tax by year, CPP and EI, and HST from the day it
+#    applies. The upgrade enters the ones the pack had in its code (2024 and 2025, and Nova Scotia's HST); a firm
+#    installing the pack enters its own. A year with no rates is not estimated (a person drafts it); an invoice with no
+#    HST rate for its day is not sent.
+#  - An invoice has lines that add up to its fee and keeps the HST rate it charged; a client is numbered by the hub
+#    (TW-0001), and a client carried over keeps the number it has.
+#  - Four dashboards: work in progress, receivables by age, billing by month and partner, and the partners'
+#    sign-offs.
+version = "1.7"
 
 [practice]
 requires_core = "1.1"
@@ -156,7 +176,7 @@ name = "Client profile: names, contacts, who owns what"
 record_types = ["Client", "Relationship"]
 
 [[data_classes]]
-id = "documents"
+id = "client-documents"
 name = "Client documents: slips, receipts, notices of assessment"
 record_types = ["TaxSlip"]
 
@@ -185,54 +205,59 @@ id = "correspondence"
 name = "Messages with clients"
 record_types = ["Communication"]
 
+[[data_classes]]
+id = "rates"
+name = "Tax rates: brackets, CPP, EI and HST, by year or from a day"
+record_types = ["TaxRate"]
+
 # ----------------------------------------------------------------------------------------------------------- grants
 # Writing a class implies reading it. Least privilege: an agent reads what its work needs and writes nothing (its
 # answers go in through its workflow steps); the portal writes what a client gives and reads nothing it did not.
 
 [grants.partner]
-write = ["profile", "documents", "tax", "books", "payroll", "engagement", "correspondence"]
+write = ["profile", "client-documents", "tax", "books", "payroll", "engagement", "correspondence", "rates"]
 policy_owner = true
 member_admin = true
 
 [grants.manager]
-write = ["profile", "documents", "tax", "engagement", "correspondence"]
+write = ["profile", "client-documents", "tax", "engagement", "correspondence", "rates"]
 read = ["books"]
 policy_owner = true              # a second policy owner: approvals never wait on one person
 
 [grants.senior]
-write = ["documents", "tax", "correspondence"]
-read = ["profile", "books", "engagement"]
+write = ["client-documents", "tax", "correspondence"]
+read = ["profile", "books", "engagement", "rates"]
 
 [grants.staff]
-write = ["documents", "tax", "correspondence"]
-read = ["profile", "engagement"]
+write = ["client-documents", "tax", "correspondence"]
+read = ["profile", "engagement", "rates"]
 
 [grants.bookkeeper]
-write = ["books", "documents", "correspondence"]
-read = ["profile", "engagement"]
+write = ["books", "client-documents", "correspondence"]
+read = ["profile", "engagement", "rates"]
 
 [grants.payroll-admin]
 write = ["payroll", "correspondence"]
-read = ["profile", "engagement"]
+read = ["profile", "engagement", "rates"]
 
 # The office administrator reads tax records: they take the document clerk's work when the agent cannot do it (the
 # organizer, chasing slips), chase the client's T183 from the return's own page, and sponsor that agent, so they
 # reach what it reaches. They change nothing on a return: preparing and reviewing stay with the accountants.
 [grants.admin]
-write = ["profile", "documents", "engagement", "correspondence"]
-read = ["tax"]
+write = ["profile", "client-documents", "engagement", "correspondence"]
+read = ["tax", "rates"]
 
 [grants.document-clerk]
-read = ["profile", "documents", "tax", "engagement"]
+read = ["profile", "client-documents", "tax", "engagement"]
 
 [grants.tax-preparer]
-read = ["profile", "documents", "tax"]
+read = ["profile", "client-documents", "tax", "rates"]
 
 [grants.bookkeeping-assistant]
 read = ["profile", "books"]
 
 [grants.client-portal]
-write = ["documents", "correspondence"]
+write = ["client-documents", "correspondence"]
 
 # --------------------------------------------------------------------------------------------------------- calendar
 # Office hours, and the filing deadlines pack.py dates work by. Each deadline: a month and day of the year after the
@@ -290,7 +315,7 @@ request_next = "We will contact you within one working day."
 [portal.identity]
 born = "birth_date"
 identifier_label = "Client number"
-identifier_help = "On every letter from us, for example TW-1042."
+identifier_help = "On every letter from us, for example TW-0042."
 
 [portal.code]
 channel = "email"
@@ -303,7 +328,7 @@ description = "Your return is ready: read the summary we sent you, then authoris
 mode = "request"
 slot = "none"
 workflow = "client-sign"
-inputs = { what = "t183" }
+about = { type = "T1Return", when = "record.status in ['with-client', 't183-overdue'] and record.t183_signed_on == null", input = "about" }
 questions = [{ input = "answer", label = "Your answer", choices = { approve = "I have read the summary and authorise Tidewater CPA to file my return electronically (T183)", question = "I have a question first" } }]
 max_upcoming = 3
 
@@ -313,7 +338,7 @@ description = "What we will do for you this year, and our fee. Signing lets us s
 mode = "request"
 slot = "none"
 workflow = "client-sign"
-inputs = { what = "engagement" }
+about = { type = "Engagement", when = "record.status in ['proposed', 'overdue'] and record.client_signed_on == null", input = "about" }
 questions = [{ input = "answer", label = "Your answer", choices = { approve = "I have read the engagement letter and accept it", question = "I have a question first" } }]
 max_upcoming = 3
 
@@ -325,6 +350,7 @@ TaxSlip = "Slip or document"
 T1Return = "T1 return"
 Invoice = "Invoice"
 Communication = "Message"
+TaxRate = "Tax rate"
 
 # ----------------------------------------------------------------------------------------------------------- events
 [[events]]

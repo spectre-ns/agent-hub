@@ -1,0 +1,33 @@
+id = "firm-wip"
+title = "Work in progress"
+summary = "The firm's work under way: this season's returns by stage, open returns and engagement fees by partner."
+roles = ["partner", "manager"]
+
+[[widget]]
+kind = "board"
+title = "Returns by stage"
+type = "T1Return"
+group_by = "status"
+where = "not (record.status in ['assessed', 'withdrawn'])"
+columns = ["title", "client_name", "year"]
+
+[[widget]]
+kind = "chart"
+title = "Open returns by partner"
+type = "T1Return"
+group_by = "client.partner_in_charge"
+where = "not (record.status in ['filed', 'assessed', 'assessment-differs', 'withdrawn'])"
+
+[[widget]]
+kind = "chart"
+title = "Fees under way by partner"
+type = "Engagement"
+measure = "sum(fee)"
+group_by = "client.partner_in_charge"
+where = "record.status in ['signed', 'active']"
+
+[[widget]]
+kind = "count"
+title = "Engagements waiting for acceptance"
+type = "Engagement"
+where = "record.status == 'acceptance'"

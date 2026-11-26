@@ -1,0 +1,55 @@
+id = "firm-receivables"
+title = "Receivables"
+summary = "What clients owe the firm, by how long it has been due, and the invoices past due."
+roles = ["partner", "manager", "admin"]
+
+[[widget]]
+kind = "count"
+title = "Owed to the firm"
+type = "Invoice"
+measure = "sum(total)"
+where = "record.status == 'sent'"
+
+[[widget]]
+kind = "count"
+title = "Not yet due"
+type = "Invoice"
+measure = "sum(total)"
+where = "record.status == 'sent' and record.due_on >= today"
+
+[[widget]]
+kind = "count"
+title = "1 to 30 days past due"
+type = "Invoice"
+measure = "sum(total)"
+where = "record.status == 'sent' and record.due_on < today and record.due_on >= today - 30d"
+
+[[widget]]
+kind = "count"
+title = "31 to 60 days past due"
+type = "Invoice"
+measure = "sum(total)"
+where = "record.status == 'sent' and record.due_on < today - 30d and record.due_on >= today - 60d"
+
+[[widget]]
+kind = "count"
+title = "61 to 90 days past due"
+type = "Invoice"
+measure = "sum(total)"
+where = "record.status == 'sent' and record.due_on < today - 60d and record.due_on >= today - 90d"
+
+[[widget]]
+kind = "count"
+title = "Over 90 days past due"
+type = "Invoice"
+measure = "sum(total)"
+where = "record.status == 'sent' and record.due_on < today - 90d"
+
+[[widget]]
+kind = "table"
+title = "Past due"
+type = "Invoice"
+where = "record.status == 'sent' and record.due_on < today"
+columns = ["number", "client_name", "issued_on", "due_on", "total"]
+sort = "due_on"
+limit = 100

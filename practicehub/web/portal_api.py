@@ -131,17 +131,17 @@ def op_slots(p: Portal, data: dict) -> dict:
     want = _s(data, "day")
     day = want if any(d["date"] == want for d in days) else (days[0]["date"] if days else None)
     return {"days": days, "day": day, "slots": p.free_slots(kid, day=day) if day else [],
-            "limit": p.limits(row["record"]).get(kid)}
+            "limit": p.limits(row["record"]).get(kid), "about": p.about_choices(row["record"], p.kind(kid))}
 
 
 def op_book(p: Portal, data: dict) -> dict:
     row = _session(p, data, form=True)
     answers = data.get("answers") if isinstance(data.get("answers"), dict) else {}
     answers = {str(k)[:64]: str(v)[:4000] for k, v in answers.items()}
-    kid, slot = _s(data, "kind"), _s(data, "slot") or None
+    kid, slot, about = _s(data, "kind"), _s(data, "slot") or None, _s(data, "about") or None
     p.kind(kid)
     return {"done": p.once(row["record"], _s(data, "submit"), "book",
-                           lambda: p.book(row["record"], kid, slot, answers))}
+                           lambda: p.book(row["record"], kid, slot, answers, about))}
 
 
 def op_cancel(p: Portal, data: dict) -> dict:

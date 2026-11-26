@@ -1,6 +1,7 @@
 # A bill to a client for an engagement's work. It is part of its client. The work's workflow raises it when the work
 # is done (a T1 once it is filed); the office marks it paid. It is numbered when it is sent, in a series per year with
-# no gaps (TW-2026-0001); a sent invoice keeps its number and its date, and is voided, never deleted.
+# no gaps (TW-2026-0001); a sent invoice keeps its number and its date, and is voided, never deleted. Its lines add up
+# to its fee, and it keeps the HST rate it was charged at (the TaxRate in force on the day it was issued).
 id = "Invoice"
 key = "INV"
 label = "Invoice"
@@ -52,12 +53,40 @@ type = "string"
 required = true
 
 [[field]]
+name = "lines"
+label = "Lines"
+type = "table"
+help = "What the fee is for, line by line: the lines add up to the fee"
+
+[[field.column]]
+name = "description"
+label = "Description"
+type = "string"
+required = true
+
+[[field.column]]
+name = "amount"
+label = "Amount"
+type = "decimal"
+scale = 2
+required = true
+
+[[field]]
 name = "amount"
 label = "Fee"
 type = "decimal"
 scale = 2
 required = true
 min = 0
+
+[[field]]
+name = "hst_rate"
+label = "HST rate"
+type = "decimal"
+scale = 4
+min = 0
+max = 1
+help = "The rate charged, as a fraction (0.1400 is 14%): the one in force on the day it was issued"
 
 [[field]]
 name = "hst"
@@ -95,7 +124,18 @@ type = "choice"
 choices = ["draft", "sent", "paid", "void"]
 required = true
 
-# Whoever writes it (the office, the pack's invoicing, an import), its total is its fee plus HST.
+# Whoever writes it (the office, the pack's invoicing, an import), its lines add up to its fee, its HST is the fee
+# at the rate it names, and its total is the fee plus HST.
+[[check]]
+when = "count(record.lines.*) > 0"
+must = "record.amount == sum(record.lines.*.amount)"
+message = "the fee is the sum of the lines"
+
+[[check]]
+when = "record.hst_rate != null"
+must = "record.hst == round(record.amount * record.hst_rate, 2)"
+message = "the HST is the fee at the HST rate, to the cent"
+
 [[check]]
 when = "record.total != null"
 must = "record.total == record.amount + record.hst"

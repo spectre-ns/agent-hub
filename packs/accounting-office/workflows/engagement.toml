@@ -2,11 +2,13 @@ id = "engagement"
 title = "Engagement"
 record = "Engagement"
 summary = """
-One service for one client for one year. The documents agent writes the engagement letter from the firm's terms and
-last year's engagement and sends it; the client signs it on the portal (or the office records a signature on paper).
-Once signed the hub opens the work (for a T1, the year's T1 return, which its own workflow walks). When the work is
-done the engagement closes, and next year's is planned: it waits for its season on its own, then its letter goes
-out. A letter not signed in two weeks goes to the office to chase; a client may decline on the engagement's page.
+One service for one client for one year. A partner accepts it for the firm first, signed, on the engagement's page
+(or does not, and the work ends there); no letter goes out before. The documents agent then writes the engagement
+letter from the firm's terms and last year's engagement and sends it; the client signs it on the portal (or the office
+records a signature on paper). Once signed the hub opens the work (for a T1, the year's T1 return, which its own
+workflow walks). When the work is done the engagement closes, and next year's is planned: it waits for its season on
+its own, then a partner accepts it again before its letter goes out. A letter not signed in two weeks goes to the
+office to chase; a client may decline on the engagement's page.
 
 Each service opens its own work: pack.py's ENGAGEMENT_STARTERS, one entry per service.
 """
@@ -15,10 +17,11 @@ Each service opens its own work: pack.py's ENGAGEMENT_STARTERS, one entry per se
 starters = ["partner", "manager", "admin"]
 
 # Written as the engagement's states and the edges between them (see practicehub/states.py). A new engagement has its
-# letter written and sent; a planned one (next year's, made when this year's closes) first waits for its season.
+# partner's acceptance first; a planned one (next year's, made when this year's closes) waits for its season, then
+# is accepted again.
 [start]
-to = "drafting"
-label = "Proposed"
+to = "acceptance"
+label = "Opened"
 
 [[start.do]]
 id = "renewal-date"
@@ -42,6 +45,35 @@ at = "{{renewal-date.on}}"
 id = "season"
 label = "Its season came"
 from = "planned"
+to = "acceptance"
+
+[[state]]
+id = "acceptance"
+label = "Acceptance"
+tone = "attention"
+
+[[state.work]]
+id = "accept"
+title = "Accept the engagement"
+kind = "task"
+role = "partner"
+persons_only = true
+moves = ["not-accepted"]
+due = "3d"
+context = ["record:engagement", "record:profile"]
+instructions = """Decide whether the firm takes this engagement on (or keeps the client for another year): independence
+and conflicts, whether the firm has the competence and the time, and anything that puts the client's integrity in
+doubt. Accept it on the engagement's page, signed, saying what you considered; then the letter is written and sent.
+If the firm should not act, do not accept it: the work ends there."""
+[[state.work.fields]]
+name = "acceptance_note"
+label = "What you considered"
+type = "text"
+
+[[edge]]
+id = "accepted"
+label = "Accepted"
+from = "acceptance"
 to = "drafting"
 
 [[state]]

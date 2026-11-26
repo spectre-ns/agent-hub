@@ -61,7 +61,7 @@ risk = "low"
 due = "2d"
 escalate_to = "admin"
 people_role = "admin"
-context = ["record:tax", "record:documents", "record:profile"]
+context = ["record:tax", "record:client-documents", "record:profile"]
 
 [[edge]]
 id = "organizer-sent"
@@ -119,7 +119,7 @@ skill = "slip-chase"
 risk = "low"
 due = "2d"
 people_role = "admin"
-context = ["record:tax", "record:documents", "record:profile"]
+context = ["record:tax", "record:client-documents", "record:profile"]
 
 [[edge]]
 id = "reminder-sent"
@@ -175,7 +175,7 @@ role = "staff"
 persons_only = true
 due = "3d"
 escalate_to = "manager"
-context = ["record:tax", "record:documents", "chase"]
+context = ["record:tax", "record:client-documents", "chase"]
 instructions = """The client was sent the organizer and a reminder and some slips are still missing. Call them.
 Prepare without them if they will not come (a slip the client says does not exist this year), or withdraw the
 return if there is nothing to file."""
@@ -238,7 +238,7 @@ risk = "medium"
 when = "compare.over_line != true"
 due = "5d"
 people_role = "senior"
-context = ["record:tax", "record:documents", "record:profile", "compare"]
+context = ["record:tax", "record:client-documents", "record:profile", "compare"]
 
 [[state.work]]
 id = "draft-flagged"
@@ -250,7 +250,7 @@ risk = "high"
 when = "compare.over_line == true"
 due = "5d"
 people_role = "senior"
-context = ["record:tax", "record:documents", "record:profile", "compare"]
+context = ["record:tax", "record:client-documents", "record:profile", "compare"]
 
 [[edge]]
 id = "drafted"
@@ -270,14 +270,16 @@ title = "Review the return"
 kind = "task"
 role = "manager"
 persons_only = true
+not_by = ["draft", "draft-flagged"]   # whoever drafted it does not review it
 when = "record.status == 'in-review'"   # a slip that came late took it back to be drafted again: nothing to review
 moves = ["comparing"]
 due = "5d"
 escalate_to = "partner"
-context = ["record:tax", "record:documents", "compare"]
-instructions = """Check the draft against the slips and last year. Correct the figures if they are wrong, note what
-you changed, and sign the review on the return's page. A return that is not ready stays here. Once you sign, the
-return is locked: what you reviewed is what the client authorises and what is filed."""
+context = ["record:tax", "record:client-documents", "compare"]
+instructions = """Check the draft against the slips and last year. A review does not change the figures: if one is
+wrong, or something is missing, send it back with your review points (on the return's page): it is compared and
+drafted again, answering them first, and comes back to you. If it is right, approve the review there, signed. What
+you reviewed is what the client authorises and what is filed."""
 [[state.work.fields]]
 name = "review_notes"
 label = "Reviewer's notes"
@@ -404,6 +406,9 @@ title = "File the return and record it"
 kind = "task"
 role = "partner"
 persons_only = true
+# separation of duties: the partner who files did not draft, review or change the return (a one-partner firm says
+# otherwise in its own pack)
+not_by = ["draft", "draft-flagged", "review", "record.editors"]
 when = "record.status == 'client-signed'"   # reopened for changes: there is nothing to file yet
 moves = ["comparing"]
 due = "3d"
@@ -502,7 +507,7 @@ role = "manager"
 persons_only = true
 due = "5d"
 escalate_to = "partner"
-context = ["record:tax", "record:documents", "compare-noa"]
+context = ["record:tax", "record:client-documents", "compare-noa"]
 instructions = """The CRA assessed this return differently from what was filed. Find out why (a slip that came late,
 a CRA adjustment) and say what was done: accepted, a reply to the CRA, an adjustment request (T1-ADJ)."""
 [[state.work.fields]]

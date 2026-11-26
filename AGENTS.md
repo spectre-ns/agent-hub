@@ -40,7 +40,7 @@ Notes for anyone, human or agent, changing this code.
 | A record's key (its type's, given once, never reused by another type) and who is told what a key names | `LocalRecordStore.create` in `practicehub/records.py`, `CatalogMixin._key_problems` in `practicehub/catalog.py`, `Hub.find_key` |
 | A type's own number (`[number]`): given once by the hub, in a series with no gaps, never written by hand | `Hub._check_number_kept`, `Hub._take_number` in `practicehub/hub.py` |
 | A record in a final state: nothing changes it, no move leaves it; it is corrected by one record that reverses it | `Hub._sealed_write`, `Hub._check_reversal` in `practicehub/hub.py`; `schema.leaves`, `catalog.lifecycle_fit` |
-| What a signature covers (its pins and the parts its type covers), and the parts locked with their record | `Hub._record_digest`, `Hub._pinned`, `Hub._check_part_lock` in `practicehub/hub.py` |
+| What a signature covers (its pins and the parts its type covers), nothing signed (a signature or a signed move) while a pin is behind, and the parts locked with their record | `Hub._record_digest`, `Hub._pinned`, `Hub.refuse_pins_behind`, `Hub._check_part_lock` in `practicehub/hub.py` |
 | A closed period: nothing dated in it is written; only a signed move reopens it | `Hub._check_period`, `Hub.closed_through`, `Hub._sealed_write` in `practicehub/hub.py` |
 | Exact numbers: a decimal is rounded half up to its places, stored exact, and carried as its exact text | `practicehub/decimals.py`, `schema.exact`; the codec in `Store.__init__` (`practicehub/store.py`) |
 | A table's rows, each checked against its columns | `schema._check_value` (the table branch), `RecordType.cells` in `practicehub/schema.py` |
@@ -48,6 +48,9 @@ Notes for anyone, human or agent, changing this code.
 | A move's checks (over the record and its parts), kept by whoever moves it, a step included | `Hub.move_check_refusal`, the move checks in `Hub.update_record`; `Engine._refused_move`; `moves.move_refusal` |
 | A view's numbers: worked out in the database over the records the reader may read; a value withheld from them is not added up, a path hidden from them shows "needs access" | `records_numbers`, `Pipeline`, `_rights` in `practicehub/views_query.py`; `masks_for` in `practicehub/restrictions.py` |
 | The sign-offs a view lists: a person's signatures, on records the reader may read and not withheld from them | `signature_rows` in `practicehub/views.py` |
+| A move's stamp: who made it and when, written by that move alone (a workflow's move: whoever did the step) and covered by a signature that makes it | `Hub.stamped`, `Hub._check_stamps_kept` in `practicehub/hub.py`; `schema._stamp_fields` |
+| `unique` over a reference compares the record it names, however it is written | `Hub._check_unique` in `practicehub/hub.py` |
+| A portal kind about a person's own record: only one of theirs its condition offers them now, checked again on sending | `Portal.about_choices`, `Portal.book` in `practicehub/portal.py` |
 
 If you change one of these, add or update a test in `tests/test_rules.py` that states the rule (the rules the
 2026-11-24 review panel found broken are stated in `tests/test_panel_fixes.py`).

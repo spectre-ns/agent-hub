@@ -138,6 +138,11 @@ answer that becomes a record, an engine calling the API.
     # requires = ["conclusion"]   # fields that must be set once it has moved (whoever moves it, a workflow too);
                                   #   the type's own field rules check what they hold
     # sign = "Approved"           # the mover signs it with this meaning (a person: an agent never signs)
+    # stamp = ["amended_by", "amended_on"]   # fields the move sets as it is made, in its own write (a signature
+                                  #   that makes it covers them): a member field to who made it (for a workflow's
+                                  #   move, whoever did the step), a date to today, a time to now. Nothing else
+                                  #   writes them (an import that brings a record in as it was aside); none is
+                                  #   asked for, a list or the state field
     # by = "workflow"             # not by hand: see below
     # [[lifecycle.transition.check]]   # the move is made only while this holds, whoever makes it (a person, a
     # must = "count(parts.Point.*, it.record.status != 'closed') == 0"   # workflow, a signature): a condition over
@@ -154,8 +159,8 @@ workflow in force, the type has them as moves by the workflow (``CatalogMixin._w
 workflow's states carry their own words and tone. What the two may not both say is checked by
 ``catalog.lifecycle_fit``. A transition ``by = "workflow"`` is still the type's to write for a move no edge of its
 own workflow makes (one made from outside its own run: another workflow's, or a signature's ``moves_to``), for a move
-from a value its workflow has no state for, and for a move it attaches ``asks``, ``requires``, ``sign`` or a
-``check`` to: an edge making that move keeps what the row says.
+from a value its workflow has no state for, and for a move it attaches ``asks``, ``requires``, ``sign``, ``stamp`` or
+a ``check`` to: an edge making that move keeps what the row says.
 
 A path may use ``*`` for every item of a list (``participant.*.actor``).
 
@@ -406,7 +411,7 @@ KEYS = {
     "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "final", "abandoned", "in_use", "labels",
                   "tones"},
     "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm",
-                   "check"},
+                   "check", "stamp"},
     "check": {"when", "must", "message"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "link": {"rel", "label", "to", "many", "help", "back"},
@@ -804,13 +809,20 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
             opens = _transition_opens(t.get("opens"), where, problems)
             if t.get("confirm") is not None and not isinstance(t["confirm"], str):
                 problems.append(f"{where}: confirm is what the person is told before the move, in words")
+            stamp = t.get("stamp", [])
+            stamp = [stamp] if isinstance(stamp, str) else stamp
+            if not _strings(stamp):
+                problems.append(f"{where}: stamp is a list of fields the move sets to who made it and when, "
+                                f"e.g. stamp = [\"reviewed_by\", \"reviewed_on\"]")
+                stamp = []
             trans.append(move_row(frm, to, by=by, label=str(t.get("label") or labels.get(to) or state_words(to)),
                                   asks=asks, requires=requires,
                                   screen=t.get("screen") if isinstance(t.get("screen"), str) else None,
                                   comment=t.get("comment") is True, sign=sign.strip() if sign else None,
                                   **({"opens": opens} if opens else {}),
                                   **({"confirm": t["confirm"]} if isinstance(t.get("confirm"), str) else {}),
-                                  **({"check": t["check"]} if t.get("check") is not None else {})))
+                                  **({"check": t["check"]} if t.get("check") is not None else {}),
+                                  **({"stamp": list(stamp)} if stamp else {})))
         # further states a person may make a new record in, besides the initial one (a record of work already done,
         # filed after the fact), each starting whatever the type's workflow starts for it
         starts = lc.get("starts") or []
@@ -1668,7 +1680,39 @@ def _screens(doc: dict, fields: list[dict], base_map: dict, lc: dict | None, pro
         asked = ok(t["asks"])
         t["asks"] = asked + [n for n in t["requires"] if n not in asked]
         t["comment"] = bool(t["comment"])
+        if t.get("stamp"):
+            t["stamp"] = _stamp_fields(t, ok(t["stamp"]), byname, problems)
     return out
+
+
+STAMPS = ("member", "date", "datetime")
+
+
+def _stamp_fields(t: dict, names: list[str], byname: dict, problems: list) -> list[str]:
+    """``stamp``: fields the move itself sets as it is made, in its own write (so a signature that makes it covers
+    them): a member field to who made it (for a workflow's move, whoever did the step), a date to today, a time to
+    now. Nothing else writes them, so a reviewer's name is the name of whoever made the move. Each is marked
+    ``by = "workflow"``: off every form and every tool's input."""
+    out = []
+    where = f"lifecycle.transition to {t['to']!r}: stamp"
+    for n in names:
+        f = byname.get(n)
+        if f is None:
+            continue
+        if f["type"] not in STAMPS or f.get("list") or "*" in f["path"]:
+            problems.append(f"{where}: {n} is {'a list' if f.get('list') else f['type']}; a stamp is one "
+                            f"{', '.join(STAMPS[:-1])} or {STAMPS[-1]} field")
+        elif n in t["asks"]:
+            problems.append(f"{where}: {n} is asked for by the move as well; the move sets it, so it is not asked")
+        else:
+            f["by"] = "workflow"
+            out.append(n)
+    return out
+
+
+def stamped(rt: "RecordType") -> set[str]:
+    """The fields the type's moves stamp (``stamp``): only a move writes them."""
+    return {n for t in (rt.lifecycle or {}).get("transition", []) for n in t.get("stamp", [])}
 
 
 # ---------------------------------------------------------------------------- a move's time and a state's tone

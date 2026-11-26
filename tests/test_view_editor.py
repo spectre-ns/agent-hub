@@ -57,9 +57,9 @@ def test_the_editor_s_document_writes_a_view_that_reads_back_the_same():
     assert table["sort"] == "plannedStartDate" and table["descending"] and table["grid"]["w"] == 9
 
 
-def test_every_view_a_module_ships_reads_back_the_same():
-    files = sorted(ROOT.glob("modules/*/views/*.toml"))
-    assert files
+def test_every_view_a_module_or_pack_ships_reads_back_the_same():
+    files = sorted(ROOT.glob("modules/*/views/*.toml")) + sorted(ROOT.glob("packs/*/views/*.toml"))
+    assert files and any(f.parts[-3] == "accounting-office" for f in files)
     for f in files:
         text = f.read_text()
         doc = viewmod.doc_of(text)

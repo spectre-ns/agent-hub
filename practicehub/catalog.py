@@ -62,7 +62,8 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
             if e["from"] and to != e["from"]:
                 made.setdefault((e["from"], to), e["id"])
     for t in rows:
-        if t["by"] != "workflow" or t["asks"] or t["requires"] or t["sign"] or t["screen"] or t.get("check"):
+        if t["by"] != "workflow" or t["asks"] or t["requires"] or t["sign"] or t["screen"] or t.get("check") \
+                or t.get("stamp"):
             continue
         problems += [f"lifecycle.transition to {t['to']!r}: the {wf.id} workflow already moves a record from {f!r} "
                      f"to {t['to']!r} (its edge {made[f, t['to']]}); leave it out"
