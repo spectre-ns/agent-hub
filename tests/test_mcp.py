@@ -446,7 +446,7 @@ def test_the_mcp_core_names_no_module_or_practice(hub):
     words = set(packmod.MODULES_DIR.glob("*/module.toml"))
     banned = {d.parent.name for d in words} | {"general-practice", "Document", "Patient", "clinic"}
     root = Path(practicehub.__file__).parent
-    for f in (root / "mcp.py", root / "mcp_bridge.py", root / "web" / "mcp_pages.py"):
+    for f in (root / "mcp.py", root / "mcp_bridge.py", root / "web" / "mcp_pages.py", root / "chat.py"):
         for node in ast.walk(ast.parse(f.read_text())):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for w in banned:

@@ -530,6 +530,26 @@ person brings an agent into a thread: an `@` an agent writes tells the people it
 agents never answer each other forever. A member whom the subject's directive keeps the file from is not mentioned on
 it, as one whose grants do not reach it is not; a directive made after the mention is respected when it is read.
 
+### Talking to an agent
+
+A chat is a conversation between one person and one agent, about no one record (`practicehub/chat.py`). A person
+may talk with any active agent whose sponsor is active; each turn and each call asks again. The agent answers with
+its profile's model and a small fixed set of tools: find a record by its key, search a type, read a record, describe
+a type, make, change or move a record, and start a workflow. Each is the agent's own MCP tool, run as the agent: its
+grants, its profile (`direct_writes`), the lifecycle's `by` and the moves only a person makes apply as they do over
+MCP, and a workflow it starts gives its steps to whoever they name, under the usual risk tiers and reviews. No tool
+signs or approves.
+
+In a chat the agent reaches only what both it and the person may (`Chat.may_reach`): a type, move or workflow is
+offered only when both have it, a record a subject's directive keeps from either is refused, a write sets only fields
+both may write, and what comes back is redacted for both (a search hit only the agent's reading finds is dropped).
+A chat is its person's: nobody else lists or reads it. It keeps the records it used (listed, read, created, updated,
+moved or started), and the track has `chat.started`, `chat.asked`, each tool as `mcp.called` with how `chat` (caused
+by the question it answers) and `chat.answered` or `chat.failed`; chat events carry ids, never what was said.
+Nothing carries over from one conversation to another, and nothing said in one changes the agent. The model's tool
+calls are data: an unknown tool or arguments that are not its own go back to the model as an error, and one answer
+makes at most eight calls.
+
 ### Released documents
 
 A lifecycle with `in_use = "<state>"` keeps a record's approved revision in use while a new one is written.

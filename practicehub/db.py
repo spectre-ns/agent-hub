@@ -102,6 +102,9 @@ SHAPES = {
     "live_ended": ("the session's", "reason at text seq"),
     "live_comments": ("id", "id ref field file quote before after body by agent at mentions replies resolved "
                                 "resolved_at resolved_by"),
+    # talking to an agent (chat.py): a conversation is its person's
+    "chats": ("id", "id person agent title at updated_at busy n resources"),
+    "chat_messages": ("id", "id chat n role body tool args refs error at"),
     # work
     "runs": ("id", "id workflow_id version title record subject status ctx steps started_by root_event item refs "
                    "waits_on resting jobs picks at deadline_at deadline_missed_at created_at updated_at"),
@@ -149,6 +152,8 @@ INDEXES = {
     "live_sessions": ["ref"],
     "live_ops": [{"fields": ["session", "seq"], "unique": True}, {"fields": ["session", "cid"], "unique": True}],
     "live_comments": [("ref", "at")],
+    "chats": [("person", "updated_at")],
+    "chat_messages": [{"fields": ["chat", "n"], "unique": True}],
     "runs": ["status", "record", "workflow_id", "refs", "waits_on", "jobs"],
     "items": ["status", "run_id", ("assignee", "status"), "n"],
     "events": [{"fields": ["hash"], "unique": True}, "run_id", ("subject", "action"), ("action", "seq"), "actor",

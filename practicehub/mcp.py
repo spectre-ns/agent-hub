@@ -700,10 +700,17 @@ def call_tool(hub, sid: str, member: dict, name: str, args: dict, *, ts: list[di
     """Run one tool as the member; every call is on the track, with the client it came from (``conn``: the client
     its credential names, and what it said it was). ``ts``: the member's tools, if the request has them already.
     Returns an MCP CallToolResult."""
+    return run_tool(hub, sid, member, name, args, ts=ts, conn=conn)[1]
+
+
+def run_tool(hub, sid: str, member: dict, name: str, args: dict, *, ts: list[dict] | None = None,
+             conn: dict | None = None, how: str = "mcp", cause: int | None = None) -> tuple[int, dict]:
+    """:func:`call_tool`, for a caller inside the hub that uses the same tools (``how``: what it is, on the track;
+    ``cause``: the event that asked for the call). Returns the call's ``mcp.called`` event and its result."""
     mine = {t["name"]: t for t in (ts if ts is not None else tools(hub, sid, member))}
     tool = mine.get(name)
-    seq = hub.track.append(member, "mcp.called", f"mcp:{sid}",
-                           data={"how": "mcp", "server": sid, "tool": name, "listed": tool is not None,
+    seq = hub.track.append(member, "mcp.called", f"mcp:{sid}", cause=cause,
+                           data={"how": how, "server": sid, "tool": name, "listed": tool is not None,
                                  **_conn_data(conn)})
     try:
         if tool is None:
@@ -712,18 +719,18 @@ def call_tool(hub, sid: str, member: dict, name: str, args: dict, *, ts: list[di
         if problems:
             raise Invalid("the arguments have problems", problems)
         what, target = tool["_call"]
-        out = _run(hub, sid, member, what, target, args, seq, f"mcp {sid}/{name}")
+        out = _run(hub, sid, member, what, target, args, seq, f"{how} {sid}/{name}")
         text = out.pop("_text", None) or json.dumps(out, default=str)[:400]
-        return {"content": [{"type": "text", "text": text}], "structuredContent": out, "isError": False}
+        return seq, {"content": [{"type": "text", "text": text}], "structuredContent": out, "isError": False}
     except (Refused, HubError) as exc:
         problems = list(getattr(exc, "problems", None) or [])
         hub.track.append(member, "mcp.refused", f"mcp:{sid}", cause=seq,
-                         data={"how": "mcp", "server": sid, "tool": name, "reason": str(exc), **_conn_data(conn)})
+                         data={"how": how, "server": sid, "tool": name, "reason": str(exc), **_conn_data(conn)})
         kind = ("denied" if isinstance(exc, (Denied, Refused)) else "not_found" if isinstance(exc, NotFound)
                 else "invalid")
         text = str(exc) + (": " + "; ".join(problems) if problems else "")
-        return {"content": [{"type": "text", "text": text}],
-                "structuredContent": {"error": kind, "reason": str(exc), "problems": problems}, "isError": True}
+        return seq, {"content": [{"type": "text", "text": text}],
+                     "structuredContent": {"error": kind, "reason": str(exc), "problems": problems}, "isError": True}
     except Exception as exc:  # noqa: BLE001 - a failure of the hub (a lost transaction, the database): the agent is
         # told the call failed, and the track keeps that it was tried; the detail goes to the server's log, not out
         import traceback
@@ -731,7 +738,7 @@ def call_tool(hub, sid: str, member: dict, name: str, args: dict, *, ts: list[di
         busy = isinstance(exc, Transient)
         try:
             hub.track.append(member, "mcp.failed", f"mcp:{sid}", cause=seq,
-                             data={"how": "mcp", "server": sid, "tool": name, "error": type(exc).__name__,
+                             data={"how": how, "server": sid, "tool": name, "error": type(exc).__name__,
                                    "reason": str(exc)[:300]})
         except Exception:  # noqa: BLE001 - the database is what failed: the call still gets an answer
             traceback.print_exc()
@@ -739,9 +746,9 @@ def call_tool(hub, sid: str, member: dict, name: str, args: dict, *, ts: list[di
                 "before trying again" if busy else
                 "the hub could not finish this call (an internal error, logged): look at the item or record "
                 "before trying again")
-        return {"content": [{"type": "text", "text": text}],
-                "structuredContent": {"error": "busy" if busy else "failed", "reason": text, "problems": []},
-                "isError": True}
+        return seq, {"content": [{"type": "text", "text": text}],
+                     "structuredContent": {"error": "busy" if busy else "failed", "reason": text, "problems": []},
+                     "isError": True}
 
 
 def _conn_data(conn: dict | None) -> dict:
