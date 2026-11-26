@@ -19,6 +19,7 @@ import tomllib
 
 from . import expr, schema
 from . import views as viewmod
+from . import views_query
 from .pack import parse_skill
 from .store import DESC
 from .workflows import DefinitionError
@@ -586,16 +587,42 @@ class CatalogMixin:
                 problems.append(f"roles: there is no role {r!r}")
         for i, w in enumerate(v.widgets):
             where = f"widget {w['title'] or i + 1}"
-            if w["source"] == "records" and w["type"] and w["type"] not in types:
+            worked = views_query.computed(self, w)  # its numbers worked out in the database: every path resolved
+            if w["source"] in ("records", "signatures") and w["type"] and w["type"] not in types:
                 problems.append(f"{where}: there is no record type {w['type']!r}")
             elif w["source"] == "records" and w["type"]:
                 rt = self.record_type(w["type"])
                 names = {f["name"] for f in rt.fields} | rt.top_keys() if rt else set()
-                for c in [*w["columns"], *([{"path": w["group_by"]}] if w["group_by"] else []),
-                          *([{"path": w["sort"]}] if w.get("sort") else [])]:
+                plain = [*w["columns"], *([{"path": w["sort"]}] if w.get("sort") else []),
+                         *([{"path": w["group_by"]}] if w["group_by"] and not worked else [])]
+                for c in plain:
                     if rt and c["path"].split(".")[0] not in names:
                         problems.append(f"{where}: {rt.label} has no field {c['path']!r} (its fields: "
                                         f"{', '.join(f['name'] for f in rt.fields)})")
+                if rt and worked:
+                    try:
+                        views_query.columns_of(self.record_type, rt, w)
+                    except ValueError as exc:
+                        problems.append(f"{where}: {exc}")
+                if rt and w["kind"] == "board" and w["group_by"] and w["group_by"].split(".")[0] in names:
+                    try:
+                        if views_query.resolve(self.record_type, rt, w["group_by"]).hop:
+                            problems.append(f"{where}: a board groups by a field of its own records, not one a "
+                                            f"reference reaches ({w['group_by']})")
+                    except ValueError as exc:
+                        problems.append(f"{where}: {exc}")
+            if w["source"] == "signatures" and worked:
+                try:
+                    views_query.signature_columns(w)
+                except ValueError as exc:
+                    problems.append(f"{where}: {exc}")
+            if worked and w["source"] == "records" and w.get("where"):
+                try:
+                    views_query.Where("2000-01-01", lambda p: "$x").cond(expr.Parser(w["where"]).parse())
+                except views_query.Untranslatable as exc:
+                    problems.append(f"{where}: where: {exc}")
+                except expr.ExprError:
+                    pass  # said when the view is read
             if w["workflow"] and w["workflow"] not in flows:
                 problems.append(f"{where}: there is no workflow {w['workflow']!r}")
             if w["role"] and w["role"] not in roles:

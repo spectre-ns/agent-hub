@@ -32,6 +32,25 @@
     title = "Shortcuts"
     links = [{ label = "Results", href = "/records/Observation" }]
 
+    [[widget]]
+    kind = "line"                  # line: a number over time
+    type = "Order"
+    measure = "sum(total)"         # count, chart and line, of records: sum | avg | min | max of a number or decimal
+                                   # field (min and max: a date too); none: how many
+    x = "placed_on:month"          # line: a date or time field by month, quarter or year
+    series = "customer.owner"      # line, optional: a line per value (the 8 largest; the rest as "Other")
+
+    [[widget]]
+    kind = "table"
+    source = "signatures"          # sign-offs: who signed what, and when (type: of that type; else of every type
+    columns = ["at", "by", "meaning", "record", "current"]  # they read); a condition reads ``row``
+
+A path (``group_by``, ``x``, ``series``, ``measure``) is a field by its name or path, or one reference followed to a
+field of the record it names (``customer.owner``). A date or time grouped by ``:month``, ``:quarter`` or ``:year``
+(``group_by = "placed_on:quarter"``), a reference followed, a measure, a series or a line are worked out in the
+database (``practicehub/views_query.py`` says how, and what they may hold); a board groups by a field of its own
+records as they are.
+
 Every widget is computed for the member looking at it: records only from data classes they may read, items and
 runs only with what visibility allows.
 
@@ -51,12 +70,13 @@ from dataclasses import dataclass, field
 
 from . import expr
 from . import schema
+from . import views_query
 from .workflows import DefinitionError
 from . import decimals
 
 ID = re.compile(r"[a-z][a-z0-9\-]*")
-WIDGETS = ("count", "table", "list", "board", "chart", "tree", "links")
-SOURCES = ("items", "runs", "records")
+WIDGETS = ("count", "table", "list", "board", "chart", "line", "tree", "links")
+SOURCES = ("items", "runs", "records", "signatures")
 ITEM_STATUS = ("open", "claimed", "held", "done", "cancelled")
 RUN_STATUS = ("running", "completed", "cancelled")
 RESERVED = {"new"}
@@ -67,22 +87,24 @@ HREF = re.compile(r"(/(?!/)[^\s\"'<>]*|https://[^\s\"'<>]+)")  # a page of the h
 
 # What each kind of widget shows and which keys it uses: the editor's palette and side panel are built from this.
 KINDS = {
-    "count": {"label": "Number", "about": "How many records or items match", "sources": SOURCES,
-              "options": ["filter"], "size": [3, 2]},
+    "count": {"label": "Number", "about": "How many records or items match, or a total of their values",
+              "sources": SOURCES, "options": ["filter", "measure"], "size": [3, 2]},
     "table": {"label": "Table", "about": "Rows with the columns you choose", "sources": SOURCES,
               "options": ["filter", "columns", "sort", "limit"], "size": [12, 4]},
     "list": {"label": "List", "about": "A short list: each row's first column, the others beside it",
              "sources": SOURCES, "options": ["filter", "columns", "sort", "limit"], "size": [6, 4]},
-    "board": {"label": "Board", "about": "A column per value, with a card per row", "sources": SOURCES,
+    "board": {"label": "Board", "about": "A column per value, with a card per row", "sources": ("items", "runs", "records"),
               "options": ["filter", "group_by", "columns", "limit"], "size": [12, 5]},
-    "chart": {"label": "Bar chart", "about": "How many rows have each value", "sources": SOURCES,
-              "options": ["filter", "group_by"], "size": [6, 4]},
+    "chart": {"label": "Bar chart", "about": "How many rows have each value, or a total for each", "sources": SOURCES,
+              "options": ["filter", "group_by", "measure"], "size": [6, 4]},
+    "line": {"label": "Line chart", "about": "A number by month, quarter or year", "sources": ("records", "signatures"),
+             "options": ["filter", "measure", "x", "series"], "size": [12, 4]},
     "tree": {"label": "Tree", "about": "Records of a type with a parent, as an outline", "sources": ("records",),
              "options": ["filter", "columns", "limit"], "size": [6, 5]},
     "links": {"label": "Links", "about": "Places to go: other views, lists, pages", "sources": (),
               "options": ["links"], "size": [4, 3]},
 }
-SOURCE_LABELS = {"records": "Records", "items": "Work items", "runs": "Workflow runs"}
+SOURCE_LABELS = {"records": "Records", "items": "Work items", "runs": "Workflow runs", "signatures": "Sign-offs"}
 # What a filter over work items or runs may look at (records: the fields of their type).
 ROW_FIELDS = {
     "items": [{"name": "title", "path": "title", "label": "Title", "type": "string"},
@@ -99,7 +121,20 @@ ROW_FIELDS = {
              {"name": "status", "path": "status", "label": "Status", "type": "choice", "choices": list(RUN_STATUS)},
              {"name": "started_by", "path": "started_by", "label": "Started by", "type": "string"},
              {"name": "created_at", "path": "created_at", "label": "Started", "type": "datetime"}],
+    # a sign-off (a person's signature on a record, or on a decision about one); current: whether it still covers
+    # the record as it is, worked out for the rows a table or list shows (not filtered or counted on)
+    "signatures": [{"name": "at", "path": "at", "label": "Signed", "type": "datetime"},
+                   {"name": "by", "path": "by", "label": "Signed by", "type": "member"},
+                   {"name": "meaning", "path": "meaning", "label": "Meaning", "type": "string"},
+                   {"name": "record", "path": "record", "label": "Record", "type": "reference"},
+                   {"name": "type", "path": "type", "label": "Record type", "type": "string"},
+                   {"name": "title", "path": "title", "label": "Record title", "type": "string"},
+                   {"name": "version", "path": "version", "label": "Version", "type": "number"},
+                   {"name": "comment", "path": "comment", "label": "Comment", "type": "text"},
+                   {"name": "current", "path": "current", "label": "Still current", "type": "boolean",
+                    "filter": False}],
 }
+MEASURE_KINDS = ("count", "chart", "line")  # the kinds a measure, a bucket or a reference followed is worked out for
 # Filter operators, as the editor names them, and the condition each writes.
 # (a date field's editor says "is before" for <, "is on or after" for >=...)
 OPS = {"==": "is", "!=": "is not", "in": "is one of", "not in": "is none of", "<": "is less than",
@@ -119,9 +154,11 @@ class View:
 
 def editor_spec() -> dict:
     """What the graphical editor offers, from this module's own lists."""
+    from .views_query import BUCKETS, MEASURES
     return {"kinds": {k: {**v, "sources": list(v["sources"])} for k, v in KINDS.items()},
             "sources": SOURCE_LABELS, "item_status": list(ITEM_STATUS), "run_status": list(RUN_STATUS),
-            "row_fields": ROW_FIELDS, "ops": OPS, "columns": COLUMNS, "max_height": MAX_HEIGHT}
+            "row_fields": ROW_FIELDS, "ops": OPS, "columns": COLUMNS, "max_height": MAX_HEIGHT,
+            "measures": list(MEASURES), "buckets": list(BUCKETS)}
 
 
 def _grid(g, where: str, problems: list[str]) -> dict | None:
@@ -147,10 +184,19 @@ def widget(w, i: int) -> tuple[dict | None, list[str]]:
     where = f"widget {w.get('title') or i + 1}"
     kind = w.get("kind", "table")
     src = None if kind == "links" else w.get("source", "records")
+    for k in w:
+        if k not in WIDGET_KEYS:
+            import difflib
+            near = difflib.get_close_matches(str(k), WIDGET_KEYS, n=1)
+            problems.append(f"{where}: a widget has no key {k!r}" + (f" (did you mean {near[0]!r}?)" if near else
+                                                                    f" (its keys: {', '.join(WIDGET_KEYS)})"))
     if kind not in WIDGETS:
         problems.append(f"{where}: kind is one of {', '.join(WIDGETS)}")
     if kind != "links" and src not in SOURCES:
         problems.append(f"{where}: source is one of {', '.join(SOURCES)}")
+    elif kind in KINDS and kind != "links" and src not in KINDS[kind]["sources"]:
+        problems.append(f"{where}: a {KINDS[kind]['label'].lower()} shows "
+                        + " or ".join(SOURCE_LABELS[x].lower() for x in KINDS[kind]["sources"]))
     if src == "records" and not w.get("type"):
         problems.append(f"{where}: say which record type it shows")
     status = w.get("status") or []
@@ -165,10 +211,9 @@ def widget(w, i: int) -> tuple[dict | None, list[str]]:
             expr.check(w["where"])
         except expr.ExprError as exc:
             problems.append(f"{where}: where: {exc}")
-    if kind == "tree" and src != "records":
-        problems.append(f"{where}: a tree shows records")
     if kind in ("board", "chart") and not w.get("group_by"):
         problems.append(f"{where}: a {kind} needs group_by: the path whose values make its columns")
+    problems += _numbers_problems(w, kind, src, where)
     cols = []
     for c in w.get("columns", []) or []:
         if isinstance(c, str):
@@ -200,7 +245,55 @@ def widget(w, i: int) -> tuple[dict | None, list[str]]:
     return ({"kind": kind, "source": src, "title": str(w.get("title", "")), "type": w.get("type"),
              "workflow": w.get("workflow"), "status": status, "role": w.get("role"), "where": w.get("where"),
              "columns": cols, "group_by": w.get("group_by"), "sort": sort, "descending": bool(w.get("descending")),
-             "limit": limit, "links": links, "grid": grid}, problems)
+             "limit": limit, "links": links, "grid": grid, "measure": w.get("measure"), "x": w.get("x"),
+             "series": w.get("series")}, problems)
+
+
+def _numbers_problems(w: dict, kind: str, src, where: str) -> list[str]:
+    """What is wrong with a widget's measure, x axis, series and buckets, as written (``catalog.check_view``
+    resolves the paths against the type)."""
+    from .views_query import parse_measure, parse_path
+    out = []
+    for k in ("measure", "x", "series", "group_by"):
+        if w.get(k) is not None and not isinstance(w[k], str):
+            out.append(f"{where}: {k} is a field's path, as text")
+    if out:
+        return out
+    if w.get("measure"):
+        if kind not in MEASURE_KINDS:
+            out.append(f"{where}: measure is for a number, a bar chart or a line chart")
+        elif src != "records":
+            out.append(f"{where}: measure reads the fields of records (a sign-off, a work item or a run is counted)")
+        else:
+            try:
+                parse_measure(w["measure"])
+            except ValueError as exc:
+                out.append(f"{where}: {exc}")
+    if kind == "line":
+        if not w.get("x"):
+            out.append(f"{where}: a line chart needs x: a date or time by month, quarter or year (issued_on:month)")
+        if w.get("group_by"):
+            out.append(f"{where}: a line chart has no group_by: its x is the date, and series a line per value")
+    else:
+        for k in ("x", "series"):
+            if w.get(k):
+                out.append(f"{where}: {k} is for a line chart")
+    for k in ("x", "series", "group_by"):
+        if not w.get(k) or (k in ("x", "series") and kind != "line"):
+            continue
+        try:
+            _, bucket = parse_path(w[k])
+        except ValueError as exc:
+            out.append(f"{where}: {k}: {exc}")
+            continue
+        if k == "x" and not bucket:
+            out.append(f"{where}: x is a date or time by month, quarter or year ({w[k]}:month)")
+        if k == "series" and bucket:
+            out.append(f"{where}: series is a line per value: a date by {bucket} is the x axis")
+        if k == "group_by" and bucket and (kind == "board" or src not in ("records", "signatures")):
+            out.append(f"{where}: group_by: a board groups by a field as it is; a date by {bucket} is for a number, "
+                       f"a bar chart or a line chart of records or sign-offs")
+    return out
 
 
 def parse(source: str, catalog=None) -> View:
@@ -253,8 +346,8 @@ def placed(widgets: list[dict]) -> list[dict]:
 
 # ============================================================================================ the editor's document
 TOP = ("id", "title", "summary", "nav", "roles")
-WIDGET_KEYS = ("kind", "title", "source", "type", "workflow", "role", "status", "where", "columns", "group_by",
-               "sort", "descending", "limit", "links", "grid")
+WIDGET_KEYS = ("kind", "title", "source", "type", "workflow", "role", "status", "where", "measure", "x", "series",
+               "columns", "group_by", "sort", "descending", "limit", "links", "grid")
 _BARE = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -278,7 +371,7 @@ def _tv(v) -> str:
 
 
 def _prefix(source: str | None) -> str:
-    return "row." if source in ("items", "runs") else "record."
+    return "row." if source in ("items", "runs", "signatures") else "record."
 
 
 def doc_of(source: str) -> dict:
@@ -340,8 +433,8 @@ def to_toml(doc: dict) -> str:
                 continue
             if k == "source" and (v == "records" or kind == "links"):
                 continue
-            if kind == "links" and k in ("type", "workflow", "role", "status", "where", "columns", "group_by",
-                                         "sort", "descending", "limit"):
+            if kind == "links" and k in ("type", "workflow", "role", "status", "where", "measure", "x", "series",
+                                         "columns", "group_by", "sort", "descending", "limit"):
                 continue
             if k == "columns":  # a column with no label of its own is just its path
                 v = [c["path"] if isinstance(c, dict) and set(c) == {"path"} or
@@ -524,9 +617,86 @@ def _words_value(hub, member: dict, rtype: str | None):
     return value
 
 
+SIGNED_LIMIT = 5000  # the newest sign-offs a widget reads
+
+
+def signature_rows(hub, member: dict, w: dict) -> tuple[list[dict], str | None, dict]:
+    """The sign-offs a member may see, newest first: a person's signature on a record (``record.signed``), or on a
+    decision about one (a gate's or a hold's), of a type they read (``type``: of that type). A record withheld from
+    them at its subject's request is not shown, and the note says how many were not. Returns the rows, the note and
+    the records they name, as the member may see them (by reference)."""
+    from .visibility import withheld
+    if w.get("type"):
+        if not hub.may_read(member, w["type"]):
+            return [], f"needs access to {hub.class_of(w['type'])} records", {}
+        types = {w["type"]}
+    else:
+        types = {t for t in hub.record_types() if hub.may_read(member, t)}
+    flt = {"$or": [{"action": "record.signed"},
+                   {"action": {"$in": ["gate.decided", "hold.decided"]}, "data.signed.record": {"$exists": True}}]}
+    events = hub.db.events.find(flt, sort=[("seq", -1)], limit=SIGNED_LIMIT)
+    today = hub.engine.now().date().isoformat()
+    rows, recs, people, hidden = [], {}, {}, 0
+    for e in events:
+        d = e.get("data") or {}
+        sg = d.get("signed") or {}
+        ref = sg.get("record")
+        if not isinstance(ref, str) or "/" not in ref or not e.get("signature"):  # an agent's decision is no signature
+            continue
+        t, rid = ref.split("/", 1)
+        if t not in types:
+            continue
+        if e["actor"] not in people:
+            people[e["actor"]] = hub.db.members.get(e["actor"])
+        who = people[e["actor"]]
+        if not who or who.get("kind") != "person":
+            continue
+        if ref not in recs:
+            raw = hub.records.read(t, rid)
+            recs[ref] = hub.redact(member, raw) if raw else None
+        rec = recs[ref]
+        gone = withheld(rec)
+        if gone and gone.get("whole"):
+            hidden += 1
+            continue
+        row = {"id": e["seq"], "seq": e["seq"], "at": e["at"], "by": e["actor"], "name": who.get("name") or e["actor"],
+               "meaning": sg.get("meaning"), "record": ref, "type": t,
+               "title": hub.short_title(rec) if rec else ref, "version": sg.get("version"),
+               "comment": d.get("comment", "")}
+        if w.get("where") and not expr.holds(w["where"], {"row": row, "today": today}):
+            continue
+        rows.append(row)
+    notes = []
+    if hidden:
+        notes.append(f"{hidden} on records withheld from you at their subject's request")
+    if len(events) >= SIGNED_LIMIT:
+        notes.append(f"only the newest {SIGNED_LIMIT} sign-offs are read")
+    return rows, "; ".join(notes) or None, {k: v for k, v in recs.items() if v}
+
+
+def _signature_value(hub):
+    """A sign-off's cell: who signed by name, the record by its title, its type in words, current as Yes or No."""
+    def value(row: dict, path: str):
+        if path == "by":
+            return row.get("name") or row.get("by")
+        if path == "record":
+            return row.get("title") or row.get("record")
+        if path == "type":
+            rt = hub.record_type(row.get("type") or "")
+            return rt.label if rt else row.get("type")
+        if path == "current":
+            v = row.get("current")
+            return None if v is None else "Yes" if v else "No"
+        return _value(row, path)
+    return value
+
+
 def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
     """The widget's rows for this member, and a note when some were not shown."""
     note = None
+    if w["source"] == "signatures":
+        rows, note, _ = signature_rows(hub, member, w)
+        return rows, note
     if w["source"] == "records":
         if not hub.may_read(member, w["type"]):
             return [], f"needs access to {hub.class_of(w['type'])} records"
@@ -580,6 +750,18 @@ def rows_for(hub, member: dict, w: dict) -> tuple[list[dict], str | None]:
     return rows, note
 
 
+def _mark_current(hub, rows: list[dict]) -> None:
+    """Whether each sign-off shown still covers its record as it is (``Hub._signatures_of``), for these rows only:
+    a later write leaves an earlier signature not current, as the record's page says."""
+    by: dict = {}
+    for r in rows:
+        if r["record"] not in by:
+            t, rid = r["record"].split("/", 1)
+            raw = hub.records.read(t, rid)
+            by[r["record"]] = {x["seq"]: x["current"] for x in hub._signatures_of(r["record"], raw)} if raw else {}
+        r["current"] = by[r["record"]].get(r["seq"])
+
+
 def _sort_key(v):
     """Rows by a value: numbers as numbers, the rest as text, the empty ones last."""
     if v is None or v == "":
@@ -595,8 +777,22 @@ def compute(hub, member: dict, view: View) -> list[dict]:
         if w["kind"] == "links":
             out.append({**w, "note": None, "total": len(w["links"]), "rows": [], "value": _value})
             continue
-        rows, note = rows_for(hub, member, w)
-        value = _words_value(hub, member, w["type"]) if w["source"] == "records" else _value
+        recs: dict = {}
+        if w["source"] == "signatures":
+            rows, note, recs = signature_rows(hub, member, w)
+        if views_query.computed(hub, w):  # its numbers are worked out, not counted from rows it lists
+            if w["source"] == "signatures":
+                d, seen = views_query.signature_numbers(hub, member, w, rows, note)
+            else:
+                d, seen = views_query.records_numbers(hub, member, w)
+            if seen:
+                hub.note_list(member, seen, how="view", what=f"view:{view.id}")
+            out.append({**w, **d, "value": _value})
+            continue
+        if w["source"] != "signatures":
+            rows, note = rows_for(hub, member, w)
+        value = (_words_value(hub, member, w["type"]) if w["source"] == "records"
+                 else _signature_value(hub) if w["source"] == "signatures" else _value)
         if w.get("sort"):
             filled = [r for r in rows if value(r, w["sort"]) not in (None, "")]
             empty = [r for r in rows if value(r, w["sort"]) in (None, "")]
@@ -619,5 +815,12 @@ def compute(hub, member: dict, view: View) -> list[dict]:
         if w["source"] == "records" and w["kind"] != "chart":  # a chart shows counts; the rest show the records
             shown = d.get("rows") if "rows" in d else [r for v in d.get("groups", {}).values() for r in v]
             hub.note_list(member, shown, how="view", what=f"view:{view.id}")
+        if w["source"] == "signatures":
+            shown = d.get("rows") if "rows" in d else [r for v in d.get("groups", {}).values() for r in v]
+            if w["kind"] in ("table", "list"):
+                _mark_current(hub, d["rows"])
+            named = [recs[r["record"]] for r in shown if r["record"] in recs]
+            if named:  # each row shows the title of the record it is on
+                hub.note_list(member, list({id(x): x for x in named}.values()), how="view", what=f"view:{view.id}")
         out.append(d)
     return out

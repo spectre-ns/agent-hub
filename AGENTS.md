@@ -46,6 +46,8 @@ Notes for anyone, human or agent, changing this code.
 | A table's rows, each checked against its columns | `schema._check_value` (the table branch), `RecordType.cells` in `practicehub/schema.py` |
 | A type's checks (`[[check]]`): kept by every write, whoever writes | `Hub._check_record` in `practicehub/hub.py`, `schema._check_checks` |
 | A move's checks (over the record and its parts), kept by whoever moves it, a step included | `Hub.move_check_refusal`, the move checks in `Hub.update_record`; `Engine._refused_move`; `moves.move_refusal` |
+| A view's numbers: worked out in the database over the records the reader may read; a value withheld from them is not added up, a path hidden from them shows "needs access" | `records_numbers`, `Pipeline`, `_rights` in `practicehub/views_query.py`; `masks_for` in `practicehub/restrictions.py` |
+| The sign-offs a view lists: a person's signatures, on records the reader may read and not withheld from them | `signature_rows` in `practicehub/views.py` |
 
 If you change one of these, add or update a test in `tests/test_rules.py` that states the rule (the rules the
 2026-11-24 review panel found broken are stated in `tests/test_panel_fixes.py`).

@@ -291,6 +291,33 @@ class Restrictions:
         meta["withheld"] = {"note": note, "whole": False, "fields": [f["label"] for f in m["fields"]]}
         return {**out, "meta": meta}
 
+    def masks_for(self, member: dict | None, rt) -> dict:
+        """What ``mask`` withholds from ``member`` of any record of ``rt``, said once for all of them (a view works
+        its numbers out in the database): ``{"subjects", "records", "fields"}``: the subjects whose records of this
+        type are withheld whole (the subject's own record is not), ``"<ref>|<subject>"`` for a record withheld by
+        name, and each withheld field's path with the subjects it is withheld for. An emergency access in force
+        lifts a subject's, as it does on a record."""
+        out: dict = {"subjects": set(), "records": set(), "fields": {}}
+        if rt is None or (member or {}).get("kind") == "automation":
+            return out
+        by = self._load()
+        if not by or rt.id in self._types:
+            return out
+        for subject, ds in by.items():
+            mine = [d for d in ds if not self._allowed(member, d)]
+            if not mine or self.override(member, subject):
+                continue
+            for d in mine:
+                if rt.id in d["types"] or rt.data_class in d["classes"]:
+                    out["subjects"].add(subject)
+                for ref in d["records"]:
+                    if ref.split("/", 1)[0] == rt.id and ref != subject:
+                        out["records"].add(f"{ref}|{subject}")
+                for f in rt.fields:
+                    if f.get("data_class") and f["data_class"] != rt.data_class and f["data_class"] in d["classes"]:
+                        out["fields"].setdefault(f["path"], set()).add(subject)
+        return out
+
     def problems(self, rt, rec: dict) -> list[str]:
         """What is wrong with a restriction as written: what it masks must be the practice's own data classes,
         record types and roles (a misspelt one would mask nothing, silently), and it must mask something."""

@@ -2480,14 +2480,22 @@ class RecordPages:
                 + "</li>" for d, r in w["tree"])
             return f"<div class='section'>{head}" + (f"<ul class='tree'>{items}</ul>" if items else
                                                      "<p class='muted'>Nothing yet.</p>") + "</div>"
+        aside = f"<p class='muted dash-aside'>{e(w['aside'][0].upper() + w['aside'][1:])}.</p>" if w.get("aside") else ""
         if w["kind"] == "count":
-            return f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{w['total']}</p></div>"
+            stat = w["stat"] if w.get("computed") else w["total"]
+            return f"<div class='section card'><h2>{e(w['title'])}</h2><p class='stat'>{e(stat)}</p>{aside}</div>"
+        if w["kind"] == "line":
+            from .charts import line_chart
+            return f"<div class='section'>{head}{line_chart(w['line'] or {}, w['title'] or fallback)}{aside}</div>"
         if w["kind"] == "chart":
-            top = max(w["counts"].values() or [1])
+            texts = w.get("texts") or {}
+            size = {k: abs(float(decimals.number(n) or 0)) for k, n in w["counts"].items()}
+            top = max(size.values(), default=0) or 1
             bars = "".join(f"<tr><th scope='row'>{e(k)}</th><td><span class='bar' style='width:"
-                           f"{max(4, 100 * n // top)}%'></span> {n}</td></tr>" for k, n in w["counts"].items())
+                           f"{max(4, int(100 * size[k] / top)) if size[k] else 0}%'></span> "
+                           f"{e(texts.get(k, n))}</td></tr>" for k, n in w["counts"].items())
             return (f"<div class='section'>{head}" + (f"<table class='chart'><tbody>{bars}</tbody></table>" if bars
-                                                      else "<p class='muted'>Nothing yet.</p>") + "</div>")
+                                                      else "<p class='muted'>Nothing yet.</p>") + aside + "</div>")
         if w["kind"] == "board":
             groups, counts = w["groups"], w["counts"]
             moving = self._board_moves(me, w) if live else None
@@ -2527,6 +2535,8 @@ class RecordPages:
     def _view_href(self, w, r) -> str:
         if w["source"] == "records":
             return self.record_href(f"{w['type']}/{r['id']}")
+        if w["source"] == "signatures":  # a sign-off opens the record it is on
+            return self.record_href(r["record"])
         return f"/items/{r['id']}" if w["source"] == "items" else self.run_href(r)
 
     def _view_cell(self, w, r, c, first) -> str:

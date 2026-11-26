@@ -866,6 +866,10 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
                               what=f"view:{target}")
             if "counts" in w:
                 d["counts"] = w["counts"]
+            if w.get("computed"):  # worked out in the database: its numbers as exact text beside them
+                d.update({k: w[k] for k in ("stat", "texts", "aside") if w.get(k) not in (None, "", {})})
+                if w.get("line"):
+                    d["line"] = w["line"]
             out.append(d)
         return {"widgets": out, "_text": f"{v.title}: {len(out)} widget(s)"}
     raise Refused(f"there is nothing called {what}")
@@ -877,6 +881,9 @@ def _row(hub, w: dict, r: dict) -> dict:
         return _summary(hub, rt, r) if rt else {"ref": f"{w['type']}/{r.get('id')}"}
     if w["source"] == "items":
         return {k: r.get(k) for k in ("id", "title", "kind", "status", "role", "run_title", "record")}
+    if w["source"] == "signatures":
+        return {k: r.get(k) for k in ("at", "by", "name", "meaning", "record", "type", "title", "version", "comment",
+                                      "current")}
     return {k: r.get(k) for k in ("id", "title", "status", "workflow_id", "record")}
 
 

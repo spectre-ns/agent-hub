@@ -8717,3 +8717,52 @@ def test_every_row_of_a_table_is_checked_rounded_and_its_reference_column_links(
                                                        {"what": "b", "amount": 2.344}]})
     assert [str(r["amount"]) for r in rec["lines"]] == ["1.01", "2.34"]
     assert {"rel": "item", "ref": f"Bill/{rec['id']}"} in hub.linked(amara, chit)
+
+
+# ---------------------------------------------------------------------------------------------- a view's numbers
+def test_a_view_s_numbers_add_up_only_what_its_reader_may_read(hub):
+    """A view's numbers are worked out in the database over the records the reader may read (``records_numbers``):
+    a type, a reference's target or a field in a class they do not read gives "needs access", never a number; a
+    value a subject withheld from them is not added up; a reference followed shows what its record withholds as
+    none."""
+    from test_view_numbers import _account, _lockbox as _directive, _patients, _sale, _show, _types
+    _types(hub)
+    p1, p2 = _patients(hub)
+    _directive(hub, p1, withhold_classes=["clinical", "billing"],
+               allow_members=[{"reference": "Practitioner/dr-amara"}])
+    east, west = _account(hub, p1, "east"), _account(hub, p2, "west")
+    _sale(hub, memo="hers", patient=p1, account=west, amount="5.00")
+    _sale(hub, memo="his", patient=p2, account=east, amount="7.00")
+    total = dict(kind="count", measure="sum(amount)")
+    assert _show(hub, "rana", **total)["note"] == "needs access to clinical records"
+    assert _show(hub, "noor", kind="chart", group_by="account.region")["note"] == "needs access to billing records"
+    assert _show(hub, "noor", kind="count", measure="sum(margin)")["note"] == "needs access to billing records"
+    assert _show(hub, "dr-amara", **total)["number"] == Decimal("12.00")
+    assert _show(hub, "noor", **total)["number"] == Decimal("7.00")
+    assert _show(hub, "dr-liam", **total)["number"] == Decimal("7.00")
+    by_region = dict(kind="chart", measure="sum(amount)", group_by="account.region")
+    assert _show(hub, "dr-amara", **by_region)["counts"] == {"East": Decimal("7.00"), "West": Decimal("5.00")}
+    # hers: her sale names no account he may see; his: the account is hers, and she withheld it
+    assert _show(hub, "dr-liam", **by_region)["counts"] == {"none": Decimal("7.00")}
+
+
+def test_the_sign_offs_a_view_lists_are_a_person_s_on_records_the_reader_may_read(hub):
+    """The sign-offs a view lists (``views.signature_rows``) are people's signatures on records of types the reader
+    reads; one on a record withheld from them at its subject's request is not listed, and the note says so."""
+    from test_view_numbers import _lockbox as _directive, _patients, _sale, _show, _types
+    _types(hub)
+    p1, p2 = _patients(hub)
+    _directive(hub, p1, withhold_classes=["clinical"], allow_members=[{"reference": "Practitioner/dr-amara"}])
+    hers, his = _sale(hub, memo="hers", patient=p1), _sale(hub, memo="his", patient=p2)
+    for ref in (hers, his):
+        hub.sign_record(M(hub, "dr-amara"), ref, "checked")
+    w = dict(kind="table", source="signatures", type="Sale", columns=["by", "record", "current"])
+    assert {r["record"] for r in _show(hub, "dr-amara", **w)["rows"]} == {hers, his}
+    noor = _show(hub, "noor", **w)
+    assert [r["record"] for r in noor["rows"]] == [his]
+    assert noor["note"] == "1 on records withheld from you at their subject's request"
+    assert _show(hub, "rana", **w)["note"] == "needs access to clinical records"
+    every = _show(hub, "rana", kind="table", source="signatures", columns=["record"])  # every type rana reads
+    assert not {hers, his} & {r["record"] for r in every["rows"]}
+    with pytest.raises(Denied):
+        hub.sign_record(M(hub, "scribe-agent"), his, "checked")

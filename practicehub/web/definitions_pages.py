@@ -34,10 +34,14 @@ HELP = {
              '<code>states</code> it is allowed in, and <code>moves_to</code> to move the record when signed.</li>'),
     "view": ('<li><code>id</code>, <code>title</code>, <code>summary</code>, <code>nav</code> (in the sidebar) and '
              '<code>roles</code> (who sees it there).</li><li><code>[[widget]]</code>: <code>kind</code> (count, '
-             'table, list, board, chart, tree, links), <code>source</code> (records, items, runs), <code>type</code>, '
-             '<code>where</code> (a condition over <code>record</code> or <code>row</code>), <code>columns</code>, '
-             '<code>group_by</code>, <code>sort</code> and <code>descending</code>, <code>limit</code>, '
-             '<code>links</code> and <code>grid</code> (<code>{ x, y, w, h }</code> on 12 columns).</li>'),
+             'table, list, board, chart, line, tree, links), <code>source</code> (records, items, runs, signatures), '
+             '<code>type</code>, <code>where</code> (a condition over <code>record</code> or <code>row</code>), '
+             '<code>columns</code>, <code>group_by</code>, <code>sort</code> and <code>descending</code>, '
+             '<code>limit</code>, <code>links</code> and <code>grid</code> (<code>{ x, y, w, h }</code> on 12 '
+             'columns).</li><li>A number, a bar chart or a line may add up a field: <code>measure = "sum(amount)"</code> '
+             '(or <code>avg</code>, <code>min</code>, <code>max</code>). A line runs along <code>x</code>, a date by '
+             '<code>:month</code>, <code>:quarter</code> or <code>:year</code>, with a line per <code>series</code>. '
+             'A path may follow one reference (<code>customer.owner</code>).</li>'),
     "skill": ('<li><code>instructions</code>: what an agent with this skill does; <code>[[output]]</code>: the shape of '
               'its answer, checked like any answer.</li>'),
 }

@@ -33,6 +33,8 @@ _DARK = """color-scheme:dark;
 --shadow-raised:0 0 0 1px var(--card-edge),0 1px 1px #03040480;
 --shadow-overlay:0 0 0 1px #BCD6F00A,0 8px 12px #0304045C,0 0 1px 1px #03040480;
 --backdrop:#10121499;
+--series-1:#338ced;--series-2:#e76624;--series-3:#00a888;--series-4:#d28e05;--series-5:#e24d8b;--series-6:#0aac23;
+--series-7:#9887ef;--series-8:#eb6263;--grid:#2C333A;
 """
 
 CSS = (r"""
@@ -61,6 +63,9 @@ CSS = (r"""
 --shadow-raised:0 0 0 1px var(--card-edge),0 1px 1px #091E4240;
 --shadow-overlay:0 8px 12px #091E4226,0 0 1px #091E424F;
 --backdrop:#091E427A;
+/* a chart's series, in a fixed order (each mode's steps checked against its surface), and its hairline grid */
+--series-1:#257de0;--series-2:#f47230;--series-3:#00b894;--series-4:#f2a600;--series-5:#ee7fac;--series-6:#008a17;
+--series-7:#6a4ce2;--series-8:#ec4647;--grid:#DCDFE4;
 /* older names, kept so existing markup and the diagram keep working; they follow the tokens above */
 --muted:var(--subtlest);--line:var(--border);--line-2:var(--border-bold);--hover:var(--neutral);--brand-soft:var(--selected-bg);
 --shadow:var(--shadow-raised);--todo:var(--loz-default-fg);--todo-bg:var(--loz-default-bg);
@@ -627,6 +632,19 @@ color:var(--subtle);background:var(--neutral)}
 /* ---- board */
 .stat{font-size:32px;line-height:40px;font-weight:600;margin:0}
 table.chart th{width:30%;font-weight:400}.bar{display:inline-block;height:12px;border-radius:2px;background:var(--brand);vertical-align:middle}
+.vl{margin:0}.line-chart{width:100%;height:auto;display:block;overflow:visible}
+.vl-grid{stroke:var(--grid);stroke-width:1}.vl-zero{stroke:var(--border-bold);stroke-width:1}
+.vl-tick{fill:var(--subtlest);font-size:12px}.vl-label{fill:var(--fg);font-size:12px}
+.vl-line{fill:none;stroke:currentColor;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.vl-dot,.vl-end{fill:currentColor;stroke:var(--surface);stroke-width:2}
+.vl-hit{fill:transparent}.vl-hit:hover{fill:var(--neutral)}
+.vl-s1{color:var(--series-1)}.vl-s2{color:var(--series-2)}.vl-s3{color:var(--series-3)}.vl-s4{color:var(--series-4)}
+.vl-s5{color:var(--series-5)}.vl-s6{color:var(--series-6)}.vl-s7{color:var(--series-7)}.vl-s8{color:var(--series-8)}
+.vl-legend{display:flex;flex-wrap:wrap;gap:4px 16px;list-style:none;margin:0 0 8px;padding:0;font-size:12px;color:var(--subtle)}
+.vl-key{display:inline-block;width:14px;height:3px;margin-right:6px;vertical-align:middle;border-radius:2px;background:currentColor}
+.vl-data{margin-top:4px}.vl-data summary{cursor:pointer;color:var(--subtle);font-size:12px}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.dash-aside{font-size:12px;margin:4px 0 0}
 .board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(208px,1fr);gap:8px;overflow-x:auto;padding-bottom:8px;position:relative;min-width:0}
 .col{background:var(--sunken);border-radius:3px;padding:8px;min-height:200px}
 .col>header{display:flex;align-items:center;gap:8px;padding:4px 4px 12px;font-size:12px;line-height:16px;font-weight:600;
@@ -4588,8 +4606,14 @@ function dashEditor(root) {
   // columns, group_by and sort name a record type's field by its name; a filter reads the stored path
   const colKey = (w, f) => (src(w) === "records" ? f.name : f.path);
   const fieldBy = (w, key) => fieldsOf(w).find((f) => f.name === key || f.path === key);
-  const labelOf = (w, key) => { const f = fieldBy(w, key); return f ? f.label : key; };
+  const labelOf = (w, key) => { const f = fieldBy(w, key) || hopsOf(w).find((h) => h.name === key); return f ? f.label : key; };
   const isDate = (f) => f && /^date/.test(f.type);
+  // a computed widget (a measure, a line, a bar chart of records) may also read a field one reference reaches
+  const hopsOf = (w) => (src(w) === "records" && (typeOf(w) || {}).hops) || [];
+  const pathOf = (key) => String(key || "").split(":")[0];
+  const bucketOf = (key) => String(key || "").split(":")[1] || "";
+  const anyField = (w, key) => fieldBy(w, pathOf(key)) || hopsOf(w).find((h) => h.name === pathOf(key));
+  const BUCKET_WORDS = { month: "Each month", quarter: "Each quarter", year: "Each year" };
 
   // ---- layout: no two widgets overlap; the moved one keeps its place, the others make room, all float up
   const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
@@ -4617,7 +4641,7 @@ function dashEditor(root) {
   }
 
   // ---- the palette
-  const glyph = { count: "123", table: "▤", list: "☰", board: "▥", chart: "▮▮", tree: "⌥", links: "↗" };
+  const glyph = { count: "123", table: "▤", list: "☰", board: "▥", chart: "▮▮", line: "∿", tree: "⌥", links: "↗" };
   const pal = $("dz-palette");
   for (const [k, ks] of Object.entries(spec.kinds)) {
     const b = el("button", { type: "button", class: "dz-kind", draggable: "true", "data-kind": k,
@@ -4645,8 +4669,12 @@ function dashEditor(root) {
     if ((w.kind === "board" || w.kind === "chart") && !w.group_by) {
       const tt = typeOf(w);
       const f = src(w) === "records" ? (tt && (fieldBy(w, tt.lifecycle || "") || tt.fields.find((x) => x.choices.length)))
-        : fieldsOf(w).find((x) => x.name === "status" || x.name === "role");
+        : fieldsOf(w).find((x) => x.name === "status" || x.name === "role" || x.name === "by");
       if (f) w.group_by = colKey(w, f);
+    }
+    if (w.kind === "line" && !w.x) {  // a line runs over a date: the type's first, by month
+      const f = fieldsOf(w).find((x) => isDate(x) && x.filter !== false);
+      if (f) w.x = colKey(w, f) + ":month";
     }
     if (w.kind === "links" && !(w.links || []).length) w.links = cat.pages.length ? [{ ...cat.pages[0] }] : [{ label: "Inbox", href: "/" }];
   }
@@ -4866,14 +4894,17 @@ function dashEditor(root) {
       w.kind = v;
       const allowed = spec.kinds[v].sources;
       if (allowed.length && !allowed.includes(src(w) || "records")) w.source = allowed[0];
-      if (v === "links") for (const k of ["source", "type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort", "descending", "limit"]) delete w[k];
+      if (v === "links") for (const k of ["source", "type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort", "descending", "limit", "measure", "x", "series"]) delete w[k];
+      for (const k of ["group_by", "columns", "sort", "limit", "measure", "x", "series"]) if (!has(w, k)) delete w[k];
+      if (!has(w, "sort")) delete w.descending;
+      if (w.kind === "board" && w.group_by && (bucketOf(w.group_by) || !fieldBy(w, w.group_by))) delete w.group_by;
       defaults(w);
       changed(); drawCanvas(); drawPanel();
     }, undefined), ks.about));
     if (w.kind === "links") return linksPanel(w);
     if (ks.sources.length > 1) {
       panel.append(field("Shows", select_(ks.sources.map((k) => [k, spec.sources[k]]), s, (v) => {
-        for (const k of ["type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort"]) delete w[k];
+        for (const k of ["type", "workflow", "role", "status", "where", "filter", "columns", "group_by", "sort", "measure", "x", "series"]) delete w[k];
         w.source = v === "records" ? undefined : v;
         if (v === "records") delete w.source;
         defaults(w); changed(); drawCanvas(); drawPanel();
@@ -4881,9 +4912,12 @@ function dashEditor(root) {
     }
     if (s === "records") {
       panel.append(field("Record type", select_(cat.types.map((t) => [t.id, t.label]), w.type, (v) => {
-        for (const k of ["where", "filter", "columns", "group_by", "sort"]) delete w[k];
+        for (const k of ["where", "filter", "columns", "group_by", "sort", "measure", "x", "series"]) delete w[k];
         w.type = v; defaults(w); changed(); drawCanvas(); drawPanel();
       }, w.type ? undefined : "Choose a type")));
+    } else if (s === "signatures") {
+      panel.append(field("Signed on", select_(cat.types.map((t) => [t.id, t.label]), w.type,
+        (v) => set(w, "type", v, true), "Any type"), "Sign-offs on the records you may read"));
     } else {
       panel.append(field("Workflow", select_(cat.workflows.map((x) => [x.id, x.title]), w.workflow,
         (v) => set(w, "workflow", v), "Any workflow")));
@@ -4894,10 +4928,36 @@ function dashEditor(root) {
         (v) => set(w, "role", v), "Any role")));
     }
     if (has(w, "filter")) filterPanel(w);
+    if (has(w, "measure") && s === "records") measurePanel(w);
     if (has(w, "group_by")) {
       const fs = fieldsOf(w).filter((f) => f.filter !== false);
-      panel.append(field(w.kind === "board" ? "A column for each" : "A bar for each",
-        select_(fs.map((f) => [colKey(w, f), f.label]), w.group_by, (v) => set(w, "group_by", v), "Choose a field")));
+      const far = w.kind === "chart" ? hopsOf(w) : [];  // a board's columns are its records' own values
+      const opts = fs.map((f) => [colKey(w, f), f.label]).concat(far.map((h) => [h.name, h.label]));
+      const g = pathOf(w.group_by), gf = anyField(w, w.group_by);
+      const box = el("div", { class: "dz-row" }, select_(opts, g, (v) => {
+        const f = anyField(w, v), b = bucketOf(w.group_by);
+        set(w, "group_by", v && b && isDate(f) ? `${v}:${b}` : v, true);
+      }, "Choose a field"));
+      box.firstChild.id = "dz-group";
+      if (w.kind === "chart" && isDate(gf)) box.append(select_(spec.buckets.map((b) => [b, BUCKET_WORDS[b] || b]), bucketOf(w.group_by),
+        (v) => set(w, "group_by", v ? `${g}:${v}` : g), "Each day"));
+      panel.append(el("div", { class: "dz-field" }, el("label", { for: "dz-group" }, w.kind === "board" ? "A column for each" : "A bar for each"), box));
+    }
+    if (has(w, "x")) {
+      const dates = fieldsOf(w).filter((f) => isDate(f) && f.filter !== false).map((f) => [colKey(w, f), f.label])
+        .concat(hopsOf(w).filter(isDate).map((h) => [h.name, h.label]));
+      const box = el("div", { class: "dz-row" },
+        select_(dates, pathOf(w.x), (v) => set(w, "x", v ? `${v}:${bucketOf(w.x) || "month"}` : undefined, true), "Choose a date"),
+        select_(spec.buckets.map((b) => [b, BUCKET_WORDS[b] || b]), bucketOf(w.x) || "month",
+          (v) => { if (w.x) set(w, "x", `${pathOf(w.x)}:${v}`); }));
+      box.firstChild.id = "dz-x";
+      panel.append(el("div", { class: "dz-field" }, el("label", { for: "dz-x" }, "Along the bottom"), box));
+    }
+    if (has(w, "series")) {
+      const fs = fieldsOf(w).filter((f) => f.filter !== false && !isDate(f) && !["text", "markdown", "number", "decimal"].includes(f.type))
+        .map((f) => [colKey(w, f), f.label]).concat(hopsOf(w).filter((h) => !isDate(h) && !["number", "decimal"].includes(h.type)).map((h) => [h.name, h.label]));
+      panel.append(field("A line for each", select_(fs, w.series, (v) => set(w, "series", v), "One line"),
+        "At most eight lines; the rest are added up as Other."));
     }
     if (has(w, "columns")) columnsPanel(w);
     if (has(w, "sort")) {
@@ -4912,6 +4972,22 @@ function dashEditor(root) {
     if (has(w, "limit")) panel.append(field("At most", input(w.limit, (v) => set(w, "limit", v === "" ? undefined : Math.max(1, parseInt(v, 10) || 1)),
       { type: "number", min: "1", max: "1000", placeholder: w.kind === "tree" ? "500" : "25", id: "dz-limit" }), "rows shown"));
     placePanel(w);
+  }
+  function measurePanel(w) {  // how many, or a total, an average, the least or the most of a number
+    const t = typeOf(w) || { fields: [], hops: [], cells: [] };
+    const m = /^(sum|avg|min|max)\((.+)\)$/.exec(w.measure || "");
+    const fn = m ? m[1] : "", on = m ? m[2] : "";
+    const nums = t.fields.filter((f) => ["number", "decimal"].includes(f.type) && !f.list).map((f) => [f.name, f.label])
+      .concat((t.cells || []).map((c) => [c.name, c.label]))
+      .concat((t.hops || []).filter((h) => ["number", "decimal"].includes(h.type)).map((h) => [h.name, h.label]));
+    const words = { sum: "The total of", avg: "The average of", min: "The least", max: "The most" };
+    const box = el("div", { class: "dz-row" }, select_(spec.measures.map((x) => [x, words[x] || x]), fn, (v) => {
+      set(w, "measure", v ? `${v}(${on || (nums[0] || [""])[0]})` : undefined, true);
+    }, "How many"));
+    box.firstChild.id = "dz-measure";
+    if (fn) box.append(select_(nums, on, (v) => set(w, "measure", v ? `${fn}(${v})` : undefined, true), "Choose a number"));
+    panel.append(el("div", { class: "dz-field" }, el("label", { for: "dz-measure" }, "Show"), box,
+      fn && !nums.length ? el("small", { class: "help muted" }, "This type has no number to add up.") : null));
   }
   function placePanel(w) {
     const g = w.grid, num = (k, label, min, max, off) => field(label, input(g[k] + off, (v) => {

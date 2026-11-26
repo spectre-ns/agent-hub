@@ -250,6 +250,61 @@ item of a list (`sum(record.lines.*.amount)`), or a value or condition over each
 any other way is refused. `round(x, 2)` rounds half up. A date is written in quotes (`'2025-01-31'`); `today + 30d`
 still moves one.
 
+## Views
+
+A view (`views/<id>.toml`) is a page of widgets on a 12-column grid. Whoever opens it sees only what they may see.
+
+```toml
+id = "orders"
+title = "Orders"
+nav = true                    # in the sidebar
+roles = ["manager"]           # whose sidebar; none: everyone's
+
+[[widget]]
+kind = "line"                 # count, table, list, board, chart, line, tree, links
+type = "Order"
+measure = "sum(total)"        # sum, avg, min or max of a number; none: how many
+x = "placed_on:month"         # a date, by month, quarter or year
+series = "customer.owner"     # a line for each (at most 8; the rest are Other)
+where = "record.status != 'void'"
+grid = { x = 0, y = 0, w = 12, h = 4 }
+```
+
+| Key | Means |
+|---|---|
+| `kind` | `count` a number; `table`, `list`; `board` a column per value; `chart` a bar per value; `line` a number over time; `tree` an outline of a type with a parent; `links` places to go |
+| `source` | `records` (the default), `items`, `runs` or `signatures` |
+| `type` | the record type (for records: required; for sign-offs: those on that type, else on every type the reader may read) |
+| `where` | a condition over `record` (records) or `row` (the rest) |
+| `columns`, `sort`, `descending`, `limit` | a table's or list's columns, its order, and at most how many rows (25, up to 1000) |
+| `group_by` | a board's columns, a chart's bars |
+| `measure` | `sum(path)`, `avg(path)`, `min(path)` or `max(path)` (min and max also of a date); on a number, a chart or a line |
+| `x`, `series` | a line's date and what it draws a line for |
+| `workflow`, `role`, `status` | for work items and runs |
+| `links` | `[{ label, href }]` for `links` |
+| `grid` | `{ x, y, w, h }`; no two widgets overlap |
+
+An unknown key is refused, with the nearest key it may mean.
+
+A path is a field's name or path. A computed widget may follow one reference to a field of the record it names
+(`customer.owner`, when `customer` is one reference to one type), and may group a date by `:month`, `:quarter` or
+`:year` (in the hub's time zone). A board groups by its records' own fields, unbucketed.
+
+A number or a chart with a measure, a chart grouped by a date's month, quarter or year or by a field a reference
+reaches, every line, and every chart of sign-offs are worked out in the database, not counted from the rows a table
+would list: the numbers cover every record the reader may read, not the first thousand. A sum, minimum or maximum of a decimal is exact (three 0.10s are 0.30); an average is rounded to the
+field's places. A table's column (`lines.*.amount`) is summed in each record, then over the records; its average is
+refused (of the lines, or of the totals?). A line fills a month with nothing in it with 0 for a count or a sum, and
+leaves it empty for the others. A value its subject withheld from the reader is not added up, and a path the reader
+may not see (a hidden field, a type they may not read) shows "needs access to …" in place of a number. A hub whose
+records are kept in another store shows a note in place of these widgets.
+
+Sign-offs (`source = "signatures"`) list each signature on a record and each signed gate or hold decision: `at`,
+`by` (the person), `meaning`, `record`, `type`, `title`, `version`, `comment`, and, in a table or list, `current`
+(whether it still covers the record as it is now; not filtered or charted on). A chart or line of sign-offs counts
+them (`group_by = "by"`, `x = "at:month"`). The newest 5000 are read, and a record withheld from the reader as a
+whole is left out, with a note saying how many.
+
 ## Skills
 
 ```toml

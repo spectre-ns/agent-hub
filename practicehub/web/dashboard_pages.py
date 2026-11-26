@@ -49,7 +49,24 @@ class DashboardPages:
                 fields.append(d)
             fields.append({"name": "meta.lastUpdated", "path": "meta.lastUpdated", "label": "Last changed",
                            "type": "datetime", "choices": [], "filter": True})
-            types.append({"id": tid, "label": rt.label, "plural": rt.plural, "fields": fields,
+            for d, f in zip(fields, rt.fields):
+                d.update({"target": list(f.get("target") or []), "list": bool(f.get("list")),
+                          "scale": f.get("scale"), "unit": f.get("unit") or ""})
+            hops = []  # a field of the record one reference names: a computed widget may group by it
+            for f in rt.fields:
+                tgt = hub.record_type(f["target"][0]) if f["type"] == "reference" and len(
+                    f.get("target") or []) == 1 and not f.get("list") and "*" not in f["path"] else None
+                for g in (tgt.fields if tgt else []):
+                    if g["type"] in ("list", "object", "json", "table", "markdown", "text", "attachment") or \
+                            g.get("list") or "*" in g["path"]:
+                        continue
+                    hops.append({"name": f"{f['name']}.{g['name']}", "label": f"{f['label']} › {g['label']}",
+                                 "type": g["type"], "choices": list(g.get("choices") or [])})
+            labels = {f["name"]: f["label"] for f in rt.fields}
+            cells = [{"name": c["path"], "label": f"{labels.get(c['table'], c['table'])} › {c['label']}",
+                      "type": c["type"]} for c in rt.cells() if c["type"] in ("number", "decimal")]
+            types.append({"id": tid, "label": rt.label, "plural": rt.plural, "fields": fields, "hops": hops,
+                          "cells": cells,
                           "tree": bool(rt.parent), "lifecycle": (rt.lifecycle or {}).get("field")})
         flows = [{"id": w["workflow"].id, "title": w["workflow"].title} for w in hub.workflows()]
         roles = [{"id": r["id"], "name": r.get("name") or r["id"]} for r in hub.roles()]
