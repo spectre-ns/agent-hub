@@ -506,7 +506,7 @@ def tools(hub, sid: str, member: dict) -> list[dict]:
              "description": f"Read one {lab.lower()}, whole (the read is recorded, as on its page).",
              "inputSchema": _obj({"id": ID_PROP}, ["id"]), "annotations": {**READ, "title": f"Read a {lab.lower()}"},
              "_call": ("read", rt.id)})
-        if not hub.may_write(member, rt.id):
+        if not hub.may_write(member, rt.id) or rt.abstract:  # an abstract type's records are its subtypes'
             continue
         unset = visibility.hidden_fields(hub, member, rt, write=True)  # a field of a class they may not write
         fs = [f for f in editable(rt) if f not in unset]
@@ -751,6 +751,7 @@ def _conn_data(conn: dict | None) -> dict:
 
 
 def _summary(hub, rt, rec: dict) -> dict:
+    rt = hub.record_type(rec.get("resourceType") or "") or rt  # a record of a type under the one asked for is its own
     st = schema.first(rec, rt.lifecycle["path"]) if rt.lifecycle else None
     gone = visibility.withheld(rec)
     key = (rec.get("meta") or {}).get("key")
@@ -807,12 +808,12 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
         hub.note_list(member, recs, how="mcp", what=f"records:{target}", text=a.get("text") or None)
         return {"records": found, "_text": f"{len(found)} {rt.plural.lower()}"}
     if what == "read":
-        ref = f"{target}/{a['id']}"
         rt = hub.record_type(target)
         hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {target} records")
-        rec = hub.redact(member, hub.records.read(target, a["id"]))
+        ref = hub.resolve_ref(f"{target}/{a['id']}")  # a type takes in those under it: the record's own type
+        rec = hub.redact(member, hub.records.read(*ref.split("/", 1))) if ref else None
         if not rec:
-            raise NotFound(f"there is no {ref}")
+            raise NotFound(f"there is no {target}/{a['id']}")
         gone = visibility.withheld(rec)
         hub.note_view(member, ref, how="withheld" if gone and gone.get("whole") else how)
         return {"record": rec, **_summary(hub, rt, rec),

@@ -683,7 +683,7 @@ class Engine:
             hub.require(actor, "starter", f"workflow:{wid}", f"start {wf.title}")
         subject, make = None, None
         if wf.record:
-            if record and "/" in record and record.split("/")[0] != wf.record and wf.new_record:
+            if record and "/" in record and not hub.is_a(record.split("/")[0], wf.record) and wf.new_record:
                 # started on what the record will be about (a person): the run makes its record, then works it
                 make = self._new_record_field(wf, record.split("/")[0])
                 if make is None:
@@ -696,7 +696,7 @@ class Engine:
                     if walking:  # the same submission again (the lab sending its result twice): the run walking it
                         self._same_submission(wf, walking[0], inputs or {})
                         return walking[0]
-            elif not record or record.split("/")[0] != wf.record:
+            elif not record or not hub.is_a(record.split("/")[0], wf.record):
                 raise Invalid(f"{wf.title} is about a {wf.record}; say which one")
             got = hub.records.read(*(record or subject).split("/", 1))
             if not got:
@@ -744,7 +744,8 @@ class Engine:
                 v = hub.skill_version(name)
                 if v is not None:
                     skills[name] = v
-        lc_type = hub.record_type(wf.record) if wf.record else None
+        # the record's own type: one under the workflow's has its lifecycle, at the same path
+        lc_type = hub.record_type((record or "").split("/")[0] or wf.record) if wf.record else None
         start_state = schema.first(got, lc_type.lifecycle["path"]) if record and lc_type and lc_type.lifecycle else \
             None
         ctx = {"run": {"id": run_id, "record": record, "subject": subject, "started_by": actor["id"],
@@ -782,7 +783,8 @@ class Engine:
         from .hub import Invalid
         for f in wf.inputs:
             ref = self._ref_of(inputs.get(f["name"]))
-            if f["type"] != "reference" or not isinstance(ref, str) or ref.split("/", 1)[0] != wf.record:
+            if f["type"] != "reference" or not isinstance(ref, str) or not self.hub.is_a(ref.split("/", 1)[0],
+                                                                                          wf.record):
                 continue
             rec = self.hub.records.read(*ref.split("/", 1))
             if rec is not None and self.hub.subject_of(rec) == subject:
@@ -803,7 +805,8 @@ class Engine:
 
     def start_on(self, wf) -> list[str]:
         """The record types a person starts ``wf`` on: its record's type, or, for a workflow that makes its record
-        (``[new_record]``), what such a record is about (its subject reference's targets). None: about nothing."""
+        (``[new_record]``), what such a record is about (its subject reference's targets); each with the types under
+        it that records are made as. None: about nothing."""
         if not wf.record:
             return []
         if wf.new_record:
@@ -812,7 +815,7 @@ class Engine:
                       and "*" not in f["path"]), None)
             if f:
                 return list(self.hub.concrete(f["target"]))
-        return [wf.record]
+        return self.hub.concrete([wf.record])
 
     def _new_record_field(self, wf, subject_type: str) -> dict | None:
         """The field of the workflow's record type that says what a new one is about, for a ``subject_type``."""
@@ -3458,12 +3461,14 @@ class Engine:
 
     def on_record(self, change: str, rt, rec: dict, before: dict | None, actor: dict, cause: int) -> list[dict]:
         """A record was created, updated or moved through its lifecycle: start the workflows listening for
-        ``record.<change>:<Type>`` whose ``trigger.when`` holds. The record change is the cause; the workflow was
-        approved to start this way, so no starter role is needed. A run never restarts its own workflow."""
+        ``record.<change>:<Type>`` whose ``trigger.when`` holds: of its own type or any type above it (a change to an
+        individual is a change to a client). The record change is the cause; the workflow was approved to start this
+        way, so no starter role is needed. A run never restarts its own workflow."""
         ref = f"{rt.id}/{rec['id']}"
-        events = {f"record.{change}:{rt.id}"}
+        kin = (rt.id, *rt.ancestors)
+        events = {f"record.{change}:{t}" for t in kin}
         if change == "transitioned":
-            events.add(f"record.updated:{rt.id}")
+            events |= {f"record.updated:{t}" for t in kin}
         started = []
         for w in self.hub.workflows():
             wf = w["workflow"]
@@ -3477,7 +3482,7 @@ class Engine:
             starter = actor if actor.get("kind") in ("person", "agent", "service") else self.automation_actor_for(wf)
             inputs = {f["name"]: rec.get(f["name"]) for f in wf.inputs if f["name"] in rec}
             try:
-                started.append(self.start(starter, wf.id, record=ref if wf.record == rt.id else None, inputs=inputs,
+                started.append(self.start(starter, wf.id, record=ref if wf.record in kin else None, inputs=inputs,
                                           cause=cause, via_automation=True))
             except Exception as exc:  # noqa: BLE001 - a trigger that cannot start is reported, not fatal to the write
                 self.hub.track.append(self.automation_actor_for(wf), "trigger.failed", ref, cause=cause,
@@ -3530,12 +3535,13 @@ class Engine:
             actor = self.automation_actor_for(wf)
             seq = hub.track.append(actor, "schedule.fired", f"workflow:{wf.id}", data={"slot": slot})
             if wf.for_each:
-                for rec in hub.records.search(wf.for_each, limit=None):
+                for rec in hub.records.search(hub.family(wf.for_each), limit=None):
                     if wf.where and not expr.holds(wf.where, {"record": rec, "run": {"today": now.date().isoformat()}}):
                         continue
-                    ref = f"{wf.for_each}/{rec['id']}"
+                    ref = f"{rec['resourceType']}/{rec['id']}"
+                    on = wf.record and hub.is_a(rec["resourceType"], wf.record)
                     try:
-                        started.append(self.start(actor, wf.id, record=ref if wf.record == wf.for_each else None,
+                        started.append(self.start(actor, wf.id, record=ref if on else None,
                                                   cause=seq, via_automation=True)["id"])
                     except Exception as exc:  # noqa: BLE001
                         hub.track.append(actor, "trigger.failed", ref, cause=seq, data={"error": str(exc)})

@@ -161,6 +161,20 @@ required = true
 - A module's type extends only the core's types, its own and those of the modules it `requires`. A hub on the Medplum
   store reads a type under a core base only.
 
+**Naming a type takes in its family**, the type and every type under it, wherever it is named:
+
+| Where it is named | What counts |
+|---|---|
+| a reference's `target`, a `[[link]]`'s `to`, `parent`, `part_of`, `covers` | a record of any type in the family |
+| its list, search and search words; an export of its list | the family's records, each saying its own type |
+| a view's `type` (and a reference a view follows) | the family's records, read by the named type's fields |
+| a workflow's `record`, its `record.<change>:<Type>` trigger, `for_each` | a record of any type in the family: an event about a record is about its own type and each type above it |
+| a data class's types, a grant, a directive's withheld `types` | the family's records |
+| its MCP tools | `search_` and `read_` find the family's; `read_party` with a person's id reads the person |
+
+A reference that names a type above a record's own (`Party/7f3a` for a person) finds it. A record is stored, and its
+page is, as its own type. An abstract type has no `create_` tool, and a workflow whose `record` is abstract works only
+on records that exist (`new_record` is refused).
 ### Sign-off that holds
 
 A state can be **final**: once a record is in it, nothing changes it, not a person, its workflow, a pack upgrade or a

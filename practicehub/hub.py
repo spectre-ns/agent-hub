@@ -799,6 +799,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 self.records.give_keys()
                 self.db.set_setting("records_keyed", 1)
 
+    def resolve_ref(self, ref: str | None) -> str | None:
+        """The record a reference names, as ``Type/id`` of its own type: one naming a type above it (``Party/7f3a``
+        for a person) finds the record of that id in the type's family. None: there is none."""
+        if not isinstance(ref, str) or "/" not in ref:
+            return None
+        t, rid = ref.split("/", 1)
+        for k in (t, *(x for x in self.family(t) if x != t)):
+            if self.records.read(k, rid) is not None:
+                return f"{k}/{rid}"
+        return None
+
     def key_of(self, ref: str | None) -> str | None:
         """A record's key (T1-12): its type's key and its number among that type's records. None: there is no such
         record, or its store keeps no keys."""
@@ -1407,7 +1418,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             return 0
         n = 0
         for r in self.db.runs.find({"workflow_id": old, "status": "running",
-                                    "record": {"$regex": f"^{re.escape(before.id)}/"}}, fields=["id"]):
+                                    "record": self.family_rx(before.id)}, fields=["id"]):
             self.engine.stop(actor, r["id"], f"the {before.label} record type no longer names this workflow", cause)
             n += 1
         return n
@@ -2921,6 +2932,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
         The member must read the type's data class, as for :meth:`read_record` (a caller that forgets to check
         does not leak a class); across every type (no ``rtype``), records of types they may not read are left out.
+        A type takes in every type under it (one data class: a type under another keeps its parent's).
         ``member`` None (a lookup that sees only what every reader does) and the hub's own automation are not
         checked."""
         checked = member is not None and not visibility._sees_all(member)
@@ -2930,11 +2942,12 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 self.require(member, "reader", f"data_class:{dc}", f"read {rtype} records")
         if field and rtype and visibility.hides_path(self, member, rtype, field):
             raise Denied(f"{member.get('name', '')} may not search {rtype} records by {field}")
+        kin = self.family(rtype) if rtype else None
         if not text:
-            recs = self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, field=field,
+            recs = self.redact_all(member, self.records.search(kin, subject=subject, limit=limit, field=field,
                                                                since=since, until=until, offset=offset))
             return self._readable_only(member, recs) if checked and not rtype else recs
-        recs = self._search_words(member, rtype, text=text, limit=limit, subject=subject, field=field,
+        recs = self._search_words(member, kin, text=text, limit=limit, subject=subject, field=field,
                                   since=since, until=until, offset=offset)
         if checked and not rtype:
             recs = self._readable_only(member, recs)
@@ -2956,30 +2969,30 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             return seen[t]
         return [r for r in recs if ok(r)]
 
-    def _search_words(self, member: dict, rtype: str | None, *, text: str, limit: int | None, subject: str | None,
+    def _search_words(self, member: dict, kin: list[str] | None, *, text: str, limit: int | None, subject: str | None,
                       field: str | None, since: str | None, until: str | None, offset: int) -> list[dict]:
-        types = {rtype: self.record_type_for_reading(rtype)} if rtype else self.record_types()
+        types = {t: self.record_type_for_reading(t) for t in kin} if kin else self.record_types()
         guarded = {t for t, rt in types.items() if visibility.hidden_fields(self, member, rt)}
         if guarded and hasattr(self.records, "reindex"):
             self._search_ready(guarded)
             classes = {f["data_class"] for rt in types.values() if rt is not None for f in rt.classed_fields}
             visible = {dc for dc in classes if member and self.can(member, "reader", f"data_class:{dc}")}
             plain = [t for t, rt in types.items() if rt is None or not rt.classed_fields]
-            recs = self.records.search(rtype, subject=subject, limit=limit, text=text, field=field, since=since,
+            recs = self.records.search(kin, subject=subject, limit=limit, text=text, field=field, since=since,
                                        until=until, offset=offset, visible=visible, plain=plain)
             return self.redact_all(member, recs)
         if guarded:  # a store that cannot look in parts (a FHIR server): match what the member sees, here
             from .records import search_text, words_of
             words = words_of(text)
-            recs = self.redact_all(member, self.records.search(rtype, subject=subject, limit=None, text=text,
+            recs = self.redact_all(member, self.records.search(kin, subject=subject, limit=None, text=text,
                                                                field=field, since=since, until=until))
             recs = [r for r in recs if all(w in search_text(r) for w in words)]
             return recs[offset:][:limit] if limit is not None else recs[offset:]
         if hasattr(self.records, "reindex"):
             self._search_ready(types)
-            return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, text=text,
+            return self.redact_all(member, self.records.search(kin, subject=subject, limit=limit, text=text,
                                                                field=field, since=since, until=until, offset=offset))
-        return self.redact_all(member, self.records.search(rtype, subject=subject, limit=limit, text=text,
+        return self.redact_all(member, self.records.search(kin, subject=subject, limit=limit, text=text,
                                                            field=field, since=since, until=until))
 
     VIEW_WINDOW = timedelta(minutes=15)
@@ -3353,10 +3366,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         rt = self.record_type(rtype)
         if not rt or not rt.parent:
             return [rtype] if rt else []
-        mine = set(rt.field(rt.parent)["target"])
+        mine = rt.field(rt.parent)["target"]
         out = [rtype]
         for tid, other in sorted(self.record_types().items()):
-            if tid != rtype and other.parent and tid in mine and rtype in other.field(other.parent)["target"]:
+            if tid != rtype and other.parent and any(other.is_a(m) for m in mine) \
+                    and any(rt.is_a(t) for t in other.field(other.parent)["target"]):
                 out.append(tid)
         return out
 
@@ -3444,7 +3458,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 hidden += self.db.links.count({"to_ref": ref, "rel": f["rel"] if f else rt.part_of["field"],
                                                "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}})
                 continue
-            recs = self._part_records(ref, rt)
+            recs = self._part_records(ref, rt, exact=True)
             shown = self.redact_all(member, recs)
             for r in shown:
                 if not visibility.withheld(r) or not visibility.withheld(r).get("whole"):
@@ -4358,7 +4372,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             return []
         out = []
         for r in self._part_records(ref, prt):
-            sigs = self._signatures_of(f"{pid}/{r['id']}", r)
+            sigs = self._signatures_of(f"{r['resourceType']}/{r['id']}", r)
             out.append({"record": {**schema._named_values(prt, r), **r},
                         "signed": sorted({s["meaning"] for s in sigs if s["current"] and s["valid"] and s["meaning"]})})
         return out
@@ -4528,7 +4542,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if now == me:
             raise Invalid(f"a {label} does not reverse itself")
         ttype, tid = now.split("/", 1)
-        target = self.records.read(ttype, tid) if ttype == rt.id else None
+        root = self.root_of(rt)  # the type that says what it reverses; its family reverses one another
+        target = self.records.read(ttype, tid) if self.is_a(ttype, root) else None
         if not target:
             raise Invalid(f"a {label} reverses another {label}; there is no {now}")
         st = schema.first(target, rt.lifecycle["path"])
@@ -4536,15 +4551,17 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             raise Invalid(f"{self.key_of(now) or now} is {rt.state_label(st).lower()}: a {label} reverses one that "
                           f"is final; change this one instead")
         f = rt.field(r["field"])
-        other = self.db.links.find_one({"to_ref": now, "rel": f["rel"], "from_ref": {"$regex": f"^{re.escape(rt.id)}/"}})
+        other = self.db.links.find_one({"to_ref": now, "rel": f["rel"], "from_ref": self.family_rx(root)})
         if other and other["from_ref"] != me:
             raise Invalid(f"{self.key_of(now) or now} is reversed already, by {self.key_of(other['from_ref']) or other['from_ref']}")
 
-    def _part_records(self, ref: str, prt) -> list[dict]:
-        """The records of part type ``prt`` that are part of ``ref`` (read for the hub, whoever asks)."""
+    def _part_records(self, ref: str, prt, exact: bool = False) -> list[dict]:
+        """The records of part type ``prt`` (or a type under it; ``exact``: of it alone, as a record's page lists
+        each part type) that are part of ``ref`` (read for the hub, whoever asks)."""
         f = prt.field(prt.part_of["field"])
         rows = self.db.links.find({"to_ref": ref, "rel": f["rel"] if f else prt.part_of["field"],
-                                   "from_ref": {"$regex": f"^{re.escape(prt.id)}/"}})
+                                   "from_ref": {"$regex": f"^{re.escape(prt.id)}/"} if exact
+                                   else self.family_rx(prt.id)})
         return [r for r in (self.records.read(*x["from_ref"].split("/", 1)) for x in rows)
                 if r and schema.ref_of(schema.first(r, prt.part_of["path"])) == ref]
 
@@ -4558,7 +4575,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             return
         owner = schema.ref_of(schema.first(after, rt.part_of["path"]))
         ort = self.record_type(owner.split("/", 1)[0]) if owner else None
-        if not ort or rt.id not in ort.covers or not ort.lifecycle:
+        if not ort or not any(rt.is_a(c) for c in ort.covers) or not ort.lifecycle:
             return
         rec = self.records.read(*owner.split("/", 1))
         st = schema.first(rec, ort.lifecycle["path"]) if rec else None
@@ -4579,12 +4596,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             if not scope:
                 return None
             f = crt.field(c["scope"])
-            rows = self.db.links.find({"to_ref": scope, "rel": f["rel"],
-                                       "from_ref": {"$regex": f"^{re.escape(crt.id)}/"}})
+            rows = self.db.links.find({"to_ref": scope, "rel": f["rel"], "from_ref": self.family_rx(crt.id)})
             closes = [r for r in (self.records.read(*x["from_ref"].split("/", 1)) for x in rows)
                       if r and schema.ref_of(schema.first(r, c["scope_path"])) == scope]
         else:
-            closes = self.records.search(crt.id, limit=None)
+            closes = self.records.search(self.family(crt.id), limit=None)
         dates = [str(schema.first(r, c["path"]))[:10] for r in closes
                  if schema.first(r, crt.lifecycle["path"]) in c["states"] and schema.first(r, c["path"])]
         return max(dates) if dates else None
@@ -5041,7 +5057,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     if not other:
                         problems.append(f"step {s.id}: requires_links {need['rel']!r}: there is no record type "
                                         f"{need['from']!r}")
-                    elif not x or not ("*" in x["to"] or rt.id in self.concrete(x["to"])):
+                    elif not x or not ("*" in x["to"] or any(rt.is_a(t) for t in x["to"])):
                         problems.append(f"step {s.id}: requires_links {need['rel']!r}: a {other.label.lower()} has no "
                                         f"link {need['rel']!r} that may point at a {rt.label.lower()}")
                 elif not rt.link(need["rel"]):
@@ -5059,8 +5075,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             if outcome is not None and need.get("outcomes") is not None and outcome not in need["outcomes"]:
                 continue
             if need["from"]:
-                n = self.db.links.count({"to_ref": ref, "rel": need["rel"],
-                                         "from_ref": {"$regex": f"^{re.escape(need['from'])}/"}})
+                n = self.db.links.count({"to_ref": ref, "rel": need["rel"], "from_ref": self.family_rx(need["from"])})
                 other = self.record_type(need["from"])
                 x = other.link(need["rel"]) if other else None
                 words = (other.plural if need["min"] > 1 else other.label).lower() if other else need["from"]
@@ -5080,12 +5095,14 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         if rt is None:
             return []
         states = rt.states()
+        made_here = [] if not (rt.abstract and wf.new_record) else [
+            f"new_record: {rt.label} is abstract: a run makes a record of a type under it, named as the workflow's record"]
         written = self._def_get("type", wf.record)  # the type as written, without its workflow's moves
         fit = lifecycle_fit(written, wf) if written and (written.workflow or {}).get("id") == wf.id else []
         if not states:
             # written as states and edges, the run keeps where it is (``run["at"]``, Engine._move_record)
-            return [f"step {s.id}: state: a {wf.record} has no lifecycle to move" for s in wf.steps
-                    if s.state and not s.on_edge]
+            return made_here + [f"step {s.id}: state: a {wf.record} has no lifecycle to move" for s in wf.steps
+                                if s.state and not s.on_edge]
         # written as states and edges, a stop the state field has no value for is the run's own (``run["at"]``)
         problems = [f"step {s.id}: state {s.state!r} is not a state of a {wf.record} ({', '.join(states)})"
                     for s in wf.steps if s.state and s.state not in states and not s.on_edge]
@@ -5093,7 +5110,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         made = (wf.new_record or {}).get(field) if field else None
         if isinstance(made, str) and "{{" not in made and made not in states:
             problems.append(f"new_record: {field} {made!r} is not a state of a {wf.record} ({', '.join(states)})")
-        return problems + fit
+        return made_here + problems + fit
 
     def _block_problems(self, wf: wfmod.Workflow, *, approving: bool) -> list[str]:
         problems = []

@@ -194,8 +194,9 @@ class Restrictions:
 
     # ------------------------------------------------------------------ what is masked
     def _covers(self, d: dict, rt, ref: str, subject: str) -> tuple[bool, list[dict]]:
-        """(whole record masked, fields masked) by one restriction, for anyone it does not allow."""
-        if ref != subject and (rt.id in d["types"] or rt.data_class in d["classes"] or ref in d["records"]):
+        """(whole record masked, fields masked) by one restriction, for anyone it does not allow. A type it names
+        takes in the types under it."""
+        if ref != subject and ({rt.id, *rt.ancestors} & d["types"] or rt.data_class in d["classes"] or ref in d["records"]):
             return True, []
         return False, [f for f in rt.fields if f.get("data_class") and f["data_class"] != rt.data_class
                        and f["data_class"] in d["classes"]]
@@ -308,7 +309,7 @@ class Restrictions:
             if not mine or self.override(member, subject):
                 continue
             for d in mine:
-                if rt.id in d["types"] or rt.data_class in d["classes"]:
+                if {rt.id, *rt.ancestors} & d["types"] or rt.data_class in d["classes"]:
                     out["subjects"].add(subject)
                 for ref in d["records"]:
                     if ref.split("/", 1)[0] == rt.id and ref != subject:

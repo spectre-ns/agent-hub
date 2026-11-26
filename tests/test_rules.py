@@ -9130,3 +9130,89 @@ def test_a_parent_s_change_that_breaks_a_subtype_is_refused(hub):
     assert hub.record_type("Person").field("phone") and hub.record_type("Person").field("birth_date")
     with pytest.raises(Invalid, match=r"record types are under it \(Person\)"):
         hub.retire(M(hub, "rana"), "type", "Party")
+
+
+SALE_LOOK = '''id = "sale-look"
+title = "Look at a sale"
+record = "Sale"
+[trigger]
+event = "record.created:Sale"
+[start]
+to = "looking"
+[[edge]]
+id = "looked"
+from = "looking"
+to = "looked"
+[[state]]
+id = "looked"
+[[state]]
+id = "looking"
+[[state.work]]
+id = "look"
+title = "Look at it"
+kind = "task"
+role = "physician"
+[[state.work.fields]]
+name = "seen"
+type = "text"
+'''
+
+
+def test_naming_a_type_takes_in_every_type_under_it(hub):
+    """Wherever a type is named, the types under it count: a reference to it takes a record of one, its list and
+    search find theirs, a view's numbers add theirs up, its workflow's trigger fires on theirs, a grant or a
+    subject's directive over it covers theirs, and its MCP tools find and read theirs. An abstract type's tools
+    find and read; they make nothing."""
+    from practicehub import mcp
+    from test_view_numbers import _lockbox, _patients, _sale, _show, _types
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
+    _types(hub)
+    _in_force(hub, 'id = "Refund"\nextends = "Sale"\n[[field]]\nname = "reason"\nlabel = "Reason"\n')
+    _in_force(hub, 'id = "Resident"\nextends = "Patient"\n[[field]]\nname = "farm"\nlabel = "Farm"\n')
+    p = hub.propose_workflow(M(hub, "jo"), SALE_LOOK, "look at each sale")
+    hub.approve_workflow(M(hub, "rana"), "sale-look", p["version"])
+    p1, p2 = _patients(hub)
+    res = hub.create_record(M(hub, "jo"), "Resident", {"name": [{"given": ["Ida"], "family": "Roy"}],
+                                                       "birthDate": "1970-02-03", "farm": "North 40"})
+    sale = _sale(hub, memo="a sale", patient=p2, amount="7.00")
+    refund = hub.create_record(amara, "Refund", {"memo": "a refund", "patient": {"reference": p1}, "amount": "3.00",
+                                                 "reason": "returned"})
+    rref = f"Refund/{refund['id']}"
+    to_resident = _sale(hub, memo="hers", patient=f"Resident/{res['id']}", amount="5.00")  # a Patient reference
+    # its list and search
+    assert {f"{r['resourceType']}/{r['id']}" for r in hub.search_records(amara, "Sale", limit=None)} == \
+        {sale, rref, to_resident}
+    assert [r["id"] for r in hub.search_records(amara, "Sale", text="refund")] == [refund["id"]]
+    assert f"Resident/{res['id']}" in {f"{r['resourceType']}/{r['id']}" for r in
+                                       hub.search_records(amara, "Patient", limit=None)}
+    assert hub.resolve_ref(f"Sale/{refund['id']}") == rref and hub.resolve_ref("Sale/nope") is None
+    # a view's numbers; a grant (by the data class the family shares)
+    total = dict(kind="count", measure="sum(amount)")
+    assert _show(hub, "dr-amara", **total)["number"] == Decimal("15.00")
+    assert _show(hub, "rana", **total)["note"] == "needs access to clinical records"
+    assert not hub.may_read(M(hub, "rana"), "Refund") and hub.may_read(noor, "Refund")
+    # its workflow's trigger
+    assert [r["record"] for r in hub.db.runs.find({"workflow_id": "sale-look"})
+            if r["record"] == rref], "record.created:Sale fires on a refund"
+    # a subject's directive over the type
+    _lockbox(hub, p1, withhold_types=["Sale"], allow_members=[{"reference": "Practitioner/dr-amara"}])
+    assert visibility.withheld(hub.redact(noor, hub.records.read("Refund", refund["id"])))
+    assert _show(hub, "noor", **total)["number"] == Decimal("12.00")
+    # MCP: the type's tools find and read the family's records; an abstract type's make nothing
+    _in_force(hub, PARTY)
+    _in_force(hub, PERSON)
+    person = hub.create_record(amara, "Person", {"name": "Ann", "email": "ann@example.org"})
+    names = {t["name"] for t in mcp.tools(hub, "practice", amara)}
+    assert {"search_party", "read_party", "create_person", "create_refund"} <= names and "create_party" not in names
+    read = mcp.call_tool(hub, "practice", amara, "read_party", {"id": person["id"]})
+    assert not read["isError"] and read["structuredContent"]["ref"] == f"Person/{person['id']}"
+    found = mcp.call_tool(hub, "practice", amara, "search_sale", {"text": "refund"})["structuredContent"]["records"]
+    assert [r["ref"] for r in found] == [rref]
+    # a workflow about an abstract type works on its family's records; it makes none
+    makes = SALE_LOOK.replace('record = "Sale"', 'record = "Party"').replace('event = "record.created:Sale"',
+                                                                         'starters = ["front-desk"]')
+    assert hub.check_workflow(makes).record == "Party"
+    from practicehub.workflows import DefinitionError
+    with pytest.raises(DefinitionError) as exc:
+        hub.check_workflow(makes + '[new_record]\nname = "x"\n')
+    assert any("new_record: Party is abstract" in x for x in exc.value.problems), exc.value.problems

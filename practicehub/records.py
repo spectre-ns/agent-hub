@@ -195,8 +195,8 @@ class LocalRecordStore:
         ``plain`` (whose fields have no classes of their own). A hidden field's value never matches. ``offset``:
         skip that many (a page further on), counted in the database."""
         flt: dict = {}
-        if rtype:
-            flt["type"] = rtype
+        if rtype:  # a type, or several (a type and those under it)
+            flt["type"] = rtype if isinstance(rtype, str) else rtype[0] if len(rtype) == 1 else {"$in": list(rtype)}
         if subject:
             flt["subject"] = subject
         words = [t for w in words_of(text) for t in _WORD.findall(w)][:8]
@@ -275,7 +275,16 @@ class MedplumRecordStore:
 
     def search(self, rtype=None, *, subject=None, limit=200, text=None, field=None, since=None, until=None,
                offset=0, **_):
-        """FHIR search; the text and time filters are applied here, over pages of results, so none is cut short."""
+        """FHIR search; the text and time filters are applied here, over pages of results, so none is cut short.
+        Several types (a type and those under it) are searched one by one, newest first together."""
+        if rtype is not None and not isinstance(rtype, str):
+            if len(rtype) != 1:
+                out = [r for t in rtype for r in self.search(t, subject=subject, limit=None if limit is None else
+                                                             limit + offset, text=text, field=field, since=since,
+                                                             until=until)]
+                out.sort(key=lambda r: (r.get("meta") or {}).get("lastUpdated") or "", reverse=True)
+                return out[offset:][:limit] if limit is not None else out[offset:]
+            rtype = rtype[0]
         if offset:
             got = self.search(rtype, subject=subject, limit=None if limit is None else limit + offset, text=text,
                               field=field, since=since, until=until)

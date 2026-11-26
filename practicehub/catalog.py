@@ -242,7 +242,7 @@ class CatalogMixin:
             except Exception:  # noqa: BLE001 - an unreadable workflow is named on its own page; the type stands
                 self._defs[key] = None
         wf = self._defs[key]
-        return wf if wf is not None and wf.record == rt.id else None
+        return wf if wf is not None and wf.record and rt.is_a(wf.record) else None
 
     def _with_workflow_moves(self, rt, row: dict):
         """A type whose workflow is written as states and edges (``practicehub/states.py``) moves as that workflow
@@ -347,6 +347,15 @@ class CatalogMixin:
     def family(self, tid: str) -> list[str]:
         """A type and every type under it, abstract ones too: what naming the type takes in."""
         return [t for t, rt in self.record_types().items() if rt.is_a(tid)] or [tid]
+
+    def root_of(self, rt) -> str:
+        """The topmost of the hub's types in ``rt``'s chain (``rt`` itself when it extends none of them, or a core
+        base only): the type that says what the chain keeps fixed (its lifecycle, number, period...)."""
+        return next((a for a in reversed(rt.ancestors) if a not in schema.bases()), rt.id)
+
+    def family_rx(self, tid: str) -> dict:
+        """A match for references (``Type/id``) to records of ``tid``'s family."""
+        return {"$regex": "^(?:" + "|".join(re.escape(t) for t in self.family(tid)) + ")/"}
 
     def of_base(self, base: str) -> list[str]:
         """The types records of ``base`` are created as: the type and those under it that are not abstract (the
@@ -655,7 +664,8 @@ class CatalogMixin:
                 out.append(f"covers: a {prt.label.lower()} is not part of a {rt.label.lower()} (its part_of says "
                            f"{(prt.part_of or {}).get('field') or 'nothing'})")
         for o in self.record_types().values():  # a part a type covers stays part of it
-            if o.id != rt.id and rt.id in o.covers and not (rt.part_of and o.id in rt.part_of["target"]):
+            if o.id != rt.id and any(rt.is_a(c) for c in o.covers) and not (
+                    rt.part_of and any(o.is_a(x) for x in rt.part_of["target"])):
                 out.append(f"part_of: {o.label} covers it (covers = [\"{rt.id}\"]): it stays part of a "
                            f"{o.label.lower()}")
         for t in (rt.lifecycle or {}).get("transition", []):  # a move's check reads parts of this type
@@ -923,14 +933,15 @@ class CatalogMixin:
         return notes
 
     def _workflows_broken_by(self, kind: str, did: str) -> list[str]:
-        """Active workflows that no longer validate after a change to a skill, record type or block they depend on."""
+        """Active workflows that no longer validate after a change to a skill, record type or block they depend on
+        (a type's change is one to every type under it)."""
         if kind not in ("skill", "type", "block"):
             return []
-        problems = []
+        problems, kin = [], set(self.family(did)) if kind == "type" else set()
         for w in self.workflows():
             wf = w["workflow"]
             uses = ((kind == "skill" and any(s.skill == did for s in wf.steps)) or
-                    (kind == "type" and wf.record == did) or
+                    (kind == "type" and wf.record in kin) or
                     (kind == "block" and any(s.block == did for s in wf.steps)))
             if not uses:
                 continue

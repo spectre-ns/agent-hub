@@ -395,20 +395,30 @@ class Where:
 
 
 class Pipeline:
-    """The aggregation that works out a widget's groups over the records of ``rt`` the member may see."""
+    """The aggregation that works out a widget's groups over the records of ``rt`` the member may see: of its type
+    and every type under it (a widget reads the fields the named type has)."""
 
     def __init__(self, hub, member, rt, *, today: str, tz: str = "UTC"):
         self.hub, self.member, self.rt, self.today, self.tz = hub, member, rt, today, tz
         self.coll = hub.db.records.c.name
-        self.stages: list[dict] = [{"$match": {"type": rt.id}}]
+        kin = hub.family(rt.id)
+        self.stages: list[dict] = [{"$match": {"type": kin[0] if len(kin) == 1 else {"$in": kin}}}]
         self.hops: dict[str, int] = {}
         self.where_cols: dict[str, tuple[str, dict]] = {}
         self._masks: dict[str, dict] = {}
 
     # ---------------------------------------------------------------- what a restriction withholds
     def masks(self, rt) -> dict:
+        """What is withheld of records of ``rt``'s family: each type's, together."""
         if rt.id not in self._masks:
-            self._masks[rt.id] = self.hub.restrictions.masks_for(self.member, rt)
+            out: dict = {"subjects": set(), "records": set(), "fields": {}}
+            for t in self.hub.family(rt.id):
+                one = self.hub.restrictions.masks_for(self.member, self.hub.record_type(t) or rt)
+                out["subjects"] |= set(one["subjects"])
+                out["records"] |= set(one["records"])
+                for fp, ss in one["fields"].items():
+                    out["fields"].setdefault(fp, set()).update(ss)
+            self._masks[rt.id] = out
         return self._masks[rt.id]
 
     @staticmethod
@@ -448,7 +458,7 @@ class Pipeline:
         """A column's value in each record (a table's column: its values in the record's rows), masked."""
         if col.hop:
             i = self._hop(col.hop)
-            base = {"$cond": [{"$eq": [f"$h{i}.type", col.target]}, f"$h{i}.data", None]}
+            base = {"$cond": [{"$in": [f"$h{i}.type", self.hub.family(col.target)]}, f"$h{i}.data", None]}
             rt, subj, rid = self.hub.record_type(col.target), f"$h{i}.subject", f"$h{i}._id"
         else:
             base, rt, subj, rid = "$data", self.rt, "$subject", "$_id"

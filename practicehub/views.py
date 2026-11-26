@@ -629,7 +629,7 @@ def signature_rows(hub, member: dict, w: dict) -> tuple[list[dict], str | None, 
     if w.get("type"):
         if not hub.may_read(member, w["type"]):
             return [], f"needs access to {hub.class_of(w['type'])} records", {}
-        types = {w["type"]}
+        types = set(hub.family(w["type"]))
     else:
         types = {t for t in hub.record_types() if hub.may_read(member, t)}
     flt = {"$or": [{"action": "record.signed"},

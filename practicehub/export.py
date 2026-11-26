@@ -311,12 +311,14 @@ def list_table(hub, member, rt, recs) -> tuple[list[str], list[list]]:
     """The list's columns (its title, status and the fields the list shows), then id and dates: header and rows."""
     lc = rt.lifecycle
     cols = visibility.shown(hub, member, rt, schema.list_columns(rt))
-    header = [rt.label] + (["Status"] if lc else []) + [f["label"] for f in cols] + ["id", "Date", "Last updated",
-                                                                                  "Version"]
+    kinds = any(r.get("resourceType", rt.id) != rt.id for r in recs)  # a family's list says each one's own type
+    header = ([rt.label] + (["Type"] if kinds else []) + (["Status"] if lc else []) + [f["label"] for f in cols]
+              + ["id", "Date", "Last updated", "Version"])
     rows = []
     for r in recs:
         meta = r.get("meta") or {}
-        row = [hub.title(r)] + ([str(schema.first(r, lc["path"]) or "")] if lc else [])
+        own = hub.record_type_for_reading(r.get("resourceType") or rt.id) or rt
+        row = ([hub.title(r)] + ([own.label] if kinds else []) + ([str(schema.first(r, lc["path"]) or "")] if lc else []))
         for f in cols:
             v = schema.first(r, f["path"]) if f["type"] in ("number", "decimal") and "*" not in f["path"] else None
             row.append(v if isinstance(v, (int, float, decimals.Decimal)) and not isinstance(v, bool)
@@ -532,7 +534,9 @@ def _stamp(hub, member) -> str:
 
 
 def record(hub, member, ref: str, fmt: str) -> Export:
-    """One record. The member must be able to read it (else Denied, as opening it is)."""
+    """One record. The member must be able to read it (else Denied, as opening it is). A reference naming a type
+    above the record's own (``Party/<id>`` for a person) finds it."""
+    ref = hub.resolve_ref(ref) or ref
     rtype, _, rid = ref.partition("/")
     rt = hub.record_type_for_reading(rtype)
     if rt is None or rtype in hub.member_types():
@@ -561,20 +565,22 @@ def a_label(rt) -> str:
 
 def records_list(hub, member, rtype: str, fmt: str, *, text: str | None = None, limit: int | None = 200,
                  every: bool = False) -> Export:
-    """A list of a type's records, as its list page finds them (``text``, the ``limit`` most recently changed).
-    ``every``: every record of the type, a bulk export, for a policy owner only."""
+    """A list of a type's records, as its list page finds them (``text``, the ``limit`` most recently changed): of
+    the type and every type under it. ``every``: every record of them, a bulk export, for a policy owner only."""
     rt = hub.record_type_for_reading(rtype)
-    if rt is None or rt.abstract or rtype in hub.member_types():
+    if rt is None or rtype in hub.member_types():
         raise NotFound(f"there is no record type {rtype}")
     _check_format(fmt, offered(hub, rtype, "list"), a_label(rt))
     if every:
         hub.require(member, "policy_owner", "practice:main", f"export every {rt.label.lower()} record (a bulk export)")
     hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {rtype} records")
     recs = hub.search_records(member, rtype, limit=None if every else limit, text=None if every else (text or None))
-    refs = [f"{rtype}/{r['id']}" for r in recs]
+    refs = [f"{r.get('resourceType') or rtype}/{r['id']}" for r in recs]
     stamp = utcnow()[:10]
     if fmt == "ndjson":
-        body = "".join(json.dumps(fhir_resource(hub, rt, r), ensure_ascii=False, default=decimals.jsonable) + "\n" for r in recs).encode()
+        own = {t: hub.record_type_for_reading(t) or rt for t in {r.get("resourceType") or rtype for r in recs}}
+        body = "".join(json.dumps(fhir_resource(hub, own[r.get("resourceType") or rtype], r), ensure_ascii=False,
+                                  default=decimals.jsonable) + "\n" for r in recs).encode()
     else:
         header, rows = list_table(hub, member, rt, recs)
         if fmt == "csv":
@@ -610,7 +616,7 @@ def gather(hub, member, ref: str) -> tuple[list[dict], int]:
     def may(t: str) -> bool:
         if t not in readable:
             rt = hub.record_type_for_reading(t)
-            readable[t] = bool(rt) and not rt.abstract and hub.may_read(member, t)
+            readable[t] = bool(rt) and hub.may_read(member, t)
         return readable[t]
 
     def take(r: str, rec: dict | None = None) -> bool:
@@ -706,9 +712,11 @@ def everything(hub, member, fmt: str = "ndjson") -> tuple[dict[str, bytes], dict
     files: dict[str, bytes] = {}
     output, left_out, refs = [], [], []
     for t, rt in hub.record_types().items():
-        if rt.abstract or t in hub.member_types():
+        if t in hub.member_types():
             continue
-        n = hub.db.records.count({"type": t})
+        n = hub.db.records.count({"type": t})  # each type's own records (an abstract type's, kept from before)
+        if rt.abstract and not n:
+            continue
         if not hub.may_read(member, t):
             if n:
                 left_out.append({"type": t, "count": n})
