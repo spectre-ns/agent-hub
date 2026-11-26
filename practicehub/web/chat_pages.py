@@ -118,7 +118,8 @@ class ChatPages:
         plural = lambda t: ((self.hub.record_type(t) and self.hub.record_type(t).plural) or t or "records").lower()
         one = lambda t: ((self.hub.record_type(t) and self.hub.record_type(t).label) or t or "record").lower()
         line = {"find": lambda: f"Looked up {s('key').upper()}",
-                "search": lambda: f"Searched {plural(s('type'))}" + (f" for “{s('text')}”" if s("text") else ""),
+                "search": lambda: (f"Searched {plural(s('type'))}" + (f" about {s('about')}" if s("about") else "")
+                                   + (f" for “{s('text')}”" if s("text") else "")),
                 "read": lambda: f"Read {s('ref')}",
                 "describe": lambda: f"Looked at how {plural(s('type'))} are kept",
                 "create": lambda: f"Created a {one(s('type'))}",

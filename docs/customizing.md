@@ -177,8 +177,9 @@ keeps from it.
 
 Every page a person works in has a chat button bottom right (Alt+K). It opens a conversation with any active agent
 whose sponsor is active. The conversation is about no one record: ask "what is still missing for this return?" and
-the agent finds, searches and reads the records it needs, and can make, change or move one, or start a workflow, all
-as itself.
+the agent finds, searches and reads the records it needs (a search can ask for the records about one, those that
+name it as their subject), and can make, change or move one, or start a workflow, all as itself. When nothing is
+offered to start, it says so rather than look for something else to do.
 
 What it may do is what **both** of you may do. It is offered a type, a move or a workflow only when both of you have
 it, it reaches a record only when neither of you is kept from it, it writes only fields both of you may write, and

@@ -498,6 +498,10 @@ def tools(hub, sid: str, member: dict) -> list[dict]:
                   "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 25}}
         if states:
             sprops["state"] = {"type": "string", "enum": states, "description": "only those in this state"}
+        if any(f["rel"] == "subject" for f in rt.references):
+            sprops["about"] = {"type": "string", "maxLength": 200,
+                               "description": "only those about this record (the one they name as their subject): "
+                                              "its ref, Type/id, as a search or read gave it"}
         add({"name": f"search_{n}", "title": f"Search {pl.lower()}",
              "description": f"Find {pl.lower()} ({rt.summary or lab}). Gives each one's ref (Type/id), title and state.",
              "inputSchema": _obj(sprops), "annotations": {**READ, "title": f"Search {pl.lower()}"},
@@ -806,8 +810,13 @@ def _run(hub, sid, member, what, target, a, seq, how) -> dict:
         rt = hub.record_type(target)
         hub.require(member, "reader", f"data_class:{rt.data_class}", f"read {target} records")
         limit = min(int(a.get("limit") or 25), MAX_LIMIT)
+        about = None
+        if a.get("about"):  # the record they are about, as the hub keeps it (a ref may name a type above its own)
+            about = hub.resolve_ref(a["about"])
+            if not about:
+                raise NotFound(f"there is no {a['about']}")
         recs = hub.search_records(member, target, limit=None if a.get("state") else limit,
-                                  text=(a.get("text") or None))
+                                  text=(a.get("text") or None), subject=about)
         if a.get("state"):
             recs = [r for r in recs if schema.first(r, rt.lifecycle["path"]) == a["state"]][:limit]
         found = [_summary(hub, rt, r) for r in recs]

@@ -355,9 +355,14 @@ class Chat:
         if types:
             ty = {"type": "string", "enum": types}
             out += [
-                {"name": "search", "description": "Search one type's records by words (and state). Gives each "
-                                                  "one's ref (Type/id), key, title and state.",
-                 "schema": _obj({"type": ty, "text": TEXT, "state": {"type": "string", "maxLength": 80},
+                {"name": "search", "description": "Search one type's records by words in them, by state, or by "
+                                                  "the record they are about (about: its ref, from an earlier search "
+                                                  "or read). Gives each one's ref (Type/id), key, title and state.",
+                 "schema": _obj({"type": ty, "text": TEXT,
+                                 "state": {"type": "string", "maxLength": 80,
+                                           "description": "one of the type's states (describe lists them); leave "
+                                                          "it out for records in any state"},
+                                 "about": REF,
                                  "limit": {"type": "integer", "minimum": 1, "maximum": SEARCH_LIMIT}}, ["type"])},
                 {"name": "read", "description": "Read one record, whole, by its ref.",
                  "schema": _obj({"ref": REF}, ["ref"])},
@@ -461,12 +466,22 @@ class Chat:
         rtype = a["type"]
         sid, tool, _ = offer.get("search", rtype, f"search {rtype} records")
         limit = min(int(a.get("limit") or 10), SEARCH_LIMIT)
-        q = {k: v for k, v in {"text": a.get("text"), "state": a.get("state"), "limit": limit}.items() if v}
+        about = None
+        if a.get("about"):  # the records about one the person and the agent may both reach
+            if "about" not in tool["inputSchema"]["properties"]:
+                raise Invalid(f"{self.hub.record_type(rtype).plural.lower()} are not about another record: search "
+                              f"them by words or state")
+            about = self.hub.resolve_ref(a["about"])
+            if not about:
+                raise NotFound(f"there is no {a['about']}")
+            self._reach(person, agent, about)
+        q = {k: v for k, v in {"text": a.get("text"), "state": a.get("state"), "about": about,
+                               "limit": limit}.items() if v}
         seq, out = self._run(agent, offer, sid, tool, q, cause)
         theirs = None
         if a.get("text"):  # words match only what each may read: a hit only the agent's reading finds is dropped
             theirs = {f"{r['resourceType']}/{r['id']}" for r in
-                      self.hub.search_records(person, rtype, text=a["text"], limit=mcp.MAX_LIMIT)}
+                      self.hub.search_records(person, rtype, text=a["text"], limit=mcp.MAX_LIMIT, subject=about)}
         recs = [x for x in (self._record_for(person, agent, r["ref"]) for r in out["records"]
                             if (theirs is None or r["ref"] in theirs) and self.may_reach(person, agent, r["ref"])) if x]
         refs = [f"{x['resourceType']}/{x['id']}" for x in recs]

@@ -9660,6 +9660,39 @@ def test_a_chat_reaches_a_record_only_when_both_the_person_and_the_agent_may(hub
     assert ch.get(liam, c["id"])["resources"] == []
 
 
+def test_a_chat_finds_the_records_about_one_both_may_reach(hub):
+    """Rule: a chat's search can ask for the records about one (those naming it as their subject), only one the person
+    and the agent may both reach, and only of a type whose records are about another; the MCP search takes the same
+    ``about``. With nothing both may start, the agent is told so, and told it sees no other kind of record."""
+    from practicehub import mcp
+    from practicehub.chat import Offer
+    amara, agent = M(hub, "dr-amara"), M(hub, "clinical-admin-agent")
+    eref, oref = _ellen_and_her_result(hub)
+    tools = {t["name"]: t for sv in mcp.servers(hub) if not sv.get("unavailable") for t in mcp.tools(hub, sv["id"], amara)}
+    assert "about" in tools["search_observation"]["inputSchema"]["properties"]
+    assert "about" not in tools["search_patient"]["inputSchema"]["properties"]  # a patient is about no other record
+    nref = next(c for c in hub.records.search("Consent", limit=None) if c["status"] == "active")["patient"]["reference"]
+    ch, given = _chat(hub, _calls(("search", {"type": "Observation", "about": eref}),
+                                  ("search", {"type": "Patient", "about": eref}),
+                                  ("search", {"type": "Condition", "about": nref})), {"text": "Done."})
+    c = ch.start(amara, agent["id"])
+    ch.say(amara, c["id"], "What came back for Ellen, and what is on Nadia's problem list?")
+    hers, patients, nadia = _tool_messages(ch, amara, c["id"])
+    found = [r["ref"] for r in json.loads(hers["body"])["records"]]
+    assert not hers.get("error") and oref in found
+    assert {hub.subject_of(hub.records.read(*r.split("/"))) for r in found} == {eref}  # each about her, none else
+    assert patients["error"] and "are not about another record" in patients["body"]
+    assert nadia["error"] and "may both read" in nadia["body"]  # her directive keeps her file from them
+    assert {(r["ref"], r["how"]) for r in ch.get(amara, c["id"])["resources"]} == {(r, "listed") for r in found}
+    assert "never answer as if they held nothing" in given[0]["system"]
+    sam = M(hub, "sam")
+    assert Offer(hub, sam, agent).having("start") == []
+    ch, given = _chat(hub, {"text": "I cannot start that."})
+    c = ch.start(sam, agent["id"])
+    ch.say(sam, c["id"], "Start a renewal for Ellen.")
+    assert "You may start no workflow in this conversation" in given[0]["system"]
+
+
 def test_a_chat_agent_acts_only_within_its_own_grants(hub):
     """Rule: in a chat the agent acts as itself: an agent its profile does not let write a record (no
     ``direct_writes``) is offered no tool that does, and a call to one is refused; a workflow both may start it starts,
