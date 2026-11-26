@@ -1347,6 +1347,39 @@ def test_a_slip_no_agent_can_read_goes_to_a_person(firm):
         assert item is not None and item["persons_only"], sref
 
 
+def test_a_photo_the_model_says_it_could_not_read_clearly_goes_to_a_person(firm):
+    """gemma4, shown a blurred photo, wrote the slip's words and added a note of its own that the picture was blurry.
+    What it wrote is not the document's words, and a reading it was unsure of is not one anyone can check: it is
+    refused each time, the slip is not read, and it goes to a person, who sees the photo."""
+    from practicehub.models import ModelGateway
+    mod = firm.pack.module
+    cref = _signed_up(firm)
+    sref = _slip_from(firm, firm.member("client-portal"), cref, mod.blurred_photo(), "IMG_0413.png", "image/png")
+    read = {**mod.read_slip(T4), "summary": "T4 2025."}
+    tries = []
+
+    class Eyes:
+        external = False
+
+        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+            tries.append(prompt)
+            return {"answer": {**read, "text": T4 + "\n[Image is blurry, but the text is legible enough.]"},
+                    "escalate": False, "reason": "read from the photo"}
+
+    gw = ModelGateway(firm)
+    gw.backends["ollama"] = Eyes()
+    run_all_local(firm, gw, log=quiet)
+    assert len(tries) >= 2 and "a picture you cannot read clearly is escalated" in tries[-1]
+    slip = firm.records.read(*sref.split("/"))
+    assert slip["status"] == "received" and not slip.get("text") and slip.get("amount") is None
+    item = firm.db.items.find_one({"run_id": _run_on(firm, sref, "slip-intake")["id"], "step_id": "extract",
+                                   "status": {"$in": ["open", "claimed"]}})
+    assert item is not None and item["persons_only"]
+    for note in ("Box 14: 64,500.00 (blurred)", "Payer: Scotiabank, I think", "Box 22: 12,400.00 (partly faded)"):
+        problems = mod.guard_slip_extract({**read, "text": note}, {"by": {"kind": "agent"}, "context": {}})
+        assert any("nothing of your own" in p for p in problems), note
+
+
 def test_the_last_slip_coming_while_staff_are_to_call_takes_the_return_on(firm):
     """Kevin's slip had not come after the organizer and the reminder, so staff were to call him. It came (he
     uploaded it, or someone added it): the call is withdrawn, nobody's work, and his return goes on to be compared

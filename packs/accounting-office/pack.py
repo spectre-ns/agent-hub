@@ -861,11 +861,20 @@ def guard_t1_draft(values, ctxview):
     return problems + guard_no_identifiers(values, ctxview)
 
 
+# words an agent writing a picture's words uses about what it saw, never printed on a slip: a transcription that says
+# the picture was hard to read is not a reading anyone can check, and goes to a person
+UNSURE = re.compile(r"\[[^\]\n]*\]|\b(?:blurr(?:y|ed)|unclear|illegible|unreadable|faded|smudged|legible enough|"
+                    r"hard to (?:read|make out|see)|difficult to (?:read|make out|see)|can(?:not|'t) (?:read|make out|see)|"
+                    r"partly|partially|not (?:sure|certain)|uncertain|possibly|probably|appears? to (?:be|read|say)|"
+                    r"seems? to (?:be|read|say)|i think)\b", re.I)
+
+
 def guard_slip_extract(values, ctxview):
     """The amount read is in the document's words, as printed: an agent copies numbers, never computes them. The words
     are the slip's text, read from its file when it was attached (a PDF's text); a photo has none, and an agent shown
     it writes them (``text``), as printed, before reading the slip from them: what it read is checked against what it
-    wrote. An agent reads only the words, so its slip and year are in them too: a document that does not say which
+    wrote, and what it wrote holds nothing of its own (a note that the picture was blurred, a guess): a picture it
+    could not read clearly is escalated. An agent reads only the words, so its slip and year are in them too: a document that does not say which
     slip it is, or for which year, goes to a person, who sees the document itself."""
     ctx = ctxview.get("context") or {}
     slip = next(iter(ctx.get("record:client-documents") or []), {})
@@ -876,6 +885,10 @@ def guard_slip_extract(values, ctxview):
         problems.append("the slip's text was read from its file; leave text empty")
     if agent and not own and not typed and (ctx.get("file:file") or {}).get("picture"):
         problems.append("the slip is a picture: write its words in text, as printed, line by line, or escalate")
+    unsure = UNSURE.search(typed) if agent and typed and not own else None
+    if unsure:
+        problems.append(f"text is the document's words as printed, nothing of your own, and you wrote "
+                        f"{unsure.group(0)!r}: a picture you cannot read clearly is escalated, and a person reads it")
     text = (own if agent and own else typed or own).replace(",", "")
     amt = values.get("amount")
     if text and _dec(amt) is not None:  # as printed: 1234.50 or 1234.5, never a sum of other boxes

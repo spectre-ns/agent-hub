@@ -3,8 +3,8 @@ title = "Read a tax slip or notice"
 instructions = """
 Read the document: its words are the slip's text, read from its file. A slip that is a photo has no text: if you are
 shown the picture, first write its words in `text`, as printed, line by line, each box with its number, then read the
-slip from what you wrote; leave out what you cannot make out, and if that is the slip, the year or an amount,
-escalate. When the slip has text, leave `text` empty. Read which slip it is (T4, T5, an RRSP receipt, a notice of assessment...),
+slip from what you wrote. Write only what is printed, nothing of your own (no notes about the picture). If the
+picture is blurred, or you cannot clearly make out the slip, the year or an amount, escalate: a person reads it. When the slip has text, leave `text` empty. Read which slip it is (T4, T5, an RRSP receipt, a notice of assessment...),
 the tax year, who issued it, the main amount (employment income on a T4, box 14; interest on a T5, box 13; the
 contribution or donation; on a notice of assessment, the refund, negative if the client owes), the income tax deducted,
 and every other box by its number. Copy numbers exactly as printed; never compute or guess one. The slip and the
