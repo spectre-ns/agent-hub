@@ -772,6 +772,29 @@ def test_an_agent_drafts_the_figures_worked_out_from_the_slips_read_and_never_co
                  {"context": {"compare": cmp}, "by": {"id": "morgan", "kind": "person"}}) == []
 
 
+def test_an_agent_reads_a_slip_s_type_and_year_from_its_text_and_never_guesses_them(firm):
+    """A photo cut off above its title and year: the amount is in its text, but which slip it is and for which year
+    are not, so an agent's T4 for 2026 is refused (qwen3 gave that on the demo) and it goes to a person, who sees the
+    document itself. A slip that says both is taken."""
+    guard = firm.pack.guards["slip-extract"]
+    agent, person = {"id": "documents-agent", "kind": "agent"}, {"id": "ethan", "kind": "person"}
+    photo = {"context": {"record:client-documents": [
+        {"text": "Photo of a pay slip, cut off: Atlantic Ferries Ltd., 48,250.00 earned, 7,120.00 withheld"}]}}
+    guess = {"slip_type": "T4", "year": 2026, "issuer": "Atlantic Ferries Ltd.", "amount": Decimal("48250.00"),
+             "tax_deducted": Decimal("7120.00")}
+    assert guard(guess, {**photo, "by": agent}) == [
+        "the document's text does not say it is a T4; a document you cannot place is escalated to a person",
+        "the year 2026 is not in the document's text; copy it as printed, or escalate"]
+    assert guard(guess, {**photo, "by": person}) == []  # a person reads the document, not only its text
+    t4 = {"context": {"record:client-documents": [{"text": T4}]}}
+    read = {**guess, "year": 2025, "amount": Decimal("64500.00"), "tax_deducted": Decimal("12400.00")}
+    assert guard(read, {**t4, "by": agent}) == []
+    assert guard({**read, "slip_type": "T5"}, {**t4, "by": agent}) == [
+        "the document's text does not say it is a T5; a document you cannot place is escalated to a person"]
+    assert guard({**read, "year": 2024}, {**t4, "by": agent}) == [
+        "the year 2024 is not in the document's text; copy it as printed, or escalate"]
+
+
 def test_filing_waits_for_the_client_s_authorisation_and_never_writes_it(firm):
     """The client's T183 is a precondition of the filing move, not something it asks for: the filing cannot record
     one, nor overwrite the one on the return."""

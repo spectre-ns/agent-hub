@@ -832,15 +832,26 @@ def guard_t1_draft(values, ctxview):
 
 
 def guard_slip_extract(values, ctxview):
-    """The amount read is in the document's text, as printed: an agent copies numbers, never computes them."""
+    """The amount read is in the document's text, as printed: an agent copies numbers, never computes them. An agent
+    reads only the text, so its slip and year are in it too: a document that does not say which slip it is, or for
+    which year, goes to a person, who sees the document itself."""
     slip = next(iter((ctxview.get("context") or {}).get("record:client-documents") or []), {})
     text = str(slip.get("text") or "").replace(",", "")
     amt = values.get("amount")
+    problems = []
     if text and _dec(amt) is not None:  # as printed: 1234.50 or 1234.5, never a sum of other boxes
         forms = {f"{abs(_dec(amt)):.2f}", _plain(abs(_dec(amt)))}
         if not any(f in text for f in forms):
-            return [f"the amount {amt} is not in the document's text; copy it as printed"]
-    return []
+            problems.append(f"the amount {amt} is not in the document's text; copy it as printed")
+    if text and (ctxview.get("by") or {}).get("kind") == "agent":
+        kind, year = values.get("slip_type"), values.get("year")
+        said = dict(SLIP_PATTERNS).get(kind)
+        if said and not said.search(text):
+            problems.append(f"the document's text does not say it is a {kind}; a document you cannot place is "
+                            f"escalated to a person")
+        if year is not None and not re.search(rf"\b{int(year)}\b", text):
+            problems.append(f"the year {year} is not in the document's text; copy it as printed, or escalate")
+    return problems
 
 
 def guard_t1_client_letter(values, ctxview):
