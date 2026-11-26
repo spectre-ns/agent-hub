@@ -72,6 +72,10 @@ roles = ["preparer"]
 profile = { model = "litellm/firm-local", max_risk = "medium", skills = ["return-prep"] }
 ```
 
+An agent that names no `model` is given the hub's default when it is installed: `PRACTICEHUB_DEFAULT_MODEL`, else
+`ollama/qwen3:14b`, a local model through Ollama (`OLLAMA_URL`). It is written into the agent's profile, so a later
+change of the default moves no agent. `model = "standin"` answers from the pack's `STANDINS`, with no model.
+
 **Design the data classes first.** They decide what each agent can ever see. Give every agent the narrowest grants
 that let it do its job. A scheduling agent needs demographics and appointments, nothing else.
 
@@ -135,7 +139,7 @@ Everything is optional. These module-level names are picked up:
 | `ACTIONS = {"name": fn(engine, run, step, params, actor)}` | deterministic actions for automation steps |
 | `PROVIDERS = {"name": fn(engine, run, step, member)}` | computed context (`provider:<name>`) |
 | `GUARDS = {"skill-id": fn(values, ctxview) -> [problems]}` | extra checks on any answer for that skill, from a person or an agent. A prompt block is guarded by `"block:<id>"`, or by its `extends` skill's guard |
-| `STANDINS = {"skill-id": fn(ctx) -> {answer, escalate, reason}}` | deterministic answers, so demos and tests need no model. `"block:<id>"` answers a prompt block |
+| `STANDINS = {"skill-id": fn(ctx) -> {answer, escalate, reason}}` | deterministic answers, so tests and a demo's past need no model (`ModelGateway(hub, scripted=True)`). `"block:<id>"` answers a prompt block |
 | `demo(hub)` | demo records and runs, for `init --demo` |
 
 Guards are where a practice's hard rules live. A guard is code, and a pack's code runs only as reviewed: while a

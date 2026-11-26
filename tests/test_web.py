@@ -1795,7 +1795,7 @@ def test_a_patients_page_shows_their_upcoming_visits(hub, server):
 
 def test_the_clinic_keeps_one_booking_type_the_visit(hub, server):
     """The clinic has one record for a booking and the visit it becomes, the Visit; there is no Appointment type."""
-    assert hub.pack.version == "5.1" and hub.of_base("Booking") == ["Encounter"]
+    assert hub.pack.version == "5.2" and hub.of_base("Booking") == ["Encounter"]
     assert hub.record_type("Appointment") is None and "Appointment" not in json.dumps(hub.practice.get("shortcuts"))
     assert call(server, "GET", "/records/Appointment", token(hub, "jo"))[0] in (404, 422)
     assert hub.db.get_setting("pack_upgrades_done") == list(hub.pack.upgrades)  # a new practice has none left to run

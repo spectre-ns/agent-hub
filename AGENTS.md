@@ -35,6 +35,7 @@ Notes for anyone, human or agent, changing this code.
 | Blocks: parsing, who may propose (agents: prompt blocks only), workflow checks, version pinning | `practicehub/blocks.py`, `Hub.propose_block`, `Hub._block_problems`, `Engine.start` |
 | What Python block code may do | `practicehub/sandbox.py` (static check and the child's audit hook) |
 | Which engine runs a block, and what it is sent | `practicehub/backends.py` |
+| Which model an agent answers with (the one its profile names; a new agent is given the hub's default, a local Ollama model) | `ModelGateway.answer`, `default_model` in `practicehub/models.py`, `Hub._create_member` |
 | Consent to commercial messages (CASL: express, implied for 2 years, withdrawn), checked at queue and at delivery | `Hub.consent_problem` in `practicehub/outbox.py`, a type's `[consent]` (`practicehub/schema.py`) |
 | A record's key (its type's, given once, never reused by another type) and who is told what a key names | `LocalRecordStore.create` in `practicehub/records.py`, `CatalogMixin._key_problems` in `practicehub/catalog.py`, `Hub.find_key` |
 | A type's own number (`[number]`): given once by the hub, in a series with no gaps, never written by hand | `Hub._check_number_kept`, `Hub._take_number` in `practicehub/hub.py` |

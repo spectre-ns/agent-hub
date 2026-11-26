@@ -10,7 +10,7 @@ from conftest import M, claim_run, item_for, quiet, run_of, snapshot_onto, visit
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid, NotFound, member_ref
 from practicehub import visibility
-from practicehub.models import ModelError, ModelGateway
+from practicehub.models import ModelError, ModelGateway, default_model
 
 
 # ------------------------------------------------------------------------------------------- agents are members
@@ -317,6 +317,50 @@ def test_external_models_are_off_unless_the_practice_allows(hub):
     with pytest.raises(ModelError):
         gw.backend("anthropic/claude-opus-5-5")
     assert gw.backend("ollama/qwen3:14b")[1] == "qwen3:14b"
+
+
+def test_an_agent_names_its_model_and_one_added_without_is_given_the_hubs_default_a_local_ollama_model(
+        hub, monkeypatch):
+    """The model an agent answers with is in its reviewed profile, always. One added without a model is given the
+    hub's default (PRACTICEHUB_DEFAULT_MODEL, else a local Ollama model) when it is added; changing the default later
+    moves no agent. A demo's past is answered by stand-ins whatever the agents name."""
+    rana = M(hub, "rana")
+    monkeypatch.delenv("PRACTICEHUB_DEFAULT_MODEL")
+    assert default_model() == "ollama/qwen3:14b"
+    hub.add_member(rana, {"id": "helper", "kind": "agent", "name": "Helper", "sponsor": "jo", "roles": []})
+    assert M(hub, "helper")["profile"]["model"] == "ollama/qwen3:14b"
+    assert hub.agent_profile_versions("helper")[0]["profile"]["model"] == "ollama/qwen3:14b"  # version 1 names it
+    # asked for skills but no model (or a blank one): the default, and only the skills wait for approval
+    hub.add_member(rana, {"id": "helper-2", "kind": "agent", "name": "Helper 2", "sponsor": "jo", "roles": [],
+                          "profile": {"model": " ", "skills": ["slot-proposal"]}})
+    assert M(hub, "helper-2")["profile"] == {"model": "ollama/qwen3:14b", "max_risk": "low", "skills": []}
+    assert hub.agent_profile_proposal("helper-2")["profile"]["model"] == "ollama/qwen3:14b"
+    monkeypatch.setenv("PRACTICEHUB_DEFAULT_MODEL", "litellm/firm-local")
+    assert M(hub, "helper")["profile"]["model"] == "ollama/qwen3:14b"  # a new default moves no agent
+    hub.add_member(rana, {"id": "helper-3", "kind": "agent", "name": "Helper 3", "sponsor": "jo", "roles": []})
+    assert M(hub, "helper-3")["profile"]["model"] == "litellm/firm-local"
+    # an agent added before there was a default names no model, and answers as it did: by stand-in
+    ollama = []
+
+    class Local:  # stands for Ollama: counts what is asked of it
+        external = False
+
+        def __call__(self, *a):
+            ollama.append(a)
+            return {"answer": {}, "escalate": True, "reason": "asked"}
+
+    gw = ModelGateway(hub)
+    gw.backends["ollama"] = Local()
+    ctx = {"step": {"id": "s", "kind": "task", "risk": "low", "title": "S", "skill": "nothing"},
+           "run": {"title": "R"}, "fields": [], "schema": {"type": "object"}}
+    assert gw.answer({"id": "old", "profile": {"max_risk": "low", "skills": []}}, ctx)["model"] == "standin"
+    assert gw.answer({"id": "new", "profile": {"model": "ollama/qwen3:14b"}}, ctx)["model"] == "ollama/qwen3:14b"
+    assert len(ollama) == 1
+    # a scripted gateway (a demo's past) answers by stand-in whatever the agent names
+    scripted = ModelGateway(hub, scripted=True)
+    scripted.backends["ollama"] = gw.backends["ollama"]
+    assert scripted.answer({"id": "new", "profile": {"model": "ollama/qwen3:14b"}}, ctx)["model"] == "standin"
+    assert len(ollama) == 1
 
 
 def test_an_unsure_agent_escalates_to_people(hub):

@@ -84,8 +84,7 @@ def demo(hub) -> None:
     except Exception:  # noqa: BLE001 - not there yet
         hub._create_member(me, {"id": "relationship-agent", "kind": "agent", "name": "Relationship agent",
                                 "sponsor": lead, "roles": ["follow-up-drafter"],
-                                "profile": {"model": "standin", "max_risk": "low",
-                                            "skills": ["crm-follow-up-draft"]}})
+                                "profile": {"max_risk": "low", "skills": ["crm-follow-up-draft"]}})
     today = hub.engine.now().date().isoformat()
 
     def make(rtype, values):  # the record, from its fields' names (``phone`` goes to the telecom entry for phones)

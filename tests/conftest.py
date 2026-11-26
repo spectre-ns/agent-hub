@@ -9,6 +9,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# The suite needs no model: an agent added without one is given the pack's stand-ins, not the hub's default (Ollama).
+# A test of the default itself unsets this.
+os.environ["PRACTICEHUB_DEFAULT_MODEL"] = "standin"
+
 from practicehub.agents.runner import run_all_local  # noqa: E402
 from practicehub.hub import Hub  # noqa: E402
 

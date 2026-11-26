@@ -36,7 +36,8 @@
 # (Task) of its own, walked by the patient-follow-up workflow.
 # 5.1: each record is keyed in its type, as an issue is in its project (PAT, VIS, LAB, RX...): VIS-12 is the 12th, and work on
 #  it shows that key.
-version = "5.1"
+# 5.2: the agents name no model, so a practice that installs the pack gets the hub's default (a local Ollama model).
+version = "5.2"
 
 [practice]
 requires_core = "1.0"
@@ -440,7 +441,7 @@ name = "Intake agent"
 title = "Checks new-patient paperwork"
 sponsor = "jo"
 roles = ["intake-coordinator"]
-profile = { model = "standin", max_risk = "low", skills = ["intake-review"] }
+profile = { max_risk = "low", skills = ["intake-review"] }
 
 [[members]]
 id = "scheduling-agent"
@@ -449,7 +450,7 @@ name = "Scheduling agent"
 title = "Proposes and books appointments"
 sponsor = "jo"
 roles = ["scheduler"]
-profile = { model = "standin", max_risk = "low", skills = ["slot-proposal"] }
+profile = { max_risk = "low", skills = ["slot-proposal"] }
 
 [[members]]
 id = "scribe-agent"
@@ -458,7 +459,7 @@ name = "Scribe agent"
 title = "Drafts visit notes for physicians"
 sponsor = "dr-amara"
 roles = ["documentation-assistant"]
-profile = { model = "standin", max_risk = "medium", skills = ["visit-note-draft"] }
+profile = { max_risk = "medium", skills = ["visit-note-draft"] }
 
 [[members]]
 id = "clinical-admin-agent"
@@ -467,7 +468,7 @@ name = "Clinical admin agent"
 title = "Prepares renewals, sorts results, drafts referrals"
 sponsor = "dr-amara"
 roles = ["clinical-assistant"]
-profile = { model = "standin", max_risk = "medium", skills = ["renewal-prep", "lab-triage", "referral-letter", "patient-reply-draft"] }
+profile = { max_risk = "medium", skills = ["renewal-prep", "lab-triage", "referral-letter", "patient-reply-draft"] }
 
 [[members]]
 id = "billing-agent"
@@ -476,7 +477,7 @@ name = "Billing agent"
 title = "Codes visits and submits routine claims"
 sponsor = "sam"
 roles = ["billing"]
-profile = { model = "standin", max_risk = "medium", skills = ["visit-coding", "claim-submit"] }
+profile = { max_risk = "medium", skills = ["visit-coding", "claim-submit"] }
 
 [[members]]
 id = "portal"

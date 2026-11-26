@@ -1,7 +1,8 @@
 # Getting started
 
-This takes a fresh clone to a running demo practice with agents working in it. It needs Python 3.12 or later, and
-Docker for the database (or a MongoDB 7 replica set of your own).
+This takes a fresh clone to a running demo practice with agents working in it. It needs Python 3.12 or later,
+Docker for the database (or a MongoDB 7 replica set of your own), and [Ollama](https://ollama.com) with
+`qwen3:14b` pulled for the agents to answer with (`ollama pull qwen3:14b`; step 3 says how to do without).
 
 ## 1. Get the code
 
@@ -40,9 +41,11 @@ practicehub agents run --once      # the agents take what is theirs in the inbox
 practicehub verify                 # check the track: its hash chain, seals and signatures
 ```
 
-`init` prints what it set up (13 members, 9 workflows). The agents answer with **stand-ins**: fixed, deterministic
-answers that ship with the pack, so the demo needs no model. `verify` should end with "chain, seals and signatures
-intact".
+`init` prints what it set up (13 members, 9 workflows). Each agent is given the hub's default model, a local model
+through Ollama (`ollama/qwen3:14b`), written into its profile. If Ollama is not running, the agents pass their work
+to people, saying the model could not be reached. To try the demo with no model at all, set
+`PRACTICEHUB_DEFAULT_MODEL=standin` before `init`: the agents then answer with **stand-ins**, fixed, deterministic
+answers that ship with the pack. `verify` should end with "chain, seals and signatures intact".
 
 The hub also writes a `state/` directory beside you. It holds the key that signs the track (`state/.secret`) and
 the track's anchors. It is gitignored; do not commit it.
@@ -95,14 +98,14 @@ PRACTICEHUB_DATABASE_NAME=accounting practicehub --state state-accounting serve 
 `init --force` replaces the hub in the database it is pointed at. It **drops that database**. `--state` does not
 choose the database; `PRACTICEHUB_DATABASE` and `PRACTICEHUB_DATABASE_NAME` do.
 
-## 6. Give an agent a real model
+## 6. Change an agent's model
 
 An agent's profile names its model as `<backend>/<model>`:
 
 | Model | What answers |
 |---|---|
-| `standin` | the pack's fixed answers (the demo's default) |
-| `ollama/<model>` | a local model through Ollama (`OLLAMA_URL`, default `http://localhost:11434`) |
+| `ollama/<model>` | a local model through Ollama (`OLLAMA_URL`, default `http://localhost:11434`). A new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/qwen3:14b` |
+| `standin` | the pack's fixed answers, with no model |
 | `litellm/<model>` | a model behind your LiteLLM proxy (`LITELLM_URL`, `LITELLM_API_KEY`) |
 | `anthropic/<model>` | Claude through the Anthropic API (`ANTHROPIC_API_KEY`). It sends data off the premises, so it is refused unless `PRACTICEHUB_ALLOW_EXTERNAL_MODELS=1` |
 
@@ -110,7 +113,7 @@ A profile is under change control, like everything else an agent may do. One pol
 another approves it:
 
 ```sh
-practicehub member profile scribe-agent --model ollama/qwen3:14b --as rana
+practicehub member profile scribe-agent --model ollama/gemma3:12b --as rana
 practicehub member approve-profile scribe-agent 2 --as dr-amara    # 2: the version the first command printed
 ```
 

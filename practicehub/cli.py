@@ -33,6 +33,7 @@ Configuration is by environment, so secrets never sit in files the hub writes:
     PRACTICEHUB_COLLABORA_URL, PRACTICEHUB_WOPI_BASE, PRACTICEHUB_COLLABORA_DISCOVERY_URL   office documents (Collabora)
     PRACTICEHUB_PACKS       where packs live (default: packs/ next to the source)
     OLLAMA_URL, LITELLM_URL, LITELLM_API_KEY, ANTHROPIC_API_KEY, PRACTICEHUB_ALLOW_EXTERNAL_MODELS   model backends
+    PRACTICEHUB_DEFAULT_MODEL   the model a new agent is given when it names none (default ollama/qwen3:14b)
 """
 
 from __future__ import annotations

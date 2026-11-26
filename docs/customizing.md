@@ -115,7 +115,7 @@ place to customize:
 | **Roles** | the Team page, or `[[members]]` in the pack | which work it is offered, and through the roles' grants, which data classes it reads and writes |
 | **Skills** | its profile | which tasks it knows how to do; a task names the skill it needs |
 | **Risk limit** (`max_risk`) | its profile | the riskiest step it may take: `low`, `medium` or `high` |
-| **Model** | its profile | what answers: `standin`, `ollama/<model>`, `litellm/<model>` or `anthropic/<model>` |
+| **Model** | its profile | what answers: `ollama/<model>` (a new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/qwen3:14b`), `litellm/<model>`, `anthropic/<model>`, or `standin` for the pack's fixed answers |
 | **Sponsor** | the Team page | the person accountable for it, who issues its tokens and can switch it off |
 
 Add an agent and give it a profile:
@@ -433,6 +433,8 @@ New definitions arrive, and changed ones become proposals for a policy owner to 
 2. Write an overlay on it with your name, time zone, people and modules.
 3. Design the data classes, then give each role the narrowest grants that work.
 4. Change the workflows in the browser until they match how you work. Set `risk` and `signer` on each step.
-5. Add agents one at a time: a sponsor, a role, a skill, a low risk limit and the `standin` model first.
-6. Give an agent a real model once its work reads right with stand-ins.
+5. Add agents one at a time: a sponsor, a role, a skill and a low risk limit. Try each one's work with the
+   `standin` model and the pack's stand-in answers first.
+6. Let it answer with a model (a new agent's default is a local one through Ollama) once its work reads right with
+   stand-ins.
 7. Run `practicehub verify`, and keep a copy of the track's head off the machine.

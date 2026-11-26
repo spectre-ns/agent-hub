@@ -5,14 +5,19 @@ submits. Nothing a model returns is ever executed.
 
 An agent's profile names its model as ``<backend>/<model>``:
 
-    standin                         deterministic answers from the pack (tests, demos, no model at all)
-    ollama/qwen3:14b                a local model through Ollama (default for anything that touches records)
+    standin                         deterministic answers from the pack (tests, no model at all)
+    ollama/qwen3:14b                a local model through Ollama, on the premises: the default
     litellm/gp-local                a model behind the practice's LiteLLM proxy (Ollama or vLLM on premises), traced
                                     in Langfuse by LiteLLM's callbacks; the trace carries the agent and work item
     anthropic/claude-opus-5-5       Claude through the Anthropic API; *external*, so off unless the practice allows it
 
 External backends send data off the premises. Under PHIA (and most professional-secrecy rules) that is a decision for
 the practice, so they are refused unless ``PRACTICEHUB_ALLOW_EXTERNAL_MODELS=1`` is set.
+
+An agent added without a model is given the hub's default, ``PRACTICEHUB_DEFAULT_MODEL`` (``ollama/qwen3:14b`` when
+unset), written into its profile when it is added: what an agent answers with is always in its reviewed profile, and a
+later change of the default moves no agent that already has one. A profile that names no model (an agent added before
+there was a default) answers by stand-in, as it did.
 
 Every answer is wrapped: ``{"answer": {...fields}, "escalate": bool, "reason": str}``. An agent that is unsure says
 so, and the runner hands the item to people instead of guessing.
@@ -29,6 +34,16 @@ ANTHROPIC_VERSION = "2026-10-21"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
 # Models that take the server-side refusal fallback; others (Haiku) get a plain request and escalate on a refusal.
 ANTHROPIC_FALLBACK_MODELS = ("claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5")
+
+
+DEFAULT_MODEL = "ollama/qwen3:14b"
+
+
+def default_model() -> str:
+    """The model a new agent is given when its profile names none: ``PRACTICEHUB_DEFAULT_MODEL``, or a local
+    Ollama model. It is written into the agent's profile when the agent is added, so changing it later is not a
+    change to any agent: that is a reviewed profile change, agent by agent."""
+    return (os.environ.get("PRACTICEHUB_DEFAULT_MODEL") or "").strip() or DEFAULT_MODEL
 
 
 class ModelError(Exception):
@@ -210,9 +225,14 @@ class Anthropic:
 
 
 class ModelGateway:
-    def __init__(self, hub=None, standins: dict | None = None, allow_external: bool | None = None):
+    """``scripted=True``: every agent answers from the pack's stand-ins, whatever its profile names. For building a
+    demo's past without a model, never for live work."""
+
+    def __init__(self, hub=None, standins: dict | None = None, allow_external: bool | None = None,
+                 scripted: bool = False):
         self.hub = hub
         self._standins = standins
+        self.scripted = scripted
         if allow_external is None:
             allow_external = os.environ.get("PRACTICEHUB_ALLOW_EXTERNAL_MODELS") == "1"
         self.allow_external = allow_external
@@ -238,7 +258,8 @@ class ModelGateway:
 
     def answer(self, agent: dict, ctx: dict, practice: str = "the practice") -> dict:
         """``{"answer", "escalate", "reason", "model"}`` for the work item described by ``ctx``."""
-        spec = (agent.get("profile") or {}).get("model") or "standin"
+        # a profile that names no model is an agent added before the hub gave one: it answers as it always did
+        spec = "standin" if self.scripted else ((agent.get("profile") or {}).get("model") or "standin")
         backend, model = self.backend(spec)
         pack = getattr(self.hub, "pack", None)
         rules = (pack.practice.get("agent_rules") if pack else None) or []

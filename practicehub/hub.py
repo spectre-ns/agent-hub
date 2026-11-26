@@ -32,6 +32,7 @@ from .outbox import OutboxMixin
 from .moves import MovesMixin
 from .activity import ActivityMixin
 from .journey import JourneyMixin
+from .models import default_model
 from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
 
@@ -1772,6 +1773,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 raise Invalid("an agent's sponsor is an active person")
         profile = dict(m.get("profile", {}) or {})
         if kind == "agent":
+            if not str(profile.get("model") or "").strip():  # every agent names the model it answers with
+                profile["model"] = default_model()
             profile.setdefault("max_risk", "low")
             profile.setdefault("skills", [])
             if profile["max_risk"] not in RISK_ORDER:
@@ -1811,8 +1814,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         asked = dict(m.get("profile") or {}) if m.get("kind") == "agent" else {}
         if asked:  # a new agent may do nothing yet: the skills and risk it asks for are proposed, like any change
             asked = self._check_profile({"max_risk": "low", "skills": [], **asked})
-            m = {**m, "profile": {**({"model": asked["model"]} if asked.get("model") else {}),
-                                  "max_risk": "low", "skills": []}}
+            asked.setdefault("model", default_model())
+            m = {**m, "profile": {"model": asked["model"], "max_risk": "low", "skills": []}}
         with self.db:
             out = self._create_member(actor, {**m, "roles": plain})
             if len(plain) != len(roles):

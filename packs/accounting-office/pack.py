@@ -947,9 +947,11 @@ def _quiet(*_):
 
 
 def _agents_work(hub):
-    """Every agent works its inbox (stand-ins: no model), as `practicehub agents run` would."""
+    """Every agent works its inbox, as `practicehub agents run` would, but answered by the pack's stand-ins whatever
+    model it names: the demo's past is built without a model, and the same every time."""
     from practicehub.agents.runner import run_all_local
-    run_all_local(hub, log=_quiet)
+    from practicehub.models import ModelGateway
+    run_all_local(hub, ModelGateway(hub, scripted=True), log=_quiet)
 
 
 # name, kind, birth date or year end, email, extra fields
