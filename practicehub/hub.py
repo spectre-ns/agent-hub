@@ -35,6 +35,7 @@ from .journey import JourneyMixin
 from .models import default_model
 from .records import LocalRecordStore, RecordStore
 from .track import Track, hub_secret
+from . import decimals
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 APPROVAL_WORKFLOW = "approval-notice"  # the home of a notice that a change waits for a policy owner's approval
@@ -531,7 +532,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                 if x and schema.sealed(x, st):  # nothing changes it: not a person, a workflow nor an upgrade
                     raise Invalid(f"{r['resourceType']}/{r['id']} is {x.state_label(st).lower()}: nothing changes "
                                   f"it, so it keeps its type and is not converted")
-            body = {k: v for k, v in data.items() if k not in ("resourceType", "meta")}
+            body = schema.exact(rt, {k: v for k, v in data.items() if k not in ("resourceType", "meta")})
             body["id"] = new_id
             self._check_record(rt, {"resourceType": rtype, **body})
             rec = self.records.update(rtype, new_id, body) if into else self.records.create(rtype, body)
@@ -889,7 +890,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         """What a record's search words were built from: the index's version and its type's classed fields."""
         import hashlib
         classed = sorted((f["path"], f["data_class"]) for f in (rt.classed_fields if rt is not None else []))
-        return self.SEARCH_INDEX + ":" + (hashlib.sha1(json.dumps(classed).encode()).hexdigest()[:12] if classed else "")
+        return self.SEARCH_INDEX + ":" + (hashlib.sha1(json.dumps(classed, default=decimals.jsonable).encode()).hexdigest()[:12] if classed else "")
 
     def _search_parts(self, rec: dict):
         """A record as each reader sees it, for its search words (``LocalRecordStore.parts_fn``)."""
@@ -2557,7 +2558,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     @staticmethod
     def _profile_source(profile: dict) -> str:
-        return json.dumps(profile, sort_keys=True, separators=(",", ":"))
+        return json.dumps(profile, sort_keys=True, separators=(",", ":"), default=decimals.jsonable)
 
     def _record_profile(self, actor: dict, mid: str, profile: dict, note: str) -> dict:
         """Put a profile in force without a second person: an agent's first version (added, or installed with a
@@ -3526,6 +3527,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             up, hops = (self.parent_of(rt, above) if above else None), hops + 1
         if rt.is_a("Restriction") and not problems:
             problems += self.restrictions.problems(rt, rec)
+        if rt.checks and not problems and not getattr(self, "_upgrading", False):
+            # the type's own rules ([[check]]), whoever writes it: a person, the API, an agent, a workflow, a convert;
+            # records a pack upgrade carries over are taken as they were, as for unique
+            ctx = schema.check_context(rt, rec, self.engine.now().date().isoformat())
+            problems += [f"{rt.label}: {c['message']}" for c in rt.checks if not schema.check_holds(c, ctx)]
         if problems:
             raise Invalid(f"the {rt.label.lower()} has problems", problems)
 
@@ -4048,7 +4054,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         rt = self._type(rtype)
         if member.get("kind") != "automation":
             self.require_writer(member, rt, f"write {rtype} records", run_id=run_id)
-        data = dict(data)
+        data = schema.exact(rt, dict(data))  # its decimals exact, at their places
         lc = rt.lifecycle
         if lc:
             st = schema.first(data, lc["path"])
@@ -4151,6 +4157,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                                f"your change.")
             after = {**before, **{k: v for k, v in data.items() if k not in ("resourceType", "id", "meta")}}
             after = {k: v for k, v in after.items() if v is not None}  # None clears a field
+            after = schema.exact(rt, after)
             self._check_number_kept(rt, before, after)
             self._workflow_fields(rt, member, run_id, before, after)
             after = visibility.guard_write(self, member, rt, before, after)  # untouched: kept; changed: refused
@@ -4199,6 +4206,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                              if blank(schema.first(after, rt.field(n)["path"]))]
                     if empty:
                         raise Invalid(f"to move a {rt.label.lower()} to {new!r}, fill in {', '.join(empty)}")
+                    why = self.move_check_refusal(rt, ref, t, after)  # the move's own checks, whoever makes it
+                    if why:
+                        raise Invalid(why)
                     self._move_signed(rt, t, _signature)
                     moved = (old, new)
             clashes, over = [], None
@@ -4250,6 +4260,34 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             self.credentials_within_reach(member, "a directive changed")
         return self.redact(member, rec)
 
+    def move_check_refusal(self, rt, ref: str, t: dict, rec: dict) -> str | None:
+        """Why a move's checks (``[[lifecycle.transition.check]]``) refuse it for the record as it would be once
+        moved, in the pack's words; None when they hold. The parts a check reads are read for the hub, whatever the
+        mover may see: the refusal says only the check's message."""
+        checks = t.get("check") or []
+        if not checks:
+            return None
+        named = sorted({p for c in checks for p in c["parts"]})
+        parts = {pid: self._parts_for_check(ref, pid) for pid in named}
+        ctx = schema.check_context(rt, rec, self.engine.now().date().isoformat(), parts)
+        failed = [c["message"] for c in checks if not schema.check_holds(c, ctx)]
+        if not failed:
+            return None
+        return f"to move a {rt.label.lower()} to {rt.state_label(t['to']).lower()}: {'; '.join(failed)}"
+
+    def _parts_for_check(self, ref: str, pid: str) -> list[dict]:
+        """A record's parts of type ``pid`` as a move's check reads them: each ``{record, signed}``, ``signed``
+        the meanings of its signatures that cover it as it is now."""
+        prt = self.record_type(pid)
+        if prt is None or not prt.part_of:
+            return []
+        out = []
+        for r in self._part_records(ref, prt):
+            sigs = self._signatures_of(f"{pid}/{r['id']}", r)
+            out.append({"record": {**schema._named_values(prt, r), **r},
+                        "signed": sorted({s["meaning"] for s in sigs if s["current"] and s["valid"] and s["meaning"]})})
+        return out
+
     def _move_signed(self, rt, t: dict, signature: int | None) -> None:
         """A transition with ``sign`` is made only by a person's signature with that meaning (``move_record`` with
         one, or a ``[[signature]]`` that ``moves_to`` there): never by an agent, a workflow or a plain edit."""
@@ -4267,6 +4305,8 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
         signature makes (approved, closed) does not leave it covering nothing."""
         from .track import canonical
         rt = self.record_type_for_reading(rec.get("resourceType", "")) if rec.get("resourceType") else None
+        if rt:
+            rec = schema.exact(rt, rec)  # 12.3 and 12.30 are the same value of a field kept at two places
         if rt and rt.lifecycle:
             rec = schema.put(rec, rt.lifecycle["path"], None)
         return hashlib.sha256(canonical({k: v for k, v in rec.items() if k != "meta"}).encode()).hexdigest()
@@ -4571,8 +4611,11 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
 
     def signatures(self, member: dict, ref: str) -> list[dict]:
         """Every signature on a record, newest first, each marked current if it covers what the record says now."""
+        return self._signatures_of(ref, self.read_record(member, ref, raw=True))
+
+    def _signatures_of(self, ref: str, rec: dict) -> list[dict]:
+        """``signatures`` for the hub, whoever asks: the record is read already."""
         rtype, rid = ref.split("/", 1)
-        rec = self.read_record(member, ref, raw=True)
         now = self._record_digest(rec)
         out = []
         rows = self.db.events.find({"$or": [{"action": "record.signed", "subject": ref},
@@ -5168,7 +5211,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
                     what = {"python": "Python code", "prompt": "an injected prompt for agents",
                             "external": f"a call to {b.engine}"}[b.runtime]
                     notes.append(f"'{s.title}' uses the block '{b.title}' (v{row['version']}, {what}) "
-                                 f"with params {json.dumps(s.params)}.")
+                                 f"with params {json.dumps(s.params, default=decimals.jsonable)}.")
                 except NotFound:
                     notes.append(f"'{s.title}' uses the block {s.block!r}, which is not approved yet.")
             if s.kind == "automation":

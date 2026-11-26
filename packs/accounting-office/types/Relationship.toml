@@ -39,7 +39,9 @@ required = true
 [[field]]
 name = "percent"
 label = "Shares held (%)"
-type = "number"
+type = "decimal"
+scale = 2
+unit = "%"
 min = 0
 max = 100
 

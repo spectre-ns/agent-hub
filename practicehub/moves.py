@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from . import schema, visibility
+from . import expr, schema, visibility
 from .store import ASC
 
 
@@ -91,6 +91,14 @@ class MovesMixin:
                     ok, why = self.engine.eligibility(actor, item)
                     if not ok:
                         return why
+        # the move's checks, said on the button when nothing its screen asks for could make them hold
+        asked = {f"record.{n}" for n in t["asks"]}
+        if t.get("check") and not any(p.split(".")[0:2] == q.split(".") for c in t["check"]
+                                      for src in (c["must"], c.get("when")) if src for p in expr.paths(src)
+                                      for q in asked):
+            why = self.move_check_refusal(rt, ref, t, schema.put(dict(rec), rt.lifecycle["path"], to))
+            if why:
+                return why
         return self.state_move_refusal(rt, ref, t, rec, None)
 
     # ------------------------------------------------------------------ the move

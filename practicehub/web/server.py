@@ -68,6 +68,7 @@ from .live_pages import LivePages
 from .record_work import RecordWork
 from .records_pages import Download, RecordPages, a_an
 from .journey_pages import JourneyPages
+from .. import decimals
 
 FORBIDDEN_PORTS = {8080, 9980, 11434}
 MAX_BODY = 26 * 1024 * 1024  # the largest file (Hub.MAX_FILE) and the form around it
@@ -1554,7 +1555,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             return f'<a class="tile{cls}" href="{e(href)}"{card}>{inner}</a>'
         opts = "".join(f'<option value="{e(c)}">{e(m["label"])}</option>' for c, m in moves.items())
         fields = "".join(f'<input type="hidden" name="{e(k)}" value="{e(str(v))}">' for k, v in hidden.items())
-        return (f'<div class="tile movable{cls}" data-card="{e(key)}" data-moves="{e(json.dumps(moves))}" '
+        return (f'<div class="tile movable{cls}" data-card="{e(key)}" data-moves="{e(json.dumps(moves, default=decimals.jsonable))}" '
                 f'draggable="true"><a class="tile-link" href="{e(href)}" draggable="false">{inner}</a>'
                 f'<form method="post" action="{e(action)}" class="move-to">{fields}'
                 f'<select name="to" aria-label="Move {e(title)} to" required><option value="">Move to…</option>'
@@ -2298,7 +2299,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         plain = f'<ul class="plain ev-lines">{"".join(lines[:10])}</ul>' if lines else ""
         if not raw:
             return plain
-        return (plain + f'<details><summary class="meta">Details</summary><pre>{e(json.dumps(data, indent=1))}</pre>'
+        return (plain + f'<details><summary class="meta">Details</summary><pre>{e(json.dumps(data, indent=1, default=decimals.jsonable))}</pre>'
                         f'</details>')
 
     SLUG_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
@@ -2392,7 +2393,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             data["states"] = {sid: st["state"] for sid, st in states.items()}
         if links:
             data["links"] = {k: v for k, v in links.items() if k not in hide}
-        return json.dumps(data).replace("</", "<\\/")
+        return json.dumps(data, default=decimals.jsonable).replace("</", "<\\/")
 
     def _flow(self, wf, run=None, links=None, legend=True, viewer=None) -> str:
         fid = f"flow-{wf.id}-{run['id'] if run else 'def'}"
@@ -3207,11 +3208,17 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             out = f'<label class="switch-row">{ctl}<span>{words}</span></label>'
             return (f'<div class="field">{out}<small id="{cid}-help" class="help">{e(helps[0])}</small></div>'
                     if helps else out)
+        elif typ == "decimal":  # text, so no digit is lost on the way; the hub rounds it to its places
+            shown = decimals.text(val) if isinstance(val, decimals.Decimal) else str(val if val is not None else "")
+            unit = f'<span class="unit">{e(f["unit"])}</span>' if f.get("unit") else ""
+            ctl = (f'<input type="text" inputmode="decimal" name="{e(name)}"{ids} value="{e(shown)}" '
+                   f'placeholder="{e(decimals.example(f.get("scale") or 0))}"{req}>{unit}')
         else:
             kind = {"number": "number", "date": "date", "datetime": "datetime-local"}.get(typ, "text")
             step = ' step="any"' if typ == "number" else ""
+            unit = f'<span class="unit">{e(f["unit"])}</span>' if typ == "number" and f.get("unit") else ""
             ctl = (f'<input type="{kind}" name="{e(name)}"{ids} value="{e(str(val if val is not None else ""))}"'
-                   f'{req}{step}>')
+                   f'{req}{step}>{unit}')
         return self._labelled(f, ctl, cid, helps)
 
     def _slot_picker(self, f, choices, val, cid, ids, req, helps) -> str:

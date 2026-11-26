@@ -51,13 +51,15 @@ type = "string"
 [[field]]
 name = "amount"
 label = "Amount"
-type = "number"
+type = "decimal"
+scale = 2
 help = "The slip's main box: employment income (T4 box 14), interest (T5 box 13), the contribution or donation; on a notice of assessment, the refund (negative: owing)"
 
 [[field]]
 name = "tax_deducted"
 label = "Tax deducted"
-type = "number"
+type = "decimal"
+scale = 2
 min = 0
 
 [[field]]

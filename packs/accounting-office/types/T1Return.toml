@@ -103,28 +103,33 @@ type = "boolean"
 [[field]]
 name = "total_income"
 label = "Total income (line 15000)"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[field]]
 name = "taxable_income"
 label = "Taxable income (line 26000)"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[field]]
 name = "tax_deducted"
 label = "Tax deducted at source"
-type = "number"
+type = "decimal"
+scale = 2
 min = 0
 
 [[field]]
 name = "net_refund"
 label = "Refund (negative: balance owing)"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[field]]
 name = "last_year_refund"
 label = "Last year's refund"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[field]]
 name = "flags"
@@ -178,12 +183,14 @@ type = "boolean"
 [[field]]
 name = "assessed_refund"
 label = "Assessed refund (negative: owing)"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[field]]
 name = "assessed_taxable_income"
 label = "Assessed taxable income"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[field]]
 name = "assessment_notes"

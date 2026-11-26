@@ -16,6 +16,7 @@ from html import escape as e
 
 from .. import schema
 from .. import views as viewmod
+from .. import decimals
 
 KINDS = {"types": ("type", "Record types", "record type"), "views": ("view", "Views", "view"),
          "skills": ("skill", "Skills", "skill")}
@@ -419,7 +420,7 @@ def _aot(v) -> bool:
 
 
 def _tk(k: str) -> str:
-    return k if _BARE.fullmatch(k) else json.dumps(k, ensure_ascii=False)
+    return k if _BARE.fullmatch(k) else json.dumps(k, ensure_ascii=False, default=decimals.jsonable)
 
 
 def _tv(v) -> str:
@@ -432,7 +433,7 @@ def _tv(v) -> str:
         return "[" + ", ".join(_tv(x) for x in v) + "]"
     if isinstance(v, dict):
         return "{ " + ", ".join(f"{_tk(str(k))} = {_tv(x)}" for k, x in v.items()) + " }" if v else "{}"
-    return json.dumps(v if isinstance(v, str) else str(v), ensure_ascii=False)
+    return json.dumps(v if isinstance(v, str) else str(v), ensure_ascii=False, default=decimals.jsonable)
 
 
 def toml_dumps(doc: dict) -> str:

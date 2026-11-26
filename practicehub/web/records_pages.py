@@ -16,6 +16,7 @@ from .. import pack as packmod
 from .. import export as exportmod
 from .. import schema, visibility
 from ..hub import Conflict, HubError, Denied, Invalid, NotFound
+from .. import decimals
 
 e = html.escape
 SIMPLE, NESTED, SCALAR = schema.FORM_SIMPLE, schema.FORM_NESTED, schema.SCALAR  # what a form can edit
@@ -365,10 +366,15 @@ class RecordPages:
 
     def _value_html(self, f, rec) -> str:
         vals = [v for v in schema.get(rec, schema.locate(rec, f["path"], f.get("with"))) if v not in (None, "", [], {})]
+        if f["type"] == "table":
+            return self._table_html(f, vals[0]) if vals else "<span class='muted'>—</span>"
         out = []
         for v in vals:
             for item in (v if isinstance(v, list) else [v]):
-                if f["type"] == "attachment" and isinstance(item, dict):
+                if f["type"] in ("decimal", "number") and decimals.number(item) is not None:
+                    shown = decimals.text(item) if isinstance(item, decimals.Decimal) else str(item)
+                    out.append(e(shown) + (f' <span class="unit">{e(f["unit"])}</span>' if f.get("unit") else ""))
+                elif f["type"] == "attachment" and isinstance(item, dict):
                     out.append(self._attachment_html(rec, item))
                 elif f["type"] == "markdown" and isinstance(item, str):
                     out.append(self.markdown_html(item, rec))
@@ -390,6 +396,92 @@ class RecordPages:
                 else:
                     out.append(e(str(item)))
         return "<br>".join(out) if out else "<span class='muted'>—</span>"
+
+    def _table_html(self, f, rows) -> str:
+        """A table field's rows as a table: a column's values right-aligned when they are numbers."""
+        if not isinstance(rows, list):
+            return self._plain_html(rows)
+        cols = f["columns"]
+        num = lambda c: ' class="num"' if c["type"] in ("number", "decimal") else ""  # noqa: E731
+        head = "".join(f"<th{num(c)} scope='col'>{e(c['label'])}"
+                       + (f" <span class='unit'>({e(c['unit'])})</span>" if c.get("unit") else "") + "</th>"
+                       for c in cols)
+        body = "".join("<tr>" + "".join(f"<td{num(c)}>{self._value_html({**c, 'unit': None}, row)}</td>" for c in cols)
+                       + "</tr>" for row in rows if isinstance(row, dict))
+        return (f'<div class="tablewrap"><table class="rows"><thead><tr>{head}</tr></thead><tbody>{body}</tbody>'
+                f'</table></div>')
+
+    def _grid(self, f, rows, me) -> str:
+        """A table field as a grid of inputs: each row's cells named ``<table>.<row>.<column>``, its rows and a few
+        blank ones (left blank, a row is dropped). The "Add a row" button adds more; without the script, saving and
+        editing again does."""
+        name = f["path"]
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        blank = max(0, min(3, (f.get("max_rows") or schema.MAX_ROWS) - len(rows)))
+        cols = f["columns"]
+
+        def cell(c, i, row):
+            n = f"{name}.{i}.{c['name']}"
+            v = row.get(c["name"])
+            lab = f' aria-label="{e(c["label"])}, row {i + 1}"'
+            if c["type"] in ("choice", "boolean", "member"):
+                opts = ([(str(x), self._choice_label(c, x)) for x in c["choices"]] if c["type"] == "choice" else
+                        [("true", "Yes"), ("false", "No")] if c["type"] == "boolean" else
+                        [(m["id"], m["name"]) for m in self.hub.members() if m["status"] == "active"])
+                cur = "" if v is None else ("true" if v is True else "false" if v is False else
+                                            str(v).removeprefix("member:"))
+                return (f'<select name="{e(n)}"{lab}><option value=""></option>' + "".join(
+                    f'<option value="{e(o)}"{" selected" if o == cur else ""}>{e(lbl)}</option>' for o, lbl in opts)
+                        + "</select>")
+            if c["type"] == "reference":
+                shown = schema.ref_of(v) or ""
+                return f'<input name="{e(n)}"{lab} value="{e(shown)}" placeholder="a name or Type/id">'
+            if c["type"] == "decimal":
+                shown = decimals.text(v) if isinstance(v, decimals.Decimal) else "" if v is None else str(v)
+                return (f'<input name="{e(n)}"{lab} inputmode="decimal" value="{e(shown)}" '
+                        f'placeholder="{e(decimals.example(c["scale"]))}">')
+            kind = {"number": "number", "date": "date", "datetime": "datetime-local"}.get(c["type"], "text")
+            step = ' step="any"' if c["type"] == "number" else ""
+            shown = "" if v is None else str(v)[:16] if c["type"] == "datetime" else str(v)
+            return f'<input type="{kind}" name="{e(n)}"{lab}{step} value="{e(shown)}">'
+
+        head = "".join(f"<th scope='col'>{self._label_words(c)}"
+                       + (f" <span class='unit'>({e(c['unit'])})</span>" if c.get("unit") else "") + "</th>"
+                       for c in cols)
+        body = "".join("<tr>" + "".join(f"<td>{cell(c, i, row)}</td>" for c in cols) + "</tr>"
+                       for i, row in enumerate(rows + [{}] * blank))
+        helps = ([f["help"]] if f.get("help") else []) + ["A row left blank is dropped."]
+        return (f'<fieldset class="grid" data-grid="{e(name)}" data-rows="{len(rows) + blank}" '
+                f'data-max="{f.get("max_rows") or schema.MAX_ROWS}"><legend>{self._label_words(f)}</legend>'
+                f'<input type="hidden" name="{e(name)}" value="rows">'
+                f'<div class="tablewrap"><table class="rows"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+                f'</div><button type="button" class="btn subtle" data-grid-add hidden>Add a row</button>'
+                f'<small class="help">{" · ".join(e(h) for h in helps)}</small></fieldset>')
+
+    def _rows_from_form(self, f, form: dict) -> list[dict]:
+        """A grid's rows as the form sent them, each cell as its column's type; a blank row is dropped."""
+        name, found = f["path"], {}
+        for k in form:
+            m = re.fullmatch(re.escape(name) + r"\.(\d{1,4})\.([A-Za-z_][A-Za-z0-9_]*)", k)
+            if m:
+                found.setdefault(int(m.group(1)), {})[m.group(2)] = form[k]
+        cols = {c["name"]: c for c in f["columns"]}
+        rows = []
+        for i in sorted(found):
+            row = {}
+            for col, raw in found[i].items():
+                c = cols.get(col)
+                if c is None:
+                    continue
+                try:
+                    v = self._coerce(c, raw)
+                except Invalid as exc:
+                    raise Invalid(f"{f['label']}, row {len(rows) + 1}: {exc}") from None
+                if v not in (None, ""):
+                    row[col] = v
+            if row:
+                rows.append(row)
+        return rows
 
     def _pin_html(self, f, rec, item) -> str:
         """A pinned reference's version, and, when its record has changed since, the version now and a button that
@@ -584,6 +676,8 @@ class RecordPages:
         if f.get("required_unless") and rec:  # not required while the record is in the state that excuses it
             f = {**f, "required": schema.is_required(f, rec)}
         spec = {**f, "name": name}
+        if f["type"] == "table":
+            return self._grid(f, vals[0] if vals else [], me)
         if f["type"] == "reference":
             refs = [schema.ref_of(v) for v in vals if schema.ref_of(v)]
             options, many = [], False
@@ -638,7 +732,7 @@ class RecordPages:
             return self._labelled(f, ctl, cid, [f["help"]] if f.get("help") else [])
         val = vals[0] if vals else None
         if self._as_json(f, val):  # structured values are edited as JSON, never as Python's repr
-            txt = json.dumps(val, indent=1, ensure_ascii=False) if val not in (None, "", [], {}) else ""
+            txt = json.dumps(val, indent=1, ensure_ascii=False, default=decimals.jsonable) if val not in (None, "", [], {}) else ""
             req = " required" if f.get("required") else ""
             cid, ids = self._control_id(name, True)
             ctl = (f'<textarea class="mono" name="{e(name)}"{ids} rows="{min(12, txt.count(chr(10)) + 2)}" '
@@ -736,6 +830,11 @@ class RecordPages:
             except ValueError:
                 raise Invalid(f"{f['label']}: {raw!r} is not a number") from None
             return int(n) if n.is_integer() else n
+        if f["type"] == "decimal":
+            try:
+                return decimals.to_decimal(raw, f["scale"])
+            except ValueError as exc:
+                raise Invalid(f"{f['label']}: {exc}") from None
         if f["type"] == "boolean":
             return raw == "true"
         text = str(raw).strip()
@@ -799,6 +898,17 @@ class RecordPages:
                 data[top] = schema.set_in(current.get(top), rest.split("."), val, f.get("with"))
                 continue
             if key not in form and not (f["type"] == "reference" and f["path"].endswith(".*") and partial):
+                continue
+            if f["type"] == "table":
+                try:
+                    val = self._rows_from_form(f, form)
+                except Invalid:
+                    if not lenient:
+                        raise
+                    continue
+                if before is not None and val == (before.get(key) or []):
+                    continue
+                data[key] = val or None
                 continue
             ok, val = coerce(f, form.get(key, []))
             if not ok:

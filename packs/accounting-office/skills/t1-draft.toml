@@ -11,25 +11,29 @@ refused. Your draft is reviewed by a manager and filed by a partner: never call 
 [[output]]
 name = "total_income"
 label = "Total income"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 
 [[output]]
 name = "taxable_income"
 label = "Taxable income"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 
 [[output]]
 name = "tax_deducted"
 label = "Tax deducted"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 
 [[output]]
 name = "net_refund"
 label = "Refund (negative: owing)"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 
 [[output]]

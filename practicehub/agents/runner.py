@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 
 from ..models import ModelError, ModelGateway
+from .. import decimals
 
 
 class Refused(Exception):
@@ -84,7 +85,7 @@ class HttpClient:
 
     def _req(self, method, path, body=None):
         req = urllib.request.Request(self.base + path, method=method,
-                                     data=json.dumps(body).encode() if body is not None else None,
+                                     data=json.dumps(body, default=decimals.jsonable).encode() if body is not None else None,
                                      headers={"Authorization": f"Bearer {self.token}",
                                               "Content-Type": "application/json"})
         try:

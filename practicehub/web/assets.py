@@ -502,6 +502,11 @@ label.radio{font-weight:400;color:var(--fg);display:inline-flex;align-items:cent
 textarea.code{font:13px/20px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 fieldset.choices{border:0;margin:12px 0 0;padding:0;min-width:0}
 fieldset.slot-picker{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.grid{border:0;margin:12px 0 0;padding:0;min-width:0}
+fieldset.grid>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
+fieldset.grid td{padding:2px 4px}fieldset.grid input,fieldset.grid select{width:100%;min-width:6em;margin:0}
+table.rows td.num,table.rows th.num{text-align:right;font-variant-numeric:tabular-nums}
+.unit{color:var(--subtle);margin-left:4px}
 fieldset.slot-picker>legend{padding:0;margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:var(--subtle)}
 .slot-filters{display:flex;flex-wrap:wrap;gap:0 12px}.slot-filters label{flex:1 1 160px;margin-top:0}
 /* a screen's tabs: every part stays in the form (a required field is never hidden); the tab links jump to a part */
@@ -1974,7 +1979,7 @@ function editor(root) {
     return el("label", { class: "radio" }, el("input", { type: "checkbox", checked: !!obj[k],
       onchange: (ev) => { obj[k] = ev.target.checked; changed(!!(o && o.rebuild)); } }), label);
   }
-  const TYPES = ["string", "text", "number", "boolean", "choice", "list", "date", "datetime", "member"];
+  const TYPES = ["string", "text", "number", "decimal", "boolean", "choice", "list", "date", "datetime", "member"];
   function fieldsEditor(obj, k, title, help) {
     const wrap = el("div");
     function draw() {
@@ -1982,15 +1987,23 @@ function editor(root) {
       const rows = (obj[k] || []).map((f, i) => el("tr", {},
         el("td", {}, el("input", { value: f.name || "", placeholder: "name", "aria-label": "field name",
           oninput: (ev) => { f.name = ev.target.value; changed(false); } })),
-        el("td", {}, el("select", { "aria-label": "field type", onchange: (ev) => { f.type = ev.target.value; changed(false); draw(); } },
+        el("td", {}, el("select", { "aria-label": "field type", onchange: (ev) => {
+            f.type = ev.target.value;
+            if (f.type === "decimal" && f.scale === undefined) f.scale = 2;  // an exact number keeps its places
+            if (f.type !== "decimal") delete f.scale;
+            changed(false); draw(); } },
           TYPES.map((t) => el("option", { value: t, selected: (f.type || "string") === t ? "selected" : null }, t)))),
         el("td", { title: "required" }, el("input", { type: "checkbox", "aria-label": "required", checked: !!f.required,
           onchange: (ev) => { f.required = ev.target.checked; changed(false); } })),
         el("td", {}, f.type === "choice" && !f.choices_from
           ? el("input", { value: (f.choices || []).join(", "), placeholder: "a, b, c", "aria-label": "choices",
               oninput: (ev) => { f.choices = ev.target.value.split(",").map((x) => x.trim()).filter(Boolean); changed(false); } })
-          : el("input", { value: f.label || "", placeholder: "label", "aria-label": "field label",
-              oninput: (ev) => { f.label = ev.target.value; changed(false); } })),
+          : el("span", {}, el("input", { value: f.label || "", placeholder: "label", "aria-label": "field label",
+              oninput: (ev) => { f.label = ev.target.value; changed(false); } }),
+            f.type === "decimal" ? el("input", { type: "number", min: "0", max: "10", value: String(f.scale ?? 2),
+              class: "dz-n", title: "places kept", "aria-label": "places kept",
+              oninput: (ev) => { const n = parseInt(ev.target.value, 10); if (n >= 0 && n <= 10) { f.scale = n; changed(false); } } })
+              : null)),
         el("td", {}, el("button", { type: "button", class: "subtle", title: "remove", "aria-label": "remove field",
           onclick: () => { obj[k].splice(i, 1); changed(false); draw(); } }, "×"))));
       wrap.append(el("table", { class: "ed-fields" },
@@ -2025,6 +2038,7 @@ function editor(root) {
     if (raw === "") return undefined;
     if (raw.includes("{{")) return raw;  // read from the run
     if (f.type === "number" && raw.trim() !== "" && !isNaN(Number(raw))) return Number(raw);
+    if (f.type === "decimal" && /^-?\d+(\.\d+)?$/.test(raw.trim())) return raw.trim();  // as text: exact
     if (f.type === "boolean" && (raw === "true" || raw === "false")) return raw === "true";
     return raw;
   }
@@ -2489,6 +2503,29 @@ function slotPickers(root) {  // a day and a person narrow the times offered; th
     sync();
   });
 }
+function grids(root) {  // "Add a row": a blank row more, its cells named for its place; without the script, save and edit
+  root.querySelectorAll("[data-grid]").forEach((box) => {
+    if (box.dataset.ready) return;
+    box.dataset.ready = "1";
+    const add = box.querySelector("[data-grid-add]"), body = box.querySelector("tbody");
+    if (!add || !body || !body.rows.length) return;
+    add.hidden = false;
+    add.addEventListener("click", () => {
+      const n = body.rows.length;
+      if (n >= Number(box.dataset.max || 1000)) { add.disabled = true; return; }
+      const row = body.rows[n - 1].cloneNode(true), name = box.dataset.grid;
+      row.querySelectorAll("input, select").forEach((c) => {
+        c.name = c.name.replace(new RegExp("^" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.\\d+\\."), name + "." + n + ".");
+        if (c.tagName === "SELECT") c.selectedIndex = 0; else c.value = "";
+        const lab = c.getAttribute("aria-label");
+        if (lab) c.setAttribute("aria-label", lab.replace(/row \d+$/, "row " + (n + 1)));
+      });
+      body.appendChild(row);
+      const first = row.querySelector("input, select");
+      if (first) first.focus();
+    });
+  });
+}
 function kindFields(root) {
   root.querySelectorAll("[data-kinds]").forEach((box) => {
     const form = box.closest("form");
@@ -2557,6 +2594,7 @@ function formModal() {
     formTabs(body);
     kindFields(body);
     slotPickers(body);
+    grids(body);
     body.querySelectorAll("[data-modal-close]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); close(); }));
     if (back) body.querySelectorAll("form[method=post]").forEach((f) => {  // opened from a board: back to it after
       if (!f.querySelector("input[name=_back]")) f.appendChild(el("input", { type: "hidden", name: "_back", value: back }));
@@ -2886,6 +2924,7 @@ document.addEventListener("DOMContentLoaded", () => {
   formTabs(document);
   kindFields(document);
   slotPickers(document);
+  grids(document);
   document.querySelectorAll("svg[data-flow]").forEach((svg) => {
     const src = document.getElementById(svg.dataset.flow);
     if (src) drawFlow(svg, JSON.parse(src.textContent));
@@ -4893,7 +4932,7 @@ function dashEditor(root) {
     if (!f) ks = all;
     else if (f.choices && f.choices.length || f.type === "role" || f.type === "choice") ks = ["==", "!=", "in", "not in", "empty", "set"];
     else if (f.type === "boolean") ks = ["==", "!=", "empty", "set"];
-    else if (f.type === "number" || f.type === "integer" || isDate(f)) ks = ["==", "!=", "<", "<=", ">", ">=", "empty", "set"];
+    else if (f.type === "number" || f.type === "decimal" || f.type === "integer" || isDate(f)) ks = ["==", "!=", "<", "<=", ">", ">=", "empty", "set"];
     else ks = ["==", "!=", "in", "not in", "empty", "set"];
     const dated = { "<": "is before", "<=": "is on or before", ">": "is after", ">=": "is on or after" };
     return ks.map((k) => [k, isDate(f) && dated[k] ? dated[k] : o[k]]);
@@ -5006,7 +5045,7 @@ function dashEditor(root) {
       draw();
       return wrap;
     }
-    const numeric = fd && (fd.type === "number" || fd.type === "integer");
+    const numeric = fd && (fd.type === "number" || fd.type === "decimal" || fd.type === "integer");
     return input(r.value, (v) => { r.value = numeric && v !== "" && !Number.isNaN(Number(v)) ? Number(v) : v; commit(); },
       { type: numeric ? "number" : "text", "aria-label": lab });
   }

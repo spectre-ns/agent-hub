@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from . import expr
 from . import schema
 from .workflows import DefinitionError
+from . import decimals
 
 ID = re.compile(r"[a-z][a-z0-9\-]*")
 WIDGETS = ("count", "table", "list", "board", "chart", "tree", "links")
@@ -258,7 +259,7 @@ _BARE = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def _tk(k: str) -> str:
-    return k if _BARE.fullmatch(k) else json.dumps(k, ensure_ascii=False)
+    return k if _BARE.fullmatch(k) else json.dumps(k, ensure_ascii=False, default=decimals.jsonable)
 
 
 def _tv(v) -> str:
@@ -267,11 +268,13 @@ def _tv(v) -> str:
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return repr(v)
+    if isinstance(v, decimals.Decimal):
+        return decimals.text(v)
     if isinstance(v, list):
         return "[" + ", ".join(_tv(x) for x in v) + "]"
     if isinstance(v, dict):
         return "{ " + ", ".join(f"{_tk(str(k))} = {_tv(x)}" for k, x in v.items()) + " }" if v else "{}"
-    return json.dumps(v if isinstance(v, str) else str(v), ensure_ascii=False)
+    return json.dumps(v if isinstance(v, str) else str(v), ensure_ascii=False, default=decimals.jsonable)
 
 
 def _prefix(source: str | None) -> str:
@@ -357,6 +360,8 @@ def _lit(v) -> str:
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return repr(v)
+    if isinstance(v, decimals.Decimal):  # a number written with a point reads back as one (1.50 is 1.50)
+        return decimals.text(v)
     s = str(v)
     if "'" not in s:
         return f"'{s}'"
@@ -579,7 +584,7 @@ def _sort_key(v):
     """Rows by a value: numbers as numbers, the rest as text, the empty ones last."""
     if v is None or v == "":
         return (2, 0, "")
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
+    if isinstance(v, (int, float, decimals.Decimal)) and not isinstance(v, bool):
         return (0, v, "")
     return (1, 0, str(v).casefold())
 

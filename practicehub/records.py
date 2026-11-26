@@ -21,6 +21,7 @@ import urllib.request
 from typing import Protocol
 
 from .db import Database, utcnow
+from . import decimals
 
 
 def subject_of(rec: dict, subject_types=frozenset()) -> str | None:
@@ -59,7 +60,7 @@ def fold(text: str) -> str:
 
 def search_text(rec: dict) -> str:
     """What a search over a record looks in: the whole record, as written, folded."""
-    return fold(json.dumps(rec, ensure_ascii=False))
+    return fold(json.dumps(rec, ensure_ascii=False, default=decimals.jsonable))
 
 
 _WORD = re.compile(r"\w+")
@@ -80,6 +81,8 @@ def words_in(rec) -> list[str]:
         elif isinstance(v, list):
             for x in v:
                 walk(x, depth + 1)
+        elif isinstance(v, decimals.Decimal):  # its exact text: 12.30 is found by 12.30
+            out.update(_WORD.findall(decimals.text(v)))
         elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
             out.update(_WORD.findall(fold(v)))
     walk(rec)
@@ -245,7 +248,7 @@ class MedplumRecordStore:
 
     def _call(self, method: str, path: str, body: dict | None = None, retry: bool = True) -> dict | None:
         req = urllib.request.Request(self.base + "/fhir/R4/" + path, method=method,
-                                     data=json.dumps(body).encode() if body is not None else None,
+                                     data=decimals.number_json(body).encode() if body is not None else None,
                                      headers={"Content-Type": "application/fhir+json",
                                               "Authorization": f"Bearer {self._auth()}"})
         try:

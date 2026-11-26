@@ -53,14 +53,16 @@ help = "set it and every delivery must give its expiry date; expired stock is ne
 [[field]]
 name = "minimum_stock"
 label = "Reorder at"
-type = "number"
+type = "decimal"
+scale = 3
 min = 0
 help = "when what is available falls to this, more is ordered"
 
 [[field]]
 name = "reorder_quantity"
 label = "Order quantity"
-type = "number"
+type = "decimal"
+scale = 3
 min = 0
 
 [[field]]
@@ -73,20 +75,23 @@ rel = "usually-in"
 [[field]]
 name = "on_hand"
 label = "On hand"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 help = "every lot with stock in it, held or not: summed when a stock move posts"
 
 [[field]]
 name = "available"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 help = "what may be used: not held, not waiting for inspection, not expired"
 
 [[field]]
 name = "quarantined"
 label = "Held"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 
 [[field]]

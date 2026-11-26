@@ -46,7 +46,8 @@ by = "workflow"
 
 [[field]]
 name = "quantity"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 
 [[field]]
@@ -91,6 +92,7 @@ by = "workflow"
 [[field]]
 name = "count_baseline"
 label = "Count baseline"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 help = "what counts are measured against: set when it was received or last signed for, so small counts cannot add up to a write-off nobody signed"

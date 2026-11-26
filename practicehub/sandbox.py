@@ -39,6 +39,8 @@ import tempfile
 import threading
 import types
 
+from . import decimals
+
 # Modules a block may import. None of them may be reached *through* another module in block code (``re.enum``,
 # ``statistics.sys``): check_code refuses attributes of a module that are themselves modules.
 ALLOWED_IMPORTS = ("math", "statistics", "datetime", "decimal", "fractions", "re", "json", "itertools", "functools",
@@ -154,7 +156,16 @@ def hook(event, args):
     raise RuntimeError("%%s is not allowed in a block" %% (event,))
 
 def main():
-    req = json.loads(sys.stdin.read())
+    import decimal
+    def exact_in(d):                               # {"$decimal": "12.30"}: an exact number (decimals.tag)
+        if len(d) == 1 and isinstance(d.get("$decimal"), str):
+            return decimal.Decimal(d["$decimal"])
+        return d
+    def exact_out(o):
+        if isinstance(o, decimal.Decimal) and o.is_finite():
+            return {"$decimal": format(o, "f")}
+        return str(o)
+    req = json.loads(sys.stdin.read(), object_hook=exact_in)
     for m in %(allowed)r:
         __import__(m)
     for m in ("_strptime", "heapq", "copy", "weakref", "unicodedata", "warnings", "_statistics", "locale"):
@@ -200,7 +211,7 @@ def main():
     try:
         payload["log"] = log.getvalue()[-2000:]
         try:
-            text = dumps(payload, default=str)
+            text = dumps(payload, default=exact_out)
         except (TypeError, ValueError) as exc:
             text = dumps({"ok": False, "error": "the output is not JSON: %%s" %% exc, "log": payload["log"]})
         data = text.encode()
@@ -270,7 +281,7 @@ def run_code(code: str, inputs: dict, *, timeout: float = TIMEOUT) -> dict:
     problems = check_code(code)
     if problems:
         raise SandboxError("; ".join(problems))
-    request = json.dumps({"code": code, "input": inputs, "zones": _zones(code, inputs)}, default=str)
+    request = json.dumps({"code": code, "input": decimals.tag(inputs), "zones": _zones(code, inputs)}, default=str)
     if len(request) > MAX_IO:
         raise SandboxError("the block's input is too large")
     child = _CHILD % {"cpu": CPU_SECONDS, "mem": MEMORY, "allowed": ALLOWED_IMPORTS}
@@ -299,4 +310,4 @@ def run_code(code: str, inputs: dict, *, timeout: float = TIMEOUT) -> dict:
         raise SandboxError(str(payload.get("error") or "the block failed"))
     if not isinstance(payload.get("output"), dict):
         raise SandboxError("the block's answer is not an object")
-    return {"output": payload["output"], "log": str(payload.get("log", ""))}
+    return {"output": decimals.untag(payload["output"]), "log": str(payload.get("log", ""))}

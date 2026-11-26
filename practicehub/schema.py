@@ -74,7 +74,8 @@ answer that becomes a record, an engine calling the API.
 
     [[field]]
     name = "status"               # the key in the record, unless ``path`` says where (``code.text``, ``name.0.family``)
-    type = "choice"               # string text markdown number boolean date datetime choice member reference attachment json object list
+    type = "choice"               # string text markdown number decimal boolean date datetime choice member reference
+                                  #   attachment json object list table
     choices = ["preliminary", "final", "amended"]
     # labels = { amended = "Corrected" }   # a choice's words where its code is not words (AMB = "In clinic")
     required = true
@@ -94,6 +95,33 @@ answer that becomes a record, an engine calling the API.
                                   #   page, list, export and history), only who may write it sets it. The type's class
                                   #   still says who sees the record exists, lists it and creates it.
 
+    [[field]]
+    name = "amount"
+    type = "decimal"              # an exact number (money, a quantity, a rate): kept to ``scale`` places, rounded half
+    scale = 2                     #   up as it is written (12.345 is 12.35), never a float: 0.10 + 0.20 is 0.30. At most
+    # unit = "%"                  #   15 digits. ``unit``: a few characters shown beside it (also on a number). min and
+    min = 0                       #   max are exact too. JSON gives it as its text ("12.30"); FHIR as a number
+
+    [[field]]
+    name = "lines"
+    type = "table"                # rows of the same columns (the lines of an order, a log): each row checked as its
+    min_rows = 1                  #   columns say ("Lines, row 2: Amount is required"); at most max_rows (1000)
+    [[field.column]]              # a column is a field of one value: string text number decimal boolean date datetime
+    name = "item"                 #   choice member reference. It has no path of its own (it is at lines.*.item: a
+    type = "reference"            #   reference column links as a reference field does); a table's ``by``, data class
+    target = ["Part"]             #   and path are said of the table
+    [[field.column]]
+    name = "amount"
+    type = "decimal"
+    scale = 2
+    required = true
+
+    [[check]]                     # a rule every write keeps, whoever writes (a person, the API, an agent, a workflow,
+    when = "record.status != 'draft'"   # a convert; a pack upgrade carries records over as they were): what ``must``
+    must = "record.amount == sum(record.lines.*.amount)"   # hold while ``when`` does (none: always), over the record
+    message = "the amount is the sum of its lines"         # by its fields' names and ``today``; ``message`` says why
+                                  #   not. A record's check reads only the record (parts: a move's check, below)
+
     [lifecycle]                   # optional: the states a record moves through
     field = "status"              # the field that holds the state; its choices are the states
     initial = "preliminary"
@@ -111,6 +139,13 @@ answer that becomes a record, an engine calling the API.
                                   #   the type's own field rules check what they hold
     # sign = "Approved"           # the mover signs it with this meaning (a person: an agent never signs)
     # by = "workflow"             # not by hand: see below
+    # [[lifecycle.transition.check]]   # the move is made only while this holds, whoever makes it (a person, a
+    # must = "count(parts.Point.*, it.record.status != 'closed') == 0"   # workflow, a signature): a condition over
+    # message = "every review point is closed"   # the record as it would be once moved, ``today``, and its parts:
+                                  #   ``parts.<part type>`` is a list of {record, signed}, ``signed`` the meanings of
+                                  #   the part's current signatures (``'Reviewed' in it.signed``). Its parts are read for
+                                  #   the hub, whatever the mover may see; the refusal says only the message. A task
+                                  #   whose move it refuses is not done
     # [lifecycle.labels]          # a state's words, where its code is not words: onleave = "On leave"
 
 A type that names its own workflow (``workflow``) lists the values its state field takes and the moves people make
@@ -119,7 +154,8 @@ workflow in force, the type has them as moves by the workflow (``CatalogMixin._w
 workflow's states carry their own words and tone. What the two may not both say is checked by
 ``catalog.lifecycle_fit``. A transition ``by = "workflow"`` is still the type's to write for a move no edge of its
 own workflow makes (one made from outside its own run: another workflow's, or a signature's ``moves_to``), for a move
-from a value its workflow has no state for, and for a move it attaches ``asks``, ``requires`` or ``sign`` to.
+from a value its workflow has no state for, and for a move it attaches ``asks``, ``requires``, ``sign`` or a
+``check`` to: an edge making that move keeps what the row says.
 
 A path may use ``*`` for every item of a list (``participant.*.actor``).
 
@@ -150,7 +186,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from . import expr
+from . import decimals, expr
 from .workflows import DefinitionError
 
 TYPE_ID = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
@@ -210,8 +246,11 @@ def number_in_series(series: str, number) -> int | None:
     return int(m.group(1)) if m else None
 
 
-FIELD_TYPES = {"string", "text", "markdown", "number", "boolean", "date", "datetime", "choice", "member", "reference",
-               "attachment", "json", "object", "list"}
+FIELD_TYPES = {"string", "text", "markdown", "number", "decimal", "boolean", "date", "datetime", "choice", "member",
+               "reference", "attachment", "json", "object", "list", "table"}
+# what a table's column may be: one plain value in each row
+COLUMN_TYPES = ("string", "text", "number", "decimal", "boolean", "date", "datetime", "choice", "member", "reference")
+MAX_ROWS = 1000
 RESERVED = {"resourceType", "id", "meta"}
 BY = ("anyone", "workflow")
 OPS = ("create", "edit", "view")   # what a screen is shown for (a transition names its own screen)
@@ -268,6 +307,7 @@ class RecordType:
     covers: list[str] = field(default_factory=list)  # part types a signature on it covers, and its lock reaches
     period: dict | None = None  # [period]: {closed_by, date, path, scope, scope_path}: _check_period
     closing: dict | None = None  # [closing]: {through, path, states, scope, scope_path}: what closes a period
+    checks: list[dict] = field(default_factory=list)  # [[check]]: {when, must, message, parts}: every write keeps them
 
     def screen(self, op: str) -> list[dict] | None:
         """The tabs of the screen shown to create, edit or view a record (None: no screen says, so every field)."""
@@ -314,7 +354,14 @@ class RecordType:
 
     @property
     def references(self) -> list[dict]:
-        return [f for f in self.fields if f["type"] == "reference"]
+        """Its reference fields, a table's reference columns among them (at their paths: lines.*.item)."""
+        return [f for f in self.fields + self.cells() if f["type"] == "reference"]
+
+    def cells(self) -> list[dict]:
+        """Its tables' columns as fields at their paths in the record (``lines.*.amount``), each naming its table."""
+        return [{**c, "path": f"{t['path']}.*.{c['name']}", "table": t["name"], "by": t["by"],
+                 "data_class": t.get("data_class")}
+                for t in self.fields if t["type"] == "table" for c in t["columns"]]
 
     def top_keys(self) -> set[str]:
         return {f["path"].split(".")[0] for f in self.fields} | RESERVED
@@ -352,13 +399,15 @@ KEYS = {
          "field", "lifecycle", "summary", "signature", "abstract", "extends", "base", "title", "short_title", "screen", "parent",
          "part_of", "slug", "link", "key",
          "navigator", "layout", "standard", "consent", "booking", "workflow", "unique", "number", "reverses", "covers",
-         "period", "closing"},
+         "period", "closing", "check"},
     "field": {"name", "path", "type", "label", "required", "help", "target", "rel", "choices", "labels", "max_length", "min",
               "max", "list", "show", "advanced", "with", "fact", "match", "by", "live", "data_class", "pin",
-              "roles", "required_unless"},
+              "roles", "required_unless", "scale", "unit", "column", "min_rows", "max_rows"},
     "lifecycle": {"field", "states", "initial", "starts", "transition", "locked", "final", "abandoned", "in_use", "labels",
                   "tones"},
-    "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm"},
+    "transition": {"from", "to", "by", "label", "screen", "comment", "asks", "requires", "sign", "opens", "confirm",
+                   "check"},
+    "check": {"when", "must", "message"},
     "signature": {"meaning", "roles", "states", "moves_to", "readers"},
     "link": {"rel", "label", "to", "many", "help", "back"},
     "screen": {"id", "on", "tab", "fields", "label"},
@@ -397,17 +446,65 @@ def default_label(name: str) -> str:
     return re.sub(r"(?<=[a-z0-9])(?=[A-Z][a-z])", " ", name).replace("_", " ").strip().capitalize()
 
 
-def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
+def _spec(raw, i: int, table: str | None = None) -> tuple[dict | None, list[str]]:
+    """One ``[[field]]``; ``table``: one column of that table field (``[[field.column]]``)."""
     if not isinstance(raw, dict):
         return None, [f"field {i + 1}: a field is a table ([[field]] with name = ..., type = ...)"]
     name = str(raw.get("name", ""))
-    where = f"field {name or i + 1}"
+    where = f"field {name or i + 1}" if table is None else f"field {table}, column {name or i + 1}"
     problems = _unknown(where, raw, "field")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
         problems.append(f"{where}: a name is letters, digits and underscores")
     typ = raw.get("type", "string")
     if typ not in FIELD_TYPES:
         problems.append(f"{where}: unknown type {typ!r} (one of {', '.join(sorted(FIELD_TYPES))})")
+    elif table is not None and typ not in COLUMN_TYPES:
+        problems.append(f"{where}: a column is one value in each row ({', '.join(COLUMN_TYPES)}), not {typ}")
+    if table is not None:
+        problems += [f"{where}: {k} is said of the table, not of a column" for k in
+                     ("path", "list", "by", "data_class", "pin", "column", "min_rows", "max_rows", "live", "fact",
+                      "match", "advanced", "required_unless", "with")
+                     if k in raw]
+    scale = raw.get("scale")
+    if typ == "decimal":
+        if isinstance(scale, bool) or not isinstance(scale, int) or not 0 <= scale <= decimals.MAX_SCALE:
+            problems.append(f"{where}: a decimal keeps a set number of places: scale = 2 (a whole number from 0 to "
+                            f"{decimals.MAX_SCALE})")
+    elif scale is not None:
+        problems.append(f"{where}: scale is for a decimal field")
+    unit = raw.get("unit")
+    if unit is not None and (not isinstance(unit, str) or not unit.strip() or len(unit) > 20):
+        problems.append(f'{where}: unit is a few characters shown beside the value (at most 20), e.g. "%" or "kg"')
+    elif unit is not None and typ not in ("number", "decimal"):
+        problems.append(f"{where}: unit is for a number or decimal field")
+    columns, rows = [], {}
+    if typ == "table":
+        raw_cols = raw.get("column")
+        if not isinstance(raw_cols, list) or not raw_cols:
+            problems.append(f"{where}: a table names its columns: [[field.column]] with name = ..., type = ...")
+        else:
+            for j, rc in enumerate(raw_cols):
+                c, ps = _spec(rc, j, table=name)
+                problems += ps
+                if c:
+                    columns.append(c)
+            names = [c["name"] for c in columns]
+            problems += [f"{where}: two columns are called {n}" for n in sorted({n for n in names if names.count(n) > 1})]
+        for k in ("min_rows", "max_rows"):
+            v = raw.get(k)
+            if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= MAX_ROWS):
+                problems.append(f"{where}: {k} is a whole number of rows, at most {MAX_ROWS}")
+            else:
+                rows[k] = v
+        if isinstance(rows.get("min_rows"), int) and isinstance(rows.get("max_rows"), int) \
+                and rows["min_rows"] > rows["max_rows"]:
+            problems.append(f"{where}: min_rows {rows['min_rows']} is above max_rows {rows['max_rows']}")
+        if raw.get("list") is True:
+            problems.append(f"{where}: a table holds its rows; it is not a list of tables")
+        if "*" in str(raw.get("path") or ""):
+            problems.append(f"{where}: a table is one field, not a path through a list")
+    else:
+        problems += [f"{where}: {k} is for a table field" for k in ("column", "min_rows", "max_rows") if k in raw]
     for k in FIELD_BOOLS:
         if k in raw and not isinstance(raw[k], bool):
             problems.append(f"{where}: {k} is true or false, not {raw[k]!r}")
@@ -423,8 +520,8 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             problems.append(f"{where}: {k} is a number, not {v!r}")
-        elif typ != "number":
-            problems.append(f"{where}: {k} is for a number field")
+        elif typ not in ("number", "decimal"):
+            problems.append(f"{where}: {k} is for a number or decimal field")
     if isinstance(raw.get("min"), (int, float)) and isinstance(raw.get("max"), (int, float)) \
             and raw["min"] > raw["max"]:
         problems.append(f"{where}: min {raw['min']} is above max {raw['max']}")
@@ -497,7 +594,12 @@ def _spec(raw, i: int) -> tuple[dict | None, list[str]]:
          "advanced": raw.get("advanced", False), "with": dict(raw.get("with") or {}),
          "fact": raw.get("fact", False), "match": raw.get("match", False), "by": by,
          "live": raw.get("live", False), "data_class": raw.get("data_class") or None,
-         "roles": list(raw.get("roles") or []), "required_unless": unless or None, "pin": raw.get("pin") is True}
+         "roles": list(raw.get("roles") or []), "required_unless": unless or None, "pin": raw.get("pin") is True,
+         "scale": scale if typ == "decimal" else None, "unit": unit or None}
+    if typ == "decimal":  # its bounds, exactly
+        f["min"], f["max"] = (None if v is None else decimals.to_decimal(v) for v in (f["min"], f["max"]))
+    if typ == "table":
+        f.update(columns=columns, min_rows=rows.get("min_rows"), max_rows=rows.get("max_rows") or MAX_ROWS)
     if typ == "reference" and not f["rel"]:
         f["rel"] = name
     return f, []
@@ -707,7 +809,8 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
                                   screen=t.get("screen") if isinstance(t.get("screen"), str) else None,
                                   comment=t.get("comment") is True, sign=sign.strip() if sign else None,
                                   **({"opens": opens} if opens else {}),
-                                  **({"confirm": t["confirm"]} if isinstance(t.get("confirm"), str) else {})))
+                                  **({"confirm": t["confirm"]} if isinstance(t.get("confirm"), str) else {}),
+                                  **({"check": t["check"]} if t.get("check") is not None else {})))
         # further states a person may make a new record in, besides the initial one (a record of work already done,
         # filed after the fact), each starting whatever the type's workflow starts for it
         starts = lc.get("starts") or []
@@ -909,6 +1012,14 @@ def _parse(doc: dict, source: str, catalog, base_ok: bool) -> RecordType:
         problems += _check_period(rt, doc["period"])
     if doc.get("closing") is not None:
         problems += _check_closing(rt, doc["closing"])
+    if doc.get("check") is not None:
+        rt.checks, more = _check_checks(rt, doc["check"], "check")
+        problems += more
+    for t in (rt.lifecycle or {}).get("transition", []):  # a move's checks read fields the type now has
+        if t.get("check"):
+            t["check"], more = _check_checks(rt, t["check"], f"lifecycle.transition to {t['to']!r}: check",
+                                             parts=True)
+            problems += more
     std = doc.get("standard")
     if std is not None:
         problems += _check_standard(rt, std)
@@ -961,7 +1072,7 @@ def _check_workflow(rt: RecordType, w) -> list[str]:
     return []
 
 
-UNIQUE_TYPES = ("string", "number", "date", "datetime", "choice", "member", "reference")
+UNIQUE_TYPES = ("string", "number", "decimal", "date", "datetime", "choice", "member", "reference")
 
 
 def _check_unique(rt: RecordType, raw) -> list[str]:
@@ -1200,6 +1311,97 @@ def _check_closing(rt: RecordType, raw) -> list[str]:
                       "scope_target": list(sf["target"]) if sf else []}
         lc["locked"] = list(dict.fromkeys([*lc["locked"], *states]))
     return out
+
+
+def _check_checks(rt: RecordType, raw, where: str, *, parts: bool = False) -> tuple[list[dict], list[str]]:
+    """``[[check]]`` (a rule every write of a record keeps) and ``[[lifecycle.transition.check]]`` (one a move
+    keeps): what ``must`` hold, a condition over the record (``record.<field>``, by the field's name) and ``today``,
+    while ``when`` does (none: always), and the ``message`` that says why not. A move's check may also read its
+    record's parts (``parts.<part type>``: a list of ``{record, signed}``, ``signed`` being the meanings of the
+    part's current signatures); a record's check reads only the record, since a part is written apart from it.
+
+        [[check]]
+        when = "record.status != 'draft'"
+        must = "record.total == record.amount + sum(record.lines.*.amount)"
+        message = "the total is the amount and its lines"
+
+    Returns the checks (``{when, must, message, parts}``: the part types it reads) and the problems."""
+    problems: list[str] = []
+    out = []
+    for i, c in enumerate(_tables({"check": raw}, "check", problems, where)):
+        at = f"{where} {i + 1}"
+        problems += _unknown(at, c, "check")
+        must, when, msg = c.get("must"), c.get("when"), c.get("message")
+        if not isinstance(msg, str) or not msg.strip():
+            problems.append(f"{at}: message says, in words, what does not hold (\"the total is the amount plus "
+                            f"its lines\")")
+        if not isinstance(must, str) or not must.strip():
+            problems.append(f"{at}: must is the condition that holds, e.g. must = \"record.end >= record.start\"")
+            continue
+        if when is not None and not (isinstance(when, str) and when.strip()):
+            problems.append(f"{at}: when is a condition, e.g. when = \"record.status != 'draft'\"")
+            continue
+        read: set[str] = set()
+        for key, src in (("must", must), ("when", when)):
+            if src is None:
+                continue
+            try:
+                problems += [f"{at}: {key}: {p}" for p in _check_rule_paths(rt, expr.paths(src), parts, read)]
+            except expr.ExprError as exc:
+                problems.append(f"{at}: {key}: {exc}")
+        out.append({"when": when, "must": must, "message": str(msg or "").strip(), "parts": sorted(read)})
+    return out, problems
+
+
+def _check_rule_paths(rt: RecordType, paths: list[str], parts: bool, read: set) -> list[str]:
+    """What is wrong with the paths a check reads: ``record.<field>`` (a table's column after ``*``), ``today``, and
+    for a move's check ``parts.<part type>.*`` with ``record.<field>`` or ``signed`` (the catalog checks the part
+    type and its fields). ``read`` gathers the part types named."""
+    out = []
+    names = [f["name"] for f in rt.fields]
+    for p in paths:
+        bits = p.split(".")
+        if p == "today":
+            continue
+        if bits[0] == "record":
+            if len(bits) < 2:
+                out.append("record alone is the whole record: read one field of it, record.<field>")
+                continue
+            f = rt.field(bits[1])
+            if f is None:
+                near = difflib.get_close_matches(bits[1], names, n=1)
+                out.append(f"{p}: there is no field {bits[1]!r}" + (f' (did you mean "{near[0]}"?)' if near else ""))
+            elif f["type"] == "table" and len(bits) > 3 and bits[2] == "*":
+                cols = [c["name"] for c in f["columns"]]
+                if bits[3] not in cols:
+                    near = difflib.get_close_matches(bits[3], cols, n=1)
+                    out.append(f"{p}: {f['name']} has no column {bits[3]!r}"
+                               + (f' (did you mean "{near[0]}"?)' if near else ""))
+            continue
+        if bits[0] == "parts":
+            if not parts:
+                out.append(f"{p}: parts are read only by a move's check ([[lifecycle.transition.check]]): a part "
+                           f"is written apart from its record")
+            elif len(bits) < 3 or bits[2] != "*" or (len(bits) > 3 and bits[3] not in ("record", "signed")) \
+                    or (len(bits) > 3 and bits[3] == "record" and len(bits) < 5):
+                out.append(f"{p}: a record's parts are read as parts.<part type>.*, each with its record.<field> "
+                           f"and signed, e.g. count(parts.Point.*, it.record.status != 'closed')")
+            else:
+                read.add(bits[1])
+            continue
+        more = ", and parts.<part type>" if parts else ""
+        out.append(f"{p}: a check reads record.<field> and today{more}")
+    return out
+
+
+def check_holds(c: dict, ctx: dict) -> bool:
+    """Whether a check holds of its context: its ``when`` does not, or its ``must`` does."""
+    return not expr.holds(c.get("when"), ctx) or expr.holds(c["must"], ctx)
+
+
+def check_context(rt: RecordType, rec: dict, today: str, parts: dict | None = None) -> dict:
+    """What a check reads: the record by its field names and as stored, today, and (for a move's) its parts."""
+    return {"record": {**_named_values(rt, rec), **rec}, "today": today, **({"parts": parts} if parts else {})}
 
 
 def sealed(rt: RecordType, st) -> bool:
@@ -1882,6 +2084,22 @@ def _check_value(f: dict, v, members=None, is_a=None) -> str | None:
             return f"{label} is below {f['min']}"
         if f.get("max") is not None and v > f["max"]:
             return f"{label} is above {f['max']}"
+    elif t == "decimal":
+        if not isinstance(v, decimals.Decimal) and not isinstance(v, (dict, list)):  # ``exact`` left it: say why
+            try:
+                decimals.to_decimal(v, f["scale"])
+            except ValueError as exc:
+                return f"{label}: {exc}"
+        if not isinstance(v, decimals.Decimal) or not v.is_finite() or v.as_tuple().exponent != -f["scale"]:
+            return f"{label}: expected a number like {decimals.example(f['scale'])}"
+        if len(v.as_tuple().digits) > decimals.DIGITS and not v.is_zero():
+            return f"{label}: at most {decimals.DIGITS} digits"
+        if f.get("min") is not None and v < f["min"]:
+            return f"{label} is below {decimals.text(f['min'])}"
+        if f.get("max") is not None and v > f["max"]:
+            return f"{label} is above {decimals.text(f['max'])}"
+    elif t == "table":
+        return _check_table(f, v, members, is_a)
     elif t == "boolean":
         if not isinstance(v, bool):
             return f"{label}: expected true or false"
@@ -1921,6 +2139,82 @@ def _check_value(f: dict, v, members=None, is_a=None) -> str | None:
         if not isinstance(v, list):
             return f"{label}: expected a list"
     return None
+
+
+def _check_table(f: dict, rows, members=None, is_a=None) -> str | None:
+    """A table's rows: a list of rows, each holding only its columns, each column's value checked as a field's is."""
+    label = f["label"]
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        return f"{label}: expected rows (a list of {{column: value}})"
+    if f.get("min_rows") and len(rows) < f["min_rows"]:
+        return f"{label}: at least {f['min_rows']} row{'s' if f['min_rows'] != 1 else ''}"
+    if len(rows) > (f.get("max_rows") or MAX_ROWS):
+        return f"{label}: at most {f.get('max_rows') or MAX_ROWS} rows"
+    names = {c["name"] for c in f["columns"]}
+    for i, row in enumerate(rows, 1):
+        extra = sorted(k for k in row if k not in names)
+        if extra:
+            return f"{label}, row {i}: {', '.join(extra)} {'is not a column' if len(extra) == 1 else 'are not columns'}"
+        for c in f["columns"]:
+            v = row.get(c["name"])
+            if v in (None, ""):
+                if c.get("required"):
+                    return f"{label}, row {i}: {c['label']} is required"
+                continue
+            p = _check_value(c, v, members, is_a)
+            if p:
+                return f"{label}, row {i}: {p}"
+    return None
+
+
+def decimal_paths(rt: RecordType) -> list[dict]:
+    """The decimal fields of a type, its tables' decimal columns among them (at their paths in the record)."""
+    return [f for f in rt.fields + rt.cells() if f["type"] == "decimal"]
+
+
+def exact(rt: RecordType | None, rec: dict) -> dict:
+    """``rec`` with every decimal value exact and rounded half up to its field's places (12.345 at scale 2 is 12.35;
+    "1,234.5" is 1234.50). A value that is not a number is left as it is, for ``validate`` to refuse. A record of a
+    type with no decimals is returned as it is; else a copy."""
+    fs = decimal_paths(rt) if rt else []
+    if not fs or not isinstance(rec, dict):
+        return rec
+    import copy
+    rec = copy.deepcopy(rec)
+
+    def one(scale):
+        def fix(v):
+            if v is None or v == "" or isinstance(v, bool):
+                return v
+            try:
+                return decimals.to_decimal(v, scale)
+            except ValueError:
+                return v
+        return fix
+
+    for f in fs:
+        fix = one(f["scale"])
+        _map_at(rec, f["path"].split("."), lambda v, fix=fix, many=f.get("list"):
+                [fix(x) for x in v] if many and isinstance(v, list) else fix(v))
+    return rec
+
+
+def _map_at(obj, parts: list[str], fn) -> None:
+    """Replace, in place, each value at a path (``*`` for every item of a list) with ``fn(value)``."""
+    head, rest = parts[0], parts[1:]
+    if head == "*":
+        keys = range(len(obj)) if isinstance(obj, list) else []
+    elif isinstance(obj, dict):
+        keys = [head] if head in obj else []
+    elif isinstance(obj, list) and head.isdigit():
+        keys = [int(head)] if int(head) < len(obj) else []
+    else:
+        keys = []
+    for k in keys:
+        if rest:
+            _map_at(obj[k], rest, fn)
+        else:
+            obj[k] = fn(obj[k])
 
 
 def is_required(f: dict, rec: dict | None) -> bool:
@@ -2014,7 +2308,7 @@ def links(rt: RecordType, rec: dict) -> list[tuple[str, str]]:
 FORM_SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.\*)?")  # a field a form can edit: a top-level key, or a list of them
 # or one plain value inside a structure, by keys and list positions (name.0.given.0, telecom.0.value)
 FORM_NESTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.([0-9]+|[A-Za-z_][A-Za-z0-9_]*))+")
-SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "boolean")
+SCALAR = ("string", "text", "markdown", "date", "datetime", "choice", "number", "decimal", "boolean")
 
 
 def form_fields(rt: RecordType) -> list[dict]:
@@ -2031,7 +2325,7 @@ def list_columns(rt: RecordType) -> list[dict]:
     """The fields a list of a type's records shows beside its title and status: for a part, its owner first; else the
     one subject it is about (a visit's patient: whose it is); then a few short values. A list's export has the same
     columns."""
-    heads = [f for f in form_fields(rt) if f["type"] in ("string", "choice", "date", "member", "number")][:3]
+    heads = [f for f in form_fields(rt) if f["type"] in ("string", "choice", "date", "member", "number", "decimal")][:3]
     owner = rt.field(rt.part_of["field"]) if rt.part_of else None
     if owner is None:
         owner = next((f for f in rt.fields if f["type"] == "reference" and f.get("rel") == "subject"

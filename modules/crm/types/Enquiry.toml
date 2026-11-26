@@ -43,7 +43,8 @@ help = "the service they asked about, in business terms: never health informatio
 [[field]]
 name = "value"
 label = "Estimated value"
-type = "number"
+type = "decimal"
+scale = 2
 min = 0
 
 [[field]]

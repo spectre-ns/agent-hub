@@ -29,13 +29,15 @@ type = "string"
 [[output]]
 name = "amount"
 label = "Amount"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 
 [[output]]
 name = "tax_deducted"
 label = "Tax deducted"
-type = "number"
+type = "decimal"
+scale = 2
 
 [[output]]
 name = "boxes"

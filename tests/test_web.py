@@ -2855,3 +2855,23 @@ def test_a_keys_own_address_and_the_search_box_open_what_it_names_for_who_may_se
         assert code == 404 and "nothing you may open has the key" in page, path
     code, _, _ = _get_with(server, f"/{hub.pack.subject['path']}?q=Ellen", amara)
     assert code == 200  # a name is searched as before
+
+
+def test_a_table_is_a_grid_its_blank_rows_dropped_and_an_exact_number_is_its_exact_text(hub, server):
+    """A table field is a grid in the form (cells ``<table>.<row>.<column>``); a row left blank is dropped. Its
+    decimal cells take an exact number and show its places; the API gives the exact text, not a float."""
+    from test_rules import _bills
+    _bills(hub)
+    amara = token(hub, "dr-amara")
+    page = call(server, "GET", "/records/Bill/new", amara)[1]
+    assert 'name="lines.0.what"' in page and 'inputmode="decimal"' in page and 'name="lines" value="rows"' in page
+    code, body = call(server, "POST", "/records/Bill", amara, form={
+        "memo": "visit", "amount": "12.30", "lines": "rows", "lines.0.what": "exam", "lines.0.amount": "12.3",
+        "lines.1.what": "", "lines.1.amount": "", "lines.2.what": "swab", "lines.2.amount": "0"})
+    assert code == 303, body
+    bill = hub.records.search("Bill")[0]
+    assert [(r["what"], str(r["amount"])) for r in bill["lines"]] == [("exam", "12.30"), ("swab", "0.00")]
+    api = json.loads(call(server, "GET", f"/api/records/Bill/{bill['id']}", amara)[1])
+    assert api["amount"] == "12.30" and [r["amount"] for r in api["lines"]] == ["12.30", "0.00"]
+    page = call(server, "GET", f"/records/Bill/{bill['id']}", amara)[1]
+    assert "12.30" in page and "CAD" in page

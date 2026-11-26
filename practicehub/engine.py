@@ -38,6 +38,7 @@ from .states import FAILED
 from .db import utcnow
 from .backends import backend_for, _timeout as engine_timeout
 from .fields import FieldError, coerce, json_schema
+from . import decimals
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
@@ -131,7 +132,7 @@ def message_classes(hub, run, step) -> set[str]:
     free_input = any(i.get("type", "string") in ("text", "string") for i in wf.inputs)
 
     def quoted(st) -> set[str]:
-        return set(re.findall(r"\{\{\s*([A-Za-z_][\w-]*)\.", json.dumps(st.params or {})))
+        return set(re.findall(r"\{\{\s*([A-Za-z_][\w-]*)\.", json.dumps(st.params or {}, default=decimals.jsonable)))
 
     out, seen, todo = {base}, set(), list(quoted(step))
     while todo:
@@ -987,6 +988,11 @@ class Engine:
                     val = int(val) if val.is_integer() else val
                 except ValueError:
                     continue  # not a number: left out, never a step refused (other fields keep the words)
+            if f["type"] == "decimal" and not isinstance(val, bool):  # "1,234.5" or 12.345: exact, at its places
+                try:
+                    val = decimals.to_decimal(val, f["scale"])
+                except ValueError:
+                    continue
             rec = schema.place(rec, f, val)
         return rec
 
@@ -1140,6 +1146,28 @@ class Engine:
             return None
         t = rt.transition(schema.first(rec, rt.lifecycle["path"]), step.state)
         return (rt.label, rt.state_label(step.state).lower(), t["sign"]) if t and t.get("sign") else None
+
+    def _refused_move(self, run: dict, step, values: dict) -> str | None:
+        """Why the move a person's step with ``state`` makes as it is done would be refused by the move's checks
+        (``[[lifecycle.transition.check]]``), for the record as it would be with what the answer gives the fields the
+        move asks for; None when it would not. The task is then not finished: the move would fail after it."""
+        ref = run.get("record") or ""
+        if not step.state or "/" not in ref:
+            return None
+        rt = self.hub.record_type(ref.split("/", 1)[0])
+        rec = self.hub.records.read(*ref.split("/", 1)) if rt is not None and rt.lifecycle else None
+        if rec is None or step.state not in rt.states():
+            return None
+        now = schema.first(rec, rt.lifecycle["path"])
+        t = rt.transition(now, step.state) if now != step.state else None
+        if not t or not t.get("check"):
+            return None
+        moved = schema.put(dict(rec), rt.lifecycle["path"], step.state)
+        for n in t.get("asks", []):
+            f = rt.field(n)
+            if f and values.get(n) not in (None, ""):
+                moved = schema.put(moved, f["path"], values[n])
+        return self.hub.move_check_refusal(rt, ref, t, schema.exact(rt, moved))
 
     def _moves_due(self, run: dict, wf, cause) -> bool:
         """Move the record for each step with a ``state`` that people or a wait finished (an automation moves it as it
@@ -3156,6 +3184,9 @@ class Engine:
                 problems = guard(values, ctxview) or []
                 if problems:
                     raise Invalid("the answer does not pass the step's checks", problems)
+            refused = self._refused_move(run, step, values)
+            if refused:  # finished, its move would fail after it: the record would stay where it is
+                raise Invalid(f"{step.title} is not done yet: {refused}")
             self._require_links(run, step)
             if item["status"] == "open":  # Done on an open item takes it first, on the record: nobody presses
                 # Assign to me only to be allowed to finish

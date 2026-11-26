@@ -21,14 +21,17 @@ import re
 from datetime import date, datetime
 
 from . import schema
+from . import decimals
 
-CORE_CONTRACT = "1.0"
+CORE_CONTRACT = "1.1"  # 1.1: a decimal field (exact text) and a table field (an array of rows)
 NAMESPACE = "ca.practicehub.core"
 
 # a base field's type, as Avro (datetimes and dates are ISO text: a booking keeps its local time as written)
 _AVRO = {"string": "string", "text": "string", "markdown": "string", "number": "double", "boolean": "boolean", "member": "string",
-         "reference": "string", "choice": "string", "date": "string", "datetime": "string"}
-_LOGICAL = {"date": "iso-date", "datetime": "iso-datetime", "member": "member-id", "reference": "type-slash-id"}
+         "reference": "string", "choice": "string", "date": "string", "datetime": "string", "decimal": "string"}
+# a decimal travels as its exact text ("1234.50", ``ph.scale`` places), never as a double that could round it
+_LOGICAL = {"date": "iso-date", "datetime": "iso-datetime", "member": "member-id", "reference": "type-slash-id",
+            "decimal": "decimal-text"}
 
 
 def major(version: str) -> str:
@@ -52,6 +55,11 @@ def _field(bf: dict) -> dict:
     t: object = {"type": _AVRO.get(bf["type"], "string")}
     if bf["type"] in _LOGICAL:
         t["logicalType"] = _LOGICAL[bf["type"]]
+    if bf["type"] == "decimal":
+        t["ph.scale"] = bf["scale"]
+    if bf["type"] == "table":  # its rows, each a record of its columns
+        t = {"type": "array", "items": {"type": "record", "name": f"{bf['name']}_row",
+                                        "fields": [_field(c) for c in bf["columns"]]}}
     if bf["type"] == "reference" and bf.get("target"):
         t["ph.targets"] = list(bf["target"])
     if bf.get("list"):
@@ -101,9 +109,16 @@ def _is(value, t) -> bool:
     if isinstance(t, dict):
         if t["type"] == "array":
             return isinstance(value, list) and all(_is(v, t["items"]) for v in value)
+        if t["type"] == "record":
+            return isinstance(value, dict) and all(
+                _is(value.get(f["name"]), f["type"]) for f in t["fields"]) and set(value) <= {f["name"] for f in t["fields"]}
+        lt = t.get("logicalType")
+        if lt == "decimal-text":  # exact text, or the Decimal a record holds
+            v = decimals.text(value) if isinstance(value, decimals.Decimal) else value
+            return isinstance(v, str) and bool(re.fullmatch(r"-?\d+(\.\d+)?", v)) and \
+                (len(v.partition(".")[2]) == t.get("ph.scale", len(v.partition(".")[2])))
         if not _is(value, t["type"]):
             return False
-        lt = t.get("logicalType")
         try:
             if lt == "iso-date":
                 date.fromisoformat(value)
@@ -129,7 +144,7 @@ def conforms(base: str, value: dict) -> list[str]:
                 bad.append(f"{f['name']}: required, absent")
             continue
         if not _is(value[f["name"]], f["type"]):
-            bad.append(f"{f['name']}: {json.dumps(value[f['name']])[:60]} is not {json.dumps(f['type'])[:80]}")
+            bad.append(f"{f['name']}: {json.dumps(value[f['name']], default=decimals.jsonable)[:60]} is not {json.dumps(f['type'], default=decimals.jsonable)[:80]}")
     extra = set(value) - {f["name"] for f in sch["fields"]}
     bad += [f"{n}: not a field of {base}" for n in sorted(extra)]
     return bad

@@ -25,12 +25,13 @@ from pathlib import Path
 
 from .db import Database, utcnow
 from .store import DESC, DuplicateKey, Transient
+from . import decimals
 
 GENESIS = "0" * 64
 
 
 def canonical(obj) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=decimals.jsonable)
 
 
 def hub_secret(state_dir: Path | None) -> str:

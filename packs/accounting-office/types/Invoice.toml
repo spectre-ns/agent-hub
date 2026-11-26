@@ -54,20 +54,23 @@ required = true
 [[field]]
 name = "amount"
 label = "Fee"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 min = 0
 
 [[field]]
 name = "hst"
 label = "HST"
-type = "number"
+type = "decimal"
+scale = 2
 min = 0
 
 [[field]]
 name = "total"
 label = "Total"
-type = "number"
+type = "decimal"
+scale = 2
 min = 0
 
 [[field]]
@@ -91,6 +94,12 @@ label = "Status"
 type = "choice"
 choices = ["draft", "sent", "paid", "void"]
 required = true
+
+# Whoever writes it (the office, the pack's invoicing, an import), its total is its fee plus HST.
+[[check]]
+when = "record.total != null"
+must = "record.total == record.amount + record.hst"
+message = "the total is the fee plus HST"
 
 [number]
 field = "number"

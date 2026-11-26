@@ -49,6 +49,7 @@ from pathlib import Path
 
 from .hub import Hub, HubError
 from . import pack as packmod
+from . import decimals
 
 
 def state_dir(args) -> Path:
@@ -467,11 +468,12 @@ def _dump(store, dest: Path) -> dict:
     opts = _json_options()
     dest.mkdir(parents=True, exist_ok=True)
     counts, head = {}, None
+    raw = store.client.get_database(store.name)  # exact numbers read as Decimal128: written as $numberDecimal
     with store.client.start_session(snapshot=True) as s:
         for name in store.collections():
             n = 0
             with open(dest / f"{name}.jsonl", "w", encoding="utf-8") as fh:
-                for doc in store.db[name].find({}, session=s).sort("_id", 1):
+                for doc in raw[name].find({}, session=s).sort("_id", 1):
                     fh.write(json_util.dumps(doc, json_options=opts) + "\n")
                     n += 1
             counts[name] = n
@@ -547,7 +549,7 @@ def cmd_backup(args):
     if anchors.exists():
         shutil.copyfile(anchors, dest / "track.anchors")
     manifest["anchors"] = anchors.exists()
-    (dest / "backup.json").write_text(json.dumps(manifest, indent=2))
+    (dest / "backup.json").write_text(json.dumps(manifest, indent=2, default=decimals.jsonable))
     head = manifest["head"]
     print(f"backed up to {dest}/: the track up to event {head['seq']}, {sum(manifest['collections'].values())} "
           f"documents and {manifest['files']} file(s)" + (" and its anchors" if anchors.exists() else "")
@@ -572,7 +574,7 @@ def cmd_restore(args):
             kept = sd / f"before-restore-{time.strftime('%Y%m%d-%H%M%S')}"
             before = _dump(store, kept)
             before["anchors"] = False
-            (kept / "backup.json").write_text(json.dumps(before, indent=2))
+            (kept / "backup.json").write_text(json.dumps(before, indent=2, default=decimals.jsonable))
             print(f"the current database is kept in {kept}/ (restore it like any backup)")
             store.drop_database()
     sd.mkdir(parents=True, exist_ok=True)
@@ -781,7 +783,7 @@ def cmd_analytics(args):
     from . import analytics
     hub = build_hub(args)
     rep = analytics.report(hub, _person(hub, args.as_member), days=args.days)
-    print(json.dumps(rep, indent=1) if args.json else "\n".join(analytics.lines(rep)))
+    print(json.dumps(rep, indent=1, default=decimals.jsonable) if args.json else "\n".join(analytics.lines(rep)))
 
 
 def cmd_workflow_export_bpmn(args):
@@ -830,7 +832,7 @@ def cmd_openfga_init(args):
     headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {tok}"} if tok else {})}
 
     def post(path, body):
-        req = urllib.request.Request(url + path, data=json.dumps(body).encode(), method="POST", headers=headers)
+        req = urllib.request.Request(url + path, data=json.dumps(body, default=decimals.jsonable).encode(), method="POST", headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
 
@@ -850,7 +852,7 @@ def cmd_openfga_init(args):
 def cmd_keycloak_realm(args):
     from .integrations.keycloak import realm_export
     hub = build_hub(args)
-    print(json.dumps(realm_export(hub, args.realm, args.redirect), indent=2))
+    print(json.dumps(realm_export(hub, args.realm, args.redirect), indent=2, default=decimals.jsonable))
 
 
 def cmd_contract_export(args):
@@ -865,7 +867,7 @@ def cmd_contract_export(args):
             d = find(args.pack, "module")
         for f in sorted((d / "types").glob("*.toml")):
             types.append(schema.parse(f.read_text()))
-    print(json.dumps(contract.export(types), indent=2))
+    print(json.dumps(contract.export(types), indent=2, default=decimals.jsonable))
 
 
 def cmd_mcp(args):

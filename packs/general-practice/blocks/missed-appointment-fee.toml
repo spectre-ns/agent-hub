@@ -52,7 +52,8 @@ help = "missed appointments in the last 12 months, before this one"
 
 [[input]]
 name = "fee"
-type = "number"
+type = "decimal"
+scale = 2
 default = 50
 help = "the practice's fee, in dollars"
 
@@ -63,7 +64,8 @@ required = true
 
 [[output]]
 name = "amount"
-type = "number"
+type = "decimal"
+scale = 2
 required = true
 
 [[output]]

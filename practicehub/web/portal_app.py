@@ -21,6 +21,7 @@ from http import cookies
 
 from .assets import CSS
 from .server import CLIENT_HEADER, FORBIDDEN_PORTS, client_address, make_handler
+from .. import decimals
 
 e = html.escape
 SESSION = "php_session"
@@ -111,7 +112,7 @@ class HubClient:
         self.url, self.token, self.timeout = url.rstrip("/"), token, timeout
 
     def call(self, op: str, data: dict | None = None) -> dict:
-        req = urllib.request.Request(f"{self.url}/api/portal/{op}", data=json.dumps(data or {}).encode(),
+        req = urllib.request.Request(f"{self.url}/api/portal/{op}", data=json.dumps(data or {}, default=decimals.jsonable).encode(),
                                      method="POST", headers={"Authorization": f"Bearer {self.token}",
                                                              "Content-Type": "application/json"})
         try:
@@ -131,7 +132,7 @@ class LocalClient:
 
     def call(self, op: str, data: dict | None = None) -> dict:
         status, _, payload = self.app.handle("POST", f"/api/portal/{op}", {
-            "authorization": f"Bearer {self.token}", "content-type": "application/json"}, json.dumps(data or {}).encode())
+            "authorization": f"Bearer {self.token}", "content-type": "application/json"}, json.dumps(data or {}, default=decimals.jsonable).encode())
         return _answer(status, payload)
 
 

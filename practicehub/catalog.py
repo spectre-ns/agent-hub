@@ -17,7 +17,7 @@ import logging
 import re
 import tomllib
 
-from . import schema
+from . import expr, schema
 from . import views as viewmod
 from .pack import parse_skill
 from .store import DESC
@@ -41,7 +41,8 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
     - a move an edge of the workflow makes (where it goes, a diversion or an ``on_fail`` included) is not written
       again as a transition ``by = "workflow"``. Such a row is still the type's to write for a move made from
       outside its own run (another workflow's, a signature), for one from a value the workflow has no state for,
-      and for one it attaches ``asks``, ``requires`` or ``sign`` to;
+      and for one it attaches ``asks``, ``requires``, ``sign`` or a ``check`` to (an edge that makes the move
+      keeps it);
     - a value that only the workflow moves a record out of, over the type's moves and the workflow's edges
       together, says in ``abandoned`` where the record goes if that work is cancelled (itself, if it stays): the
       check a type makes of its own moves alone (``schema._parse``) cannot see the edges."""
@@ -60,7 +61,7 @@ def lifecycle_fit(rt: schema.RecordType, wf) -> list[str]:
             if e["from"] and to != e["from"]:
                 made.setdefault((e["from"], to), e["id"])
     for t in rows:
-        if t["by"] != "workflow" or t["asks"] or t["requires"] or t["sign"] or t["screen"]:
+        if t["by"] != "workflow" or t["asks"] or t["requires"] or t["sign"] or t["screen"] or t.get("check"):
             continue
         problems += [f"lifecycle.transition to {t['to']!r}: the {wf.id} workflow already moves a record from {f!r} "
                      f"to {t['to']!r} (its edge {made[f, t['to']]}); leave it out"
@@ -541,6 +542,22 @@ class CatalogMixin:
             if o.id != rt.id and rt.id in o.covers and not (rt.part_of and o.id in rt.part_of["target"]):
                 out.append(f"part_of: {o.label} covers it (covers = [\"{rt.id}\"]): it stays part of a "
                            f"{o.label.lower()}")
+        for t in (rt.lifecycle or {}).get("transition", []):  # a move's check reads parts of this type
+            for c in t.get("check") or []:
+                for pid in c["parts"]:
+                    prt = self.record_type(pid) if pid != rt.id else None
+                    where = f"lifecycle.transition to {t['to']!r}: check: parts.{pid}"
+                    if pid not in known:
+                        out.append(f"{where}: there is no record type {pid!r}")
+                    elif prt is not None and not (prt.part_of and any(x == rt.id or rt.is_a(x)
+                                                                      for x in prt.part_of["target"])):
+                        out.append(f"{where}: a {prt.label.lower()} is not part of a {rt.label.lower()}")
+                    elif prt is not None:
+                        for src in (c["must"], c.get("when")):
+                            for path in expr.paths(src) if src else []:
+                                bits = path.split(".")
+                                if bits[:2] == ["parts", pid] and len(bits) > 4 and prt.field(bits[4]) is None:
+                                    out.append(f"{where}: a {prt.label.lower()} has no field {bits[4]!r}")
         p = rt.period
         if p:
             crt = self.record_type(p["closed_by"])

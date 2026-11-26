@@ -40,6 +40,8 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
+from . import decimals
+
 ASC, DESC = pymongo.ASCENDING, pymongo.DESCENDING
 
 DEFAULT_URI = "mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true"
@@ -265,7 +267,9 @@ class Store:
         self.uri = uri
         self.client = client or client_for(uri)
         self.name = database or pymongo.uri_parser.parse_uri(uri).get("database") or "practicehub"
-        self.db = self.client[self.name]
+        # exact numbers (decimals.py) go in as Decimal128 and come back as Decimal, with their places
+        self.db = self.client.get_database(
+            self.name, codec_options=self.client.codec_options.with_options(type_registry=decimals.REGISTRY))
         self.fs = gridfs.GridFSBucket(self.db, bucket_name="files")
         self.lock = threading.RLock()
         self._depth = 0

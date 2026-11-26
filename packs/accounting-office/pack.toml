@@ -30,10 +30,13 @@
 #  with no gaps), no longer by the pack's own counter, and keeps its number and its date.
 # 1.5: the agents name no model, so a practice that installs the pack gets the hub's default (a local Ollama model);
 # the demo's past is still answered by the pack's stand-ins.
-version = "1.5"
+# 1.6: money is exact. Fees, invoice amounts, slip amounts and a return's figures are decimals kept to the cent (a
+#  share held to two places, in %), so 0.10 + 0.20 is 0.30 and a total never drifts; the pack works them out in
+#  Decimal and rounds half up, as the hub does. An invoice's total is its fee plus HST, on every write ([[check]]).
+version = "1.6"
 
 [practice]
-requires_core = "1.0"
+requires_core = "1.1"
 id = "tidewater"
 kind = "accounting-office"
 name = "Tidewater Chartered Professional Accountants"

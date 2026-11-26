@@ -16,6 +16,7 @@ import urllib.request
 from typing import Protocol
 
 from .db import Database
+from . import decimals
 
 AUTHZ_MODEL_DSL = """\
 model
@@ -113,7 +114,7 @@ class OpenFGAAuthorizer:
 
     def _call(self, method: str, path: str, body: dict | None = None) -> dict:
         req = urllib.request.Request(self.url + path, method=method,
-                                     data=json.dumps(body).encode() if body is not None else None,
+                                     data=json.dumps(body, default=decimals.jsonable).encode() if body is not None else None,
                                      headers={"Content-Type": "application/json",
                                               **({"Authorization": f"Bearer {self.token}"} if self.token else {})})
         with urllib.request.urlopen(req, timeout=10) as resp:

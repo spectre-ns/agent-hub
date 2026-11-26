@@ -18,6 +18,7 @@ from .. import schema
 from ..hub import Denied, Invalid, NotFound
 from ..live import live_fields, live_of, names, word_diff
 from .. import markup
+from .. import decimals
 
 e = html.escape
 T = r"(?P<rtype>[A-Za-z][\w]*)"
@@ -179,7 +180,7 @@ class LivePages:
         url = f"/records/{e(rt.id)}/{e(rec['id'])}"
         out["article"] = (f' data-live="{e(json.dumps({"ref": ref, "field": f["path"], "may": why is None, "active": bool(everyone), "me": me["id"], "url": f"/records/{rt.id}/{rec["id"]}",
                                                          **self._editor_extras(rt, rec, st),
-                                                         "colors": [self.AV_COLORS[i % len(self.AV_COLORS)] for i in range(8)]}))}"')
+                                                         "colors": [self.AV_COLORS[i % len(self.AV_COLORS)] for i in range(8)]}, default=decimals.jsonable))}"')
         if why is None:
             out["edit"] = (f'<a class="btn primary" href="{url}?edit=1#edit" data-live-edit accesskey="e" '
                            f'aria-keyshortcuts="Alt+E">Edit</a>')
@@ -448,8 +449,8 @@ class LivePages:
             if x == y:
                 continue
             any_change = True
-            sx = "\n".join(str(v) if not isinstance(v, (dict, list)) else json.dumps(v) for v in x)
-            sy = "\n".join(str(v) if not isinstance(v, (dict, list)) else json.dumps(v) for v in y)
+            sx = "\n".join(str(v) if not isinstance(v, (dict, list)) else json.dumps(v, default=decimals.jsonable) for v in x)
+            sy = "\n".join(str(v) if not isinstance(v, (dict, list)) else json.dumps(v, default=decimals.jsonable) for v in y)
             runs = "".join(f"<del>{e(t)}</del>" if k == "del" else f"<ins>{e(t)}</ins>" if k == "ins" else e(t)
                            for k, t in word_diff(sx, sy))
             out.append(f'<section class="diff"><h2>{e(f["label"])}</h2><div class="diff-text">{runs}</div></section>')

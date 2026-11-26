@@ -164,6 +164,92 @@ While a close is in one of its closing states, nothing dated on or before its `t
 period or out of it, by anyone. A closing state is locked, nothing changes a close in it, and every transition out
 of one carries `sign`: only a signed move reopens a period.
 
+### Exact numbers
+
+A `decimal` field keeps an exact number with a set number of places, as a `number` field keeps a float:
+
+```toml
+[[field]]
+name = "amount"
+type = "decimal"
+scale = 2                       # places, a whole number from 0 to 10 (required)
+unit = "CAD"                    # optional, at most 20 characters, shown beside the value (also on a number field)
+min = 0                         # bounds are exact too
+```
+
+A value is rounded half up (away from zero) to its places when it is written, whoever writes it: 12.345 is 12.35,
+-2.345 is -2.35, "1,234.5" is 1234.50, and -0.00 is 0.00. True or false, NaN, infinity, words and more than 15
+digits are refused, saying how to write one. It is stored exact (MongoDB's Decimal128), so it reads back with its
+places, 12.30 and not 12.3; writing the same number again (12.3 over 12.30) changes nothing, so a signature over it
+stays current. JSON (the API, MCP, exports, a backup) carries it as its exact text, `"12.30"`; FHIR, whose decimal is
+a JSON number, gets a number. A condition compares it as a number (a stored 0.10 is 0.1), and Python block code is
+given it as a `Decimal`. There is no currency key: a pack that keeps one says so with a field and a check.
+
+### Tables
+
+A `table` field holds rows (line items), each the same few columns:
+
+```toml
+[[field]]
+name = "lines"
+type = "table"
+min_rows = 1                    # optional
+max_rows = 200                  # optional, at most 1000 (the default)
+[[field.column]]                # a field without a path: string, text, number, decimal, boolean, date, datetime,
+name = "item"                   # choice, member or reference; never another table
+type = "reference"
+target = ["Item"]
+[[field.column]]
+name = "amount"
+type = "decimal"
+scale = 2
+required = true                 # in every row
+```
+
+Every row is checked against its columns ("Lines, row 2: What is required"); a cell that is no column is refused, and
+decimal cells are rounded in every row. A column is read at `lines.*.amount`, so a reference column links its record
+(by the column's name) as a reference field does. The form shows a grid, a row left blank being dropped; the record
+page shows a table; a list, CSV or spreadsheet shows "2 rows" in its cell.
+
+### Checks
+
+A type's `[[check]]` is a rule every write of its records keeps, whoever writes (a person, the API, MCP, a workflow,
+the hub); a pack upgrade does not run it, as it does not run `unique`:
+
+```toml
+[[check]]
+when = "count(record.lines.*) > 0"                    # optional: the check applies while this holds
+must = "record.amount == sum(record.lines.*.amount)"
+message = "the amount is the sum of its lines"         # the refusal, in the pack's words
+```
+
+A check reads the record's fields by name (`record.<field>`, wherever its path puts it) and `today`. A move can
+have checks of its own, kept by whoever makes the move, a person's step that would make it included (the step is not
+finished):
+
+```toml
+[[lifecycle.transition]]
+from = ["in-review"]
+to = "approved"
+[[lifecycle.transition.check]]
+must = "count(parts.Point.*, it.record.status != 'closed') == 0"
+message = "every review point is closed"
+[[lifecycle.transition.check]]
+must = "count(parts.Point.*, 'I checked it' in it.signed) == count(parts.Point.*)"
+message = "every review point is signed"
+```
+
+Only a move's check reads its record's parts, `parts.<part type>.*` (a type whose `part_of` points here), each with
+its `record` and `signed` (the meanings of its current signatures). They are read for the hub, whatever the mover may
+see; the mover is told only the message. A workflow's edge into the state keeps the same checks.
+
+Conditions, here and everywhere, add, subtract, multiply and divide exactly (`0.1 + 0.2 == 0.3`), in brackets too;
+anything over a missing value or text is null, as is dividing by zero. `sum`, `min`, `max` and `count` read every
+item of a list (`sum(record.lines.*.amount)`), or a value or condition over each, `it` being the item
+(`sum(record.lines.*, it.qty * it.price)`); a sum of nothing is 0, and min or max of nothing is null. A list read
+any other way is refused. `round(x, 2)` rounds half up. A date is written in quotes (`'2025-01-31'`); `today + 30d`
+still moves one.
+
 ## Skills
 
 ```toml

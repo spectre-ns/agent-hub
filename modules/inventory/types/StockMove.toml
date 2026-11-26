@@ -38,7 +38,8 @@ help = "the lot or serial it moves (a delivery makes its own)"
 
 [[field]]
 name = "quantity"
-type = "number"
+type = "decimal"
+scale = 3
 min = 0
 help = "how many (never negative: the kind says which way). For a count or an adjustment, how many there are. Left empty to hold, move, release or write off all of it."
 
@@ -98,21 +99,118 @@ by = "workflow"
 [[field]]
 name = "before_quantity"
 label = "Before"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 
 [[field]]
 name = "after_quantity"
 label = "After"
-type = "number"
+type = "decimal"
+scale = 3
 by = "workflow"
 
+# One line for each lot it changes: its quantity, status, place and count baseline before and after. A lot it makes
+# has no line's lot until the move is posted; its lot number, serial and expiry are what it is made with.
 [[field]]
 name = "entries"
 label = "Ledger lines"
-type = "json"
+type = "table"
 by = "workflow"
 help = "each lot it changes: quantity, status, place and count baseline before and after"
+
+[[field.column]]
+name = "lot"
+label = "Stock"
+type = "reference"
+target = ["StockItem"]
+rel = "entry-lot"
+
+[[field.column]]
+name = "part"
+type = "reference"
+target = ["Part"]
+rel = "entry-part"
+
+[[field.column]]
+name = "parent"
+label = "Split from"
+type = "reference"
+target = ["StockItem"]
+rel = "entry-parent"
+
+[[field.column]]
+name = "lot_number"
+label = "Lot number"
+max_length = 60
+
+[[field.column]]
+name = "serial"
+max_length = 60
+
+[[field.column]]
+name = "supplier_lot"
+label = "Supplier's lot"
+max_length = 60
+
+[[field.column]]
+name = "expiry"
+type = "date"
+
+[[field.column]]
+name = "part_revision"
+label = "Part revision"
+type = "number"
+
+[[field.column]]
+name = "quantity_before"
+label = "Quantity before"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "quantity_after"
+label = "Quantity after"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "status_before"
+label = "Status before"
+type = "choice"
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned"]
+
+[[field.column]]
+name = "status_after"
+label = "Status after"
+type = "choice"
+choices = ["inspection", "available", "quarantined", "depleted", "scrapped", "returned"]
+
+[[field.column]]
+name = "location_before"
+label = "From"
+type = "reference"
+target = ["Location"]
+rel = "entry-from"
+
+[[field.column]]
+name = "location_after"
+label = "To"
+type = "reference"
+target = ["Location"]
+rel = "entry-to"
+
+[[field.column]]
+name = "baseline_before"
+label = "Baseline before"
+type = "decimal"
+scale = 3
+
+[[field.column]]
+name = "baseline_after"
+label = "Baseline after"
+type = "decimal"
+scale = 3
 
 [[field]]
 name = "policy"
