@@ -2,8 +2,9 @@
 
 An agent is a member like any other. It sees only its own inbox, claims an item, reads the item's context (only the
 data its roles may read), asks its model, and submits the answer through the same calls a person's form uses, so
-the same validation, guards and audit apply. When the model is unsure, or its answer is refused twice, the item is
-escalated to people. The runner never decides what an agent may do; the hub does, on every call.
+the same validation, guards and audit apply. A refused answer is asked again once, with why and the answer itself
+(to change only what was refused). When the model is unsure, or its answer is refused twice, the item is escalated
+to people. The runner never decides what an agent may do; the hub does, on every call.
 
 A notice that it was mentioned is answered in the thread it was mentioned in (:meth:`AgentRunner.answer_mention`):
 from what it was given there, and when it cannot answer, it says so there, for a person to take up. Other notices
@@ -243,11 +244,13 @@ class AgentRunner:
         self.client.claim(iid)
         ctx = self.client.context(iid)
         pictures = self._pictures(me, ctx)
-        feedback = None
+        feedback = ans = None
         for attempt in (1, 2):
-            if feedback:
+            if feedback:  # the answer itself goes back too: told only what was wrong, a model starts over and loses what it had right
+                was = json.dumps(ans, default=str, ensure_ascii=False)[:8000]
                 ctx = {**ctx, "step": {**ctx["step"], "instructions": (ctx["step"].get("instructions") or "")
-                                       + "\n\nYour previous answer was not accepted: " + "; ".join(feedback)}}
+                                       + "\n\nYour previous answer was not accepted: " + "; ".join(feedback)
+                                       + f"\nIt was: {was}\nKeep what it had right; change only what was refused."}}
             try:
                 out = self.gateway.answer(me, ctx, me.get("practice", "the practice"), pictures=pictures)
             except ModelError as exc:

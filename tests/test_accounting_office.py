@@ -1442,6 +1442,7 @@ def test_a_reading_the_slip_would_refuse_is_sent_back_to_the_agent(firm):
     gw.backends["ollama"] = Eyes()
     run_all_local(firm, gw, log=quiet)
     assert len(tries) == 2 and "Tax deducted is below 0" in tries[1]
+    assert '"issuer": "Scotiabank"' in tries[1] and "change only what was refused" in tries[1]  # what it had right
     slip = firm.records.read(*sref.split("/"))
     assert slip["status"] == "extracted" and slip["tax_deducted"] == 0
     assert not firm.db.items.find_one({"run_id": _run_on(firm, sref, "slip-intake")["id"], "kind": "notice"})
