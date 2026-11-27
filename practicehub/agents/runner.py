@@ -6,6 +6,10 @@ the same validation, guards and audit apply. A refused answer is asked again onc
 (to change only what was refused). When the model is unsure, or its answer is refused twice, the item is escalated
 to people. The runner never decides what an agent may do; the hub does, on every call.
 
+What the model thinks on a step is kept on the hub as it comes (:class:`_Thoughts`, about once a second, and when
+the attempt ends), for the record's History. Keeping it never holds up the work: a write the hub does not take is
+only logged.
+
 A notice that it was mentioned is answered in the thread it was mentioned in (:meth:`AgentRunner.answer_mention`):
 from what it was given there, and when it cannot answer, it says so there, for a person to take up. Other notices
 are for people.
@@ -21,7 +25,7 @@ import time
 import urllib.error
 import urllib.request
 
-from ..models import ModelError, ModelGateway
+from ..models import Looped, ModelError, ModelGateway, Thinking
 from .. import decimals
 
 
@@ -89,6 +93,9 @@ class LocalClient:
         except NotFound as exc:
             raise Refused(str(exc)) from None
 
+    def think(self, item_id, attempt, text, end, model):
+        return self._call(self.hub.engine.think, self._me(), item_id, attempt, text, end, model)
+
     def reply_mention(self, mid, body):
         from ..hub import NotFound
         from ..mentions import mentions_of
@@ -152,8 +159,42 @@ class HttpClient:
     def file(self, ref, blob):
         return self._req("GET", f"/api/records/{ref}/files/{blob}", raw=True)
 
+    def think(self, item_id, attempt, text, end, model):
+        return self._req("POST", f"/api/items/{item_id}/thinking",
+                         {"attempt": attempt, "text": text, "end": end, "model": model})
+
     def reply_mention(self, mid, body):
         return self._req("POST", f"/api/mentions/{mid}/reply", {"body": body})
+
+
+class _Thoughts:
+    """One attempt's thinking, kept on the hub as it comes: at most once every ``EVERY`` seconds while the model
+    thinks, and once more when the attempt ends. A model that thinks nothing (a stand-in, thinking off) keeps
+    nothing. A write the hub does not take, or cannot be reached for, is logged once, and the work goes on."""
+
+    EVERY = 1.0
+
+    def __init__(self, runner, me: dict, iid: str, attempt: int):
+        self.client, self.log, self.me, self.iid, self.attempt = runner.client, runner.log, me, iid, attempt
+        self.thinking = Thinking(self._seen)
+        self.saved, self.last, self.told = "", 0.0, False
+
+    def _seen(self, thinking) -> None:
+        if time.monotonic() - self.last >= self.EVERY:
+            self.save()
+
+    def save(self, end: str | None = None) -> None:
+        text = self.thinking.text
+        if not text or (end is None and text == self.saved):
+            return
+        self.last = time.monotonic()
+        try:
+            self.client.think(self.iid, self.attempt, text, end, self.thinking.model)
+            self.saved = text
+        except (Refused, Rejected, ModelError, OSError) as exc:
+            if not self.told:
+                self.told = True
+                self.log(f"[{self.me['id']}] could not keep its thinking on {self.iid}: {exc}")
 
 
 # ------------------------------------------------------------------------------------------------------ runner
@@ -251,13 +292,18 @@ class AgentRunner:
                 ctx = {**ctx, "step": {**ctx["step"], "instructions": (ctx["step"].get("instructions") or "")
                                        + "\n\nYour previous answer was not accepted: " + "; ".join(feedback)
                                        + f"\nIt was: {was}\nKeep what it had right; change only what was refused."}}
+            thought = _Thoughts(self, me, iid, attempt)
             try:
-                out = self.gateway.answer(me, ctx, me.get("practice", "the practice"), pictures=pictures)
+                out = self.gateway.answer(me, ctx, me.get("practice", "the practice"), pictures=pictures,
+                                          thinking=thought.thinking)
             except ModelError as exc:
+                thought.save("looped" if isinstance(exc, Looped) else "failed")
                 return self._escalate(me, iid, f"model failed: {exc}")
             if out["escalate"]:
+                thought.save("escalated")
                 return self._escalate(me, iid, out["reason"] or "the agent is not sure")
             ans = out["answer"]
+            thought.save("answered")  # while the item is still its own: once it is done, it is no one's to write
             try:
                 if ctx["step"]["kind"] == "gate":
                     self.client.decide(iid, ans.get("outcome", ""), ans.get("comment", ""))

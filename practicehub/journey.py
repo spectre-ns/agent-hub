@@ -15,6 +15,10 @@ from the runs about the record, their pinned workflow versions (``shape``, pract
 and the track. A step belongs to a move by the edge it was written on, never by when it ran: an edge's automations
 may run after the move they belong to, and a wait ends after the move that ended it.
 
+A piece of work an agent did carries what its model thought, attempt by attempt (``thoughts``, kept by
+``Engine.think`` as the model thinks): shown to whoever may see the step, and never for a run withheld from them.
+Thinking still coming makes the journey live, so the page fetches it again while the model is at it.
+
 What the viewer may not see is counted, never told: a hidden piece of work is a fold with its data classes; a move
 along an edge whose choice they may not know (``Viewer.edge_visible``) keeps where the record went, which is the
 record's own history, without the edge's name or the ways out it was chosen over.
@@ -36,6 +40,8 @@ _STEP_ACTIONS = ["run.started", "run.completed", "run.cancelled", "run.stopped",
 _OWN_ACTIONS = ["record.created", "record.updated", "record.transitioned", "record.signed"]
 _GOING = ("queued", "running")
 LIVE_FOR = 600  # seconds an agent's open work, or a message waiting to be sent, keeps the page asking for news
+THINKING_FOR = 300  # seconds thinking that has not ended may go unwritten (the model is writing its answer) before
+                    # it is taken to have stopped with whatever was running it
 
 
 def _kind(actor_kind) -> str:
@@ -55,11 +61,12 @@ class JourneyMixin:
     def record_journey_token(self, viewer: dict, ref: str) -> str:
         """What changes whenever the journey could: the last event of the runs about the record (their steps, their
         messages), the last write of the record itself (a view is not one) and who is asking. Cheap: nothing is
-        built, so a page that asks again and again is answered from two index reads."""
+        built, so a page that asks again and again is answered from a few index reads."""
         ids = [r["id"] for r in self.db.runs.find({"record": ref}, fields=["id"])]
         a = self.db.events.max("seq", {"run_id": {"$in": ids}}, default=0) if ids else 0
         b = self.db.events.max("seq", {"subject": ref, "action": {"$in": _OWN_ACTIONS}}, default=0)
-        return hashlib.sha256(f"{viewer.get('id')}|{ref}|{a}|{b}".encode()).hexdigest()[:24]
+        c = self.db.thoughts.max("tick", {"run_id": {"$in": ids}}, default=0) if ids else 0  # a model thinking
+        return hashlib.sha256(f"{viewer.get('id')}|{ref}|{a}|{b}|{c}".encode()).hexdigest()[:24]
 
     def record_journey(self, viewer: dict, ref: str) -> dict:
         """The record's journey as ``{"stages", "live", "busy", "token"}``, oldest stage first::
@@ -68,7 +75,7 @@ class JourneyMixin:
                      "seconds", "now", "entered": {"how", "by", "label", "from"} | None, "by", "lines", "moves"}
             line  = {"kind": "work", "what": "task" | "decision" | "wait" | "automatic", "title", "status", "by",
                      "for", "at", "done_at", "seconds", "since", "chose", "signed", "approved_by", "via_move",
-                     "error"}
+                     "error", "thoughts"}
                   | {"kind": "edit", "at", "by", "changed", "unread", "comment"}
                   | {"kind": "signature", "at", "by", "meaning"}
                   | {"kind": "note", "what": "began" | "finished" | "cancelled" | "stopped", "title", "by", "why",
@@ -87,7 +94,14 @@ class JourneyMixin:
         person, when it has one), ``people_only``, and ``passed`` (``{"by", "at", "up", "note"}``) when whoever last
         had it gave it back or, an agent that could not do it, passed it up to a person. ``live``: something is
         going on that will change this without anyone here doing anything (a job in the queue or under way, an agent
-        with open work, a message on its way); ``busy``: a job is in the queue or under way."""
+        with open work or thinking now, a message on its way); ``busy``: a job is in the queue or under way, or a
+        model is thinking.
+
+        ``thoughts`` (an agent's work): what its model thought, one per attempt, oldest first: ``{"key", "attempt",
+        "model", "text", "cut", "end", "going", "refused", "at", "seconds", "words"}``. ``end``: answered,
+        escalated, failed, looped (stopped going round in a loop), stopped (whatever ran it stopped) or None while it
+        is still coming (``going``); ``refused``: its answer was not taken, and another attempt followed; ``cut``:
+        characters left out of the middle of very long thinking."""
         rtype, _, rid = ref.partition("/")
         rt = self._type(rtype)
         self.require(viewer, "reader", f"data_class:{self.class_of(rtype)}", f"read {rtype} records")
@@ -153,6 +167,11 @@ class _Journey:
             sid = (e.get("data") or {}).get("step")
             if isinstance(sid, str):
                 self.by_step.setdefault((e["run_id"], sid), []).append(e)
+        self.thoughts: dict = {}
+        if self.runs:
+            for t in hub.db.thoughts.find({"run_id": {"$in": [r["id"] for r in self.runs]}},
+                                          sort=[("started_at", ASC), ("attempt", ASC)]):
+                self.thoughts.setdefault((t["run_id"], t["step_id"]), []).append(t)
         self.items = {i["id"]: i for i in hub.db.items.find(
             {"run_id": {"$in": [r["id"] for r in self.runs if r.get("status") == "running"]},
              "kind": {"$ne": "notice"}}, fields=["id", "run_id", "step_id", "status", "claimed_by", "updated_at", "role", "assignee",
@@ -550,13 +569,14 @@ class _Journey:
                                           "classes": " and ".join(missing), "titles": []}))
             return
         withheld = bool(self.view.run_withheld(run))
+        thoughts = [] if withheld else self.thought_lines(self.thoughts.get((run["id"], sid)) or [])
         opened = next((e for e in evs if e["action"] in ("step.activated", "step.waiting", "step.queued")), first)
         claimed = next((e for e in reversed(evs) if e["action"] == "item.claimed"), None)
         item = self.items.get(st.get("item")) if st.get("item") else None
         line = {"kind": "work", "title": step.title or sid, "at": opened["at"] if opened else None,
                 "done_at": None, "seconds": None, "by": None, "for": None, "assigned": None, "people_only": False,
                 "passed": None, "since": None, "chose": None,
-                "signed": False, "approved_by": None, "via_move": via_move, "error": None,
+                "signed": False, "approved_by": None, "via_move": via_move, "error": None, "thoughts": thoughts,
                 "what": {"task": "task", "gate": "decision", "wait": "wait"}.get(step.kind, "automatic")}
         if step.kind in ("task", "gate"):
             done = next((e for e in reversed(evs) if e["action"] in ("item.completed", "gate.decided")), None)
@@ -629,6 +649,25 @@ class _Journey:
             else:
                 return
         where["_lines"].append((seq, line))
+
+    def thought_lines(self, rows: list[dict]) -> list[dict]:
+        """A step's thinking as the History shows it. Thinking still coming makes the journey live and busy, so the
+        page asks again within a couple of seconds."""
+        out = []
+        for n, t in enumerate(rows):
+            end, quiet = t.get("end"), _seconds(t.get("at"), self.now)
+            going = end is None and quiet is not None and quiet < THINKING_FOR
+            if end is None and not going:
+                end = "stopped"
+            later = any(r["item"] == t["item"] and r["attempt"] > t["attempt"] for r in rows[n + 1:])
+            text = t.get("text") or ""
+            out.append({"key": t["_id"], "attempt": t["attempt"], "model": t.get("model"), "text": text,
+                        "cut": t.get("cut") or 0, "end": end, "going": going,
+                        "refused": end == "answered" and later, "at": t.get("at"),
+                        "seconds": _seconds(t.get("started_at"), t.get("at")), "words": len(text.split())})
+            if going:
+                self.live = self.busy = True
+        return out
 
     @staticmethod
     def fold(lines: list[dict]) -> list[dict]:

@@ -170,20 +170,22 @@ class Chat:
         if not c or c["person"] != person["id"]:
             raise NotFound("there is no such conversation")
         if c.get("busy") and self._stale(cid, c["busy"]):
-            if self.db.chats.update({"_id": cid, "busy": c["busy"]}, {"$set": {"busy": None}}):
+            if self.db.chats.update({"_id": cid, "busy": c["busy"]}, {"$set": {"busy": None, "thinking": None}}):
                 self._add(cid, "agent", "My answer was cut off: the hub stopped while I was working on it. Please "
                                         "ask again.", error=True)
             c = self.db.chats.get(cid)
         return self._out(c)
 
-    def wait(self, person: dict, cid: str, since: int, busy: bool, wait: float = WAIT) -> dict:
+    def wait(self, person: dict, cid: str, since: int, busy: bool, wait: float = WAIT, tick=None) -> dict:
         """The chat once it has a message after ``since``, or is no longer (or now) answering, or after ``wait``
-        seconds: what a page waiting for the answer asks. A turn another process runs is seen within a second."""
+        seconds: what a page waiting for the answer asks. A turn another process runs is seen within a second.
+        With ``tick`` (that of the thinking the page has, 0 for none), thinking that has grown since is news too."""
         deadline = time.monotonic() + max(0.0, min(float(wait), WAIT))
         while True:
             c = self.get(person, cid)
             left = deadline - time.monotonic()
-            if c["n"] > since or c["busy"] != busy or left <= 0:
+            now = (c["thinking"] or {}).get("tick") or 0
+            if c["n"] > since or c["busy"] != busy or left <= 0 or (tick is not None and now != tick):
                 return c
             with _NEWS:
                 _NEWS.wait(min(left, 1.0))
@@ -196,11 +198,11 @@ class Chat:
     @staticmethod
     def _out(c: dict) -> dict:
         return {k: c.get(k) for k in ("id", "person", "agent", "title", "at", "updated_at", "n", "resources")} | {
-            "busy": bool(c.get("busy"))}
+            "busy": bool(c.get("busy")), "thinking": c.get("thinking") if c.get("busy") else None}
 
     @staticmethod
     def _msg(m: dict) -> dict:
-        return {k: m.get(k) for k in ("id", "n", "role", "body", "tool", "args", "refs", "error", "at")}
+        return {k: m.get(k) for k in ("id", "n", "role", "body", "tool", "args", "refs", "error", "at", "thinking")}
 
     def _stale(self, cid: str, busy: dict) -> bool:
         if cid in _RUNNING:
@@ -267,16 +269,21 @@ class Chat:
         return self.answer(person["id"], cid, seq)
 
     def _idle(self, cid: str) -> None:
-        self.db.chats.set(cid, {"busy": None})
+        self.db.chats.set(cid, {"busy": None, "thinking": None})
         _RUNNING.discard(cid)
         _news()
 
     def answer(self, person_id: str, cid: str, cause: int) -> dict:
         """The agent's turn: it asks its model, runs the calls the model makes (at most ``MAX_CALLS``), and ends
-        with its answer. Returns the agent's message. The chat is free again however the turn ends."""
-        from .models import ModelError, chat_system
+        with its answer. Returns the agent's message. The chat is free again however the turn ends.
+
+        What the model thinks is shown as it comes (the chat's ``thinking``, saved about once a second), and kept
+        with the first message that call made: its words, else its first tool call, else the failure. Thinking that
+        goes round in a loop stops the call, and the turn fails, saying so."""
+        from .models import Looped, ModelError, chat_system
         c = self.db.chats.get(cid)
         agent_id, made, spec = c["agent"], 0, None
+        thought = None  # the last call's thinking, until a message carries it
         done = threading.Event()
         threading.Thread(target=self._beat, args=(cid, done), daemon=True).start()
         try:
@@ -286,27 +293,32 @@ class Chat:
                 tools = self.tools(offer) if made < MAX_CALLS else []
                 system = chat_system(agent, person, self.hub.practice.get("name") or "the practice",
                                      self._rules(), self._menu(offer))
-                out = self.gateway.chat(agent, system, self._history(cid), tools, {"chat": cid})
+                thought = _Thought(self, cid)
+                out = self.gateway.chat(agent, system, self._history(cid), tools, {"chat": cid},
+                                        thinking=thought.thinking)
                 spec = out.get("model")
                 calls = out["calls"][:MAX_CALLS - made] if tools else []
                 text = (out.get("text") or "").strip()
                 if not calls:
                     msg = self._add(cid, "agent", text or ("I used as many tools as I may for one answer: ask me "
-                                                            "to go on." if made >= MAX_CALLS else "(no answer)"))
+                                                            "to go on." if made >= MAX_CALLS else "(no answer)"),
+                                    thinking=thought.done("answered"))
                     self.hub.track.append(agent, "chat.answered", f"chat:{cid}", cause=cause,
                                           data={"chat": cid, "message": msg["id"], "calls": made, "model": spec})
                     return msg
                 if text:
-                    self._add(cid, "agent", text)
+                    self._add(cid, "agent", text, thinking=thought.done("answered"))
                 for call in calls:
                     person, agent = self._pair(person_id, agent_id)
                     got = self.call(person, agent, offer, cid, call, cause)
                     self._add(cid, "tool", got["body"][:RESULT_CHARS], tool=str(call.get("name") or "")[:64],
                               args=call.get("args") if isinstance(call.get("args"), dict) else None,
-                              refs=got.get("refs"), error=got.get("error"))
+                              refs=got.get("refs"), error=got.get("error"), thinking=thought.done("answered"))
                     made += 1
         except Exception as exc:  # noqa: BLE001 - however the turn fails, the person is told, and the track has it
-            if isinstance(exc, ModelError):
+            if isinstance(exc, Looped):
+                why = "my model's thinking went round in a loop, so it was stopped"
+            elif isinstance(exc, ModelError):
                 why = "my model did not answer"
             elif isinstance(exc, HubError):
                 why = str(exc).rstrip(".")
@@ -314,7 +326,8 @@ class Chat:
                 import traceback
                 traceback.print_exc()
                 why = "the hub could not finish it (an internal error, logged)"
-            msg = self._add(cid, "agent", f"I can't answer this: {why}.", error=True)
+            msg = self._add(cid, "agent", f"I can't answer this: {why}.", error=True,
+                            thinking=thought.done("looped" if isinstance(exc, Looped) else "failed") if thought else None)
             try:
                 actor = self.hub.member(agent_id)
             except HubError:
@@ -595,6 +608,43 @@ class Chat:
             self._used(cid, ref, "started", seq)
         return {"body": _json({"run": out["run"]["id"], "status": out["run"]["status"], "record": ref}),
                 "refs": [ref] if ref else []}
+
+
+class _Thought:
+    """One model call's thinking in a chat: shown on the chat while it comes (at most about once a second), then
+    handed, once, to the message the call made."""
+
+    EVERY = 1.0
+
+    def __init__(self, chat: Chat, cid: str):
+        from .models import Thinking
+        self.chat, self.cid, self.t0, self.last, self.given = chat, cid, time.monotonic(), 0.0, False
+        self.thinking = Thinking(self._seen)
+
+    def _seen(self, thinking) -> None:
+        now = time.monotonic()
+        if now - self.last < self.EVERY and not thinking.looped:
+            return
+        self.last = now
+        from .models import kept
+        text, cut = kept(thinking.text)
+        self.chat.db.chats.update({"_id": self.cid, "busy": {"$ne": None}}, {"$set": {"thinking": {
+            "text": text, "cut": cut, "model": thinking.model, "tick": time.time_ns(),
+            "seconds": int(now - self.t0)}}})
+        _news()
+
+    def done(self, end: str) -> dict | None:
+        """The thinking, for the first message that asks (later ones get None), and the chat's live copy gone."""
+        if self.given:
+            return None
+        self.given = True
+        self.chat.db.chats.update({"_id": self.cid}, {"$set": {"thinking": None}})
+        if not self.thinking.text:
+            return None
+        from .models import kept
+        text, cut = kept(self.thinking.text)
+        return {"text": text, "cut": cut, "model": self.thinking.model, "end": end,
+                "seconds": int(time.monotonic() - self.t0)}
 
 
 def _obj(props: dict, required=()) -> dict:

@@ -34,6 +34,12 @@ practice did not approve for it.
 A model is given as long as it takes: agents and chats answer in the background, so a slow model only makes the
 answer later. No call to a model has a time limit (asking a server which models it has does, a few seconds).
 
+What a model thinks before it answers is handed, as it comes, to a :class:`Thinking` the caller passes: the runner
+keeps a step's (shown in the record's History), a chat each answer's. Ollama streams it, so it is seen while the model
+is still at it, and a model whose thinking goes round in a loop is stopped there (:class:`Looped`): with no time limit,
+nothing else would stop it. LiteLLM and Anthropic give it only with the answer, so it is shown once the answer is in,
+and only what they send (Anthropic sends none unless the model was asked to think). A stand-in thinks nothing.
+
 The models an agent's profile may be given are listed by :meth:`ModelGateway.offered`, for the profile form: what
 Ollama has installed, what LiteLLM serves (when its proxy is configured), Claude's models (when the practice allows
 models off the premises), and ``standin``. Each says whether it takes pictures, when its server says.
@@ -67,6 +73,68 @@ def default_model() -> str:
 
 class ModelError(Exception):
     pass
+
+
+class Looped(ModelError):
+    """The model's thinking went round in a loop, and its call was stopped."""
+
+
+LOOP_TAIL = 200    # characters at the end of the thinking that, said LOOP_REPEATS times in it, are a loop
+LOOP_REPEATS = 3
+LOOP_EVERY = 50    # pieces of thinking between looks
+THINKING_KEPT = 120_000  # characters of one call's thinking that are kept: its start and, mostly, its end
+
+
+def kept(text: str, cap: int = THINKING_KEPT) -> tuple[str, int]:
+    """Thinking cut to at most ``cap`` characters, and how many were left out of its middle."""
+    cut = max(0, len(text) - cap)
+    if cut:
+        head = cap // 6
+        text = text[:head] + text[head + cut:]
+    return text, cut
+
+
+class Thinking:
+    """What a model thinks before it answers, gathered as it comes: ``seen(self)`` is told each time it grows (a
+    writer that keeps it decides how often to save it). Thinking that goes round in a loop, its last ``LOOP_TAIL``
+    characters already said ``LOOP_REPEATS`` times or more, raises :class:`Looped`, which stops the call."""
+
+    def __init__(self, seen=None):
+        self.seen = seen
+        self.model = None  # the model thinking: the gateway says, before it asks
+        self._parts: list[str] = []
+        self._pieces = 0
+        self.looped = False
+
+    @property
+    def text(self) -> str:
+        if len(self._parts) > 1:
+            self._parts[:] = ["".join(self._parts)]
+        return self._parts[0] if self._parts else ""
+
+    def add(self, piece) -> None:
+        if not isinstance(piece, str) or not piece:
+            return
+        self._parts.append(piece)
+        self._pieces += 1
+        if self.seen is not None:
+            self.seen(self)
+        if self._pieces % LOOP_EVERY == 0:
+            text = self.text
+            tail = text[-LOOP_TAIL:]
+            if len(text) > 4 * LOOP_TAIL and text.count(tail) >= LOOP_REPEATS:
+                self.looped = True
+                if self.seen is not None:
+                    self.seen(self)
+                raise Looped("the model's thinking went round in a loop, saying the same thing over and over; "
+                             "it was stopped")
+
+    def whole(self, text) -> None:
+        """Thinking that came all at once, with the answer (a backend that does not stream it)."""
+        if isinstance(text, str) and text:
+            self._parts = [text]
+            if self.seen is not None:
+                self.seen(self)
 
 
 SYSTEM = """You are {name}, an agent member of {practice}. You hold the role "{role}" and do administrative work \
@@ -301,6 +369,23 @@ def _get(url: str, headers: dict, timeout: float) -> dict:
     return _send(urllib.request.Request(url, headers=headers), url, timeout)
 
 
+def _stream(url: str, body: dict, headers: dict, timeout: float | None):
+    """The pieces of a streamed answer (one JSON object a line), as they come. Leaving the loop early closes the
+    connection, and the server stops."""
+    req = urllib.request.Request(url, data=json.dumps(body, default=decimals.jsonable).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for line in resp:
+                if line.strip():
+                    yield json.loads(line)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:500]
+        raise ModelError(f"{url} answered {exc.code}: {detail}") from None
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        raise ModelError(f"cannot reach {url}: {exc}") from None
+
+
 def _send(req, url: str, timeout: float | None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -321,7 +406,8 @@ class Standin:
         self.standins = standins
         self.is_a = is_a  # the hub's, for a stand-in that takes it (``pack.taken``)
 
-    def __call__(self, model: str, system: str, prompt: str, schema: dict, ctx: dict, pictures=()) -> dict:
+    def __call__(self, model: str, system: str, prompt: str, schema: dict, ctx: dict, pictures=(),
+                 thinking=None) -> dict:
         step = ctx["step"]
         # what pictures it was shown, never their bytes: a stand-in reads nothing
         ctx = {**ctx, "pictures": [{k: p.get(k) for k in ("name", "contentType", "size")} for p in pictures]}
@@ -335,7 +421,7 @@ class Standin:
             out = {"answer": out, "escalate": False, "reason": "stand-in answer"}
         return {"answer": out["answer"], "escalate": bool(out.get("escalate")), "reason": out.get("reason", "")}
 
-    def chat(self, model, system, rs, tools, ctx) -> dict:
+    def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
         """The pack's ``chat`` stand-in: ``fn(ctx) -> {text, calls}``, ``ctx`` holding the chat's ``messages``,
         the ``tools`` (by name) and the ``system`` prompt."""
         fn = self.standins.get("chat")
@@ -370,7 +456,32 @@ class Ollama:
         names = sorted({m.get("name") or m.get("model") or "" for m in got} - {""})
         return [{"name": n, "sees": self.sees(n, timeout=3)} for n in names]
 
-    def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+    def _chat(self, body: dict, thinking) -> dict:
+        """One streamed call to ``/api/chat``, put back together as the one answer Ollama would have sent: its
+        thinking goes to ``thinking`` as it comes, and a loop in it stops the call (:class:`Looped`)."""
+        thinking = thinking if thinking is not None else Thinking()
+        content, calls, last = [], [], {}
+        pieces = _stream(self.url + "/api/chat", {**body, "stream": True}, {}, self.timeout)
+        try:
+            for chunk in pieces:
+                if chunk.get("error"):
+                    raise ModelError(f"{self.url}/api/chat: {chunk['error']}")
+                msg = chunk.get("message") or {}
+                thinking.add(msg.get("thinking"))
+                if isinstance(msg.get("content"), str):
+                    content.append(msg["content"])
+                calls += msg.get("tool_calls") or []
+                last = chunk
+                if chunk.get("done"):
+                    break
+        finally:
+            pieces.close()  # the connection closes now, not when the generator is collected: the model stops
+        msg = {"role": "assistant", "content": "".join(content), "thinking": thinking.text}
+        if calls:
+            msg["tool_calls"] = calls
+        return {**last, "message": msg}
+
+    def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
         if pictures and not self.sees(model):
             raise ModelError(f"{model} does not take pictures: name a model that can see as the profile's vision_model")
         # a window that fits the context (num_ctx), and no thinking by default: a model that thinks first can spend
@@ -379,24 +490,24 @@ class Ollama:
         user = {"role": "user", "content": prompt}
         if pictures:
             user["images"] = [base64.b64encode(p["data"]).decode() for p in pictures]
-        body = {"model": model, "stream": False, "format": schema,
+        body = {"model": model, "format": schema,
                 "options": {"num_ctx": num_ctx()},
                 "think": os.environ.get("OLLAMA_THINK") == "1",
                 "messages": [{"role": "system", "content": system}, user]}
-        resp = _post(self.url + "/api/chat", body, {}, self.timeout)
+        resp = self._chat(body, thinking)
         msg = resp.get("message") or {}
         if not (msg.get("content") or "").strip():
             raise ModelError(f"the model gave no answer (stopped: {resp.get('done_reason') or 'unknown'}, "
                              f"{resp.get('prompt_eval_count', '?')} tokens read)")
         return parse_answer(msg["content"])
 
-    def chat(self, model, system, rs, tools, ctx) -> dict:
-        body = {"model": model, "stream": False, "messages": _openai_messages(system, rs, ollama=True),
+    def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
+        body = {"model": model, "messages": _openai_messages(system, rs, ollama=True),
                 "options": {"num_ctx": num_ctx()},
                 "think": os.environ.get("OLLAMA_THINK") == "1"}
         if tools:
             body["tools"] = _functions(tools)
-        resp = _post(self.url + "/api/chat", body, {}, self.timeout)
+        resp = self._chat(body, thinking)
         msg = resp.get("message") or {}
         calls = _calls(msg.get("tool_calls"), lambda c: (c.get("function") or {}).get("name"),
                        lambda c: (c.get("function") or {}).get("arguments"), lambda c: c.get("id"))
@@ -429,7 +540,7 @@ class LiteLLM:
         got = _get(self.url + "/v1/models", headers, 3).get("data") or []
         return [{"name": n, "sees": None} for n in sorted({m.get("id") or "" for m in got} - {""})]
 
-    def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+    def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
         content = prompt if not pictures else [{"type": "text", "text": prompt}] + [
             {"type": "image_url", "image_url": {"url": f"data:{p['contentType']};base64,"
                                                        f"{base64.b64encode(p['data']).decode()}"}} for p in pictures]
@@ -441,9 +552,11 @@ class LiteLLM:
         headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
         resp = _post(self.url + "/v1/chat/completions", body, headers, self.timeout)
         choice = (resp.get("choices") or [{}])[0]
+        if thinking is not None:  # what the proxy says the model reasoned, when it does
+            thinking.whole((choice.get("message") or {}).get("reasoning_content"))
         return parse_answer((choice.get("message") or {}).get("content") or "")
 
-    def chat(self, model, system, rs, tools, ctx) -> dict:
+    def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
         body = {"model": model, "messages": _openai_messages(system, rs, ollama=False),
                 "metadata": {"trace_user_id": ctx.get("agent", ""), "session_id": ctx.get("chat", ""),
                              "tags": [f"chat:{ctx.get('chat', '')}"]}}
@@ -452,6 +565,8 @@ class LiteLLM:
         headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
         resp = _post(self.url + "/v1/chat/completions", body, headers, self.timeout)
         msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
+        if thinking is not None:
+            thinking.whole(msg.get("reasoning_content"))
         calls = _calls(msg.get("tool_calls"), lambda c: (c.get("function") or {}).get("name"),
                        lambda c: (c.get("function") or {}).get("arguments"), lambda c: c.get("id"))
         if not calls and not (msg.get("content") or "").strip():
@@ -483,7 +598,13 @@ class Anthropic:
                    {"x-api-key": self.api_key, "anthropic-version": ANTHROPIC_VERSION}, 5).get("data") or []
         return [{"name": m["id"], "sees": True} for m in got if m.get("id")]
 
-    def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+    @staticmethod
+    def _thought(resp: dict, thinking) -> None:
+        if thinking is not None:  # the thinking blocks it sent, when the model was asked to think
+            thinking.whole("\n\n".join(b.get("thinking") or "" for b in resp.get("content") or []
+                                         if b.get("type") == "thinking" and b.get("thinking")))
+
+    def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
         if not self.api_key:
             raise ModelError("ANTHROPIC_API_KEY is not set")
         model = model or DEFAULT_ANTHROPIC_MODEL
@@ -499,6 +620,7 @@ class Anthropic:
             body["fallbacks"] = "default"
             headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
         resp = _post(self.base + "/v1/messages", body, headers, self.timeout)
+        self._thought(resp, thinking)
         stop = resp.get("stop_reason")
         if stop == "refusal":
             return {"answer": {}, "escalate": True, "reason": "the model declined this step"}
@@ -507,7 +629,7 @@ class Anthropic:
         text = next((b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text"), "")
         return parse_answer(text)
 
-    def chat(self, model, system, rs, tools, ctx) -> dict:
+    def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
         if not self.api_key:
             raise ModelError("ANTHROPIC_API_KEY is not set")
         model = model or DEFAULT_ANTHROPIC_MODEL
@@ -536,6 +658,7 @@ class Anthropic:
             body["fallbacks"] = "default"
             headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
         resp = _post(self.base + "/v1/messages", body, headers, self.timeout)
+        self._thought(resp, thinking)
         stop = resp.get("stop_reason")
         if stop == "refusal":
             return {"text": "I can't help with that.", "calls": []}
@@ -602,10 +725,11 @@ class ModelGateway:
                              "if the practice has decided that is allowed")
         return b, model
 
-    def answer(self, agent: dict, ctx: dict, practice: str = "the practice", pictures=()) -> dict:
+    def answer(self, agent: dict, ctx: dict, practice: str = "the practice", pictures=(), thinking=None) -> dict:
         """``{"answer", "escalate", "reason", "model"}`` for the work item described by ``ctx``. ``pictures``: the
         pictures its step carries ({name, contentType, size}, and ``data`` for one fetched to be shown), shown only
-        to the profile's ``vision_model``; any other model is told what it is not shown."""
+        to the profile's ``vision_model``; any other model is told what it is not shown. ``thinking``: a
+        :class:`Thinking` the model's thinking goes to, as it comes."""
         profile = agent.get("profile") or {}
         # a profile that names no model is an agent added before the hub gave one: it answers as it always did
         spec = profile.get("model") or "standin"
@@ -618,11 +742,13 @@ class ModelGateway:
         pack = getattr(self.hub, "pack", None)
         rules = (pack.practice.get("agent_rules") if pack else None) or []
         system, prompt = build_prompt(agent, ctx, practice, rules, shown=shown, unseen=unseen)
+        if thinking is not None:
+            thinking.model = spec
         out = backend(model, system, prompt, envelope(ctx["schema"]), {**ctx, "agent": agent.get("id", "")},
-                      pictures=shown)
+                      pictures=shown, thinking=thinking)
         return {**out, "model": spec}
 
-    def reply(self, agent: dict, ctx: dict, practice: str = "the practice", feedback=()) -> dict:
+    def reply(self, agent: dict, ctx: dict, practice: str = "the practice", feedback=(), thinking=None) -> dict:
         """``{"answer": {"body"}, "escalate", "reason", "model"}``: the agent's reply where it was mentioned. ``ctx``
         is what it was given (``Mentions.context``); its stand-in is the pack's ``mention``."""
         spec = "standin" if self.scripted else ((agent.get("profile") or {}).get("model") or "standin")
@@ -631,20 +757,25 @@ class ModelGateway:
         rules = (pack.practice.get("agent_rules") if pack else None) or []
         system, prompt = reply_prompt(agent, ctx, practice, rules, feedback)
         mid = (ctx.get("mention") or {}).get("id", "")
+        if thinking is not None:
+            thinking.model = spec
         out = backend(model, system, prompt, envelope(REPLY_SCHEMA),
                       {**ctx, "agent": agent.get("id", ""), "feedback": list(feedback),
                        "step": {"id": "mention", "kind": "mention", "skill": "mention", "title": "Answer a mention"},
-                       "run": {"id": mid}, "item": {"id": mid}})
+                       "run": {"id": mid}, "item": {"id": mid}}, thinking=thinking)
         return {**out, "model": spec}
 
-    def chat(self, agent: dict, system: str, messages: list[dict], tools: list[dict], ctx: dict | None = None) -> dict:
+    def chat(self, agent: dict, system: str, messages: list[dict], tools: list[dict], ctx: dict | None = None,
+             thinking=None) -> dict:
         """``{"text", "calls", "model"}``: the agent's next move in a chat (:mod:`practicehub.chat`). ``messages``:
         the conversation (``person``, ``agent`` and ``tool`` messages); ``tools``: ``{name, description, schema}``.
         The calls are data: ``{id, name, args}``, ``args`` None when the model gave no object. Its stand-in is the
         pack's ``chat``."""
         spec = "standin" if self.scripted else ((agent.get("profile") or {}).get("model") or "standin")
         backend, model = self.backend(spec)
+        if thinking is not None:
+            thinking.model = spec
         out = backend.chat(model, system, rounds(messages), tools,
-                           {**(ctx or {}), "agent": agent.get("id", ""), "messages": messages})
+                           {**(ctx or {}), "agent": agent.get("id", ""), "messages": messages}, thinking=thinking)
         return {"text": out.get("text") or "", "calls": list(out.get("calls") or []), "model": spec}
 

@@ -2762,6 +2762,44 @@ class Engine:
                               run_id=item["run_id"], cause=item["cause"], data={"note": note, "step": item["step_id"]})
         return self.item(item_id)
 
+    THOUGHT_ENDS = ("answered", "escalated", "failed", "looped")
+
+    def think(self, member: dict, item_id: str, attempt: int, text: str, end: str | None = None,
+              model: str | None = None) -> dict:
+        """What the agent's model has thought so far on the item it is working on, attempt by attempt: written again
+        as it grows (the runner does, about once a second), and once more when the attempt ends (``end``: answered,
+        escalated, failed, or ``looped``: stopped going round in a loop; an answer the hub refused is followed by
+        another attempt). Only the agent holding the item writes it, and an attempt that has ended is not written
+        again. It is kept beside the track, not on it: the
+        track says what was done and by whom; this is how a model got there, shown in the record's History to
+        whoever may see the step (:mod:`practicehub.journey`). Very long thinking keeps its start and its end."""
+        from .hub import Denied, Invalid
+        from .models import kept
+        item = self.item(item_id)
+        if member.get("kind") != "agent" or item["status"] != "claimed" or item["claimed_by"] != member["id"]:
+            raise Denied("only the agent working on an item keeps its thinking")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or not 1 <= attempt <= 9:
+            raise Invalid("attempt is a number from 1 to 9")
+        if not isinstance(text, str):
+            raise Invalid("text is the model's thinking, as text")
+        if end is not None and end not in self.THOUGHT_ENDS:
+            raise Invalid(f"end is one of {', '.join(self.THOUGHT_ENDS)}")
+        if model is not None and (not isinstance(model, str) or len(model) > 200):
+            raise Invalid("model names the model, in at most 200 characters")
+        text, cut = kept(text)
+        tid, now = f"{item_id}:{attempt}", utcnow()
+        fields = {"text": text, "cut": cut, "at": now, "end": end, "tick": time.time_ns()}
+        if model:
+            fields["model"] = model
+        n = self.hub.db.thoughts.update(
+            {"_id": tid, "end": None},
+            {"$set": fields, "$setOnInsert": {"item": item_id, "run_id": item["run_id"], "step_id": item["step_id"],
+                                              "member": member["id"], "attempt": attempt, "started_at": now}},
+            upsert=self.hub.db.thoughts.get(tid) is None)
+        if not n:
+            raise Invalid("that attempt's thinking has ended")
+        return {"id": tid, "end": end, "cut": cut}
+
     def holder(self, item: dict) -> str | None:
         """Who has this work in hand: whoever claimed it, else the one it is assigned to."""
         if item["status"] == "claimed":

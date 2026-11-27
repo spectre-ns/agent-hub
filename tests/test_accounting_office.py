@@ -1299,7 +1299,7 @@ def test_a_slip_photo_is_read_by_the_model_that_can_see_it_and_checked_against_t
     class Eyes:  # stands for the model that sees, on Ollama: what it is shown, and what it answers
         external = False
 
-        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+        def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
             shown.append((model, [p["data"] for p in pictures]))
             return {"answer": answers.pop(0), "escalate": False, "reason": "read from the photo"}
 
@@ -1361,7 +1361,7 @@ def test_a_photo_the_model_says_it_could_not_read_clearly_goes_to_a_person(firm)
     class Eyes:
         external = False
 
-        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+        def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
             tries.append(prompt)
             return {"answer": {**read, "text": T4 + "\n[Image is blurry, but the text is legible enough.]"},
                     "escalate": False, "reason": "read from the photo"}
@@ -1398,7 +1398,7 @@ def test_a_photo_s_reading_names_its_issuer_in_its_own_field(firm):
     class Eyes:
         external = False
 
-        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+        def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
             tries.append(prompt)
             if "Issued by is required" in prompt:
                 return {"answer": {**read, "issuer": "Scotiabank"}, "escalate": False, "reason": "read"}
@@ -1433,7 +1433,7 @@ def test_a_reading_the_slip_would_refuse_is_sent_back_to_the_agent(firm):
     class Eyes:
         external = False
 
-        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+        def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
             tries.append(prompt)
             fixed = "Tax deducted is below 0" in prompt
             return {"answer": {**read, "tax_deducted": 0 if fixed else -1}, "escalate": False, "reason": "read"}

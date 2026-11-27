@@ -2879,7 +2879,22 @@ function liveSections() {
   const say = el("div", { class: "visually-hidden", role: "status", "aria-live": "polite" });
   document.body.appendChild(say);
   const words = (n) => (n.textContent || "").replace(/\s+/g, " ").trim();
-  const lines = (n) => [...n.querySelectorAll("li")].map(words);
+  // a line's words, without an agent's thinking under it: that is followed, not read out
+  const lines = (n) => [...n.querySelectorAll("li")].map((li) => {
+    if (!li.querySelector(".jr-think")) return words(li);
+    const c = li.cloneNode(true);
+    c.querySelectorAll(".jr-think").forEach((x) => x.remove());
+    return words(c);
+  });
+  const thought = (n) => [...n.querySelectorAll(".jr-think-text")].map((x) => x.textContent.length).join(",");
+  // thinking opened while it is still coming shows its latest
+  document.addEventListener("toggle", (ev) => {
+    const d = ev.target;
+    if (d.matches && d.matches("details.jr-think.going") && d.open) {
+      const x = d.querySelector(".jr-think-text");
+      if (x) x.scrollTop = x.scrollHeight;
+    }
+  }, true);
   // a fold is the same fold after a swap when it sits in the same stage and says the same thing
   const key = (d) => d.dataset.key || (((d.parentElement && d.parentElement.closest("details[data-key]")) || { dataset: {} }).dataset.key || "")
     + "|" + words(d.querySelector("summary") || d).replace(/\d+/g, "#");
@@ -2903,8 +2918,11 @@ function liveSections() {
       tag = res.headers.get("ETag");
       const fresh = new DOMParser().parseFromString(await res.text(), "text/html").getElementById(id);
       if (!fresh) return;
-      const before = new Set(lines(sec));
+      const before = new Set(lines(sec)), thought0 = thought(sec);
       const open = new Map([...sec.querySelectorAll("details")].map((d) => [key(d), d.open]));
+      // where a reader had scrolled a long text (an agent's thinking) stays; one read to its end follows it on
+      const scrolled = new Map([...sec.querySelectorAll("[data-scroll-key]")].map((x) =>
+        [x.dataset.scrollKey, x.scrollHeight - x.scrollTop - x.clientHeight < 8 ? -1 : x.scrollTop]));
       fresh.querySelectorAll("details").forEach((d) => {
         const k = key(d);
         if (!open.has(k)) return;
@@ -2913,7 +2931,12 @@ function liveSections() {
       const node = document.adoptNode(fresh);
       sec.replaceWith(node);
       sec = node;
+      sec.querySelectorAll("[data-scroll-key]").forEach((x) => {
+        const was = scrolled.get(x.dataset.scrollKey);
+        if (was !== undefined) x.scrollTop = was < 0 ? x.scrollHeight : was;
+      });
       const changed = lines(sec).filter((t) => !before.has(t));
+      if (thought(sec) !== thought0) news = Date.now();  // a model still thinking is something going on
       if (changed.length) { news = Date.now(); say.textContent = "Updated: " + changed.slice(0, 3).join("; "); }
       else if (!sec.dataset.live) say.textContent = id === "activity" ? "Everything this move set going has settled." : "Nothing more is going on here.";
       if (!told && mark(sec) !== undefined && mark0 !== undefined && mark(sec) !== mark0) {
@@ -5459,6 +5482,11 @@ border:2px solid var(--line);border-top-color:var(--brand);border-radius:50%;ani
 @keyframes jr-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.jr-spin{animation:none}}
 @media (max-width:640px){.jr-at{margin-left:0;flex-basis:100%}}
+.jr-think{flex-basis:100%;margin:0 0 2px 32px;min-width:0}
+.jr-think>summary{cursor:pointer;color:var(--subtle);font-size:13px}
+.jr-think.going>summary{color:var(--brand);font-weight:600}.jr-think.looped>summary{color:var(--danger-fg)}
+.jr-think-text{max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.45;
+margin:4px 0 0;padding:8px 10px;background:var(--sunken);border:1px solid var(--line);border-radius:4px;color:var(--subtle)}
 """
 
 CSS = CSS + RECWORK_CSS
@@ -5573,6 +5601,7 @@ CHAT_JS = r"""
   const head = panel.querySelector("#chat-head"), back = panel.querySelector(".chat-back");
   const text = form.querySelector("textarea"), send = form.querySelector("button[type=submit]");
   let cur = null, n = 0, busy = false, watch = 0;  // the open conversation, its last message, whether it is answering
+  let tick = 0;  // the thinking shown while the agent is answering: 0 for none
 
   async function ask(method, url, data) {
     const r = await fetch(url, { method, credentials: "same-origin",
@@ -5652,14 +5681,15 @@ CHAT_JS = r"""
   }
 
   // ---- one conversation
-  let log = null, used = null, working = null;
+  let log = null, used = null, working = null, live = null;
   async function show(cid) {
-    cur = cid; n = 0; busy = false;
+    cur = cid; n = 0; busy = false; tick = 0;
     const mine = ++watch;
     back.hidden = false; form.hidden = false;
     log = node("ol", "chat-log"); used = node("details", "chat-used"); working = node("p", "chat-quiet chat-working");
     working.setAttribute("role", "status");
-    body.replaceChildren(log, working, used);
+    live = node("div", "chat-live");
+    body.replaceChildren(log, working, live, used);
     let got;
     try { got = await ask("GET", `/api/chats/${cid}?since=0`); } catch (err) { problem(err); return; }
     if (mine !== watch) return;
@@ -5669,13 +5699,41 @@ CHAT_JS = r"""
   }
   function take(got) {
     const c = got.chat;
+    const bottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
     head.textContent = c.agent_name;
     for (const m of got.messages) { if (m.n > n) { line(m, c); n = m.n; } }
     busy = c.busy;
     working.textContent = busy ? `${c.agent_name} is working on it…` : "";
+    thinkingNow(busy ? c.thinking : null);
     send.disabled = busy;
     records(c.resources || []);
-    body.scrollTop = body.scrollHeight;
+    if (bottom || got.messages.length) body.scrollTop = body.scrollHeight;
+  }
+  // what the model thinks: folded, and followed to its end while it comes unless the reader has scrolled up in it
+  function thought(t, going) {
+    const d = node("details", "chat-think" + (going ? " going" : "") + (t.end === "looped" ? " looped" : ""));
+    const secs = t.seconds ? `${t.seconds} s` : "a moment";
+    const words = (t.text.match(/\S+/g) || []).length;
+    const said = going ? `Thinking… ${words} words so far`
+      : t.end === "looped" ? `Went round in a loop after ${secs}, and was stopped`
+      : `Thought for ${secs}, ${words} words`;
+    d.append(node("summary", "", said));
+    if (t.cut) d.append(node("p", "chat-quiet", `${t.cut} characters from the middle are left out.`));
+    d.append(node("pre", "", t.text));
+    return d;
+  }
+  function thinkingNow(t) {
+    const was = live.querySelector("details"), pre = live.querySelector("pre");
+    const open = was ? was.open : false;
+    const end = pre ? pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8 : true, top = pre ? pre.scrollTop : 0;
+    tick = t ? t.tick : 0;
+    if (!t || !t.text) { live.replaceChildren(); return; }
+    const d = thought(t, true);
+    d.open = open;
+    live.replaceChildren(d);
+    const p = d.querySelector("pre");
+    p.scrollTop = end ? p.scrollHeight : top;
+    d.addEventListener("toggle", () => { if (d.open) p.scrollTop = p.scrollHeight; });
   }
   function line(m, c) {
     const li = node("li", "chat-msg " + m.role + (m.error ? " error" : ""));
@@ -5688,8 +5746,11 @@ CHAT_JS = r"""
       d.append(node("pre", "", m.body || ""));
       li.append(d);
     } else {
-      li.append(node("span", "chat-who", m.role === "person" ? "You" : c.agent_name), node("div", "chat-text", m.body));
+      li.append(node("span", "chat-who", m.role === "person" ? "You" : c.agent_name));
+      if (m.thinking) li.append(thought(m.thinking, false));
+      li.append(node("div", "chat-text", m.body));
     }
+    if (m.role === "tool" && m.thinking) li.prepend(thought(m.thinking, false));
     log.append(li);
   }
   function records(rs) {
@@ -5715,7 +5776,7 @@ CHAT_JS = r"""
   async function follow(mine) {  // until the agent has answered: each wait returns once there is something new
     while (mine === watch && busy) {
       try {
-        take(await ask("GET", `/api/chats/${cur}?since=${n}&busy=1&wait=25`));
+        take(await ask("GET", `/api/chats/${cur}?since=${n}&busy=1&wait=25&tick=${tick}`));
       } catch (err) {
         if (mine === watch) problem(err);
         await new Promise((ok) => setTimeout(ok, 3000));
@@ -5779,6 +5840,12 @@ border:1px solid var(--border);background:var(--surface);color:var(--fg);cursor:
 background:var(--sunken);border-radius:3px;font-size:11px}
 .chat-msg.tool.error summary{color:var(--danger-fg)}
 .chat-working:empty{display:none}
+.chat-think{margin:0 0 4px;font-size:12px;color:var(--subtle)}
+.chat-think summary{cursor:pointer}
+.chat-think.going summary{color:var(--brand);font-weight:600}.chat-think.looped summary{color:var(--danger-fg)}
+.chat-think pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;margin:4px 0 0;padding:6px 8px;
+background:var(--sunken);border-radius:3px;font-size:11px;line-height:1.45}
+.chat-live:empty{display:none}.chat-live{margin-top:4px}
 .chat-used{margin-top:12px;border-top:1px solid var(--border);padding-top:8px;font-size:13px}
 .chat-used[hidden]{display:none}
 .chat-used summary{cursor:pointer;font-weight:600}

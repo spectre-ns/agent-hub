@@ -129,6 +129,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         R("GET", r"/api/queue", self.api_queue)
         R("GET", r"/api/items/(?P<iid>[\w-]+)/context", self.api_context)
         R("POST", r"/api/items/(?P<iid>[\w-]+)/(?P<verb>claim|complete|decide|release|ack|take-over)", self.api_item_verb)
+        R("POST", r"/api/items/(?P<iid>[\w-]+)/thinking", self.api_item_thinking)
         R("GET", r"/api/runs", self.api_runs)
         R("POST", r"/api/runs", self.api_start)
         R("GET", r"/api/runs/(?P<rid>[\w-]+)", self.api_run)
@@ -464,6 +465,11 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         if verb == "take-over":
             return eng.take_over(me, iid, b.get("note", ""), to=b.get("to") or None)
         return eng.acknowledge(me, iid)
+
+    def api_item_thinking(self, req, iid):
+        """The agent's model's thinking on the item it holds, so far (Engine.think)."""
+        b = self.body_json(req)
+        return self.hub.engine.think(req["me"], iid, b.get("attempt"), b.get("text"), b.get("end"), b.get("model"))
 
     def api_runs(self, req):
         q = req["query"]

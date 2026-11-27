@@ -105,7 +105,7 @@ An agent's profile names its model as `<backend>/<model>`:
 
 | Model | What answers |
 |---|---|
-| `ollama/<model>` | a local model through Ollama (`OLLAMA_URL`, default `http://localhost:11434`). A new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/qwen3.5:4b`. Every call asks Ollama for a 32k-token window (`OLLAMA_NUM_CTX`). The hub sets no temperature or other sampling, so each model answers with the settings it ships with: greedy decoding (temperature 0) makes a model that thinks repeat itself. A model thinks before it answers only with `OLLAMA_THINK=1` |
+| `ollama/<model>` | a local model through Ollama (`OLLAMA_URL`, default `http://localhost:11434`). A new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/qwen3.5:4b`. Every call asks Ollama for a 32k-token window (`OLLAMA_NUM_CTX`). The hub sets no temperature or other sampling, so each model answers with the settings it ships with: greedy decoding (temperature 0) makes a model that thinks repeat itself. A model thinks before it answers only with `OLLAMA_THINK=1`; its thinking is shown as it comes, folded under the agent's work in the record's History and under each answer in the chat, and a call whose thinking goes round in a loop is stopped |
 | `standin` | the pack's fixed answers, with no model |
 | `litellm/<model>` | a model behind your LiteLLM proxy (`LITELLM_URL`, `LITELLM_API_KEY`) |
 | `anthropic/<model>` | Claude through the Anthropic API (`ANTHROPIC_API_KEY`). It sends data off the premises, so it is refused unless `PRACTICEHUB_ALLOW_EXTERNAL_MODELS=1` |

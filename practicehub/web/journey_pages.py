@@ -257,8 +257,31 @@ class JourneyPages:
             why = f': “{e(p["note"][:300])}”' if p.get("note") else ""
             passed = (f'<span class="jr-passed muted small">{self._by(p["by"])} {did}'
                       f' at {self._clock(p["at"], day)}{why}</span>')
+        thoughts = "".join(self._thought_html(t, len(ln.get("thoughts") or []) > 1) for t in ln.get("thoughts") or [])
         return (f'<li class="jr-line jr-work jr-{cls} jr-{e(status)}{going}">{mark}{title} '
-                f'<span class="jr-said">{said}</span> <span class="jr-who">{who}</span>{at}{passed}</li>')
+                f'<span class="jr-said">{said}</span> <span class="jr-who">{who}</span>{at}{passed}{thoughts}</li>')
+
+    def _thought_html(self, t: dict, several: bool) -> str:
+        """What the model thought on one attempt, folded: still coming (with the spinner), or how it ended. The page
+        keeps it open, and scrolled to its end, while it is fetched again."""
+        took = span_words(t["seconds"]) if t.get("seconds") else "a moment"
+        said = {None: f'{self.SPIN}Thinking now',
+                "answered": f"Thought for {took}, then answered",
+                "escalated": f"Thought for {took}, then passed it to a person",
+                "failed": f"Thought for {took}; then its model failed",
+                "looped": f"Went round in a loop after {took}, and was stopped",
+                "stopped": f"Thought for {took}, and stopped before it answered"}.get(t["end"], f"Thought for {took}")
+        if t.get("refused"):
+            said += "; the answer was not taken"
+        head = (f"Attempt {t['attempt']}: " if several else "") + said
+        size = f'{t["words"]:,} words' + (" so far" if t["going"] else "")
+        model = f' · {e(t["model"])}' if t.get("model") else ""
+        cut = (f'<p class="muted small">{t["cut"]:,} characters from the middle are left out.</p>'
+               if t.get("cut") else "")
+        return (f'<details class="jr-think{" going" if t["going"] else ""}{" looped" if t["end"] == "looped" else ""}" '
+                f'data-key="think-{e(t["key"])}"><summary>{head} <span class="muted small">{size}{model}</span>'
+                f'</summary>{cut}<pre class="jr-think-text" data-scroll-key="think-{e(t["key"])}">{e(t["text"])}</pre>'
+                f'</details>')
 
     # ------------------------------------------------------------------------------------------ moves
     def _move_html(self, me, rt, m: dict, day=None, nested: bool = False) -> str:

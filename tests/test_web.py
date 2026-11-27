@@ -2976,6 +2976,28 @@ def test_a_records_history_is_fetched_alone_and_answers_304_until_something_chan
     assert "function liveSections()" in js and 'section[data-live][id]' in js and "data-busy" in js
 
 
+def test_an_agent_s_thinking_is_folded_under_its_work_in_the_history_and_grows_there(hub, server):
+    """The History shows an agent's thinking folded under its work: while it comes, "Thinking now" and the section
+    busy, so the page asks again within seconds and keeps the fold open and its place in it (``data-key``,
+    ``data-scroll-key``); once the attempt ends, how long it thought and how it ended. Its words are escaped."""
+    agent, tok = M(hub, "clinical-admin-agent"), token(hub, "dr-amara")
+    item = hub.db.items.find_one({"step_id": "sort", "status": "open"})
+    ref = hub.engine.run(item["run_id"])["record"]
+    hub.engine.claim(agent, item["id"])
+    hub.engine.think(agent, item["id"], 1, "Is <b>H</b> high? ", model="ollama/thinker")
+    code, head, frag = _get_with(server, f"/records/{ref}/journey", tok)
+    key = f'data-key="think-{item["id"]}:1"'
+    assert code == 200 and 'class="jr-think going"' in frag and key in frag and "Thinking now" in frag
+    assert "Is &lt;b&gt;H&lt;/b&gt; high?" in frag and "<b>H</b>" not in frag and " data-busy" in frag
+    assert "3 words so far" in frag and "ollama/thinker" in frag
+    hub.engine.think(agent, item["id"], 1, "Is <b>H</b> high? Yes, abnormal.", end="answered")
+    code, _, frag = _get_with(server, f"/records/{ref}/journey", tok, {"If-None-Match": head.get("ETag")})
+    assert code == 200 and 'class="jr-think"' in frag and key in frag and ", then answered" in frag
+    assert "Thinking now" not in frag and "5 words ·" in frag
+    js = call(server, "GET", "/static/app.js", tok)[1]
+    assert "data-scroll-key" in js and "details.jr-think.going" in js and "chat-think" in js and "tick=" in js
+
+
 def test_a_keys_own_address_and_the_search_box_open_what_it_names_for_who_may_see_it(hub, server):
     """``/PAT-1`` (any case) goes to the record that has the key, and ``/api/keys/PAT-1`` says what it names; the
     search box takes a key as well. A member who may not read the record is told nothing is there, as for a key no

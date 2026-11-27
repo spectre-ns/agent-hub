@@ -103,8 +103,8 @@ SHAPES = {
     "live_comments": ("id", "id ref field file quote before after body by agent at mentions replies resolved "
                                 "resolved_at resolved_by"),
     # talking to an agent (chat.py): a conversation is its person's
-    "chats": ("id", "id person agent title at updated_at busy n resources"),
-    "chat_messages": ("id", "id chat n role body tool args refs error at"),
+    "chats": ("id", "id person agent title at updated_at busy n resources thinking"),
+    "chat_messages": ("id", "id chat n role body tool args refs error at thinking"),
     # work
     "runs": ("id", "id workflow_id version title record subject status ctx steps started_by root_event item refs "
                    "waits_on resting jobs picks at deadline_at deadline_missed_at created_at updated_at"),
@@ -112,6 +112,8 @@ SHAPES = {
                     "created_at updated_at due_at escalated priority escalate_next escalates repeats "
                     "step_title history parent_id children wave step_started_at waiting resting"),
     "events": ("seq", "seq at actor actor_kind action subject run_id cause data prev hash signature mac"),
+    # what an agent's model thought before it answered a step, one attempt each (Engine.think): beside the track
+    "thoughts": ('"item:attempt"', "item run_id step_id member attempt model text cut started_at at end tick"),
     "outbox": ("id", "id at channel recipient subject body run_id sent_by status classes purpose claimed_by "
                      "claimed_at done_at done_by note escalated"),
     # the portal
@@ -156,6 +158,7 @@ INDEXES = {
     "chat_messages": [{"fields": ["chat", "n"], "unique": True}],
     "runs": ["status", "record", "workflow_id", "refs", "waits_on", "jobs"],
     "items": ["status", "run_id", ("assignee", "status"), "n"],
+    "thoughts": [("run_id", "step_id")],
     "events": [{"fields": ["hash"], "unique": True}, "run_id", ("subject", "action"), ("action", "seq"), "actor",
                ("action", "data.refs"), ("data.refs_sha256", "actor"), ("data.subject", "actor")],
     "outbox": ["status", "channel"],

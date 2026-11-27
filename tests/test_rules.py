@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -7498,6 +7499,93 @@ def test_a_journey_folds_what_the_viewer_may_not_read_and_never_names_the_edge_a
     assert [m["label"] for m in hub.record_activity(amara, visit) if m["edge"] == "book-it-soon"] == ["Book it soon"]
 
 
+# ------------------------------------------------------------------ what an agent's model thought
+class _Thinker:
+    """Stands for Ollama: thinks out loud, then gives the next of its answers."""
+    external = False
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+
+    def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
+        ans = self.answers.pop(0)
+        for piece in ("The lab flagged it H. ", f"I will call it {ans['category']}."):
+            thinking.add(piece)
+        return {"answer": ans, "escalate": False, "reason": "sorted"}
+
+
+def _lab_sorted_by(hub, answers):
+    """The demo's lab result sorted by the clinical admin agent, thinking, with ``answers`` one attempt each."""
+    agent, rana, amara = "clinical-admin-agent", M(hub, "rana"), M(hub, "dr-amara")
+    hub.approve_agent_profile(amara, agent, hub.propose_agent_profile(rana, agent, {"model": "ollama/thinker"})["version"])
+    gw = ModelGateway(hub)
+    gw.backends["ollama"] = _Thinker(answers)
+    item = hub.db.items.find_one({"step_id": "sort", "status": "open"})
+    AgentRunner(LocalClient(hub, agent), gw, quiet).handle(M(hub, agent), hub.engine.item(item["id"]))
+    return item, hub.engine.run(item["run_id"])["record"]
+
+
+def test_an_agent_s_thinking_is_kept_attempt_by_attempt_and_shown_only_to_who_may_see_its_work(hub):
+    """Rule: what an agent's model thinks is kept beside the track as it comes (``Engine.think``): one record per
+    attempt, written only by the agent holding the work, never again once the attempt has ended, and cut in the
+    middle when it is very long. The record's History shows it on the work, attempt by attempt, saying when an answer
+    was not taken, to whoever may see the step, and never for a run a directive withholds from the viewer."""
+    item, ref = _lab_sorted_by(hub, [{"category": "normal", "rationale": "looks fine"},
+                                     {"category": "abnormal", "rationale": "flagged H by the lab"}])
+    rows = list(hub.db.thoughts.find({"item": item["id"]}, sort=[("attempt", 1)]))
+    assert [(t["attempt"], t["end"], t["model"]) for t in rows] == [(1, "answered", "ollama/thinker"),
+                                                                    (2, "answered", "ollama/thinker")]
+    assert rows[1]["text"] == "The lab flagged it H. I will call it abnormal." and rows[0]["member"] == "clinical-admin-agent"
+    assert not hub.db.events.exists({"data.text": rows[0]["text"]})  # beside the track, not on it
+    amara, noor = M(hub, "dr-amara"), M(hub, "noor")
+    (line,) = [ln for st in hub.record_journey(amara, ref)["stages"] for ln in st["lines"]
+               if ln["kind"] == "work" and ln["title"] == "Sort the result"]
+    assert [(t["attempt"], t["end"], t["refused"], t["going"]) for t in line["thoughts"]] == [
+        (1, "answered", True, False), (2, "answered", False, False)]
+    assert line["thoughts"][0]["text"].endswith("call it normal.") and line["thoughts"][1]["words"] == 10
+    assert "I will call it abnormal." in json.dumps(hub.record_journey(noor, ref))  # a nurse reads results
+    # a directive keeping the patient's results from the nurses: the run's content is withheld, its thinking too
+    _lockbox(hub, hub.records.read(*ref.split("/"))["subject"]["reference"], withhold_classes=["clinical"])
+    assert "call it" not in json.dumps(hub.record_journey(noor, ref))
+
+
+def test_thinking_still_coming_keeps_the_history_fetching_and_is_shown_folded_as_it_grows(hub):
+    """Rule: thinking that has not ended makes the History live and busy (the page asks again within seconds) and
+    changes its token as it grows; the History shows it folded under the work, with what it has said so far.
+    Thinking that has not been written for a while is taken to have stopped with whatever was running it. Only the
+    agent holding the work writes it, and an attempt that has ended stays as it ended."""
+    from practicehub import journey
+    agent = M(hub, "clinical-admin-agent")
+    item = hub.db.items.find_one({"step_id": "sort", "status": "open"})
+    ref, sort = hub.engine.run(item["run_id"])["record"], item["id"]
+    amara = M(hub, "dr-amara")
+    with pytest.raises(Denied):
+        hub.engine.think(agent, sort, 1, "not mine yet")
+    hub.engine.claim(agent, sort)
+    with pytest.raises(Denied):
+        hub.engine.think(amara, sort, 1, "a person's")
+    with pytest.raises(Invalid):
+        hub.engine.think(agent, sort, 1, "x", end="refused")
+    before = hub.record_journey_token(amara, ref)
+    hub.engine.think(agent, sort, 1, "Reading the flag", model="ollama/thinker")
+    assert hub.record_journey_token(amara, ref) != before
+    j = hub.record_journey(amara, ref)
+    assert j["live"] and j["busy"]
+    (t,) = [t for st in j["stages"] for ln in st["lines"] for t in ln.get("thoughts") or []]
+    assert t["going"] and t["end"] is None and t["text"] == "Reading the flag"
+    hub.db.thoughts.update({"_id": t["key"]}, {"$set": {"at": "2026-01-01T00:00:00+00:00"}})
+    (t,) = [t for st in hub.record_journey(amara, ref)["stages"] for ln in st["lines"] for t in ln.get("thoughts") or []]
+    assert not t["going"] and t["end"] == "stopped" and journey.THINKING_FOR == 300
+    # very long thinking keeps its start and, mostly, its end
+    hub.engine.think(agent, sort, 1, "a" * 200_000)
+    t = hub.db.thoughts.get(f"{sort}:1")
+    assert t["cut"] == 80_000 and len(t["text"]) == 120_000 and t["end"] is None
+    assert hub.engine.think(agent, sort, 1, "done thinking", end="escalated")["end"] == "escalated"
+    with pytest.raises(Invalid, match="ended"):
+        hub.engine.think(agent, sort, 1, "more")
+    assert hub.db.thoughts.get(f"{sort}:1")["text"] == "done thinking"
+
+
 # ------------------------------------------------------------------ cancelling a run: who may, and who is told
 JOB_CHECK = """id = "job-check"
 title = "Check the job"
@@ -10116,7 +10204,7 @@ def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(h
     class Local:  # stands for Ollama: what each model is asked, and shown
         external = False
 
-        def __call__(self, model, system, prompt, schema, ctx, pictures=()):
+        def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
             if ctx["step"]["id"] == "look":
                 asked.append((model, prompt, list(pictures)))
             return {"answer": {}, "escalate": True, "reason": "looked"}
@@ -10484,3 +10572,49 @@ def test_a_chat_model_s_calls_are_data(hub):
     assert hub.db.events.count({"action": "mcp.called", "data.how": "chat"}) == MAX_CALLS - 5
     assert given[-1]["tools"] == []  # its last turn: no tools left, it answers
     assert ch.messages(amara, c["id"])[-1]["body"] == "Done."
+
+
+def test_a_chat_shows_its_model_s_thinking_while_it_answers_and_keeps_it_on_the_answer(hub):
+    """Rule: what a chat's model thinks is on the chat while it answers, for its person only, and a page waiting with
+    the ``tick`` of the thinking it has is told as soon as there is more (``Chat.wait``). The thinking then goes,
+    once, with the first message its call made, and the chat's live copy is gone. Thinking that goes round in a
+    loop stops the call: the turn fails, saying so, and keeps the thinking that looped."""
+    from practicehub.chat import Chat
+    amara, rana, agent = M(hub, "dr-amara"), M(hub, "rana"), "clinical-admin-agent"
+    hub.approve_agent_profile(amara, agent, hub.propose_agent_profile(rana, agent, {"model": "ollama/thinker"})["version"])
+    _, oref = _ellen_and_her_result(hub)
+    live = []
+
+    class Thinks:
+        external = False
+        moves = [{"calls": [{"id": "1", "name": "read", "args": {"ref": oref}}]}, {"text": "Her result is in."}]
+
+        def chat(self, model, system, rs, tools, ctx, thinking=None):
+            thinking.add(f"Step {len(live)}: what does she want? ")
+            c = ch.get(amara, ctx["chat"])
+            t0 = time.monotonic()
+            waited = ch.wait(amara, ctx["chat"], c["n"], True, wait=5, tick=0)  # a page with no thinking yet
+            live.append((c["thinking"], waited["thinking"]["tick"], time.monotonic() - t0))
+            if not self.moves:  # the next turn: round and round
+                for _ in range(200):
+                    thinking.add("Let me look again at what she asked. ")
+            return self.moves.pop(0)
+
+    gw = ModelGateway(hub)
+    gw.backends["ollama"] = Thinks()
+    ch = Chat(hub, gw)
+    c = ch.start(amara, agent)
+    ch.say(amara, c["id"], "What came back for Ellen?")
+    assert [t["text"] for t, _, _ in live] == ["Step 0: what does she want? ", "Step 1: what does she want? "]
+    assert all(t["model"] == "ollama/thinker" and tick == t["tick"] > 0 and took < 1 for t, tick, took in live)
+    tool, answer = ch.messages(amara, c["id"])[-2:]
+    assert tool["role"] == "tool" and tool["thinking"]["text"] == "Step 0: what does she want? "
+    assert answer["body"] == "Her result is in." and answer["thinking"]["end"] == "answered"
+    assert ch.get(amara, c["id"])["thinking"] is None and hub.db.chats.get(c["id"])["thinking"] is None
+    with pytest.raises(NotFound):
+        ch.get(rana, c["id"])  # a chat, and its thinking, is its person's
+    ch.say(amara, c["id"], "And her last one?")
+    last = ch.messages(amara, c["id"])[-1]
+    assert last["error"] and "went round in a loop" in last["body"]
+    assert last["thinking"]["end"] == "looped" and last["thinking"]["text"].startswith("Step 2:")
+    assert hub.db.chats.get(c["id"])["thinking"] is None

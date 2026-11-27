@@ -54,14 +54,17 @@ class ChatPages:
 
     def api_chat(self, req, cid):
         """The conversation and its messages after ``since``; with ``wait``, held until there is a message after it,
-        or the agent starts or stops answering (``busy`` is what the page last saw), for at most 25 seconds."""
+        or the agent starts or stops answering (``busy`` is what the page last saw), or, with ``tick`` (the tick of
+        the thinking the page shows, 0 for none), its model has thought more, for at most 25 seconds."""
         me = self._chatter(req)
         q = req["query"]
         try:
             since, wait = int(q.get("since", 0)), float(q.get("wait", 0))
+            tick = int(q["tick"]) if q.get("tick") not in (None, "") else None
         except ValueError:
-            raise Invalid("since and wait are numbers") from None
-        c = (self.chat.wait(me, cid, since, q.get("busy") == "1", wait) if wait > 0 else self.chat.get(me, cid))
+            raise Invalid("since, wait and tick are numbers") from None
+        c = (self.chat.wait(me, cid, since, q.get("busy") == "1", wait, tick) if wait > 0
+             else self.chat.get(me, cid))
         return {"chat": self._chat_out(me, c),
                 "messages": [self._chat_msg(m) for m in self.chat.messages(me, cid, since)]}
 
