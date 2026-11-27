@@ -29,6 +29,7 @@ from .. import workflows as wfmod
 from ..backends import engines
 from ..sandbox import ALLOWED_IMPORTS, TIMEOUT as SANDBOX_TIMEOUT
 from ..hub import Denied, Duplicate, HubError, Invalid, NotFound, member_ref
+from ..models import default_model
 from ..store import Transient
 
 CLIENT_HEADER = "x-practicehub-client"  # the address a request came from, as the listener saw it (it overwrites any)
@@ -4127,6 +4128,48 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         return ('<div class="account-history"><p class="muted">Their account:</p><ul class="plain">'
                 + "".join(f"<li>{x}</li>" for x in lines) + "</ul></div>")
 
+    GROUPS = {"ollama": "On the premises: Ollama", "litellm": "On the premises: LiteLLM",
+              "anthropic": "Off the premises: Claude", "standin": "No model"}
+
+    def _model_picks(self, mid: str, prof: dict) -> str:
+        """The profile form's two model dropdowns, of the models the hub can reach now (``ModelGateway.offered``):
+        any for its words, one that takes pictures for a photo or scan. The agent's own stays offered when it is not
+        among them (its server down, the model removed), so changing something else does not change its model."""
+        got = self.hub.models.offered()
+        default = default_model()
+        down = ", ".join(self.GROUPS.get(b, b).split(": ")[-1] for b in got["unreached"])
+
+        def label(r, marks):
+            name = r["spec"].partition("/")[2] or "Stand-ins: the pack's fixed answers"
+            return (name + (" · sees pictures" if marks and r["sees"] else "")
+                    + (" · the hub's default" if r["spec"] == default else ""))
+
+        def options(rows, current, none, marks):
+            out = f'<option value=""{" selected" if not current else ""}>{none}</option>' if none else ""
+            if current and current not in {r["spec"] for r in rows}:
+                out += f'<option value="{e(current)}" selected>{e(current)} (not reachable now)</option>'
+            groups: dict[str, list] = {}
+            for r in rows:
+                groups.setdefault(r["spec"].partition("/")[0], []).append(r)
+            for b, rs in groups.items():
+                out += f'<optgroup label="{e(self.GROUPS.get(b, b))}">' + "".join(
+                    f'<option value="{e(r["spec"])}"{" selected" if r["spec"] == current else ""}>'
+                    f'{e(label(r, marks))}</option>' for r in rs) + "</optgroup>"
+            return out
+
+        model = prof.get("model", "")
+        words = options(got["models"], model, "" if model else "None named: answers by stand-in", True)
+        seeing = options([r for r in got["models"] if r["sees"] is not False], prof.get("vision_model", ""),
+                         "None: it is told there is a picture it cannot see", False)
+        note = (f" {e(down)} did not answer, so {'their' if ',' in down else 'its'} models are not listed."
+                if down else "")
+        return (f'<div class="field"><label>Model<select name="model" aria-describedby="m-{e(mid)}">{words}</select>'
+                f'</label><small id="m-{e(mid)}" class="help">The models this hub can reach now.{note}</small></div>'
+                f'<div class="field"><label>Model for pictures<select name="vision_model" '
+                f'aria-describedby="vm-{e(mid)}">{seeing}</select></label>'
+                f'<small id="vm-{e(mid)}" class="help">A model that can see, shown a photo or scan a step carries.'
+                f'</small></div>')
+
     def _profile_forms(self, me, m) -> list[str]:
         """An agent's profile: the version in force, a proposed one waiting for a second person, the history."""
         hub, mid, out = self.hub, m["id"], []
@@ -4182,11 +4225,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                        f'not made: it takes effect when a policy owner other than you approves it. Lowering the risk, '
                        f'taking skills away or turning direct changes off, and nothing else, takes effect at once. Every version is kept, on '
                        f'the track.</p>'
-                       f'<label>Model<input name="model" value="{e(prof.get("model", ""))}"></label>'
-                       f'<div class="field"><label>Model for pictures<input name="vision_model" '
-                       f'value="{e(prof.get("vision_model", ""))}" aria-describedby="vm-{e(mid)}"></label>'
-                       f'<small id="vm-{e(mid)}" class="help">A model that can see, shown a photo or scan a step '
-                       f'carries. Left empty, the agent is told there is a picture it cannot see.</small></div>'
+                       f'{self._model_picks(mid, prof)}'
                        f'<fieldset class="choices options"><legend>Highest risk it may take</legend>{risks}</fieldset>'
                        f'<fieldset class="choices options"><legend>Skills</legend>{boxes}</fieldset>'
                        f'<fieldset class="choices options"><legend>Records</legend><label class="radio multi">'

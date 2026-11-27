@@ -12,6 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # The suite needs no model: an agent added without one is given the pack's stand-ins, not the hub's default (Ollama).
 # A test of the default itself unsets this.
 os.environ["PRACTICEHUB_DEFAULT_MODEL"] = "standin"
+# Nor does it reach a model server: an agent's profile form lists the models the hub can reach, and here there are none
+# (a test of the list gives the gateway backends of its own).
+os.environ["OLLAMA_URL"] = "http://127.0.0.1:9"
+os.environ.pop("LITELLM_URL", None)
 
 from practicehub.agents.runner import run_all_local  # noqa: E402
 from practicehub.hub import Hub  # noqa: E402

@@ -64,3 +64,43 @@ def test_litellm_is_sent_a_picture_as_a_data_url(monkeypatch):
     content = sent["messages"][1]["content"]
     assert content[0] == {"type": "text", "text": "prompt"}
     assert content[1]["image_url"]["url"] == "data:image/jpeg;base64," + base64.b64encode(pic["data"]).decode()
+
+
+def test_ollama_lists_its_installed_models_and_which_see(monkeypatch):
+    def get(url, headers, timeout):
+        assert url == "http://ollama.invalid/api/tags" and timeout <= 3
+        return {"models": [{"name": "qwen3:14b"}, {"name": "gemma4:12b-it-qat"}, {"model": "granite4.2:3b"}]}
+
+    monkeypatch.setattr(models, "_get", get)
+    monkeypatch.setattr(models, "_post", lambda url, body, headers, timeout: {
+        "capabilities": ["completion", "vision"] if body["model"].startswith("gemma") else ["completion"]})
+    assert models.Ollama(url="http://ollama.invalid").models() == [
+        {"name": "gemma4:12b-it-qat", "sees": True}, {"name": "granite4.2:3b", "sees": False},
+        {"name": "qwen3:14b", "sees": False}]
+
+
+def test_the_gateway_offers_what_its_servers_serve_and_names_one_that_does_not_answer(monkeypatch):
+    """Ollama's models, LiteLLM's only when its proxy is configured, Claude's only when the practice allows models off
+    the premises, and always ``standin``: what an agent's profile form offers."""
+    class Served:
+        def __init__(self, external, names):
+            self.external, self.names = external, names
+
+        def models(self):
+            if self.names is None:
+                raise models.ModelError("cannot reach it")
+            return [{"name": n, "sees": True} for n in self.names]
+
+    gw = models.ModelGateway(allow_external=False)
+    gw.backends = {"ollama": Served(False, ["gemma4:12b-it-qat"]), "litellm": Served(False, None),
+                   "anthropic": Served(True, ["claude-opus-5-5"])}
+    got = gw.offered()
+    assert [m["spec"] for m in got["models"]] == ["ollama/gemma4:12b-it-qat", "standin"]
+    assert got["unreached"] == {"litellm": "cannot reach it"}
+    gw.backends["ollama"].names = ["qwen3:14b"]
+    assert gw.offered() is got  # kept a while: a page is not held up asking
+    monkeypatch.setattr(gw, "OFFERED_FOR", 0)
+    gw.allow_external = True
+    assert [m["spec"] for m in gw.offered()["models"]] == ["ollama/qwen3:14b", "anthropic/claude-opus-5-5", "standin"]
+    monkeypatch.delenv("LITELLM_URL", raising=False)
+    assert models.LiteLLM().models() == []  # no proxy configured: nothing asked, nothing offered

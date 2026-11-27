@@ -73,8 +73,8 @@ profile = { model = "litellm/firm-local", max_risk = "medium", skills = ["return
 ```
 
 An agent that names no `model` is given the hub's default when it is installed: `PRACTICEHUB_DEFAULT_MODEL`, else
-`ollama/qwen3:14b`, a local model through Ollama (`OLLAMA_URL`). It is written into the agent's profile, so a later
-change of the default moves no agent. `model = "standin"` answers from the pack's `STANDINS`, with no model.
+`ollama/gemma4:12b-it-qat`, a local model through Ollama (`OLLAMA_URL`). It is written into the agent's profile, so a
+later change of the default moves no agent. `model = "standin"` answers from the pack's `STANDINS`, with no model.
 
 **Design the data classes first.** They decide what each agent can ever see. Give every agent the narrowest grants
 that let it do its job. A scheduling agent needs demographics and appointments, nothing else.

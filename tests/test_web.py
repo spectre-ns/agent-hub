@@ -3120,3 +3120,40 @@ def test_a_table_is_a_grid_its_blank_rows_dropped_and_an_exact_number_is_its_exa
     assert api["amount"] == "12.30" and [r["amount"] for r in api["lines"]] == ["12.30", "0.00"]
     page = call(server, "GET", f"/records/Bill/{bill['id']}", amara)[1]
     assert "12.30" in page and "CAD" in page
+
+
+def test_an_agent_s_model_is_picked_from_the_models_the_hub_can_reach(hub, server, monkeypatch):
+    """The profile form offers the models the hub can reach now (``ModelGateway.offered``) in a dropdown: any of them
+    for its words, only one that sees for pictures. The agent's own model stays offered when it cannot be reached, so
+    changing something else does not change its model, and a server that does not answer is named."""
+    from practicehub.models import ModelError
+
+    class Installed:
+        external = False
+        names = [{"name": "gemma4:12b-it-qat", "sees": True}, {"name": "qwen3:14b", "sees": False}]
+
+        def models(self):
+            if self.names is None:
+                raise ModelError("cannot reach http://127.0.0.1:9/api/tags")
+            return self.names
+
+    monkeypatch.setattr(hub.models, "OFFERED_FOR", 0)
+    hub.models.backends["ollama"] = ollama = Installed()
+    rana = token(hub, "rana")
+    pick = lambda page, name: re.search(rf'<select name="{name}".*?</select>', page, re.S).group(0)
+    values = lambda sel: re.findall(r'<option value="([^"]*)"', sel)
+    page = call(server, "GET", "/team/scribe-agent", rana)[1]
+    words, pics = pick(page, "model"), pick(page, "vision_model")
+    assert values(words) == ["ollama/gemma4:12b-it-qat", "ollama/qwen3:14b", "standin"]
+    assert 'value="standin" selected' in words  # its own: the suite's default
+    assert "gemma4:12b-it-qat · sees pictures" in html.unescape(words)
+    assert values(pics) == ["", "ollama/gemma4:12b-it-qat"] and 'value="" selected' in pics  # only one that sees
+    assert "did not answer" not in page
+    agent = M(hub, "scribe-agent")
+    hub.db.members.set(agent["id"], {"profile": {**agent["profile"], "model": "ollama/gemma4:12b-it-qat"}})
+    ollama.names = None
+    page = call(server, "GET", "/team/scribe-agent", rana)[1]
+    words = pick(page, "model")
+    assert values(words) == ["ollama/gemma4:12b-it-qat", "standin"]
+    assert 'value="ollama/gemma4:12b-it-qat" selected>ollama/gemma4:12b-it-qat (not reachable now)' in words
+    assert "Ollama did not answer, so its models are not listed." in page

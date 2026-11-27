@@ -2,7 +2,7 @@
 """A real engine under the hub, for trying engine blocks on one machine: a small HTTP service that takes the hub's
 webhook call and does the block's work with a local model through Ollama.
 
-    scripts/dev-engine.py                                  # on http://127.0.0.1:8215/, model granite4.2:3b
+    scripts/dev-engine.py                                  # on http://127.0.0.1:8215/, model gemma4:12b-it-qat
     PRACTICEHUB_ENGINE_WEBHOOK_URL=http://127.0.0.1:8215/hook \\
       python3 -m practicehub.cli serve --dev --agents      # the hub posts its engine blocks here
 
@@ -139,8 +139,8 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="A dev engine for the hub's engine blocks, run by a local model.")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8215)
-    ap.add_argument("--model", default=os.environ.get("PRACTICEHUB_DEV_ENGINE_MODEL", "granite4.2:3b"),
-                    help="the Ollama model that answers (default granite4.2:3b)")
+    ap.add_argument("--model", default=os.environ.get("PRACTICEHUB_DEV_ENGINE_MODEL", "gemma4:12b-it-qat"),
+                    help="the Ollama model that answers (default gemma4:12b-it-qat)")
     ap.add_argument("--flows", help="a JSON file of more flows: {target: {\"ask\": ..., \"output\": {schema}}}")
     args = ap.parse_args(argv)
     if args.port in KEPT_FOR_OTHERS:

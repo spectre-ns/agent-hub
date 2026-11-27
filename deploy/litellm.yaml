@@ -2,11 +2,11 @@
 model_list:
   - model_name: gp-local
     litellm_params:
-      model: ollama_chat/qwen3:14b
+      model: ollama_chat/gemma4:12b-it-qat
       api_base: http://host.docker.internal:11434
   # - model_name: gp-local          # or vLLM on a GPU host in the practice's Canadian data centre
   #   litellm_params:
-  #     model: hosted_vllm/Qwen/Qwen3-14B
+  #     model: hosted_vllm/<the Gemma 4 model it serves>
   #     api_base: http://vllm:8000/v1
 
 litellm_settings:

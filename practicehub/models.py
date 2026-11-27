@@ -6,7 +6,7 @@ submits. Nothing a model returns is ever executed.
 An agent's profile names its model as ``<backend>/<model>``:
 
     standin                         deterministic answers from the pack (tests, no model at all)
-    ollama/qwen3:14b                a local model through Ollama, on the premises: the default
+    ollama/gemma4:12b-it-qat        a local model through Ollama, on the premises: the default
     litellm/gp-local                a model behind the practice's LiteLLM proxy (Ollama or vLLM on premises), traced
                                     in Langfuse by LiteLLM's callbacks; the trace carries the agent and work item
     anthropic/claude-opus-5-5       Claude through the Anthropic API; *external*, so off unless the practice allows it
@@ -14,10 +14,10 @@ An agent's profile names its model as ``<backend>/<model>``:
 External backends send data off the premises. Under PHIA (and most professional-secrecy rules) that is a decision for
 the practice, so they are refused unless ``PRACTICEHUB_ALLOW_EXTERNAL_MODELS=1`` is set.
 
-An agent added without a model is given the hub's default, ``PRACTICEHUB_DEFAULT_MODEL`` (``ollama/qwen3:14b`` when
-unset), written into its profile when it is added: what an agent answers with is always in its reviewed profile, and a
-later change of the default moves no agent that already has one. A profile that names no model (an agent added before
-there was a default) answers by stand-in, as it did.
+An agent added without a model is given the hub's default, ``PRACTICEHUB_DEFAULT_MODEL``
+(``ollama/gemma4:12b-it-qat`` when unset), written into its profile when it is added: what an agent answers with is
+always in its reviewed profile, and a later change of the default moves no agent that already has one. A profile that
+names no model (an agent added before there was a default) answers by stand-in, as it did.
 
 Every answer is wrapped: ``{"answer": {...fields}, "escalate": bool, "reason": str}``. An agent that is unsure says
 so, and the runner hands the item to people instead of guessing.
@@ -30,6 +30,10 @@ A step that carries a picture (a photo of a document, in a ``file:<field>`` cont
 the profile names as ``vision_model``, which is shown the picture. An agent whose profile names none is told there is
 a picture it cannot see, and answers with what else it has (or escalates): a picture is never sent to a model the
 practice did not approve for it.
+
+The models an agent's profile may be given are listed by :meth:`ModelGateway.offered`, for the profile form: what
+Ollama has installed, what LiteLLM serves (when its proxy is configured), Claude's models (when the practice allows
+models off the premises), and ``standin``. Each says whether it takes pictures, when its server says.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from . import decimals
@@ -47,7 +52,7 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
 ANTHROPIC_FALLBACK_MODELS = ("claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5")
 
 
-DEFAULT_MODEL = "ollama/qwen3:14b"
+DEFAULT_MODEL = "ollama/gemma4:12b-it-qat"
 
 
 def default_model() -> str:
@@ -276,8 +281,15 @@ def parse_answer(text: str) -> dict:
 
 
 def _post(url: str, body: dict, headers: dict, timeout: float) -> dict:
-    req = urllib.request.Request(url, data=json.dumps(body, default=decimals.jsonable).encode(), method="POST",
-                                 headers={"Content-Type": "application/json", **headers})
+    return _send(urllib.request.Request(url, data=json.dumps(body, default=decimals.jsonable).encode(), method="POST",
+                                        headers={"Content-Type": "application/json", **headers}), url, timeout)
+
+
+def _get(url: str, headers: dict, timeout: float) -> dict:
+    return _send(urllib.request.Request(url, headers=headers), url, timeout)
+
+
+def _send(req, url: str, timeout: float) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
@@ -333,12 +345,18 @@ class Ollama:
         self.timeout = timeout
         self._sees: dict[str, bool] = {}
 
-    def sees(self, model: str) -> bool:
+    def sees(self, model: str, timeout: float = 30) -> bool:
         """Whether the model takes pictures: what Ollama says it can do (``vision``), asked once."""
         if model not in self._sees:
-            got = _post(self.url + "/api/show", {"model": model}, {}, 30)
+            got = _post(self.url + "/api/show", {"model": model}, {}, timeout)
             self._sees[model] = "vision" in (got.get("capabilities") or [])
         return self._sees[model]
+
+    def models(self) -> list[dict]:
+        """The models Ollama has installed, and whether each takes pictures."""
+        got = _get(self.url + "/api/tags", {}, 3).get("models") or []
+        names = sorted({m.get("name") or m.get("model") or "" for m in got} - {""})
+        return [{"name": n, "sees": self.sees(n, timeout=3)} for n in names]
 
     def __call__(self, model, system, prompt, schema, ctx, pictures=()):
         if pictures and not self.sees(model):
@@ -385,8 +403,18 @@ class LiteLLM:
 
     def __init__(self, url: str | None = None, key: str | None = None, timeout: float = 300):
         self.url = (url or os.environ.get("LITELLM_URL") or "http://localhost:4000").rstrip("/")
+        self.configured = bool(url or os.environ.get("LITELLM_URL"))
         self.key = key if key is not None else os.environ.get("LITELLM_API_KEY", "")
         self.timeout = timeout
+
+    def models(self) -> list[dict]:
+        """The model names the proxy serves (``/v1/models``); none when no proxy is configured. Whether one takes
+        pictures is the proxy's to know."""
+        if not self.configured:
+            return []
+        headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
+        got = _get(self.url + "/v1/models", headers, 3).get("data") or []
+        return [{"name": n, "sees": None} for n in sorted({m.get("id") or "" for m in got} - {""})]
 
     def __call__(self, model, system, prompt, schema, ctx, pictures=()):
         content = prompt if not pictures else [{"type": "text", "text": prompt}] + [
@@ -433,6 +461,14 @@ class Anthropic:
         self.base = (base_url or os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
         self.timeout = timeout
         self.effort = effort or os.environ.get("PRACTICEHUB_MODEL_EFFORT", "medium")
+
+    def models(self) -> list[dict]:
+        """The Claude models the key may use (every one takes pictures)."""
+        if not self.api_key:
+            raise ModelError("ANTHROPIC_API_KEY is not set")
+        got = _get(self.base + "/v1/models?limit=100",
+                   {"x-api-key": self.api_key, "anthropic-version": ANTHROPIC_VERSION}, 5).get("data") or []
+        return [{"name": m["id"], "sees": True} for m in got if m.get("id")]
 
     def __call__(self, model, system, prompt, schema, ctx, pictures=()):
         if not self.api_key:
@@ -503,6 +539,8 @@ class ModelGateway:
     """``scripted=True``: every agent answers from the pack's stand-ins, whatever its profile names. For building a
     demo's past without a model, never for live work."""
 
+    OFFERED_FOR = 60  # seconds a list of the models offered is kept before the servers are asked again
+
     def __init__(self, hub=None, standins: dict | None = None, allow_external: bool | None = None,
                  scripted: bool = False):
         self.hub = hub
@@ -512,6 +550,26 @@ class ModelGateway:
             allow_external = os.environ.get("PRACTICEHUB_ALLOW_EXTERNAL_MODELS") == "1"
         self.allow_external = allow_external
         self.backends = {"ollama": Ollama(), "litellm": LiteLLM(), "anthropic": Anthropic()}
+        self._offered: tuple[float, dict] | None = None
+
+    def offered(self) -> dict:
+        """The models an agent's profile may be given now: ``{"models": [{spec, sees}], "unreached": {backend: why}}``.
+        ``sees`` says the model takes pictures (None: its server does not say). A backend off the premises is offered
+        only when the practice allows it; one whose server does not answer offers nothing and says why; ``standin``
+        is always offered. Kept for ``OFFERED_FOR`` seconds, so a page is not held up asking."""
+        if self._offered and time.monotonic() - self._offered[0] < self.OFFERED_FOR:
+            return self._offered[1]
+        models, unreached = [], {}
+        for name, b in self.backends.items():
+            if (b.external and not self.allow_external) or not hasattr(b, "models"):
+                continue
+            try:
+                models += [{"spec": f"{name}/{m['name']}", "sees": m.get("sees")} for m in b.models()]
+            except (ModelError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                unreached[name] = str(exc)
+        out = {"models": models + [{"spec": "standin", "sees": False}], "unreached": unreached}
+        self._offered = (time.monotonic(), out)
+        return out
 
     def standins(self) -> dict:
         if self._standins is not None:
