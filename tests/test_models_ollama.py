@@ -22,6 +22,23 @@ def test_ollama_reads_the_whole_context_and_answers_without_thinking_first(monke
     assert sent["options"]["num_ctx"] == 32768  # a chat turn and a mention reply get the same window
 
 
+def test_every_local_model_answers_with_the_sampling_it_ships_with(monkeypatch):
+    """The hub sets no temperature, top_p or top_k: greedy decoding (temperature 0) makes a model that thinks repeat
+    itself until its window is full, so each model keeps the settings it ships with, in a step and in a chat."""
+    sent = []
+    monkeypatch.setattr(models, "_post", lambda url, body, headers, timeout: sent.append(body) or {
+        "message": {"content": '{"answer": {}, "escalate": false, "reason": ""}'},
+        "choices": [{"message": {"content": '{"answer": {}, "escalate": false, "reason": ""}'}}]})
+    rs = [{"role": "user", "text": "hi"}]
+    models.Ollama(url="http://ollama.invalid")("gemma", "sys", "prompt", {}, {})
+    models.Ollama(url="http://ollama.invalid").chat("gemma", "sys", rs, [], {})
+    models.LiteLLM(url="http://litellm.invalid")("gemma", "sys", "prompt", {}, {"step": {"id": "s"}})
+    models.LiteLLM(url="http://litellm.invalid").chat("gemma", "sys", rs, [], {})
+    assert len(sent) == 4
+    for body in sent:
+        assert not {"temperature", "top_p", "top_k", "seed"} & (set(body) | set(body.get("options") or {})), body
+
+
 def test_an_empty_answer_says_the_model_gave_none(monkeypatch):
     monkeypatch.setattr(models, "_post", lambda *a: {"message": {"content": "", "thinking": "hmm"},
                                                       "done_reason": "length", "prompt_eval_count": 4096})

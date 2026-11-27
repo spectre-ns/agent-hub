@@ -374,12 +374,13 @@ class Ollama:
         if pictures and not self.sees(model):
             raise ModelError(f"{model} does not take pictures: name a model that can see as the profile's vision_model")
         # a window that fits the context (num_ctx), and no thinking by default: a model that thinks first can spend
-        # its whole turn thinking
+        # its whole turn thinking. No sampling is set: each model answers with the settings it ships with (greedy
+        # decoding, temperature 0, makes a model that thinks repeat itself)
         user = {"role": "user", "content": prompt}
         if pictures:
             user["images"] = [base64.b64encode(p["data"]).decode() for p in pictures]
         body = {"model": model, "stream": False, "format": schema,
-                "options": {"temperature": 0, "num_ctx": num_ctx()},
+                "options": {"num_ctx": num_ctx()},
                 "think": os.environ.get("OLLAMA_THINK") == "1",
                 "messages": [{"role": "system", "content": system}, user]}
         resp = _post(self.url + "/api/chat", body, {}, self.timeout)
@@ -391,7 +392,7 @@ class Ollama:
 
     def chat(self, model, system, rs, tools, ctx) -> dict:
         body = {"model": model, "stream": False, "messages": _openai_messages(system, rs, ollama=True),
-                "options": {"temperature": 0, "num_ctx": num_ctx()},
+                "options": {"num_ctx": num_ctx()},
                 "think": os.environ.get("OLLAMA_THINK") == "1"}
         if tools:
             body["tools"] = _functions(tools)
@@ -432,7 +433,7 @@ class LiteLLM:
         content = prompt if not pictures else [{"type": "text", "text": prompt}] + [
             {"type": "image_url", "image_url": {"url": f"data:{p['contentType']};base64,"
                                                        f"{base64.b64encode(p['data']).decode()}"}} for p in pictures]
-        body = {"model": model, "temperature": 0,
+        body = {"model": model,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
                 "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}},
                 "metadata": {"trace_user_id": ctx.get("agent", ""), "session_id": ctx.get("run", {}).get("id", ""),
@@ -443,7 +444,7 @@ class LiteLLM:
         return parse_answer((choice.get("message") or {}).get("content") or "")
 
     def chat(self, model, system, rs, tools, ctx) -> dict:
-        body = {"model": model, "temperature": 0, "messages": _openai_messages(system, rs, ollama=False),
+        body = {"model": model, "messages": _openai_messages(system, rs, ollama=False),
                 "metadata": {"trace_user_id": ctx.get("agent", ""), "session_id": ctx.get("chat", ""),
                              "tags": [f"chat:{ctx.get('chat', '')}"]}}
         if tools:

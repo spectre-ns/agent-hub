@@ -53,7 +53,7 @@ class NoFlow(Exception):
 def ask_model(url: str, model: str, flow: dict, inputs: dict, timeout: float = 55.0) -> dict:
     """What the model answers for one call of a flow: an object with the keys the flow's shape names, no others."""
     body = {"model": model, "stream": False, "format": flow["output"],
-            "options": {"temperature": 0, "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX") or 32768)},
+            "options": {"num_ctx": int(os.environ.get("OLLAMA_NUM_CTX") or 32768)},
             "messages": [{"role": "user", "content": f"{flow['ask']}\nWhat you are given, as JSON:\n"
                                                       f"{json.dumps(inputs, default=str)}"}]}
     req = urllib.request.Request(f"{url.rstrip('/')}/api/chat", data=json.dumps(body).encode(),
