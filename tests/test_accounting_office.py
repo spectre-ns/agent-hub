@@ -1381,15 +1381,18 @@ def test_a_photo_the_model_says_it_could_not_read_clearly_goes_to_a_person(firm)
 
 
 def test_a_photo_s_reading_names_its_issuer_in_its_own_field(firm):
-    """gemma4 read a clear T5 photo right but left issuer empty, and wrote its answers (issuer: Scotiabank) into the
-    slip's words instead. A slip read without its issuer is 'T5', which a return expecting 'T5 · Scotiabank' does not
-    count: what it wrote is refused, it reads the slip again, and the slip is filed with who issued it."""
+    """gemma4 read a clear T5 photo right but left issuer out (an answer's optional field it may skip), and wrote its
+    answers (issuer: Scotiabank) into the slip's words instead. A slip read without its issuer is 'T5', which a return
+    expecting 'T5 · Scotiabank' does not count: the skill asks for the issuer of every document, an answer without one
+    is refused, it reads the slip again, and the slip is filed with who issued it. Its answers written in the words
+    are refused too."""
     from practicehub.models import ModelGateway
     mod = firm.pack.module
+    assert next(o for o in firm.skill("slip-extract").output if o["name"] == "issuer").get("required")
     cref = _signed_up(firm)
     sref = _slip_from(firm, firm.member("client-portal"), cref, mod.blurred_photo(), "IMG_0414.png", "image/png")
     words = "T5 Statement of Investment Income\nYear\n2025\nPayer\nScotiabank\nBox 13\n325.40"
-    read = {"slip_type": "T5", "year": 2025, "amount": 325.40, "tax_deducted": 0, "summary": "T5 2025."}
+    read = {"slip_type": "T5", "year": 2025, "amount": 325.40, "tax_deducted": 0, "summary": "T5 2025.", "text": words}
     tries = []
 
     class Eyes:
@@ -1397,24 +1400,21 @@ def test_a_photo_s_reading_names_its_issuer_in_its_own_field(firm):
 
         def __call__(self, model, system, prompt, schema, ctx, pictures=()):
             tries.append(prompt)
-            if "copy that name into issuer" in prompt:
-                return {"answer": {**read, "issuer": "Scotiabank", "text": words}, "escalate": False, "reason": "read"}
-            return {"answer": {**read, "issuer": "", "text": words + "\n\nslip_type: T5\nissuer: Scotiabank"},
-                    "escalate": False, "reason": "read from the photo"}
+            if "Issued by is required" in prompt:
+                return {"answer": {**read, "issuer": "Scotiabank"}, "escalate": False, "reason": "read"}
+            return {"answer": read, "escalate": False, "reason": "read from the photo"}
 
     gw = ModelGateway(firm)
     gw.backends["ollama"] = Eyes()
     run_all_local(firm, gw, log=quiet)
-    assert len(tries) == 2 and "the name of a field" in tries[1] and "copy that name into issuer" in tries[1]
+    assert len(tries) == 2 and "Issued by is required" in tries[1]
     slip = firm.records.read(*sref.split("/"))
     assert slip["status"] == "extracted" and slip["issuer"] == "Scotiabank" and slip["text"] == words
     assert mod.slip_key(slip) == "T5 · Scotiabank"
-    agent = {"by": {"kind": "agent"}}
-    pdf = {**agent, "context": {"record:client-documents": [{"text": "T5 2025\nPayer: Scotiabank\nBox 13: 325.40"}]}}
-    assert any("copy that name into issuer" in p for p in mod.guard_slip_extract({**read, "issuer": ""}, pdf))
-    assert mod.guard_slip_extract({**read, "issuer": "Scotiabank"}, pdf) == []
-    assert not mod.guard_slip_extract({**read, "issuer": ""}, {**agent, "context": {"record:client-documents": [
-        {"text": "T5 2025\nBox 13: 325.40"}]}})  # a document that names nobody is read without one
+    photo = {"by": {"kind": "agent"}, "context": {"record:client-documents": [{}], "file:file": {"picture": "image/png"}}}
+    dumped = {**read, "issuer": "Scotiabank", "text": words + "\n\nslip_type: T5\nissuer: Scotiabank"}
+    assert any("the name of a field" in p for p in mod.guard_slip_extract(dumped, photo))
+    assert mod.guard_slip_extract({**read, "issuer": "Scotiabank"}, photo) == []
 
 
 def test_a_reading_the_slip_would_refuse_is_sent_back_to_the_agent(firm):

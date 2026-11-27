@@ -7,7 +7,7 @@ slip from what you wrote. Write only what is printed, nothing of your own (no no
 your answers: the slip, year, issuer and amounts go in their own fields). If the
 picture is blurred, or you cannot clearly make out the slip, the year or the main amount, escalate: a person reads
 it. A box the slip does not have (a T5 has no income tax deducted) is left empty: that is not a reason to escalate. When the slip has text, leave `text` empty. Read which slip it is (T4, T5, an RRSP receipt, a notice of assessment...),
-the tax year, who issued it (the payer or employer, as printed: always fill it when the document names them), the main amount (employment income on a T4, box 14; interest on a T5, box 13; the
+the tax year, who issued it (the payer, employer or other issuer, as printed: every document names one), the main amount (employment income on a T4, box 14; interest on a T5, box 13; the
 contribution or donation; on a notice of assessment, the refund, negative if the client owes), the income tax deducted,
 and every other box by its number. Copy numbers exactly as printed; never compute or guess one. The slip and the
 year are read from the text too, never guessed (the main box, and box 22 on a T4, T4A or T4E, the income tax deducted,
@@ -32,6 +32,8 @@ required = true
 name = "issuer"
 label = "Issued by"
 type = "string"
+required = true
+help = "the payer, employer or other issuer, as printed (every slip, receipt and notice names one)"
 
 [[output]]
 name = "amount"
@@ -45,6 +47,7 @@ name = "tax_deducted"
 label = "Tax deducted"
 type = "decimal"
 scale = 2
+help = "the income tax deducted, as printed; 0 when the slip has no such box (a T5 has none), never negative"
 
 [[output]]
 name = "boxes"
