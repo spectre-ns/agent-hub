@@ -1296,7 +1296,7 @@ def test_a_slip_photo_is_read_by_the_model_that_can_see_it_and_checked_against_t
     answers = [{**read, "text": ""}, {**read, "text": T4}]
     shown = []
 
-    class Eyes:  # stands for gemma4 on Ollama: what it is shown, and what it answers
+    class Eyes:  # stands for the model that sees, on Ollama: what it is shown, and what it answers
         external = False
 
         def __call__(self, model, system, prompt, schema, ctx, pictures=()):
@@ -1306,7 +1306,7 @@ def test_a_slip_photo_is_read_by_the_model_that_can_see_it_and_checked_against_t
     gw = ModelGateway(firm)
     gw.backends["ollama"] = Eyes()
     run_all_local(firm, gw, log=quiet)
-    assert shown == [("gemma4:12b-it-qat", [photo])] * 2  # refused once (no words), taken the second time
+    assert shown == [("qwen3.5:4b", [photo])] * 2  # refused once (no words), taken the second time
     slip = firm.records.read(*sref.split("/"))
     assert (slip["status"], slip["amount"], slip["text"]) == ("extracted", 64500.0, T4)
     assert firm.db.events.exists({"action": "record.viewed", "actor": "documents-agent", "subject": sref,
@@ -1498,7 +1498,7 @@ def test_the_organizer_expects_only_the_client_s_slips_on_file_from_last_year(fi
 def test_an_upgrade_to_1_9_proposes_the_documents_agent_s_model_for_pictures_and_nothing_changes_until_approved(firm):
     """A 1.8 hub's documents agent has no model for pictures. The upgrade proposes the one the pack names, in the
     hub's name: until a policy owner approves it, no picture goes to that model."""
-    want = "ollama/gemma4:12b-it-qat"
+    want = "ollama/qwen3.5:4b"
     firm.propose_agent_profile(firm.member("sophie"), "documents-agent", {"vision_model": ""})  # as 1.8 had it
     firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records", "1.8-clients-by-kind"])  # a hub on 1.8
     assert firm.run_pack_upgrades() == [{"upgrade": "1.9-documents-agent-sees", "profiles_proposed": 1}]

@@ -1,8 +1,9 @@
 # Getting started
 
 This takes a fresh clone to a running demo practice with agents working in it. It needs Python 3.12 or later, Docker for
-the database (or a MongoDB 7 replica set of your own), and [Ollama](https://ollama.com) with `gemma4:12b-it-qat` pulled
-for the agents to answer with (`ollama pull gemma4:12b-it-qat`; step 3 says how to do without).
+the database (or a MongoDB 7 replica set of your own), and [Ollama](https://ollama.com) with `qwen3.5:4b` pulled for
+the agents to answer with (`ollama pull qwen3.5:4b`; step 3 says how to do without). It sees pictures too: the
+accounting office's documents agent reads photos of slips with it.
 
 ## 1. Get the code
 
@@ -42,7 +43,7 @@ practicehub verify                 # check the track: its hash chain, seals and 
 ```
 
 `init` prints what it set up (13 members, 9 workflows). Each agent is given the hub's default model, a local model
-through Ollama (`ollama/gemma4:12b-it-qat`), written into its profile. If Ollama is not running, the agents pass their
+through Ollama (`ollama/qwen3.5:4b`), written into its profile. If Ollama is not running, the agents pass their
 work to people, saying the model could not be reached. To try the demo with no model at all, set
 `PRACTICEHUB_DEFAULT_MODEL=standin` before `init`: the agents then answer with **stand-ins**, fixed, deterministic
 answers that ship with the pack. `verify` should end with "chain, seals and signatures intact".
@@ -104,16 +105,20 @@ An agent's profile names its model as `<backend>/<model>`:
 
 | Model | What answers |
 |---|---|
-| `ollama/<model>` | a local model through Ollama (`OLLAMA_URL`, default `http://localhost:11434`). A new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/gemma4:12b-it-qat` |
+| `ollama/<model>` | a local model through Ollama (`OLLAMA_URL`, default `http://localhost:11434`). A new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/qwen3.5:4b`. Every call asks Ollama for a 32k-token window (`OLLAMA_NUM_CTX`) |
 | `standin` | the pack's fixed answers, with no model |
 | `litellm/<model>` | a model behind your LiteLLM proxy (`LITELLM_URL`, `LITELLM_API_KEY`) |
 | `anthropic/<model>` | Claude through the Anthropic API (`ANTHROPIC_API_KEY`). It sends data off the premises, so it is refused unless `PRACTICEHUB_ALLOW_EXTERNAL_MODELS=1` |
+
+On a GPU with 8 GB, Ollama keeps more of a model on the GPU when its context cache is 8-bit: start the Ollama server
+with `OLLAMA_KV_CACHE_TYPE=q8_0` (it needs flash attention, which Ollama turns on for the models that support it). With
+the Ollama snap: `sudo snap set ollama kv-cache-type=q8_0`, then `sudo snap restart ollama`.
 
 A profile is under change control, like everything else an agent may do. One policy owner proposes the change and
 another approves it:
 
 ```sh
-practicehub member profile scribe-agent --model ollama/gemma4:12b-it-qat --as rana
+practicehub member profile scribe-agent --model ollama/qwen3.5:4b --as rana
 practicehub member approve-profile scribe-agent 2 --as dr-amara    # 2: the version the first command printed
 ```
 

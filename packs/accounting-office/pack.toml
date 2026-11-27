@@ -61,7 +61,7 @@
 #  client to its kind, keeping its id, key and number, and points everything at it (1.8-clients-by-kind).
 # 1.9: a slip is read from its file. A PDF's words are its text, read by the hub when it is attached (anyone who adds
 #  a slip attaches the file, on the new-slip form too); a photo is shown to the documents agent's model for pictures
-#  (gemma4), which writes its words as printed, and what it read is checked against them; words of its own (that the
+#  (qwen3.5:4b), which writes its words as printed, and what it read is checked against them; words of its own (that the
 #  picture was blurred, or its answers) are refused, and it escalates; every slip is read with who issued it, and its tax deducted is never below 0. A slip no agent can read goes to a person. The organizer expects only the client's slips on file from last year. A return whose last slip
 #  comes while staff are to call the client about it goes on to be compared and drafted (the call is withdrawn). The
 #  upgrade proposes the documents agent's model for pictures, for a policy owner to approve (1.9-documents-agent-sees).
@@ -428,9 +428,9 @@ name = "Documents agent"
 title = "Sends organizers, reads slips, chases what is missing"
 sponsor = "sophie"
 roles = ["document-clerk"]
-# a slip that is a photo is shown to a model that can see it (gemma4 reads a slip's boxes); anything else is read with
-# the hub's default model
-profile = { max_risk = "low", skills = ["engagement-letter", "t1-organizer", "slip-extract", "slip-chase"], vision_model = "ollama/gemma4:12b-it-qat" }
+# a slip that is a photo is shown to a model that can see it (qwen3.5:4b reads a slip's boxes); anything else is read
+# with the hub's default model
+profile = { max_risk = "low", skills = ["engagement-letter", "t1-organizer", "slip-extract", "slip-chase"], vision_model = "ollama/qwen3.5:4b" }
 
 [[members]]
 id = "tax-agent"

@@ -45,7 +45,8 @@ HISTORY = 20           # messages of the conversation the model is given
 RESULT_CHARS = 4000    # of one tool's result
 MAX_BODY = 4000        # of one message from the person
 SEARCH_LIMIT = 25
-STALE_SECONDS = 900    # a turn another machine left busy this long ago is taken to have died with it
+BEAT_SECONDS = 60      # how often a turn being answered says so (a model has no time limit, so a turn may be long)
+STALE_SECONDS = 300    # a turn another machine has not said it is answering for this long died with it
 
 REF_TEXT = re.compile(r"[A-Z][A-Za-z0-9]*/[A-Za-z0-9_.-]+")
 REF = {"type": "string", "pattern": r"^[A-Z][A-Za-z0-9]*/[A-Za-z0-9_.-]+$", "description": "the record, as Type/id"}
@@ -210,7 +211,7 @@ class Chat:
                 at = datetime.fromisoformat(str(busy.get("at")).replace("Z", "+00:00"))
             except ValueError:
                 return True
-            return (datetime.now(timezone.utc) - at).total_seconds() > STALE_SECONDS
+            return (datetime.now(timezone.utc) - at).total_seconds() > STALE_SECONDS  # its beat stopped
         if busy.get("pid") == os.getpid():
             return True  # this process is not answering it: the thread that was is gone
         try:
@@ -276,6 +277,8 @@ class Chat:
         from .models import ModelError, chat_system
         c = self.db.chats.get(cid)
         agent_id, made, spec = c["agent"], 0, None
+        done = threading.Event()
+        threading.Thread(target=self._beat, args=(cid, done), daemon=True).start()
         try:
             person, agent = self._pair(person_id, agent_id)
             while True:
@@ -321,7 +324,15 @@ class Chat:
                                         "error": type(exc).__name__})
             return msg
         finally:
+            done.set()
             self._idle(cid)
+
+    def _beat(self, cid: str, done: threading.Event) -> None:
+        """While this process answers a turn, its busy mark is renewed, so another machine reading the chat sees it
+        is still being answered however long the model takes, and only one whose machine stopped looks stale."""
+        while not done.wait(BEAT_SECONDS):
+            self.db.chats.update({"_id": cid, "busy.host": socket.gethostname(), "busy.pid": os.getpid()},
+                                 {"$set": {"busy.at": utcnow()}})
 
     def _rules(self) -> list[str]:
         pack = self.hub.pack

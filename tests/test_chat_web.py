@@ -3,6 +3,7 @@ and a conversation nobody else reads."""
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 from practicehub.chat import chat_of
 from practicehub.models import ModelGateway
@@ -92,3 +93,38 @@ def test_another_person_s_chat_is_not_found_and_an_agent_has_none(hub):
     assert cid not in {c["id"] for c in _api(app, "GET", "/api/chats", rana)[1]["chats"]}
     assert _api(app, "GET", "/api/chats", token(hub, "scribe-agent"))[0] == 403
     assert hub.db.chat_messages.find_one({"chat": cid}) is None  # nothing was said
+
+
+def test_a_turn_being_answered_says_so_however_long_its_model_takes(hub, monkeypatch):
+    """A model has no time limit, so a long turn is not a dead one: while a turn is answered, its chat's busy mark
+    is renewed, and only a turn whose machine stopped renewing it is taken to have died."""
+    from practicehub import chat as chatmod
+    monkeypatch.setattr(chatmod, "BEAT_SECONDS", 0.05)
+    beats = []
+
+    def slow(ctx):  # as if the model had been at it a long while: the mark is renewed as it goes on
+        hub.db.chats.update({"_id": cid}, {"$set": {"busy.at": "2000-01-01T00:00:00Z"}})
+        time.sleep(0.4)
+        beats.append(hub.db.chats.get(cid)["busy"]["at"])
+        return {"text": "Done, slowly."}
+    chat_of(hub, ModelGateway(hub, standins={**hub.pack.standins, "chat": slow}))
+    ch = chat_of(hub)
+    rana = hub.member("rana")
+    cid = ch.start(rana, "scheduling-agent")["id"]
+    assert ch.say(rana, cid, "Take your time.")["body"] == "Done, slowly."
+    assert beats[0] > "2000-01-01T00:00:00Z" and hub.db.chats.get(cid)["busy"] is None
+
+
+def test_a_turn_left_busy_on_another_machine_is_cut_off_only_once_it_stops_saying_so(hub):
+    from practicehub import chat as chatmod
+    from practicehub.db import utcnow
+    ch = chat_of(hub)
+    rana = hub.member("rana")
+    cid = ch.start(rana, "scheduling-agent")["id"]
+    hub.db.chats.set(cid, {"busy": {"at": utcnow(), "host": "another-machine", "pid": 1}})
+    assert ch.get(rana, cid)["busy"]  # it said so just now: still being answered there
+    old = (datetime.now(timezone.utc) - timedelta(seconds=chatmod.STALE_SECONDS + 5)).isoformat()
+    hub.db.chats.set(cid, {"busy": {"at": old, "host": "another-machine", "pid": 1}})
+    ch.get(rana, cid)
+    assert hub.db.chats.get(cid)["busy"] is None
+    assert ch.messages(rana, cid)[-1]["body"].startswith("My answer was cut off")

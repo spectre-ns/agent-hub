@@ -676,7 +676,7 @@ tone = "warm"
   (`--job-workers 0` does the same in a served hub). The portal always runs a block in place, since it answers the
   patient from what the screen found (`Engine.jobs_inline`).
 - **To try an engine block on one machine**, `scripts/dev-engine.py` is a real engine for the webhook path: a small
-  HTTP service that does a block's work with a local model through Ollama (`--model`, default `gemma4:12b-it-qat`).
+  HTTP service that does a block's work with a local model through Ollama (`--model`, default `qwen3.5:4b`).
   Start it, then serve the hub with `PRACTICEHUB_ENGINE_WEBHOOK_URL=http://127.0.0.1:8215/hook`. A block's
   `target` names a flow there (what the model is asked, and the shape of its answer); the pack's
   `post-claim-to-erp` has one built in, and `--flows` adds more. It posts nothing anywhere: it is for seeing an

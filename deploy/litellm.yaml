@@ -2,11 +2,12 @@
 model_list:
   - model_name: gp-local
     litellm_params:
-      model: ollama_chat/gemma4:12b-it-qat
+      model: ollama_chat/qwen3.5:4b
       api_base: http://host.docker.internal:11434
+      num_ctx: 32768                # the window the hub gives a local model (OLLAMA_NUM_CTX)
   # - model_name: gp-local          # or vLLM on a GPU host in the practice's Canadian data centre
   #   litellm_params:
-  #     model: hosted_vllm/<the Gemma 4 model it serves>
+  #     model: hosted_vllm/<the model it serves>
   #     api_base: http://vllm:8000/v1
 
 litellm_settings:

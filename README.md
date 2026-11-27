@@ -226,7 +226,7 @@ not yet been run against live servers:
 | Identity | Passphrases for people (scrypt; sessions and setup codes kept as hashes); API tokens (hashed) for agents, services and API clients | **Keycloak**: `practicehub keycloak realm` exports every member. Each agent is a confidential client with a service account, and tokens are exchanged (RFC 8693) for the hub's audience |
 | Orchestration | The run engine; Python blocks in a sandbox | **Engine blocks** run on Kestra (`KESTRA_URL`) or any JSON webhook (`PRACTICEHUB_ENGINE_WEBHOOK_URL`: Activepieces, an in-house service); the Kestra adapter is not yet run against a live server. Engines can also call `POST /api/events` and `POST /api/runs` as a `service` member. Either way the hub keeps the gates, eligibility and the track. Where the hub is served, a block runs as a job outside the request that made it ready (queued, running, done), and the record's History shows it as it happens |
 | Agent plumbing | `GET /api/inbox`, `/context`, `/complete` | **agentgateway** in front of the API. A2A Agent Cards per agent are *not built yet* (each agent's profile has what a card needs) |
-| Models | Ollama (a new agent's default, `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/gemma4:12b-it-qat`); stand-in answers for tests and a demo's past | **LiteLLM** (`litellm/<model>`) in front of Ollama or vLLM, traced in **Langfuse** with the agent, run and item |
+| Models | Ollama (a new agent's default, `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/qwen3.5:4b`); stand-in answers for tests and a demo's past | **LiteLLM** (`litellm/<model>`) in front of Ollama or vLLM, traced in **Langfuse** with the agent, run and item |
 
 Everything else is Apache-2.0 or similarly permissive. Windmill and n8n are deliberately not used.
 

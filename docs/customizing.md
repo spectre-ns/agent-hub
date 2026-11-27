@@ -119,14 +119,14 @@ place to customize:
 | **Roles** | the Team page, or `[[members]]` in the pack | which work it is offered, and through the roles' grants, which data classes it reads and writes |
 | **Skills** | its profile | which tasks it knows how to do; a task names the skill it needs |
 | **Risk limit** (`max_risk`) | its profile | the riskiest step it may take: `low`, `medium` or `high` |
-| **Model** | its profile | what answers: `ollama/<model>` (a new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/gemma4:12b-it-qat`), `litellm/<model>`, `anthropic/<model>`, or `standin` for the pack's fixed answers |
+| **Model** | its profile | what answers: `ollama/<model>` (a new agent is given `PRACTICEHUB_DEFAULT_MODEL`, else `ollama/qwen3.5:4b`), `litellm/<model>`, `anthropic/<model>`, or `standin` for the pack's fixed answers |
 | **Sponsor** | the Team page | the person accountable for it, who issues its tokens and can switch it off |
 
 Add an agent and give it a profile:
 
 ```sh
 practicehub member add filing-agent "Filing agent" --kind agent --sponsor dr-amara --as rana
-practicehub member profile filing-agent --model ollama/gemma4:12b-it-qat --max-risk low --skill intake-review --as rana
+practicehub member profile filing-agent --model ollama/qwen3.5:4b --max-risk low --skill intake-review --as rana
 practicehub member approve-profile filing-agent 2 --as dr-amara
 ```
 

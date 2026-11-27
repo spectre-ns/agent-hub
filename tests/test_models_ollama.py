@@ -16,7 +16,10 @@ def test_ollama_reads_the_whole_context_and_answers_without_thinking_first(monke
     monkeypatch.delenv("OLLAMA_THINK", raising=False)
     out = models.Ollama(url="http://ollama.invalid")("gemma", "sys", "prompt", {"type": "object"}, {})
     assert out["answer"] == {"category": "abnormal"}
-    assert sent["options"]["num_ctx"] >= 32768 and sent["think"] is False
+    assert sent["options"]["num_ctx"] == 32768 and sent["think"] is False
+    sent.clear()
+    models.Ollama(url="http://ollama.invalid").chat("gemma", "sys", [{"role": "user", "text": "hi"}], [], {})
+    assert sent["options"]["num_ctx"] == 32768  # a chat turn and a mention reply get the same window
 
 
 def test_an_empty_answer_says_the_model_gave_none(monkeypatch):
@@ -104,3 +107,38 @@ def test_the_gateway_offers_what_its_servers_serve_and_names_one_that_does_not_a
     assert [m["spec"] for m in gw.offered()["models"]] == ["ollama/qwen3:14b", "anthropic/claude-opus-5-5", "standin"]
     monkeypatch.delenv("LITELLM_URL", raising=False)
     assert models.LiteLLM().models() == []  # no proxy configured: nothing asked, nothing offered
+
+
+def test_a_model_is_given_as_long_as_it_takes(monkeypatch):
+    """Agents and chats answer in the background, so no call to a model has a time limit, on any backend. Asking a
+    server which models it has does: a page waits on that."""
+    import io
+    import json
+    answer = '{"answer": {}, "escalate": false, "reason": "done"}'
+    said = {"message": {"content": answer}, "choices": [{"message": {"content": answer}}],
+            "content": [{"type": "text", "text": answer}], "stop_reason": "end_turn",
+            "models": [{"name": "gemma"}], "capabilities": ["completion"], "data": [{"id": "gemma"}]}
+    waited = {}
+
+    class Said(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+    def urlopen(req, timeout):
+        waited.setdefault(req.full_url.split("/", 3)[3], []).append(timeout)
+        return Said(json.dumps(said).encode())
+
+    monkeypatch.setattr(models.urllib.request, "urlopen", urlopen)
+    o = models.Ollama(url="http://ollama.invalid")
+    o("gemma", "sys", "prompt", {}, {})
+    o.chat("gemma", "sys", [{"role": "user", "text": "hello"}], [], {})
+    models.LiteLLM(url="http://litellm.invalid")("gemma", "sys", "prompt", {}, {"step": {"id": "s"}})
+    models.Anthropic(api_key="k", base_url="http://anthropic.invalid")("claude", "sys", "prompt", {}, {})
+    assert waited.pop("api/chat") == [None, None]
+    assert waited.pop("v1/chat/completions") == [None] and waited.pop("v1/messages") == [None]
+    o.models()
+    assert waited.pop("api/tags") == [3] and waited.pop("api/show") == [3]
+    assert not waited

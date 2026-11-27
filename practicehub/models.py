@@ -6,7 +6,7 @@ submits. Nothing a model returns is ever executed.
 An agent's profile names its model as ``<backend>/<model>``:
 
     standin                         deterministic answers from the pack (tests, no model at all)
-    ollama/gemma4:12b-it-qat        a local model through Ollama, on the premises: the default
+    ollama/qwen3.5:4b               a local model through Ollama, on the premises: the default
     litellm/gp-local                a model behind the practice's LiteLLM proxy (Ollama or vLLM on premises), traced
                                     in Langfuse by LiteLLM's callbacks; the trace carries the agent and work item
     anthropic/claude-opus-5-5       Claude through the Anthropic API; *external*, so off unless the practice allows it
@@ -15,7 +15,7 @@ External backends send data off the premises. Under PHIA (and most professional-
 the practice, so they are refused unless ``PRACTICEHUB_ALLOW_EXTERNAL_MODELS=1`` is set.
 
 An agent added without a model is given the hub's default, ``PRACTICEHUB_DEFAULT_MODEL``
-(``ollama/gemma4:12b-it-qat`` when unset), written into its profile when it is added: what an agent answers with is
+(``ollama/qwen3.5:4b`` when unset), written into its profile when it is added: what an agent answers with is
 always in its reviewed profile, and a later change of the default moves no agent that already has one. A profile that
 names no model (an agent added before there was a default) answers by stand-in, as it did.
 
@@ -30,6 +30,9 @@ A step that carries a picture (a photo of a document, in a ``file:<field>`` cont
 the profile names as ``vision_model``, which is shown the picture. An agent whose profile names none is told there is
 a picture it cannot see, and answers with what else it has (or escalates): a picture is never sent to a model the
 practice did not approve for it.
+
+A model is given as long as it takes: agents and chats answer in the background, so a slow model only makes the
+answer later. No call to a model has a time limit (asking a server which models it has does, a few seconds).
 
 The models an agent's profile may be given are listed by :meth:`ModelGateway.offered`, for the profile form: what
 Ollama has installed, what LiteLLM serves (when its proxy is configured), Claude's models (when the practice allows
@@ -52,7 +55,7 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
 ANTHROPIC_FALLBACK_MODELS = ("claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5")
 
 
-DEFAULT_MODEL = "ollama/gemma4:12b-it-qat"
+DEFAULT_MODEL = "ollama/qwen3.5:4b"
 
 
 def default_model() -> str:
@@ -280,7 +283,16 @@ def parse_answer(text: str) -> dict:
     return {"answer": data["answer"], "escalate": bool(data.get("escalate")), "reason": str(data.get("reason", ""))}
 
 
-def _post(url: str, body: dict, headers: dict, timeout: float) -> dict:
+NUM_CTX = 32768  # the context window a local model is given, unless OLLAMA_NUM_CTX names another
+
+
+def num_ctx() -> int:
+    """The window every call to Ollama asks for: its own default (a few thousand tokens) would silently cut a long
+    record off."""
+    return int(os.environ.get("OLLAMA_NUM_CTX") or NUM_CTX)
+
+
+def _post(url: str, body: dict, headers: dict, timeout: float | None) -> dict:
     return _send(urllib.request.Request(url, data=json.dumps(body, default=decimals.jsonable).encode(), method="POST",
                                         headers={"Content-Type": "application/json", **headers}), url, timeout)
 
@@ -289,7 +301,7 @@ def _get(url: str, headers: dict, timeout: float) -> dict:
     return _send(urllib.request.Request(url, headers=headers), url, timeout)
 
 
-def _send(req, url: str, timeout: float) -> dict:
+def _send(req, url: str, timeout: float | None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
@@ -340,7 +352,7 @@ class Standin:
 class Ollama:
     external = False
 
-    def __init__(self, url: str | None = None, timeout: float = 300):
+    def __init__(self, url: str | None = None, timeout: float | None = None):
         self.url = (url or os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
         self.timeout = timeout
         self._sees: dict[str, bool] = {}
@@ -361,13 +373,13 @@ class Ollama:
     def __call__(self, model, system, prompt, schema, ctx, pictures=()):
         if pictures and not self.sees(model):
             raise ModelError(f"{model} does not take pictures: name a model that can see as the profile's vision_model")
-        # Ollama's default context (a few thousand tokens) silently cuts a patient's records off, and a model that
-        # thinks first can spend its whole turn thinking: a window that fits the context, and no thinking by default
+        # a window that fits the context (num_ctx), and no thinking by default: a model that thinks first can spend
+        # its whole turn thinking
         user = {"role": "user", "content": prompt}
         if pictures:
             user["images"] = [base64.b64encode(p["data"]).decode() for p in pictures]
         body = {"model": model, "stream": False, "format": schema,
-                "options": {"temperature": 0, "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX") or 32768)},
+                "options": {"temperature": 0, "num_ctx": num_ctx()},
                 "think": os.environ.get("OLLAMA_THINK") == "1",
                 "messages": [{"role": "system", "content": system}, user]}
         resp = _post(self.url + "/api/chat", body, {}, self.timeout)
@@ -379,7 +391,7 @@ class Ollama:
 
     def chat(self, model, system, rs, tools, ctx) -> dict:
         body = {"model": model, "stream": False, "messages": _openai_messages(system, rs, ollama=True),
-                "options": {"temperature": 0, "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX") or 32768)},
+                "options": {"temperature": 0, "num_ctx": num_ctx()},
                 "think": os.environ.get("OLLAMA_THINK") == "1"}
         if tools:
             body["tools"] = _functions(tools)
@@ -401,7 +413,7 @@ class LiteLLM:
 
     external = False
 
-    def __init__(self, url: str | None = None, key: str | None = None, timeout: float = 300):
+    def __init__(self, url: str | None = None, key: str | None = None, timeout: float | None = None):
         self.url = (url or os.environ.get("LITELLM_URL") or "http://localhost:4000").rstrip("/")
         self.configured = bool(url or os.environ.get("LITELLM_URL"))
         self.key = key if key is not None else os.environ.get("LITELLM_API_KEY", "")
@@ -455,7 +467,7 @@ class Anthropic:
 
     external = True
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None, timeout: float = 600,
+    def __init__(self, api_key: str | None = None, base_url: str | None = None, timeout: float | None = None,
                  effort: str | None = None):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.base = (base_url or os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")

@@ -318,7 +318,7 @@ def test_external_models_are_off_unless_the_practice_allows(hub):
     gw = ModelGateway(hub, allow_external=False)
     with pytest.raises(ModelError):
         gw.backend("anthropic/claude-opus-5-5")
-    assert gw.backend("ollama/gemma4:12b-it-qat")[1] == "gemma4:12b-it-qat"
+    assert gw.backend("ollama/qwen3.5:4b")[1] == "qwen3.5:4b"
 
 
 def test_an_agent_names_its_model_and_one_added_without_is_given_the_hubs_default_a_local_ollama_model(
@@ -328,18 +328,18 @@ def test_an_agent_names_its_model_and_one_added_without_is_given_the_hubs_defaul
     moves no agent. A demo's past is answered by stand-ins whatever the agents name."""
     rana = M(hub, "rana")
     monkeypatch.delenv("PRACTICEHUB_DEFAULT_MODEL")
-    assert default_model() == "ollama/gemma4:12b-it-qat"
+    assert default_model() == "ollama/qwen3.5:4b"
     hub.add_member(rana, {"id": "helper", "kind": "agent", "name": "Helper", "sponsor": "jo", "roles": []})
-    assert M(hub, "helper")["profile"]["model"] == "ollama/gemma4:12b-it-qat"
+    assert M(hub, "helper")["profile"]["model"] == "ollama/qwen3.5:4b"
     # version 1 names it
-    assert hub.agent_profile_versions("helper")[0]["profile"]["model"] == "ollama/gemma4:12b-it-qat"
+    assert hub.agent_profile_versions("helper")[0]["profile"]["model"] == "ollama/qwen3.5:4b"
     # asked for skills but no model (or a blank one): the default, and only the skills wait for approval
     hub.add_member(rana, {"id": "helper-2", "kind": "agent", "name": "Helper 2", "sponsor": "jo", "roles": [],
                           "profile": {"model": " ", "skills": ["slot-proposal"]}})
-    assert M(hub, "helper-2")["profile"] == {"model": "ollama/gemma4:12b-it-qat", "max_risk": "low", "skills": []}
-    assert hub.agent_profile_proposal("helper-2")["profile"]["model"] == "ollama/gemma4:12b-it-qat"
+    assert M(hub, "helper-2")["profile"] == {"model": "ollama/qwen3.5:4b", "max_risk": "low", "skills": []}
+    assert hub.agent_profile_proposal("helper-2")["profile"]["model"] == "ollama/qwen3.5:4b"
     monkeypatch.setenv("PRACTICEHUB_DEFAULT_MODEL", "litellm/firm-local")
-    assert M(hub, "helper")["profile"]["model"] == "ollama/gemma4:12b-it-qat"  # a new default moves no agent
+    assert M(hub, "helper")["profile"]["model"] == "ollama/qwen3.5:4b"  # a new default moves no agent
     hub.add_member(rana, {"id": "helper-3", "kind": "agent", "name": "Helper 3", "sponsor": "jo", "roles": []})
     assert M(hub, "helper-3")["profile"]["model"] == "litellm/firm-local"
     # an agent added before there was a default names no model, and answers as it did: by stand-in
@@ -357,13 +357,13 @@ def test_an_agent_names_its_model_and_one_added_without_is_given_the_hubs_defaul
     ctx = {"step": {"id": "s", "kind": "task", "risk": "low", "title": "S", "skill": "nothing"},
            "run": {"title": "R"}, "fields": [], "schema": {"type": "object"}}
     assert gw.answer({"id": "old", "profile": {"max_risk": "low", "skills": []}}, ctx)["model"] == "standin"
-    gemma = "ollama/gemma4:12b-it-qat"
-    assert gw.answer({"id": "new", "profile": {"model": gemma}}, ctx)["model"] == gemma
+    local = "ollama/qwen3.5:4b"
+    assert gw.answer({"id": "new", "profile": {"model": local}}, ctx)["model"] == local
     assert len(ollama) == 1
     # a scripted gateway (a demo's past) answers by stand-in whatever the agent names
     scripted = ModelGateway(hub, scripted=True)
     scripted.backends["ollama"] = gw.backends["ollama"]
-    assert scripted.answer({"id": "new", "profile": {"model": "ollama/gemma4:12b-it-qat"}}, ctx)["model"] == "standin"
+    assert scripted.answer({"id": "new", "profile": {"model": "ollama/qwen3.5:4b"}}, ctx)["model"] == "standin"
     assert len(ollama) == 1
 
 
@@ -10214,7 +10214,7 @@ def test_an_agent_that_cannot_answer_says_so_in_the_thread(hub):
                 def __call__(self, *a, **k):
                     raise ModelError("cannot reach the model")
             gw.backends["ollama"] = Down()
-            hub.db.members.set(agent["id"], {"profile": {**agent["profile"], "model": "ollama/gemma4:12b-it-qat"}})
+            hub.db.members.set(agent["id"], {"profile": {**agent["profile"], "model": "ollama/qwen3.5:4b"}})
         threads.append(lv.comment(amara, oref, f"@clinical-admin-agent {ask}")["id"])
         runner.work_once()
     said = [hub.db.live_comments.get(t)["replies"][-1] for t in threads]
