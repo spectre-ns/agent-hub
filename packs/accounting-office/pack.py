@@ -1631,16 +1631,16 @@ def _engage(hub, name, year, previous=None, *, sign=True, answer="approve"):
 
 
 def _upload(hub, name, year, slips, *, only=None):
-    """The client uploads this year's slips on the portal; the documents agent reads each."""
-    portal = hub.member("client-portal")
+    """The client sends this year's slips on the portal (Send us a slip or receipt); the documents agent reads
+    each."""
+    from practicehub.portal import Portal
+    portal = Portal(hub)
     # what the organizer did not expect first: the return is drafted as soon as the expected ones are all in
     for kind, issuer, _, _, amount, tax in sorted(slips, key=lambda s: s[2] is not None):
         if amount is None or (only is not None and kind not in only):
             continue
-        f = hub.add_file(portal, "TaxSlip", slip_pdf(slip_text(kind, year, issuer, amount, tax or 0.0)),
-                         f"{kind.lower()}-{year}.pdf", "application/pdf")
-        hub.create_record(portal, "TaxSlip", {"client": DEMO_CLIENTS[name], "status": "received", "source": "portal",
-                                              "received_on": hub.engine.now().date().isoformat(), "file": f})
+        portal.upload(DEMO_CLIENTS[name], "slips",
+                      [(f"{kind.lower()}-{year}.pdf", slip_pdf(slip_text(kind, year, issuer, amount, tax or 0.0)))])
     _agents_work(hub)
 
 

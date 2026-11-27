@@ -62,6 +62,7 @@ Notes for anyone, human or agent, changing this code.
 | A move's stamp: who made it and when, written by that move alone (a workflow's move: whoever did the step) and covered by a signature that makes it | `Hub.stamped`, `Hub._check_stamps_kept` in `practicehub/hub.py`; `schema._stamp_fields` |
 | `unique` over a reference compares the record it names, however it is written | `Hub._check_unique` in `practicehub/hub.py` |
 | A portal kind about a person's own record: only one of theirs its condition offers them now, checked again on sending | `Portal.about_choices`, `Portal.book` in `practicehub/portal.py` |
+| A file a person sends on the portal: kept only when its own bytes are a PDF or picture its upload takes, every file checked before any is kept, each a record about them that its type's workflow takes in; a large body only from a signed-in person | `Portal.upload`, `upload_problems` in `practicehub/portal.py`; `PortalApp.body_limit` in `practicehub/web/portal_app.py` |
 | A step done by a move is refused to whoever wrote the record before the move (`not_by = ["record.editors"]`); the fields that move writes do not make its mover an editor | `Hub.revision_authors` in `practicehub/hub.py`; `Engine.eligibility`; `_step_by_move` in `practicehub/moves.py` |
 
 If you change one of these, add or update a test in `tests/test_rules.py` that states the rule (the rules the

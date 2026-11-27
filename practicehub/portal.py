@@ -19,6 +19,9 @@ to say, in ``[portal]``, which is under the pack's change control (two policy ow
   a one-time code sent to its contact (``Subject.contact``).
 * ``register``: the fields a new person gives, the values that keep their record from signing in or booking until
   the practice has taken them in (``pending``), and ``intake_workflow``, the workflow that takes them in.
+* ``uploads``: what a signed-in person may send the practice (a PDF, a photo of a page). Each file becomes a record
+  of the upload's type about them (``Portal.upload``), with the upload's fixed values and the day it was sent, and
+  that type's own workflow takes it in as it does any record made: nothing sent lies unread.
 
 A question a person answers in their own words is screened: its kind names the step of its workflow that reads it
 (``screen``) and says when the answer must be told loudly (``alarm``); a kind booked straight away books only after
@@ -36,7 +39,7 @@ import re
 import secrets
 from datetime import date, datetime, timedelta, timezone
 
-from . import expr, schema
+from . import expr, filetext, schema
 
 KINDS_KEYS = {"label", "description", "mode", "workflow", "roles", "minutes", "horizon_days", "slot", "slot_input",
               "inputs", "questions", "advice", "alarm", "booked", "booking_kind", "cancel_to",
@@ -44,7 +47,12 @@ KINDS_KEYS = {"label", "description", "mode", "workflow", "roles", "minutes", "h
 ABOUT_KEYS = {"type", "when", "input"}
 ABOUT_LIMIT = 50           # the person's records of the kind's type a choice is made from, newest first
 TOP_KEYS = {"member", "title", "welcome", "privacy", "contact_line", "wording", "identity", "code", "register",
-            "intake_workflow", "session_minutes", "kinds", "public_origin", "per_minute", "over_limit"}
+            "intake_workflow", "session_minutes", "kinds", "public_origin", "per_minute", "over_limit", "uploads"}
+UPLOAD_KEYS = {"label", "description", "type", "file", "values", "today", "max_files", "per_day", "accept"}
+ACCEPT = {"pdf": "a PDF", "picture": "a photo (JPEG, PNG or WebP)"}  # what an upload may take, by its first bytes
+MAX_FILES = 5              # files sent at once, unless the upload's max_files says
+PER_DAY = 20               # files one person may send of one upload in a day, unless its per_day says
+UPLOAD_FILE = filetext.MAX_PICTURE  # bytes of one file sent: what the hub reads, and a model is shown, whole
 OVER_LIMIT_KEYS = {"workflow", "input"}
 QUESTION_KEYS = {"input", "label", "help", "choices"}
 FREE_TEXT = ("string", "text")    # an input a person fills in their own words: screened
@@ -98,6 +106,10 @@ WORDING = {  # what the pages say, unless [portal.wording] says otherwise
     "about": "Which one this is about",
     "choose_about": "Choose which one this is about.",
     "nothing_about": "Nothing of yours is waiting for this just now. If you expected something, call the practice.",
+    "uploaded": "Thank you: the practice has what you sent. You do not need to send it again.",
+    "upload_limit": "You have sent as many files today as can be sent online. Send the rest tomorrow, or call the "
+                    "practice.",
+    "choose_files": "Choose a file to send.",
 }
 
 
@@ -111,16 +123,21 @@ class Clash(Exception):
 
 # ------------------------------------------------------------------------------------------ the pack's [portal]
 def config(pack) -> dict:
-    """The practice's ``[portal]``, with the kinds its modules add (a module adds kinds, never changes the rest)."""
+    """The practice's ``[portal]``, with the kinds and uploads its modules add (a module adds them, never changes the
+    rest)."""
     if pack is None:
         return {}
     cfg = dict(pack.portal or {})
-    kinds = dict(cfg.get("kinds") or {})
-    for m in pack.modules:
-        for kid, k in ((m.portal or {}).get("kinds") or {}).items():
-            kinds.setdefault(kid, k)
-    if kinds:
-        cfg["kinds"] = kinds
+    for table in ("kinds", "uploads"):
+        got = cfg.get(table) or {}
+        if not isinstance(got, dict):
+            continue  # check_config says so
+        got = dict(got)
+        for m in pack.modules:
+            for kid, k in ((m.portal or {}).get(table) or {}).items():
+                got.setdefault(kid, k)
+        if got:
+            cfg[table] = got
     return cfg
 
 
@@ -424,7 +441,89 @@ def check_config(pack) -> list[str]:
                 float(k.get("cancel_before_hours", 0))
             except (TypeError, ValueError):
                 problems.append(f"{w}.cancel_before_hours: a number of hours")
+    uploads = cfg.get("uploads")
+    if uploads is not None and not isinstance(uploads, dict):
+        problems.append("uploads: a table of what a person may send ([portal.uploads.<id>])")
+        uploads = {}
+    for uid, u in (uploads or {}).items():
+        if not ID.fullmatch(str(uid)):
+            problems.append(f"uploads.{uid}: an id is lower-case letters, digits and dashes")
+        problems += upload_problems(f"uploads.{uid}", u, pack, up, portal_roles, mid)
     return problems
+
+
+def upload_problems(w: str, u, pack, up: list[str], roles: set[str], mid) -> list[str]:
+    """An upload, ``[portal.uploads.<id>]``: what each file a person sends becomes. ``type``: a record type about the
+    type that signs in (a ``rel = "subject"`` reference to it or a type above it: ``up``), which names the workflow
+    that takes in what is sent (its ``workflow``) and whose data class the portal's member may write (``roles``,
+    its roles); ``file``: its attachment field for one file; ``values``: the fields each record gets as they are;
+    ``today``: its date fields set to the day it was sent; ``accept``: ``pdf``, ``picture`` or both; ``max_files``
+    at once and ``per_day``, files a person may send of it in a day."""
+    if not isinstance(u, dict):
+        return [f"{w}: a table"]
+    out = [f"{w}.{x}: not a setting of an upload (settings: {', '.join(sorted(UPLOAD_KEYS))})"
+           for x in sorted(set(u) - UPLOAD_KEYS)]
+    if not str(u.get("label") or "").strip():
+        out.append(f"{w}.label: what a person sees it as")
+    for key, lo, hi, dflt in (("max_files", 1, 20, MAX_FILES), ("per_day", 1, 500, PER_DAY)):
+        v = u.get(key, dflt)
+        if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
+            out.append(f"{w}.{key}: a whole number between {lo} and {hi}")
+    acc = u.get("accept", list(ACCEPT))
+    if not isinstance(acc, list) or not acc or set(map(str, acc)) - set(ACCEPT):
+        out.append(f"{w}.accept: what it takes, one or both of {', '.join(ACCEPT)} (by the file's own bytes)")
+    tid = u.get("type")
+    chain = _chain_docs(pack, tid) if isinstance(tid, str) else []
+    if not chain:
+        out.append(f"{w}.type: there is no record type {tid!r}")
+        return out
+    fields = {f.get("name"): f for _, doc in reversed(chain) for f in doc.get("field") or [] if isinstance(f, dict)}
+    if chain[0][1].get("abstract"):
+        out.append(f"{w}.type: {tid} is abstract: name a type under it")
+
+    def targets(f):
+        return [f["target"]] if isinstance(f.get("target"), str) else list(f.get("target") or [])
+    if not any(f.get("type") == "reference" and f.get("rel") == "subject" and set(up) & set(targets(f))
+               for f in fields.values()):
+        out.append(f"{w}.type: a {tid} is not about a {up[0] if up else 'person'} (no rel = \"subject\" reference "
+                   f"to one): what a person sends is filed as theirs")
+    ff = fields.get(u.get("file"))
+    if not ff or ff.get("type") != "attachment":
+        out.append(f"{w}.file: the attachment field of {tid} that holds the file, not {u.get('file')!r}")
+    elif ff.get("list") or "*" in str(ff.get("path") or "") or ff.get("by") == "workflow":
+        out.append(f"{w}.file: {ff['name']} holds one file, written by whoever makes the record (each file sent is a "
+                   f"record of its own)")
+    vals = u.get("values", {})
+    if not isinstance(vals, dict):
+        out.append(f"{w}.values: a table of field = value that each record sent gets")
+        vals = {}
+    today = u.get("today", [])
+    if not isinstance(today, list):
+        out.append(f"{w}.today: a list of {tid}'s date fields set to the day it was sent")
+        today = []
+    for n, v in vals.items():
+        f = fields.get(n)
+        if not f:
+            out.append(f"{w}.values: {tid} has no field {n!r}")
+        elif n == u.get("file") or f.get("rel") == "subject" or n in today:
+            out.append(f"{w}.values: {n} is the portal's to set (the file, who sent it, or the day)")
+        elif f.get("choices") and v not in f["choices"]:
+            out.append(f"{w}.values.{n}: {v!r} is not one of {tid}'s choices for {n}")
+    out += [f"{w}.today: {tid} has no date field {n!r}" for n in today
+            if (fields.get(n) or {}).get("type") != "date"]
+    dc = next((d.get("data_class") for _, d in chain if d.get("data_class")), None)
+    writes = {c for p in pack.all_parts() for r in roles for c in ((p.grants.get(r) or {}).get("write") or [])}
+    if roles and dc not in writes:
+        out.append(f"{w}.type: {mid} may not write {dc} (a {tid}'s data class): what a person sends is written as "
+                   f"the portal's member, so give one of its roles write = [\"{dc}\"] ([grants])")
+    owner = next((d["workflow"] for _, d in chain if isinstance(d.get("workflow"), dict)), None)
+    wid = (owner or {}).get("id")
+    if not wid:
+        out.append(f"{w}.type: {tid} names no workflow (workflow = {{ id = ... }}) to take in what is sent: nothing a "
+                   f"person sends may lie unread")
+    elif _workflow(pack, wid) is None:
+        out.append(f"{w}.type: {tid}'s workflow {wid!r} is not one of the pack's")
+    return out
 
 
 def about_problems(w: str, ab, pack, up: list[str], names: dict, given: set) -> list[str]:
@@ -594,6 +693,15 @@ class Portal:
                 raise ValueError(f"[portal] register.pending: a record with {pend} is still active as "
                                  f"{self.subject_type} says it: a new registration must not sign in before the "
                                  f"practice takes it in")
+        for uid, u in self.uploads().items():  # as this hub has the type, not only as the pack wrote it
+            rt = hub.record_type(u["type"])
+            gone = [n for n in [u["file"], *(u.get("values") or {}), *(u.get("today") or [])]
+                    if rt is not None and rt.field(n) is None]
+            if rt is None or gone:
+                raise ValueError(f"[portal] uploads.{uid}: this hub's {u['type']} has no {', '.join(gone) or 'type'}")
+            if not schema.starts_workflow(rt, self._sent(rt, u, None, None)):
+                raise ValueError(f"[portal] uploads.{uid}: a {u['type']} sent with {u.get('values') or {}} starts no "
+                                 f"workflow (its type's workflow when does not hold of it): nothing would read it")
 
     # --- configuration
     @property
@@ -608,6 +716,16 @@ class Portal:
 
     def kinds(self) -> dict[str, dict]:
         return {kid: {"id": kid, **k} for kid, k in (self.cfg.get("kinds") or {}).items()}
+
+    def uploads(self) -> dict[str, dict]:
+        return {uid: {"id": uid, **u} for uid, u in (self.cfg.get("uploads") or {}).items()}
+
+    def upload_kind(self, uid: str) -> dict:
+        from .hub import NotFound
+        u = self.uploads().get(uid)
+        if not u:
+            raise NotFound(f"there is nothing to send called {uid!r}")
+        return u
 
     def kind(self, kid: str) -> dict:
         from .hub import NotFound
@@ -644,6 +762,9 @@ class Portal:
             wids.append((f"kinds.{kid}.workflow", k.get("workflow")))
         if self.cfg.get("over_limit"):
             wids.append(("over_limit.workflow", self.cfg["over_limit"].get("workflow")))
+        for uid, u in self.uploads().items():  # what is sent is taken in by its type's own workflow
+            rt = self.hub.record_type(u["type"])
+            wids.append((f"uploads.{uid}.type", ((rt.workflow or {}) if rt else {}).get("id") or u["type"]))
         for where, wid in wids:
             try:
                 wf, _ = self.hub.workflow(wid)
@@ -740,7 +861,11 @@ class Portal:
                              "digits": ident.get("digits"), "identifier_help": ident.get("identifier_help") or "",
                              "born_help": ident.get("born_help") or ""},
                 "register": bool(self.cfg.get("intake_workflow") and self.cfg.get("register")),
-                "register_fields": fields, "kinds": kinds, "dev": self.dev}
+                "register_fields": fields, "kinds": kinds, "dev": self.dev,
+                "uploads": [{"id": u["id"], "label": u["label"], "description": u.get("description") or "",
+                             "max_files": int(u.get("max_files", MAX_FILES)),
+                             "accept": [a for a in ACCEPT if a in (u.get("accept") or ACCEPT)],
+                             "max_bytes": UPLOAD_FILE} for u in self.uploads().values()]}
 
     # --- counting: lockouts as the staff sign-in counts them (``credentials``), caps in fixed windows of our own
     def _keys(self, client: str | None, identifier: str | None) -> list[tuple[str, int]]:
@@ -988,6 +1113,70 @@ class Portal:
             raise
         db.portal_submits.set(key, {"state": "done", "result": result})
         return done
+
+    # --- what a person sends
+    def _sent(self, rt, u: dict, person: str | None, att: dict | None) -> dict:
+        """The record a file sent becomes: about the person, with the upload's values, the day, and the file."""
+        rec: dict = {}
+        sf = next((f for f in rt.fields if f["type"] == "reference" and f.get("rel") == "subject"
+                   and "*" not in f["path"] and (person is None or person.split("/", 1)[0] in
+                                                 self.hub.concrete(f["target"]))), None)
+        if sf is not None and person:
+            rec = schema.place(rec, sf, person)
+        for name, value in (u.get("values") or {}).items():
+            rec = schema.place(rec, rt.field(name), value)
+        today = self.hub.engine.now().date().isoformat()
+        for name in u.get("today") or []:
+            rec = schema.place(rec, rt.field(name), today)
+        if att is not None:
+            rec = schema.place(rec, rt.field(u["file"]), att)
+        return rec
+
+    def sent_today(self, person: str, uid: str) -> int:
+        """Files the person has sent of this upload in the last day (the forms' answers keep the count)."""
+        since = _stamp(datetime.now(timezone.utc) - timedelta(hours=24))
+        rows = self.hub.db.portal_submits.find({"record": person, "what": "upload"}, limit=1000)
+        return sum(int((r.get("result") or {}).get("count") or 0) for r in rows
+                   if (r.get("result") or {}).get("upload") == uid and str(r.get("created_at") or "") >= since)
+
+    def upload(self, person: str, uid: str, files: list[tuple[str, bytes]]) -> dict:
+        """What a person sends (an upload, ``[portal.uploads.<id>]``): each file a record of the upload's type about
+        them, with its values and the day (``_sent``), written as the portal's member, so the type's own workflow
+        takes each in as it does any record made. A file is what the upload accepts by its own first bytes (never
+        its name, or what the browser called it), at most ``UPLOAD_FILE``; at most ``max_files`` at once and
+        ``per_day`` a day. Every file is checked before any is kept: what is refused is said file by file, and then
+        nothing is kept. ``{upload, count, names}``: the person's own names for what was kept."""
+        from .hub import Invalid
+        u = self.upload_kind(uid)
+        rt = self.hub.record_type(u["type"])
+        files = [(re.sub(r"[\x00-\x1f\x7f]", "", str(n or "")).strip()[:200], d) for n, d in files if d]
+        if not files:
+            raise Invalid(self.say("choose_files"))
+        most = int(u.get("max_files", MAX_FILES))
+        if len(files) > most:
+            raise Invalid(f"Send at most {most} files at a time.")
+        if self.sent_today(person, uid) + len(files) > int(u.get("per_day", PER_DAY)):
+            raise Invalid(self.say("upload_limit"))
+        accept = [a for a in ACCEPT if a in (u.get("accept") or ACCEPT)]
+        problems, kept = [], []
+        for i, (name, data) in enumerate(files, 1):
+            label = name or f"File {i}"
+            if len(data) > UPLOAD_FILE:
+                problems.append(f"{label}: larger than {UPLOAD_FILE // (1024 * 1024)} MB. Send a smaller copy.")
+                continue
+            ctype = "application/pdf" if "pdf" in accept and data[:5] == b"%PDF-" else \
+                filetext.picture_type(data) if "picture" in accept else None
+            if not ctype:
+                problems.append(f"{label}: not {' or '.join(ACCEPT[a] for a in accept)}.")
+                continue
+            kept.append((name or f"file-{i}.{ctype.rsplit('/', 1)[1].replace('jpeg', 'jpg')}", data, ctype))
+        if problems:
+            raise Invalid("; ".join(problems), problems)
+        member = self.member
+        for name, data, ctype in kept:
+            att = self.hub.add_file(member, rt.id, data, name, ctype)
+            self.hub.create_record(member, rt.id, self._sent(rt, u, person, att))
+        return {"upload": uid, "count": len(kept), "names": [n for n, _, _ in kept]}
 
     def answer(self, person: str | None, done: str) -> dict:
         """The answer a form got (``once``), for the person who sent it: ``{what, state, result}``."""

@@ -1,6 +1,6 @@
 # The booking portal
 
-The portal lets the people a practice serves book online. It is a process of its own, the only part meant to face
+The portal lets the people a practice serves book online and send the practice documents. It is a process of its own, the only part meant to face
 the internet. The staff hub stays inside.
 
 The portal process has no database and none of the hub's secrets. It does not hold the MongoDB URI or
@@ -47,7 +47,8 @@ below). It never binds 8080, 9980 or 11434.
 
 Limits on the listener:
 
-- a 64 KB body, refused before it is read;
+- a 64 KB body, refused before it is read. The one exception is files a signed-in person sends from the portal's
+  own pages to `/send/<upload>`, which may be about 19 MB (`PortalApp.body_limit`, below);
 - a 30 second socket timeout, so a slow client does not hold a thread;
 - POSTs only from `public_origin`;
 - Secure, HttpOnly, SameSite=Strict cookies;
@@ -75,6 +76,13 @@ server {
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_read_timeout 30s;
     }
+    location /send/ {                # files a person sends: the portal itself reads them only when signed in
+        client_max_body_size 20m;
+        proxy_pass http://127.0.0.1:8210;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_read_timeout 60s;
+    }
 }
 server {
     listen 80;
@@ -89,7 +97,7 @@ accepts only forms posted from that address.
 ## What it does, as whom
 
 The portal acts as the `[portal] member`. In the clinic, that member holds `patient-portal`, which writes contact
-details, intake, messages and visits, and reads no clinical record. It makes only three kinds of change:
+details, intake, messages and visits, and reads no clinical record. It makes only four kinds of change:
 
 - **A booking or a request** starts the kind's workflow about the person (`hub.engine.start`). In the clinic, both
   kinds start the practice's own `appointment-request`. It makes the visit (an Encounter) and screens the reason
@@ -100,6 +108,9 @@ details, intake, messages and visits, and reads no clinical record. It makes onl
   portal never writes a status any other way.
 - **Someone new** gets a record with `[portal.register] pending` values (`active = false`), and the intake workflow
   starts about it.
+- **A file a person sends** becomes a record of the upload's type about them (`Portal.upload`), made through
+  `hub.create_record`, so its type's own workflow takes it in as it does any record made. In the accounting office
+  each file is a `TaxSlip`, and `slip-intake` reads it.
 
 The code makes and cancels bookings in exactly one place each: `Portal._book` and `Portal._cancel` in
 `practicehub/portal.py`.
@@ -150,15 +161,15 @@ delivers them, and that provider must keep the data in Canada.
 
 ## Forms: one answer, after a redirect
 
-Every form that changes something (book, cancel, register) carries its own token. The hub runs it at most once and
+Every form that changes something (book, cancel, register, send) carries its own token. The hub runs it at most once and
 keeps the answer. The portal then redirects to `/done/<id>`, which:
 
 - is the same page however often the form is sent or reloaded, and only for the person who sent it;
 - while the hub is still working, shows the emergency line and refreshes itself (a meta refresh, no script);
 - for a booking or request, always shows the say-now advice first: the screen's advice, or the emergency line when
   there is none. It shows the advice loudly when the kind's `alarm` holds;
-- has a title that says what happened: **Booked**, **Request sent**, **Not booked** (with what happens next) or
-  **Cancelled**.
+- has a title that says what happened: **Booked**, **Request sent**, **Not booked** (with what happens next),
+  **Cancelled** or **Sent** (with the names of the files kept).
 
 If the same request reaches the workflow twice, for example from a second tab, the workflow's `one_open_same`
 (the same reason within `one_open_within`) refuses the second start. The hub answers with the open request's own
@@ -184,7 +195,8 @@ starts with no portal until the upgrade.
 ## `[portal]` in the pack
 
 It is checked when the pack loads, and a mistake stops the load with a clear problem
-(`practicehub/portal.py: check_config`). Modules may add kinds under `[portal.kinds]`.
+(`practicehub/portal.py: check_config`). Modules may add kinds under `[portal.kinds]` and uploads under
+`[portal.uploads]`.
 
 | Key | |
 |---|---|
@@ -193,7 +205,7 @@ It is checked when the pack loads, and a mistake stops the load with a clear pro
 | `privacy` | required; shown on every page |
 | `public_origin` | the https address people use (behind a proxy) |
 | `per_minute` | sign-ins and registrations from everyone in a minute (default 60) |
-| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many at_limit over_limit safety busy failed closed visit_next request_next no_cancel_soon no_cancel about choose_about nothing_about` |
+| `wording.*` | `booking sent no_match duplicate clash requested booked registered cancelled emergency working too_many at_limit over_limit safety busy failed closed visit_next request_next no_cancel_soon no_cancel about choose_about nothing_about uploaded upload_limit choose_files` |
 | `over_limit.workflow`, `over_limit.input` | what takes a person's own words once they are at a kind's limit (below) |
 | `identity.type` | the type whose records sign in: the practice's subject type (the default) or a type under it, such as `Individual` under `Client`. Records of every type under it sign in too, each as its own type, and a person who registers online is made as this type, so it may be abstract only when no one registers online |
 | `identity.born`, `born_label`, `identifier_label`, `inputmode` | the date-of-birth field (of that type, or of a type above it); the labels; `numeric` for a number card |
@@ -201,6 +213,7 @@ It is checked when the pack loads, and a mistake stops the load with a clear pro
 | `code` | `channel`, `minutes` (2 to 30), `length` (6 to 10) |
 | `register.fields`, `register.pending`, `intake_workflow` | the form for someone new, the values that keep them a request, and the workflow that takes them in. A field is a name, or `{field, label, help, required}` in the portal's words (`required = true` only adds to what the type requires) |
 | `session_minutes` | 5 to 120, default 30 |
+| `uploads.<id>` | what a signed-in person may send (below) |
 
 Each `[portal.kinds.<id>]` takes these keys.
 
@@ -276,6 +289,57 @@ The clinic has two kinds. Both go through `appointment-request`:
 
 The time a person picks is checked again when they submit. If it has been taken, the form comes back with fresh
 times.
+
+## Sending documents (`[portal.uploads.<id>]`)
+
+A signed-in person may send the practice files: a PDF, or a photo of each page of a paper document. Their page
+lists each upload under **Send us documents**, at `/send/<id>`, with one file input that takes several files. Each
+file becomes a record of the upload's type about them, and that type's own workflow takes it in. Nothing sent lies
+unread, because the hub refuses an upload whose type starts no workflow.
+
+```toml
+[portal.uploads.slips]
+label = "Send us a slip or receipt"
+description = "A PDF, or a photo of each page: T4s, T5s, RRSP and donation receipts, your notice of assessment."
+type = "TaxSlip"
+file = "file"
+values = { status = "received", source = "portal" }
+today = ["received_on"]
+```
+
+| Key | |
+|---|---|
+| `label`, `description` | what the person sees it as (`label` is required) |
+| `type` | the record type each file becomes. It must be about the type that signs in (a `rel = "subject"` reference to it or a type above it), not abstract, name a workflow of the pack, and have a data class the portal member's roles may write |
+| `file` | the type's attachment field for one file: not a list, not `by = "workflow"` |
+| `values` | the fields each record gets as they are. A choice must be one of the field's choices. The file, the subject and the `today` fields are the portal's to set |
+| `today` | the type's date fields set to the day the file was sent |
+| `accept` | `pdf`, `picture` or both (the default) |
+| `max_files` | files sent at once, 1 to 20 (default 5) |
+| `per_day` | files one person may send of this upload in 24 hours, 1 to 500 (default 20). Past it the page says `upload_limit` and nothing is kept |
+
+When the hub starts the portal, it also checks the upload against the hub's own type: every field it names must
+exist, and a record sent with its `values` must start the type's workflow (its `workflow.when` holds).
+
+**What is kept.** The hub reads what each file is from its own first bytes, never from its name or what the
+browser called it. A PDF starts `%PDF-`; a picture is PNG, JPEG or WebP (`filetext.picture_type`). Each file may be
+at most 10 MB (`UPLOAD_FILE`, what the hub reads and a model is shown whole). Every file is checked before any is
+kept: a file that is not a document the upload takes, or is too large, is named on the page with what is wrong,
+the page says "Nothing was sent. Choose your files again.", and no file of that send is kept. A file sent with no
+name is named `file-<n>.<ext>` by what it is.
+
+**Who makes the record.** The portal's member, through `hub.create_record`, so the type's checks, the grants and
+the track all apply. The record's subject is the signed-in person; the person cannot name another one.
+
+**The body.** The portal refuses any body over 64 KB before it is read (`MAX_FORM`), except a POST to
+`/send/<id>` that comes from the portal's own pages with a session cookie the hub accepts
+(`PortalApp.body_limit`, given to the listener as `max_body`). Those may be up to `UPLOAD_BODY`, about 19 MB in
+all, so that the files in base64 still fit the hub's own 26 MB limit (`MAX_BODY`). A stranger's large body is never
+read. The portal sends the files to the hub's `upload` operation as `files = [{name, data}]`, each in base64.
+
+The send is a form like any other: it carries the session's form token and its own submit token, so a second tap or
+a reload keeps the files once, and `/done/<id>` shows **Sent** with the names kept, **Send more**, and **Your
+bookings**.
 
 ## Gaps
 

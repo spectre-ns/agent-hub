@@ -1709,3 +1709,281 @@ def test_an_upgrade_to_1_10_proposes_the_reading_model_and_enters_the_cpp2_rates
     waiting = hub.agent_profile_proposal("documents-agent")
     assert (waiting["profile"]["reading_model"], waiting["author"]) == ("ollama/glm-ocr", "hub")
     assert hub.run_pack_upgrades() == []
+
+
+# ---------------------------------------------------------- the client sends slips on the portal (accounting 1.11)
+def _upload_pack(firm):
+    import copy
+    import dataclasses
+    return dataclasses.replace(firm.pack, portal=copy.deepcopy(firm.pack.portal))
+
+
+def _slips_of(firm, cref):
+    return {s["id"]: s for s in firm.records.search("TaxSlip", subject=cref, limit=None)}
+
+
+def test_the_firm_s_portal_takes_slips_as_pdfs_and_photos(firm):
+    from practicehub.portal import UPLOAD_FILE, Portal, check_config
+    assert check_config(firm.pack) == []
+    got = Portal(firm).public()["uploads"]
+    assert [(u["id"], u["accept"], u["max_files"], u["max_bytes"]) for u in got] == [
+        ("slips", ["pdf", "picture"], 5, UPLOAD_FILE)]
+    assert "T4s, T5s" in got[0]["description"]
+
+
+@pytest.mark.parametrize("change,says", [
+    (lambda u: u.update(type="NoSuchType"), "uploads.slips.type: there is no record type"),
+    (lambda u: u.update(type="TaxRate"), "is not about a"),
+    (lambda u: u.update(file="text"), "uploads.slips.file"),
+    (lambda u: u.update(values={"status": "lost"}), "'lost' is not one of"),
+    (lambda u: u.update(values={"client": "Individual/x"}), "the portal's to set"),
+    (lambda u: u.update(values={"shoe_size": 9}), "no field 'shoe_size'"),
+    (lambda u: u.update(today=["year"]), "no date field 'year'"),
+    (lambda u: u.update(accept=["exe"]), "uploads.slips.accept"),
+    (lambda u: u.update(accept=[]), "uploads.slips.accept"),
+    (lambda u: u.update(max_files=0), "uploads.slips.max_files"),
+    (lambda u: u.update(per_day=True), "uploads.slips.per_day"),
+    (lambda u: u.update(colour="teal"), "uploads.slips.colour: not a setting"),
+    (lambda u: u.update(label=" "), "uploads.slips.label"),
+])
+def test_a_bad_upload_is_refused_with_a_clear_problem(firm, change, says):
+    from practicehub.portal import check_config
+    pack = _upload_pack(firm)
+    change(pack.portal["uploads"]["slips"])
+    problems = check_config(pack)
+    assert any(says in p for p in problems), problems
+
+
+def test_an_upload_the_portal_s_member_may_not_write_or_whose_type_reads_nothing_is_refused(firm, monkeypatch):
+    """What a person sends is written as the portal's member, and its type's own workflow takes it in: a type the
+    member may not write, or one whose record sent would start no workflow, is refused before anyone sends a file."""
+    import dataclasses
+    from practicehub.portal import Portal, check_config
+    pack = _upload_pack(firm)
+    grants = {r: dict(g) for r, g in pack.grants.items()}
+    grants["client-portal"]["write"] = [c for c in grants["client-portal"]["write"] if c != "client-documents"]
+    assert any("may not write client-documents" in p for p in check_config(dataclasses.replace(pack, grants=grants)))
+    pack.portal["uploads"]["slips"]["values"] = {"status": "extracted", "source": "portal"}
+    assert check_config(pack) == []  # the pack is well formed; this hub's TaxSlip would not take it in
+    monkeypatch.setattr(firm, "pack", pack)
+    with pytest.raises(ValueError, match="starts no workflow"):
+        Portal(firm)
+
+
+def test_each_file_a_client_sends_is_a_slip_of_theirs_that_slip_intake_takes_in(firm):
+    """The client sends their T4 as a PDF and a photo at once: each is a slip about them, made by the portal's
+    member, received from the portal today, its file as the hub read it from its bytes (not its name), and
+    slip-intake starts on each; the PDF's words are read from it and the documents agent reads the slip."""
+    from practicehub.portal import Portal
+    mod = firm.pack.module
+    cref = _signed_up(firm)
+    before = set(_slips_of(firm, cref))
+    got = Portal(firm).upload(cref, "slips", [("t4-2025.pdf", mod.slip_pdf(T4)), ("", mod.blurred_photo()),
+                                              ("empty.pdf", b"")])
+    assert got == {"upload": "slips", "count": 2, "names": ["t4-2025.pdf", "file-2.png"]}
+    new = [s for i, s in _slips_of(firm, cref).items() if i not in before]
+    assert sorted((s["file"]["name"], s["file"]["contentType"]) for s in new) == [
+        ("file-2.png", "image/png"), ("t4-2025.pdf", "application/pdf")]
+    for s in new:
+        assert (s["status"], s["source"], s["received_on"]) == ("received", "portal", _today(firm))
+        assert _run_on(firm, f"TaxSlip/{s['id']}", "slip-intake") is not None
+    pdf = next(s for s in new if s["file"]["contentType"] == "application/pdf")
+    assert "Employer: Harbour Logistics Ltd." in pdf["text"]
+    for s in new:
+        assert firm.db.events.find_one({"action": "record.created", "subject": f"TaxSlip/{s['id']}"})["actor"] == \
+            "client-portal"
+    run_all_local(firm, log=quiet)
+    assert firm.records.read("TaxSlip", pdf["id"])["status"] == "extracted"
+
+
+def test_a_file_that_is_not_a_document_is_refused_by_its_bytes_and_then_nothing_is_kept(firm):
+    """A file is what its own first bytes say, never its name: one that is not a PDF or a photo, or is too large,
+    is refused by name, and then nothing sent with it is kept; nothing at all, or too many, is refused too."""
+    from practicehub.portal import UPLOAD_FILE, Portal
+    mod = firm.pack.module
+    cref = _signed_up(firm)
+    p = Portal(firm)
+    before = set(_slips_of(firm, cref))
+    files = firm.db.file_ids()
+    with pytest.raises(Invalid) as got:
+        p.upload(cref, "slips", [("t4.pdf", mod.slip_pdf(T4)), ("t5.pdf", b"MZ\x90\x00 a program, named a PDF"),
+                                 ("big.png", b"\x89PNG\r\n\x1a\n" + b"\0" * UPLOAD_FILE)])
+    assert got.value.problems == ["t5.pdf: not a PDF or a photo (JPEG, PNG or WebP).",
+                                  "big.png: larger than 10 MB. Send a smaller copy."]
+    assert set(_slips_of(firm, cref)) == before, "one file refused: none is kept"
+    assert firm.db.file_ids() == files, "nor any file's bytes"
+    with pytest.raises(Invalid, match="Choose a file"):
+        p.upload(cref, "slips", [("nothing.pdf", b"")])
+    with pytest.raises(Invalid, match="at most 5 files"):
+        p.upload(cref, "slips", [(f"t4-{i}.pdf", mod.slip_pdf(T4)) for i in range(6)])
+    assert set(_slips_of(firm, cref)) == before
+
+
+def _client_session(firm, cref, client="10.7.0.1"):
+    from practicehub.portal import Portal
+    p = Portal(firm, dev=True)
+    rec = firm.records.read(*cref.split("/"))
+    got = p.begin_sign_in(rec["birth_date"], rec["client_number"], client=client)
+    sid = p.finish_sign_in(got["challenge"], got["dev_code"], client=client)
+    return sid, p.session(sid)["form"]
+
+
+def _firm_api(firm, op, data):
+    from practicehub.web.server import App
+    tok = firm.issue_token(firm.member("sophie"), "client-portal", "portal process", scope="portal")
+    status, _, body = App(firm, dev=True).handle("POST", f"/api/portal/{op}", {"authorization": f"Bearer {tok}"},
+                                                 json.dumps(data).encode())
+    return status, json.loads(body)
+
+
+def test_a_client_sends_so_many_files_a_day_and_the_same_form_twice_is_one_answer(firm, monkeypatch):
+    """Through the portal's API: a form sent twice (a second tap, a reload) keeps its files once and gets the same
+    answer; past the upload's files a day the portal says so and keeps nothing; a file that did not arrive whole,
+    or a stranger's, is refused."""
+    import base64
+    from practicehub import portal as portal_mod
+    mod = firm.pack.module
+    monkeypatch.setattr(portal_mod, "PER_DAY", 2)
+    cref = _signed_up(firm)
+    sid, form = _client_session(firm, cref)
+    pdf = base64.b64encode(mod.slip_pdf(T4)).decode()
+    before = set(_slips_of(firm, cref))
+
+    def send(submit, files=None, **extra):
+        return _firm_api(firm, "upload", {"session": sid, "form": form, "upload": "slips", "submit": submit,
+                                          "files": files or [{"name": "t4.pdf", "data": pdf}], **extra})
+    first = send("a" * 20)
+    assert first[0] == 200 and send("a" * 20) == first
+    assert len(set(_slips_of(firm, cref)) - before) == 1
+    status, got = _firm_api(firm, "done", {"session": sid, "id": first[1]["done"]})
+    assert status == 200 and got["what"] == "upload" and got["result"]["names"] == ["t4.pdf"]
+    assert send("b" * 20)[0] == 200
+    status, got = send("c" * 20)
+    assert status == 422 and "as many files today" in got["says"]
+    assert len(set(_slips_of(firm, cref)) - before) == 2
+    status, got = send("d" * 20, files=[{"name": "t4.pdf", "data": "not base64!"}])
+    assert status == 422 and "did not arrive whole" in got["says"]
+    assert send("e" * 20, session="forged")[0] == 401
+    assert send("f" * 20, form="forged")[0] == 422
+    assert _firm_api(firm, "upload", {"session": sid, "form": form, "upload": "tax-returns", "submit": "g" * 20,
+                                      "files": [{"name": "t4.pdf", "data": pdf}]})[0] == 404
+
+
+def _firm_portal(firm):
+    from practicehub.web.portal_app import LocalClient, PortalApp
+    from practicehub.web.server import App
+    tok = firm.issue_token(firm.member("sophie"), "client-portal", "portal process", scope="portal")
+    return PortalApp(LocalClient(App(firm, dev=True), tok), dev=True)
+
+
+def _multipart(fields, files):
+    bound = "phtestboundary7f3a"
+    out = b"".join(f'--{bound}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                   for k, v in fields.items())
+    out += b"".join(f'--{bound}\r\nContent-Disposition: form-data; name="files"; filename="{name}"\r\n'
+                    f"Content-Type: {ctype}\r\n\r\n".encode() + data + b"\r\n" for name, ctype, data in files)
+    return {"content-type": f"multipart/form-data; boundary={bound}"}, out + f"--{bound}--\r\n".encode()
+
+
+def _browser_signs_in(firm, b, cref):
+    import urllib.parse
+    rec = firm.records.read(*cref.split("/"))
+    y, m, d = rec["birth_date"].split("-")
+    status, h, _ = b.go("POST", "/sign-in", {"born_year": y, "born_month": m, "born_day": str(int(d)),
+                                             "identifier": rec["client_number"]})
+    assert status == 303, h
+    code = urllib.parse.parse_qs(urllib.parse.urlsplit(h["Location"]).query)["dev"][0]
+    status, h, _ = b.go("POST", "/code", {"code": code})
+    assert status == 303 and h["Location"] == "/me"
+
+
+def test_the_pages_walk_a_client_from_sign_in_to_their_slips_sent(firm):
+    """No script anywhere: the client signs in, opens what they may send, picks two files in one input and sends
+    them; a file the portal does not take is said by name and they choose again; the answer is the same page
+    however often the form is sent or the page reloaded."""
+    import re
+    from test_portal import Browser
+    mod = firm.pack.module
+    cref = _signed_up(firm)
+    app = _firm_portal(firm)
+    b = Browser(app)
+    status, _, page = b.go("GET", "/")
+    assert "Send us documents" in page and "Sign in to book or send documents" in page and "<script" not in page
+    _browser_signs_in(firm, b, cref)
+    page = b.go("GET", "/me")[2]
+    assert '<a href="/send/slips">Send us a slip or receipt</a>' in page
+    assert b.go("GET", "/send/nothing-here")[0] == 404
+    status, _, page = b.go("GET", "/send/slips")
+    assert status == 200 and 'enctype="multipart/form-data"' in page and 'name="files"' in page
+    assert " multiple " in page and 'accept="application/pdf,image/jpeg,image/png,image/webp"' in page
+    assert "Up to 5 files at a time, each at most 10 MB" in page
+    form = re.search(r'name="_form" value="([^"]+)"', page).group(1)
+    submit = re.search(r'name="_submit" value="([^"]+)"', page).group(1)
+    before = set(_slips_of(firm, cref))
+    hd, body = _multipart({"_form": form, "_submit": submit},
+                          [("t4.pdf", "application/pdf", mod.slip_pdf(T4)),
+                           ("notes.txt", "application/pdf", b"just some words")])
+    status, _, page = b.go("POST", "/send/slips", headers=hd, raw=body)
+    assert status == 422 and "notes.txt: not a PDF or a photo" in page and "Nothing was sent" in page
+    assert set(_slips_of(firm, cref)) == before
+    hd, body = _multipart({"_form": form, "_submit": submit},
+                          [("t4.pdf", "application/pdf", mod.slip_pdf(T4)),
+                           ("receipt.jpg", "image/jpeg", mod.blurred_photo())])
+    status, h, _ = b.go("POST", "/send/slips", headers=hd, raw=body)
+    assert status == 303 and h["Location"].startswith("/done/")
+    again = b.go("POST", "/send/slips", headers=hd, raw=body)
+    assert again[0] == 303 and again[1]["Location"] == h["Location"], "the same form twice: the same answer"
+    new = [s for i, s in _slips_of(firm, cref).items() if i not in before]
+    assert sorted(s["file"]["contentType"] for s in new) == ["application/pdf", "image/png"], \
+        "a photo is what its bytes are, whatever the browser called it"
+    status, _, page = b.go("GET", h["Location"])
+    assert status == 200 and "<title>Sent" in page and "the practice has what you sent" in page
+    assert "<li>t4.pdf</li>" in page and "<li>receipt.jpg</li>" in page and 'href="/send/slips"' in page
+    assert b.go("GET", h["Location"])[2] == page
+    hd, body = _multipart({"_form": form, "_submit": "z" * 20}, [])
+    status, _, page = b.go("POST", "/send/slips", headers=hd, raw=body)
+    assert status == 422 and "Choose a file to send." in page
+    assert b.go("POST", "/sign-out", {"_form": form})[0] == 303
+    assert b.go("GET", "/send/slips")[1]["Location"] == "/sign-in"
+    assert b.go("POST", "/send/slips", headers=hd, raw=body)[1]["Location"] == "/sign-in"
+
+
+def test_only_files_a_signed_in_client_sends_from_the_portal_may_be_a_large_body(firm):
+    """The portal refuses a large body before it is read unless it is files a signed-in person sends, from its own
+    pages, to /send/: a stranger, another site, or any other page gets a form's size."""
+    import socket
+    import threading
+    from http.server import ThreadingHTTPServer
+    from test_portal import Browser
+    from practicehub.web.portal_app import MAX_FORM, UPLOAD_BODY
+    from practicehub.web.server import MAX_BODY, make_handler
+    cref = _signed_up(firm)
+    app = _firm_portal(firm)
+    b = Browser(app)
+    _browser_signs_in(firm, b, cref)
+    cookie = "; ".join(f"{k}={v}" for k, v in b.jar.items())
+    mine = {"host": "127.0.0.1:8210", "cookie": cookie}
+    assert UPLOAD_BODY * 4 // 3 + MAX_FORM <= MAX_BODY, "files in base64 fit what the hub takes"
+    assert app.body_limit("POST", "/send/slips", mine) == UPLOAD_BODY
+    assert app.body_limit("POST", "/send/slips?x=1", {**mine, "origin": "http://127.0.0.1:8210"}) == UPLOAD_BODY
+    assert app.body_limit("POST", "/send/slips", {**mine, "origin": "https://elsewhere.example"}) == MAX_FORM
+    assert app.body_limit("POST", "/send/slips", {"host": "127.0.0.1:8210"}) == MAX_FORM
+    assert app.body_limit("POST", "/send/slips", {**mine, "cookie": "php_session=forged"}) == MAX_FORM
+    assert app.body_limit("POST", "/book/approve-return", mine) == MAX_FORM
+    assert app.body_limit("GET", "/send/slips", mine) == MAX_FORM
+    assert app.handle("POST", "/sign-in", mine, b"x" * (MAX_FORM + 1))[0] == 413
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app, max_body=app.body_limit, timeout=5))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        port = httpd.server_address[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(b"POST /send/slips HTTP/1.1\r\nHost: 127.0.0.1:8210\r\nContent-Length: 999999\r\n\r\n")
+            assert b" 413 " in s.recv(200), "a stranger's large body is never read"
+        junk = b"x" * (MAX_FORM * 2)
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(f"POST /send/slips HTTP/1.1\r\nHost: 127.0.0.1:8210\r\nCookie: {cookie}\r\n"
+                      f"Content-Type: multipart/form-data; boundary=zz\r\nContent-Length: {len(junk)}\r\n"
+                      f"Connection: close\r\n\r\n".encode() + junk)
+            assert b" 422 " in s.recv(200), "the signed-in client's body is read, and the page says what is wrong"
+    finally:
+        httpd.shutdown()

@@ -58,7 +58,7 @@ def file_response(data: bytes, meta: dict) -> Download:
 
 def multipart(req) -> dict:
     """A multipart/form-data body: {name: str} for fields, {name: (filename, content_type, bytes)} for files; a
-    repeated field becomes a list, as in a plain form."""
+    repeated field becomes a list, as in a plain form, and so do the files of one input that takes several."""
     import email.parser
     import email.policy
     ctype = (req.get("headers") or {}).get("content-type", "")
@@ -72,11 +72,9 @@ def multipart(req) -> dict:
         if not name:
             continue
         data = part.get_payload(decode=True) or b""
-        if part.get_filename() is not None:
-            out[name] = (part.get_filename(), part.get_content_type(), data)
-        else:
-            v = data.decode("utf-8", "replace")
-            out[name] = v if name not in out else (out[name] if isinstance(out[name], list) else [out[name]]) + [v]
+        v = (part.get_filename(), part.get_content_type(), data) if part.get_filename() is not None else \
+            data.decode("utf-8", "replace")
+        out[name] = v if name not in out else (out[name] if isinstance(out[name], list) else [out[name]]) + [v]
     return out
 
 

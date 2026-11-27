@@ -722,12 +722,13 @@ class Browser:
             else:
                 self.jar[name] = value
 
-    def go(self, method, path, form=None, origin=None, headers=None):
+    def go(self, method, path, form=None, origin=None, headers=None, raw=None):
+        """``raw``: the body as it is (a multipart form, with its content-type in ``headers``)."""
         hd = {"host": self.host, "x-practicehub-client": self.client,
               "cookie": "; ".join(f"{k}={v}" for k, v in self.jar.items()), **(headers or {})}
         if origin:
             hd["origin"] = origin
-        body = urllib.parse.urlencode(form or {}).encode()
+        body = raw if raw is not None else urllib.parse.urlencode(form or {}).encode()
         status, h, page = self.app.handle(method, path, hd, body)
         self._cookies(h)
         return status, h, page.decode()

@@ -5,10 +5,13 @@ It holds no database, no hub secret and no staff session: only the address of th
 token of the practice's ``[portal] member`` with scope ``portal``, which opens the hub's ``/api/portal/`` and nothing
 else. Each page asks the hub (``portal_api.py``); codes, sessions, counts, bookings and the track stay there. Its own
 cookies (the session the hub gave, opaque here), the hub's stylesheet, no scripts: every page works without
-JavaScript. What it says is the pack's ``[portal]``, as the hub gives it."""
+JavaScript. What it says is the pack's ``[portal]``, as the hub gives it. A form is small and refused past
+``MAX_FORM`` before it is read; only files a signed-in person sends (``/send/<upload>``) may be larger
+(``body_limit``), and the hub reads what each file is from its bytes."""
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import re
@@ -20,14 +23,20 @@ import urllib.request
 from http import cookies
 
 from .assets import CSS
-from .server import CLIENT_HEADER, FORBIDDEN_PORTS, client_address, make_handler
+from .records_pages import multipart
+from .server import CLIENT_HEADER, FORBIDDEN_PORTS, MAX_BODY, client_address, make_handler
 from .. import decimals
+from ..hub import Invalid
+from ..portal import ACCEPT
 
 e = html.escape
 SESSION = "php_session"
 SIGNIN = "php_signin"
 MAX_FORM = 64 * 1024        # a portal form is small: anything bigger is refused before it is read
+UPLOAD_BODY = (MAX_BODY - MAX_FORM) * 3 // 4  # files a signed-in person sends at once: in base64, they fit the hub's
 TIMEOUT = 30                # seconds a connection may sit idle, and a call to the hub may take
+MIME = {"pdf": "application/pdf", "picture": "image/jpeg,image/png,image/webp"}  # what a file input offers
+SEND = re.compile(r"/send/[a-z][a-z0-9-]*/?")
 CONFIG_SECONDS = 60         # how long the hub's words are kept before they are asked for again
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
@@ -83,6 +92,9 @@ PORTAL_CSS = """
 .portal .slot-none{display:flex;gap:6px;align-items:center;min-height:44px}
 .portal .enter-default{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
 .portal .limit{display:block;padding:8px 12px;margin:8px 0;border-radius:6px;background:var(--warning-bg);color:var(--fg)}
+.portal input[type=file]{display:block;width:100%;max-width:100%;min-height:44px;font-size:16px;padding:8px 0}
+.portal .sent{list-style:none;padding:0;margin:8px 0 16px}
+.portal .sent li{padding:6px 0;border-bottom:1px solid var(--line,#ddd);overflow-wrap:anywhere}
 """
 
 
@@ -190,6 +202,15 @@ class PortalApp:
                 return k
         raise _Page(404, self.page(None, "Not found", '<p>There is no such page. <a href="/">Start again</a>.</p>'))
 
+    def uploads(self) -> list[dict]:
+        return self.cfg.get("uploads") or []
+
+    def upload(self, uid: str) -> dict:
+        for u in self.uploads():
+            if u["id"] == uid:
+                return u
+        raise _Page(404, self.page(None, "Not found", '<p>There is no such page. <a href="/">Start again</a>.</p>'))
+
     @property
     def public_origin(self) -> str | None:
         return self._public_origin or (self._cfg or {}).get("public_origin") or None
@@ -220,7 +241,7 @@ class PortalApp:
                 return 200, {"Content-Type": "text/css; charset=utf-8", **sec}, (CSS + PORTAL_CSS).encode()
             if method == "POST" and not self._same_origin(headers):
                 return 403, text, b"Refused: not from this site."
-            if method == "POST" and len(body or b"") > MAX_FORM:
+            if method == "POST" and len(body or b"") > (UPLOAD_BODY if SEND.fullmatch(path + "/") else MAX_FORM):
                 return 413, text, b"Too large."
             fn = self._route(method, path)
             if fn is None:
@@ -265,7 +286,31 @@ class PortalApp:
                 (lambda req: self.book(req, parts[2])) if method == "POST" else None
         if len(parts) == 3 and parts[1] == "done" and method == "GET":
             return lambda req: self.done_page(req, parts[2])
+        if len(parts) == 3 and parts[1] == "send":
+            return (lambda req: self.send_form(req, parts[2])) if method == "GET" else \
+                (lambda req: self.send(req, parts[2])) if method == "POST" else None
         return None
+
+    def body_limit(self, method: str, raw_path: str, headers: dict) -> int:
+        """The most a request may send, from its line and headers, before any of it is read: files a signed-in
+        person sends, from this site, to ``/send/<upload>``, up to ``UPLOAD_BODY``; anything else a form's
+        ``MAX_FORM``. A stranger's large body is never read."""
+        if method != "POST" or not SEND.fullmatch(urllib.parse.urlsplit(raw_path).path) \
+                or not self._same_origin(headers):
+            return MAX_FORM
+        jar = cookies.SimpleCookie()
+        try:
+            jar.load(headers.get("cookie", ""))
+        except cookies.CookieError:
+            return MAX_FORM
+        sid = jar.get(SESSION)
+        if not sid or not sid.value:
+            return MAX_FORM
+        try:
+            self.client.call("session", {"session": sid.value})
+        except Exception:  # signed out, or the hub did not answer: a form's size, and the page says why
+            return MAX_FORM
+        return UPLOAD_BODY
 
     def _same_origin(self, headers: dict) -> bool:
         """A form posted from another site is refused (the cookies are SameSite=Strict as well). Behind a proxy the
@@ -424,11 +469,17 @@ class PortalApp:
                         f'{f" <span class=muted>{e(k["description"])}</span>" if k.get("description") else ""}</li>'
                         for k in cfg["kinds"])
         new = '<p>New here? <a href="/new">Ask to register</a>.</p>' if cfg.get("register") else ""
+        ups = self.uploads()
+        send = ('<h2>Send us documents</h2><ul>' + "".join(
+            f'<li><strong>{e(u["label"])}</strong>'
+            f'{f" <span class=muted>{e(u["description"])}</span>" if u.get("description") else ""}</li>'
+            for u in ups) + '</ul>') if ups else ""
         if self.me(req):
             act = '<p><a class="btn primary" href="/me">Your bookings</a></p>'
         else:
-            act = '<p><a class="btn primary" href="/sign-in">Sign in to book</a></p>'
-        return self.page(req, "Book online", f'<p>{e(cfg.get("welcome", ""))}</p><ul>{kinds}</ul>{act}{new}')
+            act = (f'<p><a class="btn primary" href="/sign-in">Sign in to book'
+                   f'{" or send documents" if ups else ""}</a></p>')
+        return self.page(req, "Book online", f'<p>{e(cfg.get("welcome", ""))}</p><ul>{kinds}</ul>{send}{act}{new}')
 
     # --- signing in
     def sign_in_form(self, req, problems=(), values=None) -> str:
@@ -546,7 +597,13 @@ class PortalApp:
         kinds = "".join(f'<li><a href="/book/{e(k["id"])}">{e(k["label"])}</a>'
                         f'{f" <span class=muted>{e(k["description"])}</span>" if k.get("description") else ""}'
                         f'{full(k)}</li>' for k in self.cfg["kinds"])
-        return self.page(req, "Your bookings", f'<h2>Coming up</h2>{upcoming}{open_}<h2>Book</h2><ul>{kinds}</ul>')
+        ups = self.uploads()
+        send = ('<h2>Send us documents</h2><ul>' + "".join(
+            f'<li><a href="/send/{e(u["id"])}">{e(u["label"])}</a>'
+            f'{f" <span class=muted>{e(u["description"])}</span>" if u.get("description") else ""}</li>'
+            for u in ups) + '</ul>') if ups else ""
+        return self.page(req, "Your bookings",
+                         f'<h2>Coming up</h2>{upcoming}{open_}<h2>Book</h2><ul>{kinds}</ul>{send}')
 
     def cancel_form(self, req) -> str:
         got = self.call(req, "me")
@@ -698,6 +755,66 @@ class PortalApp:
             raise
         self.redirect(f"/done/{urllib.parse.quote(got['done'])}")
 
+    # --- documents a person sends
+    def send_form(self, req, uid: str, problems=()) -> str:
+        s = self.signed_in(req)
+        u = self.upload(uid)
+        accept = [a for a in ACCEPT if a in u["accept"]]
+        each = u["max_bytes"] // (1024 * 1024)
+        most = u["max_files"]
+        kinds = " or ".join(ACCEPT[a] for a in accept)
+        help = (f'{kinds[:1].upper()}{kinds[1:]}. '
+                f'{"One file" if most == 1 else f"Up to {most} files"} at a time, each at most {each} MB'
+                f'{f" and {UPLOAD_BODY // (1024 * 1024)} MB in all" if most * u["max_bytes"] > UPLOAD_BODY else ""}.'
+                f' Each page of a paper document may be a photo of its own.')
+        desc = f'<p>{e(u["description"])}</p>' if u.get("description") else ""
+        again = '<p class="warn">Nothing was sent. Choose your files again.</p>' if problems else ""
+        return self.page(req, u["label"], desc + self._problems(problems) + again + (
+            f'<form method="post" action="/send/{e(uid)}" enctype="multipart/form-data" class="card">'
+            f'<input type="hidden" name="_form" value="{e(s["form"])}">'
+            f'<input type="hidden" name="_submit" value="{e(secrets.token_urlsafe(16))}">'
+            f'{self._label("files", "Files", True)}<span class="help" id="files-help">{e(help)}</span>'
+            f'<input type="file" id="files" name="files" required aria-describedby="files-help"'
+            f'{" multiple" if most > 1 else ""} accept="{e(",".join(MIME[a] for a in accept))}">'
+            f'<p><button class="btn primary">Send to the practice</button></p></form>'
+            f'<p><a href="/me">Back to your bookings</a></p>'))
+
+    def send(self, req, uid: str) -> str:
+        """The files, to the hub as they came (each a record there, read for what it is from its own bytes)."""
+        self.signed_in(req)
+        self.upload(uid)
+        try:
+            f = multipart(req)
+        except Invalid:
+            raise _Page(422, self.send_form(req, uid, [self.say("choose_files")])) from None
+        got = f.get("files")
+        parts = got if isinstance(got, list) else [got]
+        files = [{"name": x[0] or "", "data": base64.b64encode(x[2]).decode("ascii")}
+                 for x in parts if isinstance(x, tuple) and x[2]]
+        if not files:
+            raise _Page(422, self.send_form(req, uid, [self.say("choose_files")]))
+        form, submit = f.get("_form"), f.get("_submit")
+        try:
+            got = self.call(req, "upload", form=form if isinstance(form, str) else "", upload=uid, files=files,
+                            submit=submit if isinstance(submit, str) else "")
+        except HubSaid as exc:
+            if exc.status == 422:
+                raise _Page(422, self.send_form(req, uid, exc.data.get("problems") or [str(exc)])) from None
+            raise
+        self.redirect(f"/done/{urllib.parse.quote(got['done'])}")
+
+    def _sent_page(self, req, done: str, got: dict) -> str:
+        if got["state"] != "done":
+            return self.page(req, "Sending your files", f'<p role="status">{e(self.say("working"))}</p>'
+                             f'<p><a href="/done/{e(done)}">Refresh</a></p>',
+                             head='<meta http-equiv="refresh" content="2">')
+        r = got.get("result") or {}
+        names = "".join(f"<li>{e(str(n))}</li>" for n in r.get("names") or [])
+        more = f'<a class="btn" href="/send/{e(str(r.get("upload") or ""))}">Send more</a> ' if r.get("upload") else ""
+        return self.page(req, "Sent", f'<p class="ok" role="status">{e(self.say("uploaded"))}</p>'
+                         f'{f"<ul class=sent>{names}</ul>" if names else ""}'
+                         f'<p>{more}<a class="btn primary" href="/me">Your bookings</a></p>')
+
     def done_page(self, req, done: str) -> str:
         """What a form got, after the redirect: the same page however often it is sent or reloaded. A booking's
         always says what to do in an emergency, first, and loudly when the screen found something."""
@@ -705,6 +822,8 @@ class PortalApp:
         if req["cookies"].get(SESSION):
             data["session"] = req["cookies"][SESSION]
         got = self.client.call("done", data)
+        if got["what"] == "upload":
+            return self._sent_page(req, done, got)
         if got["state"] != "done":
             return self.page(req, "Sending your request", (
                 f'<div class="advice alarm" role="alert">{e(self.say("emergency"))}</div>'
@@ -838,7 +957,7 @@ def serve(hub_url: str, token: str, host: str = "127.0.0.1", port: int = 8210, *
     if cfg.get("dev") != dev:
         raise SystemExit("the portal and the hub disagree about dev: run both with --dev, or neither")
     app = PortalApp(client, dev=dev, public_origin=public_origin)
-    httpd = ThreadingHTTPServer((host, port), make_handler(app, max_body=MAX_FORM, timeout=TIMEOUT,
+    httpd = ThreadingHTTPServer((host, port), make_handler(app, max_body=app.body_limit, timeout=TIMEOUT,
                                                            client=client_address))
     print(f"Practice portal on http://{host}:{port}/, using the hub at {hub_url}"
           + (" (dev: codes are shown on screen)" if dev else ""))

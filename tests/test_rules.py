@@ -10,6 +10,7 @@ import pytest
 from bson import json_util
 
 from conftest import M, claim_run, item_for, quiet, run_of, snapshot_onto, visit_run
+from test_accounting_office import firm  # noqa: F401 - firm is a fixture: the accounting firm's hub
 from practicehub.agents.runner import AgentRunner, LocalClient, Refused
 from practicehub.hub import Denied, Invalid, NotFound, member_ref
 from practicehub import decimals, visibility
@@ -7000,6 +7001,38 @@ def test_a_portal_token_opens_the_portals_api_and_nothing_else(hub):
         hub.issue_token(M(hub, "jo"), "jo", "x", scope="portal")
     cfg = _json.loads(app.handle("POST", "/api/portal/config", {"authorization": f"Bearer {tok}"}, b"{}")[2])
     assert "member" not in cfg, "the portal is told words and kinds, not the hub's settings"
+
+
+def test_a_file_sent_on_the_portal_is_kept_only_as_the_document_its_bytes_show_and_each_is_taken_in(firm):
+    """Rule: a file a signed-in person sends on the portal is kept only when its own first bytes are a PDF or a
+    picture its upload takes (never its name, nor what the browser called it), at most ``UPLOAD_FILE``; every file
+    is checked before any is kept, so one refused keeps none; each one kept is a record of the upload's type about
+    the person, made by the portal's member, that its type's own workflow takes in; and the portal reads a large
+    body only from a signed-in person posting from its own pages to /send/."""
+    from practicehub.portal import Portal
+    from practicehub.web.portal_app import MAX_FORM, LocalClient, PortalApp
+    from practicehub.web.server import App
+    mod = firm.pack.module
+    c = firm.create_record(M(firm, "sophie"), "Individual", {"name": "Ada Lane", "email": "ada@example.ca",
+                                                              "birth_date": "1990-02-03", "services": ["t1"],
+                                                              "partner_in_charge": "anne"})
+    cref = f"Individual/{c['id']}"
+    p = Portal(firm, dev=True)
+    pdf = mod.slip_pdf("T5 Statement of Investment Income\nYear: 2025\nPayer: Scotiabank\nBox 13: 80.00")
+    with pytest.raises(Invalid) as got:
+        p.upload(cref, "slips", [("t5.pdf", pdf), ("photo.png", b"%!PS-Adobe a print file, named a photo")])
+    assert got.value.problems == ["photo.png: not a PDF or a photo (JPEG, PNG or WebP)."]
+    assert firm.records.search("TaxSlip", subject=cref, limit=None) == []
+    p.upload(cref, "slips", [("t5.pdf", pdf), ("IMG_1.jpg", mod.blurred_photo())])
+    slips = firm.records.search("TaxSlip", subject=cref, limit=None)
+    assert sorted(s["file"]["contentType"] for s in slips) == ["application/pdf", "image/png"]
+    for s in slips:
+        ref = f"TaxSlip/{s['id']}"
+        assert firm.db.events.find_one({"action": "record.created", "subject": ref})["actor"] == p.member["id"]
+        assert firm.db.runs.find_one({"workflow_id": "slip-intake", "record": ref}), "nothing sent lies unread"
+    app = PortalApp(LocalClient(App(firm, dev=True), firm.issue_token(M(firm, "sophie"), "client-portal", "portal",
+                                                                      scope="portal")), dev=True)
+    assert app.body_limit("POST", "/send/slips", {"host": "127.0.0.1:8210"}) == MAX_FORM, "a stranger's: a form's"
 
 
 def test_a_new_portal_setting_on_an_existing_hub_is_not_taken_from_disk(tmp_path, monkeypatch):

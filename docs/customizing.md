@@ -470,6 +470,7 @@ needs something the core cannot do, add it to the core as something any practice
 | Let an agent or a tool use the hub | MCP: every module and the practice's own definitions are MCP servers at `/mcp/<server>`, generated from the definitions in force |
 | Run an agent as its own process | `practicehub agents run --agent <id> --url <hub> --token-file <file>`, with a token its sponsor issued |
 | Let the public book online | the booking portal: `[portal]` in the pack, and [The booking portal](portal.md) |
+| Let people send you documents | `[portal.uploads.<id>]`: each file a record of a type whose workflow takes it in ([Sending documents](portal.md#sending-documents-portaluploadsid)) |
 
 The README's "The stack" and "MCP" sections cover each of these.
 

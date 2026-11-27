@@ -8,15 +8,19 @@ the bookings (through workflows) and the track are the hub's, in ``practicehub/p
 Every operation is a POST. A person's session is the opaque string the hub gave at sign-in; the portal keeps it in
 the person's cookie and sends it back. ``client`` is the person's address as the portal saw it (it is counted, never
 trusted for anything else). A form that changes something carries the session's ``form`` (against cross-site
-posts) and its own ``submit`` (the same form sent twice gets one answer: ``done``)."""
+posts) and its own ``submit`` (the same form sent twice gets one answer: ``done``). Files a person sends come as
+``files = [{name, data}]``, each file's bytes in base64; what each is, is read from those bytes here, never from the
+name or what the browser said."""
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import secrets
 
 from ..hub import Denied, HubError, Invalid, NotFound
-from ..portal import Clash, Portal, config
+from ..portal import MAX_FILES, Clash, Portal, config
 
 PREFIX = "/api/portal/"
 
@@ -161,6 +165,25 @@ def op_done(p: Portal, data: dict) -> dict:
     return p.answer(person, _s(data, "id"))
 
 
+def op_upload(p: Portal, data: dict) -> dict:
+    row = _session(p, data, form=True)
+    uid = _s(data, "upload")
+    u = p.upload_kind(uid)
+    raw = data.get("files") if isinstance(data.get("files"), list) else []
+    if len(raw) > int(u.get("max_files", MAX_FILES)):
+        raise Invalid(f"Send at most {int(u.get('max_files', MAX_FILES))} files at a time.")
+    files = []
+    for f in raw:
+        if not isinstance(f, dict):
+            continue
+        try:
+            blob = base64.b64decode(str(f.get("data") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            raise Invalid("A file did not arrive whole. Send it again.") from None
+        files.append((str(f.get("name") or "")[:200], blob))
+    return {"done": p.once(row["record"], _s(data, "submit"), "upload", lambda: p.upload(row["record"], uid, files))}
+
+
 def op_register(p: Portal, data: dict) -> dict:
     values = data.get("values") if isinstance(data.get("values"), dict) else {}
     values = {str(k)[:64]: str(v)[:200] for k, v in values.items()}
@@ -174,4 +197,4 @@ def op_register(p: Portal, data: dict) -> dict:
 
 OPS = {"config": op_config, "sign-in": op_sign_in, "code": op_code, "session": op_session, "sign-out": op_sign_out,
        "me": op_me, "slots": op_slots, "book": op_book, "cancel": op_cancel, "done": op_done,
-       "register": op_register}
+       "register": op_register, "upload": op_upload}

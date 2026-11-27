@@ -74,7 +74,10 @@
 #  person; so does a Quebec T4, and one for a year with no rates. A firm whose T4s are full years of regular pay can
 #  hold them to it ([practice.slips] t4_full_year). The upgrade proposes the reading model for a policy owner to
 #  approve, and enters the CPP2 rates (1.10-documents-agent-reads).
-version = "1.10"
+# 1.11: a client sends slips and receipts on the portal (Send us a slip or receipt: a PDF, or a photo of each page).
+#  Each file is a slip of theirs, received from the portal that day, and the documents agent reads it as it reads any
+#  slip received; what is not a PDF or a photo is refused, file by file, before anything is kept.
+version = "1.11"
 
 [practice]
 requires_core = "1.1"
@@ -331,7 +334,7 @@ who = "everyone"
 [portal]
 member = "client-portal"
 title = "Tidewater CPA: client portal"
-welcome = "Approve your tax return, or sign this year's engagement. To send us slips, reply to our email."
+welcome = "Send us your slips and receipts, approve your tax return, or sign this year's engagement."
 privacy = "What you give here is used only to prepare and file your returns with Tidewater CPA, under PIPEDA, and it stays in Canada."
 contact_line = "For anything else, call the office at 902-555-0140."
 
@@ -369,6 +372,15 @@ workflow = "client-sign"
 about = { type = "Engagement", when = "record.status in ['proposed', 'overdue'] and record.client_signed_on == null", input = "about" }
 questions = [{ input = "answer", label = "Your answer", choices = { approve = "I have read the engagement letter and accept it", question = "I have a question first" } }]
 max_upcoming = 3
+
+# What a client sends: each file a slip of theirs, received from the portal today, which slip-intake reads.
+[portal.uploads.slips]
+label = "Send us a slip or receipt"
+description = "A PDF, or a photo of each page: T4s, T5s, RRSP and donation receipts, your notice of assessment."
+type = "TaxSlip"
+file = "file"
+values = { status = "received", source = "portal" }
+today = ["received_on"]
 
 [record_labels]
 Client = "Client"

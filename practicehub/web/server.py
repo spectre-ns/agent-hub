@@ -4823,11 +4823,13 @@ label = "Closed"
 
 
 # ================================================================================================== server
-def make_handler(app, only: str | None = None, *, max_body: int = MAX_BODY, timeout: float | None = 60,
+def make_handler(app, only: str | None = None, *, max_body=MAX_BODY, timeout: float | None = 60,
                  client=client_address):
     """``only``: a path prefix this listener serves, and nothing else (the WOPI listener Collabora reaches).
-    ``max_body``: the largest request, refused before it is read. ``timeout``: seconds a connection may sit idle (a
-    slow client holds no thread for ever). ``client``: where a request came from, from its peer and headers."""
+    ``max_body``: the largest request, refused before it is read: a number of bytes, or what one request may send,
+    ``max_body(method, path, headers)``, from its line and headers alone. ``timeout``: seconds a connection may sit
+    idle (a slow client holds no thread for ever). ``client``: where a request came from, from its peer and
+    headers."""
     class Handler(BaseHTTPRequestHandler):
         server_version = "PracticeHub"
 
@@ -4835,7 +4837,7 @@ def make_handler(app, only: str | None = None, *, max_body: int = MAX_BODY, time
             self.timeout = timeout
             super().setup()
 
-        def _chunked(self) -> bytes | None:
+        def _chunked(self, limit: int) -> bytes | None:
             out = b""
             while True:
                 line = self.rfile.readline(64)
@@ -4847,7 +4849,7 @@ def make_handler(app, only: str | None = None, *, max_body: int = MAX_BODY, time
                     while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
                         pass
                     return out
-                if len(out) + size > max_body:
+                if len(out) + size > limit:
                     return None
                 out += self.rfile.read(size)
                 self.rfile.readline(4)
@@ -4862,11 +4864,13 @@ def make_handler(app, only: str | None = None, *, max_body: int = MAX_BODY, time
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 n = -1
+            limit = max_body(self.command, self.path, {k.lower(): v for k, v in self.headers.items()}) \
+                if callable(max_body) else max_body
             chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
-            body = self._chunked() if chunked else None
+            body = self._chunked(limit) if chunked else None
             if chunked and body is None:
-                n = max_body + 1
-            if n < 0 or n > max_body:  # refused before it is read: a request is never larger than a file and a form
+                n = limit + 1
+            if n < 0 or n > limit:  # refused before it is read: a request is never larger than a file and a form
                 self.send_response(413 if n > 0 else 400)
                 self.send_header("Content-Length", "0")
                 self.send_header("Connection", "close")
