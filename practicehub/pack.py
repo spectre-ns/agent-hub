@@ -55,6 +55,7 @@ class Skill:
     instructions: str
     output: list[dict]
     source: str = ""
+    reading: dict | None = None  # how a picture its step carries is read first (``[reading]``, :func:`parse_reading`)
 
 
 def taken(fn, **offered) -> dict:
@@ -235,10 +236,83 @@ def parse_skill(source: str) -> Skill:
     if not str(s.get("instructions", "")).strip():
         problems.append("instructions: say what the agent is to do")
     problems += [q for spec in s.get("output", []) for q in check_spec(spec)]
+    reading, more = parse_reading(s.get("reading"), s.get("output", []))
+    problems += more
     if problems:
         raise DefinitionError(problems)
     return Skill(id=sid, title=str(s.get("title", sid)), instructions=str(s.get("instructions", "")).strip(),
-                 output=[normalize(f) for f in s.get("output", [])], source=source)
+                 output=[normalize(f) for f in s.get("output", [])], source=source, reading=reading)
+
+
+READ_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+
+
+def parse_reading(r, output: list) -> tuple[dict | None, list[str]]:
+    """A skill's ``[reading]``: how a picture its step carries is read, by the agent's reading model (its profile's
+    ``reading_model``), before the step is answered from what was read. ``words``: the output field (text) the
+    picture's words go in, as read; the answering model does not write it. ``[[reading.form]]``: a kind of document,
+    known by its words (``says``: any of these, whole, in any case), and the ``fields`` read from a picture of one
+    (each a key the reading model fills, named for what it holds: ``box_14_employment_income``). Its ``answer``: the
+    output fields given as read, which the answering model is not asked: an output takes one field's value
+    (``amount = "box_14_employment_income"``), and a text output takes a line, ``label: value``, for each of its
+    fields that was read (``boxes = { "16" = "box_16_cpp" }``). A picture whose words are no form's is answered from
+    its words alone. ``(reading, problems)``."""
+    if r is None:
+        return None, []
+    if not isinstance(r, dict):
+        return None, ["reading: a table, with words and its forms"]
+    problems = []
+    extra = sorted(set(r) - {"words", "form"})
+    if extra:
+        problems.append(f"reading holds words and form, not {', '.join(extra)}")
+    words = r.get("words")
+    kinds = {str(f.get("name")): f.get("type") for f in output if isinstance(f, dict)}
+    if words is not None and kinds.get(str(words)) != "text":
+        problems.append(f"reading.words: {words!r} is not a text field of the skill's output")
+    forms = []
+    for i, f in enumerate(r.get("form") or []):
+        says = f.get("says") if isinstance(f, dict) else None
+        keys = f.get("fields") if isinstance(f, dict) else None
+        if not isinstance(f, dict) or sorted(set(f) - {"says", "fields", "answer"}):
+            problems.append(f"reading.form {i + 1}: says, fields and answer, nothing else")
+            continue
+        if not says or not isinstance(says, list) or not all(isinstance(w, str) and w.strip() for w in says):
+            problems.append(f"reading.form {i + 1}: says is a list of the words a document of this form has")
+        if not keys or not isinstance(keys, list) or not all(isinstance(k, str) and READ_KEY.fullmatch(k)
+                                                             for k in keys) or len(set(keys)) != len(keys):
+            problems.append(f"reading.form {i + 1}: fields is a list of keys (letters, digits and _), each once")
+            continue
+        answer, before = f.get("answer") or {}, len(problems)
+        if not isinstance(answer, dict):
+            problems.append(f"reading.form {i + 1}: answer is a table of the output fields given as read")
+            answer = {}
+        for name, src in answer.items():
+            if name not in kinds or name == words:
+                problems.append(f"reading.form {i + 1}: answer.{name} is not a field of the skill's output (its "
+                                f"words go in {words})" if name == words and words else
+                                f"reading.form {i + 1}: answer.{name} is not a field of the skill's output")
+            elif isinstance(src, str) and src in keys:
+                continue
+            elif (isinstance(src, dict) and src and kinds[name] == "text"
+                  and all(isinstance(k, str) and k.strip() and v in keys for k, v in src.items())):
+                continue
+            else:
+                problems.append(f"reading.form {i + 1}: answer.{name} names one of the form's fields, or (a text "
+                                f"field) its lines, each label naming one")
+        if len(problems) == before:
+            forms.append({"says": [w.strip() for w in says], "fields": list(keys),
+                          "answer": {k: (dict(v) if isinstance(v, dict) else v) for k, v in answer.items()}})
+    if not words and not forms and not problems:
+        problems.append("reading: name the field its words go in (words), a form to read, or both")
+    return ({"words": str(words) if words else None, "forms": forms} if not problems else None), problems
+
+
+def reading_form(reading: dict | None, words: str) -> dict | None:
+    """The first of a reading's forms whose words (``says``) the picture's words have, whole and in any case."""
+    for f in (reading or {}).get("forms") or []:
+        if any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", words or "", re.I) for w in f["says"]):
+            return f
+    return None
 
 
 def _load_module(pack_dir: Path, pack_id: str, code: bytes | None = None):

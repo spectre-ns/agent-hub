@@ -1074,6 +1074,8 @@ def _pack_with(hub, change):
 
 
 def test_bookings_are_cards_with_the_next_step_and_why_not_cancel(hub):
+    today = datetime.now(timezone.utc)  # a Tuesday morning: on a Friday afternoon, the first free slot is days away
+    hub.engine._now = (today + timedelta(days=(1 - today.weekday()) % 7 or 7)).replace(hour=12, minute=0, second=0)
     p, ref, token = signed_in(hub)
     soon = next(s for s in p.free_slots("forms", limit=10000))
     p.book(ref, "forms", soon["value"], {"reason": "a sick note for work"})

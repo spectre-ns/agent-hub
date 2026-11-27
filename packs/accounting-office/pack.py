@@ -427,7 +427,7 @@ def tax_rates(hub, year) -> dict:
             for name, kw in T1_RATES.items()}
 
 
-# The rates a new firm starts with (seed_rates): federal and Nova Scotia income tax, CPP and EI for 2024 and 2025
+# The rates a new firm starts with (seed_rates): federal and Nova Scotia income tax, CPP, CPP2 and EI for 2024 and 2025
 # (brackets and basic amounts only: the estimate is one a reviewer checks), and Nova Scotia's HST since 2010. A partner
 # or manager adds the next year's as a TaxRate when it is published.
 def _brackets(*rows):
@@ -454,6 +454,10 @@ SEED_RATES = [
      "max_earnings": Decimal("68500"), "source": "CRA, CPP 2024"},
     {"kind": "cpp", "jurisdiction": "federal", "year": 2025, "rate": Decimal("0.0595"), "basic_amount": Decimal("3500"),
      "max_earnings": Decimal("71300"), "source": "CRA, CPP 2025"},
+    {"kind": "cpp2", "jurisdiction": "federal", "year": 2024, "rate": Decimal("0.04"), "max_earnings": Decimal("73200"),
+     "source": "CRA, CPP2 2024 (4% between $68,500 and $73,200)"},
+    {"kind": "cpp2", "jurisdiction": "federal", "year": 2025, "rate": Decimal("0.04"), "max_earnings": Decimal("81200"),
+     "source": "CRA, CPP2 2025 (4% between $71,300 and $81,200)"},
     {"kind": "ei", "jurisdiction": "federal", "year": 2024, "rate": Decimal("0.0166"), "max_earnings": Decimal("63200"),
      "source": "CRA, EI 2024"},
     {"kind": "ei", "jurisdiction": "federal", "year": 2025, "rate": Decimal("0.0164"), "max_earnings": Decimal("65700"),
@@ -469,13 +473,13 @@ def _rate_key(r: dict) -> tuple:
     return r.get("kind"), r.get("jurisdiction"), r.get("year"), str(r.get("effective_from") or "") or None
 
 
-def seed_rates(hub, actor) -> list[str]:
-    """The SEED_RATES not on file yet, made as TaxRate records by ``actor``: the references made. A rate the firm
-    already has (of that kind, place and year or day) is left as the firm has it."""
+def seed_rates(hub, actor, kinds=None) -> list[str]:
+    """The SEED_RATES not on file yet (of ``kinds``, or every kind), made as TaxRate records by ``actor``: the
+    references made. A rate the firm already has (of that kind, place and year or day) is left as the firm has it."""
     have = {_rate_key(r) for r in hub.records.search("TaxRate", limit=None)}
     made = []
     for row in SEED_RATES:
-        if _rate_key(row) not in have:
+        if _rate_key(row) not in have and (kinds is None or row["kind"] in kinds):
             made.append(f"TaxRate/{hub.create_record(actor, 'TaxRate', dict(row))['id']}")
     return made
 
@@ -872,15 +876,17 @@ UNSURE = re.compile(r"\[[^\]\n]*\]|\b(?:blurr(?:y|ed)|unclear|illegible|unreadab
 OWN_FIELD = re.compile(r"^[ \t]*(?:slip_type|tax_deducted|summary)[ \t]*:", re.I | re.M)
 
 
-def guard_slip_extract(values, ctxview):
+def guard_slip_extract(values, ctxview, hub=None):
     """The amount read is in the document's words, as printed: an agent copies numbers, never computes them. The words
-    are the slip's text, read from its file when it was attached (a PDF's text); a photo has none, and an agent shown
-    it writes them (``text``), as printed, before reading the slip from them: what it read is checked against what it
-    wrote, and what it wrote holds nothing of its own (a note that the picture was blurred, a guess): a picture it
-    could not read clearly is escalated, and the fields it read are in their own fields, never in what it wrote. An
-    agent reads only the words, so its slip and year are in them too: a document that does not say which slip it is,
-    or for which year, goes to a person, who sees the document itself. Who issued it is always read (the skill asks
-    for it), as a return's expected slips are named by it ('T5 · Scotiabank')."""
+    are the slip's text, read from its file when it was attached (a PDF's text); a photo has none, and its words are
+    read first (the agent's model for reading documents writes them, and the hub puts them in ``text``) or the agent,
+    shown it, writes them, as printed, before reading the slip from them: what it read is checked against those words,
+    and words it wrote hold nothing of its own (a note that the picture was blurred, a guess): a picture it could not
+    read clearly is escalated, and the fields it read are in their own fields, never in what it wrote. An agent reads
+    only the words, so its slip and year are in them too: a document that does not say which slip it is, or for which
+    year, goes to a person, who sees the document itself. Who issued it is always read (the skill asks for it), as a
+    return's expected slips are named by it ('T5 · Scotiabank'). A T4 read from a photo is checked box by box against
+    its words and its own arithmetic (:func:`t4_read_problems`)."""
     ctx = ctxview.get("context") or {}
     slip = next(iter(ctx.get("record:client-documents") or []), {})
     own, typed = str(slip.get("text") or "").strip(), str(values.get("text") or "").strip()
@@ -921,7 +927,141 @@ def guard_slip_extract(values, ctxview):
             have = _money(values.get(field)) if _dec(values.get(field)) is not None else "empty"
             problems.append(f"box {box} of a {kind} is {what}: {field} is {have} but box {box} reads "
                             f"{_money(boxes[box])}; put it in {field}")
+    if agent and kind == "T4" and typed and not own:
+        problems += t4_read_problems(values, typed, hub)
     return problems
+
+
+# A T4 read from a photo holds together. Every amount read is one printed in its words, with its cents, and every
+# amount printed is in some box; its CPP, CPP2 and EI are what the year's rates give from its own earnings boxes, none
+# is over the year's maximum, and its other boxes are as a T4's usually are (none of them more than its income); a SIN
+# printed on it passes its check digit. A misread digit or an amount read into another box seldom leaves all of that
+# true: a slip that breaks any of it was misread and goes to a person, who reads the picture. Nothing here works a box
+# out; the rates are the firm's TaxRate records for the slip's year, and a year with none is checked by a person. The
+# arithmetic is the rest of Canada's: a Quebec T4 (QPP, box 17, and PPIP) goes to a person. A practice whose T4s are
+# all full years of regular pay can hold them to it ([practice.slips] t4_full_year).
+T4_NOT_MONEY = {"10", "28", "29", "50"}  # the province, the exemptions, the employment code, the RPP number
+UNMARKED = {"", "0", "N", "NO", "NONE", "FALSE", "-", "☐"}  # a box 28 line read for a plan not marked exempt
+T4_EARNINGS = {"14": "employment income", "24": "EI insurable earnings", "26": "CPP pensionable earnings"}
+MONEY = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)\s?[.,]\s?(\d{2})(?!\d)")
+T4_TOLERANCE = Decimal(1)  # the slip's own rounding, pay period by pay period
+
+
+def _luhn(digits: str) -> bool:
+    d = [int(c) for c in digits]
+    return len(d) == 9 and sum(x if i % 2 == 0 else (2 * x - 9 if x > 4 else 2 * x) for i, x in enumerate(d)) % 10 == 0
+
+
+def t4_rates(hub, year) -> dict | None:
+    """The year's federal CPP, CPP2 and EI (TaxRate records) a T4's arithmetic is checked with, or None when one is not
+    on file."""
+    if hub is None or year is None:
+        return None
+    rows = {r.get("kind"): r for r in hub.records.search("TaxRate", limit=None)
+            if r.get("year") == year and r.get("jurisdiction") == "federal" and r.get("kind") in ("cpp", "cpp2", "ei")}
+    if len(rows) < 3 or any(_dec(rows[k].get(f)) is None for k in rows for f in ("rate", "max_earnings")):
+        return None
+    return rows
+
+
+def t4_read_problems(values, words, hub=None) -> list[str]:
+    """What is wrong with a T4 an agent read from a photo, by the words read from it (``words``) and its own
+    arithmetic: [] when it holds together."""
+    misread = "a box was misread or read into another box: escalate, and a person reads the picture"
+    raw = {re.sub(r"(?i)^box\s*", "", k.strip()).upper(): v.strip() for k, sep, v in
+           (line.partition(":") for line in str(values.get("boxes") or "").splitlines()) if sep and k.strip()}
+    money = {k: v for k, v in raw.items() if (k.split() or [k])[0] not in T4_NOT_MONEY}
+    problems = [f"box {k} reads {v!r}: an amount on a T4 is printed with its cents; {misread}"
+                for k, v in money.items() if v and not re.fullmatch(r"\$?-?[\d,]*\d[.,]\d{2}", v)]
+    b = {k: _dec(v) for k, v in money.items() if _dec(v) is not None}
+    for box, field in (("14", "amount"), ("22", "tax_deducted")):
+        if _dec(values.get(field)) is not None:
+            b[box] = _dec(values[field])
+    printed = {_dec(f"{whole.replace(',', '')}.{cents}") for whole, cents in MONEY.findall(words)}
+    printed.discard(Decimal(0))
+    for box, v in sorted(b.items()):
+        if v and v not in printed:
+            problems.append(f"box {box} is read as {v:.2f}, which is not an amount in the slip's words; {misread}")
+    read = {v for v in b.values() if v}
+    for v in sorted(printed - read):
+        problems.append(f"{v:.2f} is printed on the slip but is in no box read; {misread}")
+    for m in SIN.finditer(words):
+        if not _luhn(re.sub(r"\D", "", m.group(0))):
+            problems.append("a SIN in the slip's words fails its check digit, so it was misread: escalate, and a "
+                            "person reads the picture")
+    for box, what in T4_EARNINGS.items():
+        if b.get(box) is None:
+            problems.append(f"box {box} ({what}) is empty, and a T4 always has it (0 when there is none): it was not "
+                            f"read; escalate")
+    if str(raw.get("10", "")).upper().strip() == "QC":
+        return problems + ["box 10 says the slip is from Quebec, which has its own pension plan and parental "
+                           "insurance: a person checks it; escalate"]
+    rates = t4_rates(hub, values.get("year"))
+    if rates is None:
+        return problems + [f"the firm has no CPP, CPP2 and EI rates for {values.get('year')} to check this T4 "
+                           f"with: escalate, and a person checks it"]
+    exempt = " ".join([str(raw.get("28", "")).upper()]  # 28: CPP EI, or a line a plan: 28 CPP: X
+                      + [k[2:] for k, v in raw.items() if k[:3] == "28 " and v.upper() not in UNMARKED])
+    g = lambda box: b.get(box) or Decimal(0)  # noqa: E731
+    tol = T4_TOLERANCE
+    cpp, cpp2, ei = rates["cpp"], rates["cpp2"], rates["ei"]
+    ympe, yampe, mie = _dec(cpp["max_earnings"]), _dec(cpp2["max_earnings"]), _dec(ei["max_earnings"])
+    exemption, rate = _dec(cpp.get("basic_amount"), Decimal(0)), _dec(cpp["rate"])
+    cpp_max, cpp2_max = rate * (ympe - exemption), _dec(cpp2["rate"]) * (yampe - ympe)
+    ei_max = _dec(ei["rate"]) * mie
+    year = values.get("year")
+    if re.search(r"\b(?:CPP|QPP)\b", exempt):
+        if g("16") or g("16A"):
+            problems.append(f"box 28 marks the employee exempt from CPP, but boxes 16 and 16A have contributions; "
+                            f"{misread}")
+    elif b.get("26") is not None:
+        top = min(b["26"], ympe)
+        low = min(rate * max(top - exemption, Decimal(0)), cpp_max)  # a full year: the whole exemption
+        high = min(rate * top, cpp_max)  # part of a year: less of it
+        if not low - tol <= g("16") <= high + tol:
+            problems.append(f"box 16 (CPP) is {g('16'):.2f}, but box 26 ({b['26']:.2f}) gives {_cents(low):.2f} "
+                            f"to {_cents(high):.2f} at {year}'s rate; {misread}")
+        want2 = _dec(cpp2["rate"]) * max(min(b["26"], yampe) - ympe, Decimal(0))
+        if abs(g("16A") - want2) > tol:
+            problems.append(f"box 16A (CPP2) is {g('16A'):.2f}, but box 26 ({b['26']:.2f}) gives "
+                            f"{_cents(want2):.2f} at {year}'s rate; {misread}")
+        if _practice_slips(hub).get("t4_full_year"):
+            full = min(rate * max(top - exemption, Decimal(0)), cpp_max)
+            if abs(g("16") - full) > Decimal("0.5"):
+                problems.append(f"box 16 (CPP) is {g('16'):.2f}, not a full year's on box 26 ({_cents(full):.2f}), "
+                                f"and the firm's T4s are full years of regular pay; {misread}")
+            if b.get("14") is not None and b["26"] != min(b["14"], yampe):
+                problems.append(f"box 26 ({b['26']:.2f}) is not box 14 ({b['14']:.2f}) up to {year}'s maximum, "
+                                f"and the firm's T4s are full years of regular pay; {misread}")
+    if re.search(r"\bEI\b", exempt):
+        if g("18"):
+            problems.append(f"box 28 marks the employee exempt from EI, but box 18 has premiums; {misread}")
+    elif b.get("24") is not None:
+        want = min(_dec(ei["rate"]) * min(b["24"], mie), ei_max)
+        if abs(g("18") - want) > tol:
+            problems.append(f"box 18 (EI) is {g('18'):.2f}, but box 24 ({b['24']:.2f}) gives {_cents(want):.2f} "
+                            f"at {year}'s rate; {misread}")
+    for box, cap in (("16", cpp_max), ("16A", cpp2_max), ("18", ei_max), ("24", mie), ("26", yampe)):
+        if g(box) > _cents(cap) + CENT / 2:
+            problems.append(f"box {box} is {g(box):.2f}, over {year}'s maximum of {_cents(cap):.2f}; {misread}")
+    if b.get("14") is not None:  # what a T4 usually is; one that is not goes to a person, who may find it right
+        for box in ("24", "26"):
+            if g(box) > b["14"] + tol:
+                problems.append(f"box {box} ({g(box):.2f}) is more than box 14 ({b['14']:.2f}); {misread}")
+        for box in ("20", "22", "40", "44", "46"):
+            if g(box) > b["14"]:
+                problems.append(f"box {box} ({g(box):.2f}) is more than box 14 ({b['14']:.2f}); {misread}")
+        if g("52") > Decimal("0.18") * b["14"] + tol:
+            problems.append(f"box 52 ({g('52'):.2f}) is more than 18% of box 14; {misread}")
+    if g("20") and not g("52"):
+        problems.append(f"box 20 has pension plan contributions but box 52 has no pension adjustment; {misread}")
+    elif g("20") > g("52") + tol:
+        problems.append(f"box 20 ({g('20'):.2f}) is more than box 52 ({g('52'):.2f}); {misread}")
+    return problems
+
+
+def _practice_slips(hub) -> dict:
+    return ((hub.practice if hub is not None else {}) or {}).get("slips") or {}
 
 
 def guard_t1_client_letter(values, ctxview):
@@ -1231,27 +1371,45 @@ def upgrade_clients_by_kind(hub, actor):
             **({"clients_not_moved": kept} if kept else {}), "more": len(rows) == hub.UPGRADE_BATCH}
 
 
+def _propose_documents_model(hub, actor, key: str, why: str) -> int:
+    """The documents agent's model for pictures of one kind (``key`` of its profile, as the pack names it), proposed
+    for a hub whose agent has none: a policy owner approves it, as any change to what an agent may do; a model shown
+    clients' documents is never put in force by the pack alone. A proposal already waiting keeps what it changes.
+    Nothing to propose (0) when the agent is not here or has one."""
+    want = next(((m.get("profile") or {}).get(key) for m in hub.pack.members if m.get("id") == "documents-agent"), None)
+    row = hub.db.members.get("documents-agent")
+    if not want or row is None or (row.get("profile") or {}).get(key):
+        return 0
+    waiting = (hub.agent_profile_proposal("documents-agent") or {}).get("profile") or {}
+    if waiting.get(key):
+        return 0
+    hub.propose_agent_profile(actor, "documents-agent", {**waiting, key: want}, why)
+    return 1
+
+
 def upgrade_documents_agent_sees(hub, actor):
     """1.9: the documents agent reads a slip that is a photo with a model that can see it (its profile's
-    ``vision_model``, as the pack names it). A hub on an older version has the agent without one: the upgrade proposes
-    it, and a policy owner approves it, as any change to what an agent may do; a model shown clients' documents is
-    never put in force by the pack alone. A proposal already waiting keeps what it changes. Nothing to propose when
-    the agent is not here or has a model for pictures."""
-    want = next(((m.get("profile") or {}).get("vision_model") for m in hub.pack.members
-                 if m.get("id") == "documents-agent"), None)
-    row = hub.db.members.get("documents-agent")
-    if not want or row is None or (row.get("profile") or {}).get("vision_model"):
-        return {"profiles_proposed": 0}
-    waiting = (hub.agent_profile_proposal("documents-agent") or {}).get("profile") or {}
-    if waiting.get("vision_model"):
-        return {"profiles_proposed": 0}
-    hub.propose_agent_profile(actor, "documents-agent", {**waiting, "vision_model": want},
-                              "Accounting office 1.9: a slip that is a photo is read by a model that can see it")
-    return {"profiles_proposed": 1}
+    ``vision_model``): proposed for a hub whose agent has none."""
+    return {"profiles_proposed": _propose_documents_model(
+        hub, actor, "vision_model", "Accounting office 1.9: a slip that is a photo is read by a model that can see it")}
+
+
+def upgrade_documents_agent_reads(hub, actor):
+    """1.10: a slip that is a photo is read first by a model made to read documents (the documents agent's
+    ``reading_model``), which reads its words and a T4's boxes one by one, and a T4's arithmetic is checked with the
+    year's CPP2 as well: the model is proposed for a policy owner to approve, and the CPP2 rates the pack knows are
+    entered where the firm has none for their year."""
+    if hub.record_type("TaxRate") is None:
+        return None
+    return {"profiles_proposed": _propose_documents_model(
+        hub, actor, "reading_model", "Accounting office 1.10: a slip that is a photo is read first by a model made to "
+                                     "read documents, and a T4's boxes are checked against what it read"),
+            "rates_made": seed_rates(hub, actor, kinds={"cpp2"})}
 
 
 UPGRADES = {"1.7-rates-are-records": upgrade_rates_are_records, "1.8-clients-by-kind": upgrade_clients_by_kind,
-            "1.9-documents-agent-sees": upgrade_documents_agent_sees}
+            "1.9-documents-agent-sees": upgrade_documents_agent_sees,
+            "1.10-documents-agent-reads": upgrade_documents_agent_reads}
 
 
 def summarize(rec: dict, is_a=None) -> str | None:

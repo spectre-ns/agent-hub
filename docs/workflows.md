@@ -700,9 +700,24 @@ tone = "warm"
 
 A step whose `file:` entry is a picture (a PNG, JPEG or WebP photo of a document) is answered by the model the
 agent's profile names as `vision_model`, which is shown the picture (fetched as the agent: reading it is a view of
-the record, on the track). An agent with no model for pictures is told there is a picture it cannot see; a skill
+the record, on the track). That model is given what the step asks (its instructions, its skill, the fields to fill)
+and what its files are, and nothing else the step reads: no records, no earlier work, no draft. What it answers is
+what the picture shows, with nothing beside it to copy from; the step's guards still check the answer against the
+whole context. An agent with no model for pictures is told there is a picture it cannot see; a skill
 that needs what it shows escalates. Setting or changing an agent's `vision_model` is proposed and approved by a
 second policy owner, as a change of its model is.
+
+A picture can be read first instead, by a model made to read documents: the one the agent's profile names as
+`reading_model` (GLM-OCR through Ollama, `ollama/glm-ocr`, for one), where the step's skill says how (`[reading]`, in
+[packs.md](packs.md#skills)). It is asked for the picture's words and, when they are those of a form the skill knows,
+for each of the form's fields by name, and what it read goes in the file's `reading` (`by`, `words`, `fields`). The
+step is then answered by the profile's `model` from what was read, shown neither the picture nor anything else the
+step reads; the picture's words go in the skill's `words` field as read, never as the answering model would have
+them, and so do the fields the form gives the answer (its `answer`): the answering model is not asked them, and one
+the step requires that was not read sends the step to a person without asking it. A picture is read once, before the first answer: an answer refused and given again is given the same reading.
+A reading model that reads no words, or does not read pictures, sends the step to a person. A picture the skill says
+how to read goes to the reading model only; one it does not goes to the model for pictures, as above. Setting or
+changing `reading_model` is approved by a second policy owner too.
 
 **Data classes travel with data.** A member may take work only if they may read every class it reads:
 

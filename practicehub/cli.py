@@ -389,7 +389,8 @@ def cmd_member(args):
         print(f"{out['name']} is switched on")
     elif args.sub == "profile":
         changes = {k: v for k, v in (("model", args.model), ("vision_model", args.vision_model),
-                                     ("max_risk", args.max_risk)) if v is not None}
+                                     ("reading_model", args.reading_model), ("max_risk", args.max_risk))
+                   if v is not None}
         if args.direct_writes is not None:
             changes["direct_writes"] = args.direct_writes == "yes"
         if args.skill is not None:
@@ -996,6 +997,8 @@ def main(argv=None):
     p.add_argument("id")
     p.add_argument("--model")
     p.add_argument("--vision-model", help="the model a step carrying a picture is answered by ('' for none)")
+    p.add_argument("--reading-model", help="the model a picture is read with first, where the step's skill says how "
+                                           "('' for none)")
     p.add_argument("--max-risk", choices=["low", "medium", "high"])
     p.add_argument("--skill", action="append", help="every skill or prompt block it takes (repeat)")
     p.add_argument("--direct-writes", choices=["yes", "no"],

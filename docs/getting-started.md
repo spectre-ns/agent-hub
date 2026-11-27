@@ -124,8 +124,8 @@ practicehub member approve-profile scribe-agent 2 --as dr-amara    # 2: the vers
 
 The agent's page under **Team** does the same in the browser. There the model is picked from a list of the models
 the hub can reach now: what Ollama has installed, what your LiteLLM proxy serves (when `LITELLM_URL` is set), Claude's
-models (when models off the premises are allowed), and `standin`. The model for pictures lists only those that can
-see. A server that does not answer is named under the list.
+models (when models off the premises are allowed), and `standin`. The model for pictures, and the model that reads
+pictures, list only those that can see. A server that does not answer is named under the list.
 
 ## 7. Run it for real
 

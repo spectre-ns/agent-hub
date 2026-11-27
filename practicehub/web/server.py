@@ -4167,6 +4167,8 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
         words = options(got["models"], model, "" if model else "None named: answers by stand-in", True)
         seeing = options([r for r in got["models"] if r["sees"] is not False], prof.get("vision_model", ""),
                          "None: it is told there is a picture it cannot see", False)
+        reading = options([r for r in got["models"] if r["sees"] is not False], prof.get("reading_model", ""),
+                          "None: a picture is not read first", False)
         note = (f" {e(down)} did not answer, so {'their' if ',' in down else 'its'} models are not listed."
                 if down else "")
         return (f'<div class="field"><label>Model<select name="model" aria-describedby="m-{e(mid)}">{words}</select>'
@@ -4174,7 +4176,12 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                 f'<div class="field"><label>Model for pictures<select name="vision_model" '
                 f'aria-describedby="vm-{e(mid)}">{seeing}</select></label>'
                 f'<small id="vm-{e(mid)}" class="help">A model that can see, shown a photo or scan a step carries.'
-                f'</small></div>')
+                f'</small></div>'
+                f'<div class="field"><label>Model that reads pictures<select name="reading_model" '
+                f'aria-describedby="rm-{e(mid)}">{reading}</select></label>'
+                f'<small id="rm-{e(mid)}" class="help">A model made to read documents. Where a step\'s skill says how '
+                f'a picture is read, this model reads its words and fields first, and the step is answered from '
+                f'what it read.</small></div>')
 
     def _profile_forms(self, me, m) -> list[str]:
         """An agent's profile: the version in force, a proposed one waiting for a second person, the history."""
@@ -4190,6 +4197,9 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             if new.get("vision_model", "") != prof.get("vision_model", ""):
                 rows.append(("Model for pictures", e(prof.get("vision_model", "") or "—"),
                              e(new.get("vision_model", "") or "—")))
+            if new.get("reading_model", "") != prof.get("reading_model", ""):
+                rows.append(("Model that reads pictures", e(prof.get("reading_model", "") or "—"),
+                             e(new.get("reading_model", "") or "—")))
             if new.get("max_risk") != prof.get("max_risk"):
                 rows.append(("Highest risk", e(prof["max_risk"].capitalize()), e(new["max_risk"].capitalize())))
             if bool(new.get("direct_writes")) != bool(prof.get("direct_writes")):
@@ -4250,6 +4260,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
                 f'<tr><td>v{v["version"]}</td><td><span class="badge {e(v["status"])}">{e(v["status"])}</span></td>'
                 f'<td>{e(v["profile"].get("model", ""))}'
                 f'{" (pictures: " + e(v["profile"]["vision_model"]) + ")" if v["profile"].get("vision_model") else ""}'
+                f'{" (reads: " + e(v["profile"]["reading_model"]) + ")" if v["profile"].get("reading_model") else ""}'
                 f' · {e(v["profile"].get("max_risk", "low"))} · '
                 f'{e(", ".join(self.human(x) for x in v["profile"].get("skills", [])))}'
                 f'{" · changes records directly" if v["profile"].get("direct_writes") else ""}</td>'
@@ -4378,6 +4389,7 @@ class App(CalendarPages, RecordWork, WorkPanel, RecordPages, JourneyPages, Dashb
             elif verb == "profile":
                 hub.propose_agent_profile(me, mid, {"model": str(f.get("model", "")),
                                                     "vision_model": str(f.get("vision_model", "")),
+                                                    "reading_model": str(f.get("reading_model", "")),
                                                     "max_risk": f.get("max_risk"),
                                                     "skills": many("skills"),
                                                     "direct_writes": bool(f.get("direct_writes"))},

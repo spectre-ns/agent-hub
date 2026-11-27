@@ -2640,7 +2640,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
     # What an agent may do (its model, the skills and prompt blocks it takes, the highest risk) is a versioned record
     # under the same change control as a definition: proposed, approved by a second person who is a policy owner,
     # then in force. Nothing changes an agent's behaviour at once, and every version is kept.
-    PROFILE_KEYS = ("model", "vision_model", "max_risk", "skills", "direct_writes")
+    PROFILE_KEYS = ("model", "vision_model", "reading_model", "max_risk", "skills", "direct_writes")
 
     def _check_profile(self, profile: dict) -> dict:
         extra = sorted(set(profile) - set(self.PROFILE_KEYS))
@@ -2655,7 +2655,9 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             out.pop("direct_writes", None)  # off is the absence of the key: a profile says only what it allows
         else:
             raise Invalid("direct_writes is true, or left out")
-        for k in ("model", "vision_model"):  # vision_model: the model a step carrying a picture is answered by
+        # vision_model: the model a step carrying a picture is answered by; reading_model: the model a picture is read
+        # with first (its words, and the fields its skill's ``[reading]`` names), the step then answered from that
+        for k in ("model", "vision_model", "reading_model"):
             if k in out:
                 out[k] = str(out[k] or "").strip()
                 if not out[k]:
@@ -2724,6 +2726,7 @@ class Hub(CatalogMixin, CredentialsMixin, OutboxMixin, MovesMixin, ActivityMixin
             raise Invalid("that is the profile in force: there is nothing to propose")
         reduction = (profile.get("model") == current.get("model")
                      and profile.get("vision_model") in (None, current.get("vision_model"))
+                     and profile.get("reading_model") in (None, current.get("reading_model"))
                      and RISK_ORDER[profile["max_risk"]] <= RISK_ORDER[current["max_risk"]]
                      and set(profile["skills"]) <= set(current["skills"])
                      and (current.get("direct_writes") or not profile.get("direct_writes")))

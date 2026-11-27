@@ -31,6 +31,14 @@ the profile names as ``vision_model``, which is shown the picture. An agent whos
 a picture it cannot see, and answers with what else it has (or escalates): a picture is never sent to a model the
 practice did not approve for it.
 
+A step whose skill says how its pictures are read (``[reading]``, :func:`practicehub.pack.parse_reading`) is answered
+in two goes when the profile names a ``reading_model`` (a model made to read documents): that model reads the
+picture first (:meth:`ModelGateway.read`), its words and, for a picture of a form the skill knows, the fields the
+form names, and the step is then answered by the profile's ``model`` from what was read, without the picture. The
+words go in the skill's ``words`` field as read, never as the answering model wrote them, and so do the fields the
+form gives the answer (its ``answer``): the answering model is not asked them, so it cannot copy one into the wrong
+place, and a step's checks hold the answer against a reading it did not make.
+
 A model is given as long as it takes: agents and chats answer in the background, so a slow model only makes the
 answer later. No call to a model has a time limit (asking a server which models it has does, a few seconds).
 
@@ -50,6 +58,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -300,15 +309,43 @@ def _functions(tools: list[dict]) -> list[dict]:
 
 def envelope(schema: dict) -> dict:
     return {"type": "object", "additionalProperties": False, "required": ["answer", "escalate", "reason"],
-            "properties": {"answer": schema, "escalate": {"type": "boolean"}, "reason": {"type": "string"}}}
+            "properties": {"answer": every_field(schema), "escalate": {"type": "boolean"},
+                           "reason": {"type": "string"}}}
+
+
+def every_field(schema: dict) -> dict:
+    """The answer a model is asked for: every field of its step, in the step's order, one it may leave empty as
+    null. A model's structured output writes the fields it must before any it may (Ollama's grammar does), and a
+    small model ends there: a field it may leave out it never reaches, and a step that asks for one first is
+    answered out of order. A null is an empty field (:func:`practicehub.fields.coerce`)."""
+    props, must = schema.get("properties") or {}, set(schema.get("required") or ())
+    return {**schema, "required": list(props),
+            "properties": {k: v if k in must else _nullable(v) for k, v in props.items()}}
+
+
+def _nullable(prop: dict) -> dict:
+    kind = prop.get("type")
+    out = {**prop, "type": [kind, "null"] if isinstance(kind, str) else kind}
+    return {**out, "enum": [*prop["enum"], None]} if "enum" in prop else out
+
+
+def picture_alone(ctx: dict) -> dict:
+    """What a model reading a step's pictures is given: the step and what it asks (its instructions, its skill, the
+    fields to fill and their allowed values) and, of its context, only the files (what each is, and its words when it
+    has any), never the records or earlier work the step reads, nor a draft. What it answers is then what the
+    pictures show, with nothing beside them to copy from; the step's guards still check the answer against the whole
+    context, on the hub."""
+    return {**ctx, "context": {k: v for k, v in (ctx.get("context") or {}).items() if k.startswith("file:")},
+            "draft": None}
 
 
 def build_prompt(agent: dict, ctx: dict, practice: str = "the practice", rules=(), shown=(),
-                 unseen=()) -> tuple[str, str]:
+                 unseen=(), read=()) -> tuple[str, str]:
     """The system prompt and the step prompt. ``rules`` are the practice's own (its pack's ``agent_rules``): what an
     agent of this kind of practice must never do, in its words; the core knows no profession. ``shown``: the
     pictures the model is shown with the step ({name, contentType}); ``unseen``: those it carries but the model
-    is not shown."""
+    is not shown; ``read``: those read for it (:meth:`ModelGateway.read`), what was read in their file's
+    ``reading``."""
     step, skill = ctx["step"], ctx.get("skill") or {}
     extra = "".join(f"\n- {str(r).strip()}" for r in rules or () if str(r).strip())
     system = SYSTEM.format(name=agent.get("name", agent.get("id", "an agent")), practice=practice,
@@ -338,6 +375,14 @@ def build_prompt(agent: dict, ctx: dict, practice: str = "the practice", rules=(
         parts.append(f"The step carries {'a picture' if len(unseen) == 1 else 'pictures'} you cannot see: "
                      f"{names(unseen)}. You have only what the context says beside it. If the step needs what the "
                      f"picture shows, escalate.")
+    if read:
+        one = len(read) == 1
+        parts.append(f"{'A picture' if one else 'Pictures'} the step carries {'was' if one else 'were'} "
+                     f"read for you: {names(read)}. What was read is its file's `reading` in the context: its "
+                     f"`words`, as read, and the `fields` read from it, each named for what it holds (empty or "
+                     f"missing: not read). Answer from them, copying each value exactly; what they do not say was "
+                     f"not read: leave it empty, or escalate if the step needs it. A field the reading gives the "
+                     f"answer as read is not in your list: it is filled for you.")
     return system, "\n\n".join(parts)
 
 
@@ -349,6 +394,69 @@ def parse_answer(text: str) -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("answer"), dict):
         raise ModelError("the model's answer is not an object with an 'answer'")
     return {"answer": data["answer"], "escalate": bool(data.get("escalate")), "reason": str(data.get("reason", ""))}
+
+
+# What a reading model is asked: a document-reading model's own task prompts (GLM-OCR's, as its model card gives
+# them: its words, then the information a form names, the form's keys in a JSON template it fills in).
+READ_WORDS = "Text Recognition:"
+READ_FIELDS = "请按下列JSON格式输出图中信息:\n"
+READ_TOKENS = 8192  # the most a reading may write: one that goes on past it is cut off, and fails
+
+
+def read_fields(text: str, keys) -> dict:
+    """The values a reading model wrote for the form's keys, from its answer (a JSON object, which a small model
+    does not always close or escape): each key's string value where it wrote one, stripped; an empty one is left
+    out (not read)."""
+    out = {}
+    for k in keys:
+        m = re.search(r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"' % re.escape(k), text or "")
+        if m:
+            try:
+                v = json.loads(f'"{m.group(1)}"')
+            except json.JSONDecodeError:
+                v = m.group(1)
+            if str(v).strip():
+                out[k] = str(v).strip()
+    return out
+
+
+def without_field(ctx: dict, name: str) -> dict:
+    """``ctx`` with one of the step's fields taken out of what the model is asked to fill."""
+    schema = ctx.get("schema") or {}
+    return {**ctx, "fields": [f for f in ctx.get("fields") or [] if f.get("name") != name],
+            "schema": {**schema, "properties": {k: v for k, v in (schema.get("properties") or {}).items() if k != name},
+                       "required": [k for k in schema.get("required") or [] if k != name]}}
+
+
+def read_files(ctx: dict) -> dict:
+    """The step's files that were read for it: ``{context key: entry}``, each with its ``reading``."""
+    return {k: v for k, v in (ctx.get("context") or {}).items()
+            if k.startswith("file:") and isinstance(v, dict) and v.get("reading")}
+
+
+def read_answer(ctx: dict, read: dict) -> tuple[dict, list[str]]:
+    """What the step's answer is given as read, by the forms its files were read as (their ``answer``,
+    :func:`practicehub.pack.parse_reading`): ``({field: value, or None when it was not read}, [each required field
+    that was not read])``. A field takes its form field's value; a text field of lines takes ``label: value`` for each
+    of its form fields that was read. Only fields the step asks are given."""
+    from .pack import reading_form
+    reading = (ctx.get("skill") or {}).get("reading")
+    asked = {f["name"]: f for f in ctx.get("fields") or []}
+    given, src = {}, {}
+    for entry in read.values():
+        fields = entry["reading"].get("fields") or {}
+        for name, key in ((reading_form(reading, entry["reading"]["words"]) or {}).get("answer") or {}).items():
+            if name not in asked:
+                continue
+            if isinstance(key, dict):
+                lines = [f"{label}: {fields[k]}" for label, k in key.items() if fields.get(k)]
+                given[name] = "\n".join(x for x in (given.get(name), *lines) if x) or None
+                src.setdefault(name, "any of " + ", ".join(key.values()))
+            elif given.get(name) is None:
+                given[name], src[name] = fields.get(key) or None, key
+    unread = [f"{asked[n].get('label') or n} is read from the picture's {src[n]}, which was not read"
+              for n, v in given.items() if v is None and asked[n].get("required")]
+    return given, unread
 
 
 NUM_CTX = 32768  # the context window a local model is given, unless OLLAMA_NUM_CTX names another
@@ -420,6 +528,18 @@ class Standin:
         if "answer" not in out:
             out = {"answer": out, "escalate": False, "reason": "stand-in answer"}
         return {"answer": out["answer"], "escalate": bool(out.get("escalate")), "reason": out.get("reason", "")}
+
+    def read(self, model, prompt, pictures, ctx) -> str:
+        """The pack's ``reading:<skill id>`` stand-in: ``fn(ctx) -> str`` (the words) or a dict (the fields), ``ctx``
+        holding the ``prompt``, the form's ``keys`` (None when the words are asked for) and the ``pictures`` (never
+        their bytes)."""
+        fn = self.standins.get(f"reading:{ctx['step'].get('skill') or ''}")
+        if fn is None:
+            raise ModelError("there is no stand-in that reads pictures")
+        from .pack import taken
+        out = fn({**ctx, "prompt": prompt, "pictures": [{k: p.get(k) for k in ("name", "contentType", "size")}
+                                                         for p in pictures]}, **taken(fn, is_a=self.is_a))
+        return json.dumps(out, ensure_ascii=False) if isinstance(out, dict) else str(out or "")
 
     def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
         """The pack's ``chat`` stand-in: ``fn(ctx) -> {text, calls}``, ``ctx`` holding the chat's ``messages``,
@@ -501,6 +621,21 @@ class Ollama:
                              f"{resp.get('prompt_eval_count', '?')} tokens read)")
         return parse_answer(msg["content"])
 
+    def read(self, model, prompt, pictures, ctx) -> str:
+        """What a reading model writes for the pictures, asked ``prompt`` as it is (``/api/generate``: no system
+        prompt and no chat around it, as a document-reading model is run)."""
+        if not self.sees(model):
+            raise ModelError(f"{model} does not take pictures: name a model that reads them as the reading_model")
+        got = _post(self.url + "/api/generate",
+                    {"model": model, "prompt": prompt, "stream": False,
+                     "images": [base64.b64encode(p["data"]).decode() for p in pictures],
+                     "options": {"num_ctx": num_ctx(), "num_predict": READ_TOKENS}}, {}, self.timeout)
+        if got.get("error"):
+            raise ModelError(f"{self.url}/api/generate: {got['error']}")
+        if got.get("done_reason") == "length":
+            raise ModelError(f"the reading went on past {READ_TOKENS} tokens and was cut off")
+        return str(got.get("response") or "")
+
     def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
         body = {"model": model, "messages": _openai_messages(system, rs, ollama=True),
                 "options": {"num_ctx": num_ctx()},
@@ -555,6 +690,22 @@ class LiteLLM:
         if thinking is not None:  # what the proxy says the model reasoned, when it does
             thinking.whole((choice.get("message") or {}).get("reasoning_content"))
         return parse_answer((choice.get("message") or {}).get("content") or "")
+
+    def read(self, model, prompt, pictures, ctx) -> str:
+        content = [{"type": "text", "text": prompt}] + [
+            {"type": "image_url", "image_url": {"url": f"data:{p['contentType']};base64,"
+                                                       f"{base64.b64encode(p['data']).decode()}"}} for p in pictures]
+        headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
+        resp = _post(self.url + "/v1/chat/completions",
+                     {"model": model, "max_tokens": READ_TOKENS, "messages": [{"role": "user", "content": content}],
+                      "metadata": {"trace_user_id": ctx.get("agent", ""),
+                                  "session_id": ctx.get("run", {}).get("id", ""),
+                                  "tags": [f"item:{ctx.get('item', {}).get('id', '')}", "reading"]}},
+                     headers, self.timeout)
+        choice = (resp.get("choices") or [{}])[0]
+        if choice.get("finish_reason") == "length":
+            raise ModelError(f"the reading went on past {READ_TOKENS} tokens and was cut off")
+        return str((choice.get("message") or {}).get("content") or "")
 
     def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
         body = {"model": model, "messages": _openai_messages(system, rs, ollama=False),
@@ -628,6 +779,19 @@ class Anthropic:
             raise ModelError("the model ran out of tokens before finishing its answer")
         text = next((b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text"), "")
         return parse_answer(text)
+
+    def read(self, model, prompt, pictures, ctx) -> str:
+        if not self.api_key:
+            raise ModelError("ANTHROPIC_API_KEY is not set")
+        content = [{"type": "image", "source": {"type": "base64", "media_type": p["contentType"],
+                                                "data": base64.b64encode(p["data"]).decode()}} for p in pictures]
+        resp = _post(self.base + "/v1/messages",
+                     {"model": model or DEFAULT_ANTHROPIC_MODEL, "max_tokens": READ_TOKENS,
+                      "messages": [{"role": "user", "content": content + [{"type": "text", "text": prompt}]}]},
+                     {"x-api-key": self.api_key, "anthropic-version": ANTHROPIC_VERSION}, self.timeout)
+        if resp.get("stop_reason") in ("max_tokens", "refusal"):
+            raise ModelError(f"the reading stopped short ({resp['stop_reason']})")
+        return "".join(b.get("text", "") for b in resp.get("content") or [] if b.get("type") == "text")
 
     def chat(self, model, system, rs, tools, ctx, thinking=None) -> dict:
         if not self.api_key:
@@ -725,27 +889,77 @@ class ModelGateway:
                              "if the practice has decided that is allowed")
         return b, model
 
+    def read(self, agent: dict, ctx: dict, pictures=()) -> tuple[dict, list[dict]]:
+        """``(ctx, pictures)`` with the pictures the step's skill says how to read (``ctx["skill"]["reading"]``)
+        read by the profile's ``reading_model``: each one's words (:data:`READ_WORDS`) and, when they are those of
+        a form the skill knows (:func:`practicehub.pack.reading_form`), the fields it names (:data:`READ_FIELDS`)
+        go in its file's ``reading`` ({by, words, fields}), and it leaves ``pictures``: the step is then answered
+        from what was read, by the profile's ``model``. Nothing is read without a reading model, a skill that says
+        how, or a picture fetched for it (``data``, and ``of``: its context key). A model that cannot read it
+        raises :class:`ModelError`: nothing is answered from a picture half read."""
+        from .pack import reading_form
+        profile = agent.get("profile") or {}
+        reading = (ctx.get("skill") or {}).get("reading")
+        todo = [p for p in pictures if p.get("data") and p.get("of") in (ctx.get("context") or {})]
+        if not (profile.get("reading_model") and reading and todo):
+            return ctx, list(pictures)
+        spec = "standin" if self.scripted else profile["reading_model"]
+        backend, model = self.backend(spec)
+        if not hasattr(backend, "read"):
+            raise ModelError(f"{spec} does not read pictures")
+        files, call = dict(ctx["context"]), {**ctx, "agent": agent.get("id", "")}
+        for p in todo:
+            words = backend.read(model, READ_WORDS, [p], {**call, "keys": None}).strip()
+            if not words:
+                raise ModelError(f"{spec} read no words in {p.get('name') or 'the picture'}")
+            form, fields = reading_form(reading, words), {}
+            if form:
+                template = json.dumps({k: "" for k in form["fields"]}, indent=4, ensure_ascii=False)
+                fields = read_fields(backend.read(model, READ_FIELDS + template, [p], {**call, "keys": form["fields"]}),
+                                     form["fields"])
+            files[p["of"]] = {**files[p["of"]], "reading": {"by": spec, "words": words, "fields": fields}}
+        return {**ctx, "context": files}, [p for p in pictures if not any(p is t for t in todo)]
+
     def answer(self, agent: dict, ctx: dict, practice: str = "the practice", pictures=(), thinking=None) -> dict:
         """``{"answer", "escalate", "reason", "model"}`` for the work item described by ``ctx``. ``pictures``: the
         pictures its step carries ({name, contentType, size}, and ``data`` for one fetched to be shown), shown only
-        to the profile's ``vision_model``; any other model is told what it is not shown. ``thinking``: a
-        :class:`Thinking` the model's thinking goes to, as it comes."""
+        to the profile's ``vision_model``, which is given nothing else the step reads (:func:`picture_alone`); any
+        other model is told what it is not shown. Files read for the step (:meth:`read`) are answered from by the
+        profile's ``model``, given nothing else the step reads either: the words read go in the skill's ``words``
+        field, and the fields its form gives (:func:`read_answer`) in theirs, as read, and the model is not asked
+        them; one the step requires that was not read goes to a person, unasked. ``thinking``: a :class:`Thinking`
+        the model's thinking goes to, as it comes."""
         profile = agent.get("profile") or {}
         # a profile that names no model is an agent added before the hub gave one: it answers as it always did
         spec = profile.get("model") or "standin"
         shown = [p for p in pictures if p.get("data")] if profile.get("vision_model") else []
         unseen = [p for p in pictures if not any(p is s for s in shown)]
+        read = read_files(ctx)
+        words = ((ctx.get("skill") or {}).get("reading") or {}).get("words") if read else None
+        given, unread = read_answer(ctx, read) if read else ({}, [])
+        if unread:  # nothing to answer it from: the answering model is not asked what the reading did not give
+            return {"answer": {}, "escalate": True, "reason": "; ".join(unread) + ": a person reads the picture",
+                    "model": next(iter(read.values()))["reading"]["by"]}
+        if shown or read:
+            ctx = picture_alone(ctx)
         if shown:
             spec = profile["vision_model"]
+        for name in ([words] if words else []) + list(given):
+            ctx = without_field(ctx, name)
         spec = "standin" if self.scripted else spec
         backend, model = self.backend(spec)
         pack = getattr(self.hub, "pack", None)
         rules = (pack.practice.get("agent_rules") if pack else None) or []
-        system, prompt = build_prompt(agent, ctx, practice, rules, shown=shown, unseen=unseen)
+        system, prompt = build_prompt(agent, ctx, practice, rules, shown=shown, unseen=unseen,
+                                      read=[{"name": v.get("name"), "contentType": v.get("picture")}
+                                            for v in read.values()])
         if thinking is not None:
             thinking.model = spec
         out = backend(model, system, prompt, envelope(ctx["schema"]), {**ctx, "agent": agent.get("id", "")},
                       pictures=shown, thinking=thinking)
+        if (words or given) and not out["escalate"]:  # as read, never as the answering model would have them
+            said = {words: "\n\n".join(v["reading"]["words"] for v in read.values())} if words else {}
+            out = {**out, "answer": {**out["answer"], **given, **said}}
         return {**out, "model": spec}
 
     def reply(self, agent: dict, ctx: dict, practice: str = "the practice", feedback=(), thinking=None) -> dict:

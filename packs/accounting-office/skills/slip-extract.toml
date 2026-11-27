@@ -1,19 +1,35 @@
 id = "slip-extract"
 title = "Read a tax slip or notice"
 instructions = """
-Read the document: its words are the slip's text, read from its file. A slip that is a photo has no text: if you are
-shown the picture, first write its words in `text`, as printed, line by line, each box with its number, then read the
-slip from what you wrote. Write only what is printed, nothing of your own (no notes about the picture, and none of
-your answers: the slip, year, issuer and amounts go in their own fields). If the
-picture is blurred, or you cannot clearly make out the slip, the year or the main amount, escalate: a person reads
-it. A box the slip does not have (a T5 has no income tax deducted) is left empty: that is not a reason to escalate. When the slip has text, leave `text` empty. Read which slip it is (T4, T5, an RRSP receipt, a notice of assessment...),
-the tax year, who issued it (the payer, employer or other issuer, as printed: every document names one), the main amount (employment income on a T4, box 14; interest on a T5, box 13; the
-contribution or donation; on a notice of assessment, the refund, negative if the client owes), the income tax deducted,
-and every other box by its number. Copy numbers exactly as printed; never compute or guess one. The slip and the
-year are read from the text too, never guessed (the main box, and box 22 on a T4, T4A or T4E, the income tax deducted,
-go in the amount and the tax deducted, not in the other boxes): a document that does not say which slip it is, or for which year, one
-you cannot read, or one that is for someone else, is escalated to a person.
+Read the document. A PDF's words are read for you: they are its file's `text` in the context, and then your `text` is
+left empty. A photo may be read for you too: then its file's `reading` holds the words read from it and, for a T4, its
+boxes read one by one (`fields`, each named for its box), and a T4's year, issuer, amounts and boxes are filled from
+them for you, as read: they are not in your list, and you answer the rest (which slip it is, and the summary) from the
+words. Never work a box out from others. When a photo is not read for you (its file's `text` is null and it has no
+`reading`) and you are shown the picture, first write its words in your `text`, as printed, line by line, each box with
+its number, then read the slip from what you wrote. Write only what is printed, nothing of your own (no notes about
+the picture, and none of your answers: the slip, year, issuer and amounts go in their own fields). If the picture is
+blurred, or you cannot clearly make out the slip, the year or the main amount, escalate: a person reads it. A box the
+slip does not have (a T5 has no income tax deducted) is left empty: that is not a reason to escalate. Read which slip
+it is (T4, T5, an RRSP receipt, a notice of assessment...), the tax year, who issued it (the payer, employer or other
+issuer, as printed: every document names one), the main amount (employment income on a T4, box 14; interest on a T5,
+box 13; the contribution or donation; on a notice of assessment, the refund, negative if the client owes), the income
+tax deducted, and every other box by its number. On a T4 that is every box with an amount (16, 16A, 18, 20, 24, 26,
+44, 46, 52, and each code in other information, such as 40), and also box 10 (the province of employment, as printed:
+10: NS), box 28 when an exemption is marked (28: CPP, 28: EI or 28: PPIP), box 29 (the employment code) and box 50 (the
+RPP registration number) when they are filled. Copy numbers exactly as printed; never compute or guess one. A T4 read
+from a photo is checked against its own arithmetic (its CPP and EI against its earnings, at the year's rates): one
+that does not add up was misread, and is escalated, never corrected by working a box out. The slip and the year are
+read from the text too, never guessed (the main box, and box 22 on a T4, T4A or T4E, the income tax deducted, go in
+the amount and the tax deducted, not in the other boxes): a document that does not say which slip it is, or for which
+year, one you cannot read, or one that is for someone else, is escalated to a person.
 """
+
+[[output]]
+name = "text"
+label = "Words of the document"
+type = "text"
+help = "when you are shown the picture: its words as printed, line by line; when its file's text is given you, empty"
 
 [[output]]
 name = "slip_type"
@@ -56,12 +72,49 @@ type = "text"
 help = "one a line, as `box: amount`, e.g. 16: 1250.00; on a notice of assessment also 26000 (taxable income) and date"
 
 [[output]]
-name = "text"
-label = "Words of the document"
-type = "text"
-help = "only for a slip with no text whose picture you are shown: its words as printed, line by line; otherwise empty"
-
-[[output]]
 name = "summary"
 type = "text"
 required = true
+
+# A photo is read first, when the agent has a model made to read documents (its profile's reading_model): its words go
+# in text, as read, and a T4's boxes are read one by one, each key named for what it holds, and go in the answer as
+# read (answer): the agent is not asked them, so it cannot copy one into another box, and the slip's checks hold them
+# against words it did not write. The boxes a reading model reads best come first; those it seldom misses come last.
+[reading]
+words = "text"
+
+[[reading.form]]
+says = ["Statement of Remuneration Paid", "T4"]
+fields = ["year", "employer_name", "employee_last_name", "employee_first_name", "social_insurance_number",
+          "employer_account_number", "box_14_employment_income", "box_16_employee_cpp_contributions",
+          "box_16A_employee_second_cpp_contributions", "box_18_employee_ei_premiums", "box_20_rpp_contributions",
+          "box_22_income_tax_deducted", "box_24_ei_insurable_earnings", "box_26_cpp_pensionable_earnings",
+          "box_44_union_dues", "box_46_charitable_donations", "box_52_pension_adjustment",
+          "other_information_box_40_amount", "other_information_box_85_amount", "box_10_province_of_employment",
+          "box_28_exempt_cpp_qpp", "box_28_exempt_ei", "box_28_exempt_ppip", "box_29_employment_code",
+          "box_50_rpp_registration_number"]
+
+[reading.form.answer]
+year = "year"
+issuer = "employer_name"
+amount = "box_14_employment_income"
+tax_deducted = "box_22_income_tax_deducted"
+
+[reading.form.answer.boxes]  # a line for each box read: 16: 3269.50 (28 CPP: X, an exemption marked)
+"10" = "box_10_province_of_employment"
+"16" = "box_16_employee_cpp_contributions"
+"16A" = "box_16A_employee_second_cpp_contributions"
+"18" = "box_18_employee_ei_premiums"
+"20" = "box_20_rpp_contributions"
+"24" = "box_24_ei_insurable_earnings"
+"26" = "box_26_cpp_pensionable_earnings"
+"28 CPP" = "box_28_exempt_cpp_qpp"
+"28 EI" = "box_28_exempt_ei"
+"28 PPIP" = "box_28_exempt_ppip"
+"29" = "box_29_employment_code"
+"40" = "other_information_box_40_amount"
+"44" = "box_44_union_dues"
+"46" = "box_46_charitable_donations"
+"50" = "box_50_rpp_registration_number"
+"52" = "box_52_pension_adjustment"
+"85" = "other_information_box_85_amount"

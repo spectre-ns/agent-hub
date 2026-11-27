@@ -7,6 +7,7 @@ confirmation number; a partner records the one the tax software gave, signed. An
 client authorises and what is filed: a reviewed return is locked, and changing it (a person reopening it, a slip
 that comes late) means the review and the client's authorisation again."""
 
+import json
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -1079,11 +1080,13 @@ def test_an_upgrade_to_1_7_enters_the_rates_the_pack_had_in_its_code_once(monkey
     hub = snapshot_hub("accounting_office_without_rates", PACK, lambda h: h.install(PACK))
     assert not hub.records.search("TaxRate", limit=None)  # a firm installing the pack enters its own
     hub.db.set_setting("pack_upgrades_done", [])  # as a hub on 1.6 has it
-    # and 1.8's, which finds no client to move, and 1.9's, the agent having the model for pictures the pack names
-    done, clients, sees = hub.run_pack_upgrades()
+    # and 1.8's, which finds no client to move, and 1.9's and 1.10's, the agent having the models for pictures the
+    # pack names, and the CPP2 rates entered with the rest
+    done, clients, sees, reads = hub.run_pack_upgrades()
     assert (done["upgrade"], clients["upgrade"], clients["clients_moved"]) == \
         ("1.7-rates-are-records", "1.8-clients-by-kind", 0)
     assert sees == {"upgrade": "1.9-documents-agent-sees", "profiles_proposed": 0}
+    assert reads == {"upgrade": "1.10-documents-agent-reads", "profiles_proposed": 0, "rates_made": 0}
     assert len(hub.records.search("TaxRate", limit=None)) == len(hub.pack.module.SEED_RATES)
     assert hub.run_pack_upgrades() == [] and hub.pack.module.seed_rates(hub, IMPORTER) == []
 
@@ -1116,8 +1119,9 @@ def test_an_upgrade_to_1_8_moves_each_client_to_its_kind_keeping_its_key_and_num
     what named it names it, and the other kind's fields, and kind, go."""
     now = firm.record_type("Client").source
     assert not _in_force(firm, _client_as_1_7(firm)).abstract
-    # as a hub on 1.7 has it (1.9's, which is not about clients, done)
-    firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records", "1.9-documents-agent-sees"])
+    # as a hub on 1.7 has it (1.9's and 1.10's, which are not about clients, done)
+    firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records", "1.9-documents-agent-sees",
+                                               "1.10-documents-agent-reads"])
     person = firm.create_record(IMPORTER, "Client", {"kind": "person", "name": "Sarah MacNeil", "birth_date": "1980-02-03",
                                                      "sin": "046454286", "services": ["t1"]})
     company = firm.create_record(IMPORTER, "Client", {"kind": "business", "name": "Harbourview Bakery Ltd.",
@@ -1282,18 +1286,64 @@ def test_a_slip_uploaded_as_a_pdf_is_read_from_its_words_and_the_return_goes_on(
     assert ret["total_income"] == 64500.0
 
 
+T4_PHOTO = ("T4 Statement of Remuneration Paid\nYear 2025\nEmployer's name HARBOUR LOGISTICS LTD.\n"
+            "Social insurance number 046 454 286\nProvince of employment 10 NS\nEmployment income 14 64,500.00\n"
+            "Income tax deducted 22 12,400.00\nEmployee's CPP contributions 16 3,629.50\n"
+            "EI insurable earnings 24 64,500.00\nCPP pensionable earnings 26 64,500.00\n"
+            "Employee's EI premiums 18 1,057.80")
+T4_FIELDS = {"year": "2025", "employer_name": "HARBOUR LOGISTICS LTD.", "social_insurance_number": "046 454 286",
+             "box_10_province_of_employment": "NS", "box_14_employment_income": "64,500.00",
+             "box_16_employee_cpp_contributions": "3,629.50", "box_18_employee_ei_premiums": "1,057.80",
+             "box_22_income_tax_deducted": "12,400.00", "box_24_ei_insurable_earnings": "64,500.00",
+             "box_26_cpp_pensionable_earnings": "64,500.00"}
+T4_READ = {"slip_type": "T4", "year": 2025, "issuer": "Harbour Logistics Ltd.", "amount": 64500.00,
+           "tax_deducted": 12400.00, "boxes": "10: NS\n16: 3,629.50\n18: 1,057.80\n24: 64,500.00\n26: 64,500.00",
+           "summary": "T4 2025: $64,500.00."}
+
+
+class Reader:
+    """Stands for Ollama: GLM-OCR reading a photo (its words, then a T4's boxes), and the documents agent's model
+    answering from what it read: what each is asked, and what it answers."""
+    external = False
+
+    def __init__(self, answers, words=T4_PHOTO, fields=T4_FIELDS):
+        self.answers, self.words, self.fields, self.reads, self.asked = list(answers), words, fields, [], []
+
+    def read(self, model, prompt, pictures, ctx):
+        self.reads.append((model, ctx["keys"], [p["data"] for p in pictures]))
+        return json.dumps(self.fields) if ctx["keys"] else self.words
+
+    def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
+        self.asked.append((model, prompt, list(pictures), schema["properties"]["answer"]["properties"]))
+        return {"answer": self.answers.pop(0), "escalate": False, "reason": "read"}
+
+
+def _answers_on_ollama(firm):
+    """The documents agent answers with a model on Ollama, as a firm's does (a second policy owner approves it)."""
+    firm.approve_agent_profile(firm.member("anne"), "documents-agent", firm.propose_agent_profile(
+        firm.member("sophie"), "documents-agent", {"model": "ollama/qwen3.5:4b"})["version"])
+
+
+def _sees_without_reading(firm):
+    """The documents agent as a firm whose agent has no reading model has it: shown a photo by its model for
+    pictures. Taking the reading model away only lets it do less, so its sponsor does it, in force at once."""
+    assert firm.propose_agent_profile(firm.member("sophie"), "documents-agent",
+                                      {"reading_model": ""})["status"] == "active"
+
+
 def test_a_slip_photo_is_read_by_the_model_that_can_see_it_and_checked_against_the_words_it_wrote(firm):
-    """A client's phone photo of their T4: the hub reads no words from a picture, so the documents agent's model for
-    pictures is shown it. It writes the slip's words as printed and reads the slip from them: an answer with no words
-    is refused, and so is an amount that is not in them. What it wrote is the slip's text from then on."""
+    """A client's phone photo of their T4, at a firm whose documents agent has no reading model: the hub reads no
+    words from a picture, so the agent's model for pictures is shown it. It writes the slip's words as printed and
+    reads the slip from them: an answer with no words is refused, and so is an amount that is not in them. What it
+    wrote is the slip's text from then on."""
     from practicehub.models import ModelGateway
     mod = firm.pack.module
+    _sees_without_reading(firm)
     cref = _signed_up(firm)
     photo = mod.blurred_photo()
     sref = _slip_from(firm, firm.member("client-portal"), cref, photo, "IMG_0412.png", "image/png")
     assert not firm.records.read(*sref.split("/")).get("text")  # a photo has no words for the hub to read
-    read = {**mod.read_slip(T4), "summary": "T4 2025: $64,500.00."}
-    answers = [{**read, "text": ""}, {**read, "text": T4}]
+    answers = [{**T4_READ, "text": ""}, {**T4_READ, "text": T4_PHOTO}]
     shown = []
 
     class Eyes:  # stands for the model that sees, on Ollama: what it is shown, and what it answers
@@ -1301,6 +1351,7 @@ def test_a_slip_photo_is_read_by_the_model_that_can_see_it_and_checked_against_t
 
         def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
             shown.append((model, [p["data"] for p in pictures]))
+            assert "record:client-documents" not in prompt  # the photo alone: no other slip of the client's to copy
             return {"answer": answers.pop(0), "escalate": False, "reason": "read from the photo"}
 
     gw = ModelGateway(firm)
@@ -1308,23 +1359,25 @@ def test_a_slip_photo_is_read_by_the_model_that_can_see_it_and_checked_against_t
     run_all_local(firm, gw, log=quiet)
     assert shown == [("qwen3.5:4b", [photo])] * 2  # refused once (no words), taken the second time
     slip = firm.records.read(*sref.split("/"))
-    assert (slip["status"], slip["amount"], slip["text"]) == ("extracted", 64500.0, T4)
+    assert (slip["status"], slip["amount"], slip["text"]) == ("extracted", 64500.0, T4_PHOTO)
     assert firm.db.events.exists({"action": "record.viewed", "actor": "documents-agent", "subject": sref,
                                   "data.how": "file"})
     # what it read is checked against what it wrote; a slip with words of its own takes none from an agent
     guard, agent = firm.pack.guards["slip-extract"], {"id": "documents-agent", "kind": "agent"}
     pic = {"context": {"record:client-documents": [{"text": ""}], "file:file": {"picture": "image/png"}}, "by": agent}
-    assert guard({**read, "text": T4}, pic) == []
-    assert guard({**read, "amount": Decimal("64800.00"), "text": T4}, pic) == [
-        "the amount 64800.00 is not in the document's text; copy it as printed"]
-    assert guard({**read, "text": ""}, pic) == [
+    assert guard({**T4_READ, "text": T4_PHOTO}, pic, hub=firm) == []
+    assert guard({**T4_READ, "amount": Decimal("64800.00"), "text": T4_PHOTO}, pic, hub=firm)[0] == \
+        "the amount 64800.00 is not in the document's text; copy it as printed"
+    assert guard({**T4_READ, "text": ""}, pic, hub=firm) == [
         "the slip is a picture: write its words in text, as printed, line by line, or escalate"]
+    read = {**mod.read_slip(T4), "summary": "T4 2025: $64,500.00."}
     pdf = {"context": {"record:client-documents": [{"text": T4}], "file:file": {"picture": None}}, "by": agent}
-    assert guard({**read, "text": T4}, pdf) == ["the slip's text was read from its file; leave text empty"]
+    assert guard({**read, "text": T4}, pdf, hub=firm) == ["the slip's text was read from its file; leave text empty"]
+    assert guard({**read, "text": ""}, pdf, hub=firm) == []  # its arithmetic is a person's to look at, as always
 
 
 def test_a_slip_no_agent_can_read_goes_to_a_person(firm):
-    """A scan (a PDF with no words) and a photo the documents agent is not shown (its model for pictures taken away):
+    """A scan (a PDF with no words) and a photo the documents agent is not shown (its models for pictures taken away):
     the agent escalates each, and the slip waits for a person, who sees the document itself."""
     import io
     from pypdf import PdfWriter
@@ -1334,9 +1387,9 @@ def test_a_slip_no_agent_can_read_goes_to_a_person(firm):
     w = PdfWriter()
     w.add_blank_page(612, 792)
     w.write(scan)
-    # taking the model for pictures away only lets the agent do less: its sponsor does it, in force at once
+    # taking the models for pictures away only lets the agent do less: its sponsor does it, in force at once
     assert firm.propose_agent_profile(firm.member("sophie"), "documents-agent",
-                                      {"vision_model": ""})["status"] == "active"
+                                      {"vision_model": "", "reading_model": ""})["status"] == "active"
     refs = [_slip_from(firm, portal, cref, scan.getvalue(), "scan.pdf", "application/pdf"),
             _slip_from(firm, portal, cref, mod.blurred_photo(), "IMG_0412.png", "image/png")]
     run_all_local(firm, log=quiet)
@@ -1353,6 +1406,7 @@ def test_a_photo_the_model_says_it_could_not_read_clearly_goes_to_a_person(firm)
     refused each time, the slip is not read, and it goes to a person, who sees the photo."""
     from practicehub.models import ModelGateway
     mod = firm.pack.module
+    _sees_without_reading(firm)
     cref = _signed_up(firm)
     sref = _slip_from(firm, firm.member("client-portal"), cref, mod.blurred_photo(), "IMG_0413.png", "image/png")
     read = {**mod.read_slip(T4), "summary": "T4 2025."}
@@ -1389,6 +1443,7 @@ def test_a_photo_s_reading_names_its_issuer_in_its_own_field(firm):
     from practicehub.models import ModelGateway
     mod = firm.pack.module
     assert next(o for o in firm.skill("slip-extract").output if o["name"] == "issuer").get("required")
+    _sees_without_reading(firm)
     cref = _signed_up(firm)
     sref = _slip_from(firm, firm.member("client-portal"), cref, mod.blurred_photo(), "IMG_0414.png", "image/png")
     words = "T5 Statement of Investment Income\nYear\n2025\nPayer\nScotiabank\nBox 13\n325.40"
@@ -1423,6 +1478,7 @@ def test_a_reading_the_slip_would_refuse_is_sent_back_to_the_agent(firm):
     slip is filed, never left with a step done and its move failed."""
     from practicehub.models import ModelGateway
     mod = firm.pack.module
+    _sees_without_reading(firm)
     cref = _signed_up(firm)
     sref = _slip_from(firm, firm.member("client-portal"), cref, mod.blurred_photo(), "IMG_0415.png", "image/png")
     words = "T5 Statement of Investment Income\nYear: 2025\nPayer: Scotiabank\nBox 13: 325.40"
@@ -1446,6 +1502,116 @@ def test_a_reading_the_slip_would_refuse_is_sent_back_to_the_agent(firm):
     slip = firm.records.read(*sref.split("/"))
     assert slip["status"] == "extracted" and slip["tax_deducted"] == 0
     assert not firm.db.items.find_one({"run_id": _run_on(firm, sref, "slip-intake")["id"], "kind": "notice"})
+
+
+def test_a_t4_photo_is_read_by_the_reading_model_and_filed_when_its_boxes_hold_together(firm):
+    """A client's photo of their T4: the documents agent's reading model (GLM-OCR) reads it first, its words and each
+    box by name, and its model answers from what was read, shown neither the photo nor any other slip of the
+    client's. The words are the slip's text and its year, employer, amounts and boxes the answer, as read: the model
+    is not asked them (one that copied them put box 44's amount in box 17), so what it would have written does not
+    count. Its boxes hold together (each printed, CPP and EI as the 2025 rates give), so it is filed."""
+    from practicehub.models import ModelGateway
+    mod = firm.pack.module
+    _answers_on_ollama(firm)
+    cref = _signed_up(firm)
+    photo = mod.blurred_photo()
+    sref = _slip_from(firm, firm.member("client-portal"), cref, photo, "IMG_0412.png", "image/png")
+    r = Reader([{**T4_READ, "text": "words of its own", "issuer": "Harbor", "boxes": "17: 3,629.50"}])
+    gw = ModelGateway(firm)
+    gw.backends["ollama"] = r
+    run_all_local(firm, gw, log=quiet)
+    keys = firm.skill("slip-extract").reading["forms"][0]["fields"]
+    assert r.reads == [("glm-ocr", None, [photo]), ("glm-ocr", keys, [photo])]
+    assert {"box_10_province_of_employment", "box_28_exempt_cpp_qpp", "box_29_employment_code",
+            "box_50_rpp_registration_number"} <= set(keys)
+    (model, prompt, shown, props), = r.asked
+    assert model == "qwen3.5:4b" and shown == [] and set(props) == {"slip_type", "summary"}
+    assert "read for you: IMG_0412.png (image/png)" in prompt and '"box_14_employment_income": "64,500.00"' in prompt
+    assert "record:client-documents" not in prompt
+    slip = firm.records.read(*sref.split("/"))
+    assert (slip["status"], slip["year"], slip["issuer"], slip["amount"], slip["tax_deducted"], slip["text"]) == \
+        ("extracted", 2025, "HARBOUR LOGISTICS LTD.", 64500.0, 12400.0, T4_PHOTO)
+    assert slip["boxes"] == "10: NS\n16: 3,629.50\n18: 1,057.80\n24: 64,500.00\n26: 64,500.00"
+
+
+def test_a_t4_photo_whose_boxes_do_not_hold_together_goes_to_a_person(firm):
+    """The reading model read the slip's EI premiums as box 16 and its CPP as box 18. Each amount is printed on the
+    slip, but neither is what the 2025 rates give from its earnings: the answer is refused, with why, the agent
+    answers again from the same reading, and the slip goes to a person, who reads the photo. Nothing of it is filed."""
+    from practicehub.models import ModelGateway
+    mod = firm.pack.module
+    _answers_on_ollama(firm)
+    cref = _signed_up(firm)
+    sref = _slip_from(firm, firm.member("client-portal"), cref, mod.blurred_photo(), "IMG_0416.png", "image/png")
+    swapped = {**T4_FIELDS, "box_16_employee_cpp_contributions": "1,057.80", "box_18_employee_ei_premiums": "3,629.50"}
+    r = Reader([T4_READ, T4_READ], fields=swapped)
+    gw = ModelGateway(firm)
+    gw.backends["ollama"] = r
+    run_all_local(firm, gw, log=quiet)
+    assert len(r.asked) == 2 and "box 16 (CPP) is 1057.80, but box 26 (64500.00) gives 3629.50" in r.asked[1][1]
+    assert len(r.reads) == 2  # read once: the second answer is given what the first was
+    slip = firm.records.read(*sref.split("/"))
+    assert slip["status"] == "received" and slip.get("amount") is None and not slip.get("text")
+    item = firm.db.items.find_one({"run_id": _run_on(firm, sref, "slip-intake")["id"], "step_id": "extract",
+                                   "status": {"$in": ["open", "claimed"]}})
+    assert item["persons_only"] and item["note"].startswith("answer refused twice") and "box 18 (EI)" in item["note"]
+    assert "046" not in item["note"]  # a SIN is never repeated in why
+
+
+def test_a_t4_read_from_a_photo_is_checked_against_its_words_and_its_own_arithmetic(firm):
+    """What the slip guard holds a T4 an agent read from a photo to, without working any box out: each amount read is
+    printed in its words with its cents, and each printed is in some box; CPP, CPP2 and EI are what the year's rates
+    (the firm's TaxRate records) give from its earnings boxes, within a dollar, and none is over the year's maximum;
+    its other boxes are as a T4's usually are; a SIN on it passes its check digit. A Quebec slip, or one for a year
+    with no rates on file, goes to a person; so does a part year's CPP, at a firm that holds its T4s to a full year."""
+    guard = firm.pack.guards["slip-extract"]
+    pic = {"context": {"record:client-documents": [{"text": ""}], "file:file": {"picture": "image/png"}},
+           "by": {"id": "documents-agent", "kind": "agent"}}
+    check = lambda words=T4_PHOTO, **v: guard({**T4_READ, "text": words, **v}, pic, hub=firm)  # noqa: E731
+    read = {"10": "NS", "16": "3,629.50", "18": "1,057.80", "24": "64,500.00", "26": "64,500.00"}
+    boxes = lambda **kv: "\n".join(f"{k}: {v}" for k, v in {**read, **kv}.items() if v)  # noqa: E731
+    assert check() == []
+    misread = "a box was misread or read into another box: escalate, and a person reads the picture"
+    assert check(boxes=boxes(**{"16": "3,269.50"})) == [  # two digits read the wrong way round
+        f"box 16 is read as 3269.50, which is not an amount in the slip's words; {misread}",
+        "3629.50 is printed on the slip but is in no box read; " + misread,
+        f"box 16 (CPP) is 3269.50, but box 26 (64500.00) gives 3629.50 to 3837.75 at 2025's rate; {misread}"]
+    assert check(boxes=boxes(**{"18": ""})) == [
+        "1057.80 is printed on the slip but is in no box read; " + misread,
+        f"box 18 (EI) is 0.00, but box 24 (64500.00) gives 1057.80 at 2025's rate; {misread}"]
+    assert check(boxes=boxes(**{"24": ""}), words=T4_PHOTO.replace("EI insurable earnings 24 64,500.00\n", "")) == [
+        "box 24 (EI insurable earnings) is empty, and a T4 always has it (0 when there is none): it was not read; "
+        "escalate"]
+    rpp = T4_PHOTO + "\nRPP or DPSP registration number 50 1234567"
+    assert check(rpp, boxes=boxes(**{"40": "1234567"}))[0] == \
+        f"box 40 reads '1234567': an amount on a T4 is printed with its cents; {misread}"
+    assert check(rpp, boxes=boxes(**{"50": "1234567"})) == []  # the RPP's number is no amount
+    assert check(T4_PHOTO.replace("046 454 286", "046 454 287")) == [
+        "a SIN in the slip's words fails its check digit, so it was misread: escalate, and a person reads the picture"]
+    assert check(boxes=boxes(**{"20": "2,500.00"}), words=T4_PHOTO + "\nRPP contributions 20 2,500.00") == [
+        f"box 20 has pension plan contributions but box 52 has no pension adjustment; {misread}"]
+    assert check(boxes=boxes(**{"44": "90,000.00"}), words=T4_PHOTO + "\nUnion dues 44 90,000.00") == [
+        f"box 44 (90000.00) is more than box 14 (64500.00); {misread}"]
+    assert check(boxes=boxes(**{"10": "QC"}))[-1].startswith("box 10 says the slip is from Quebec")
+    assert check(T4_PHOTO.replace("2025", "2023"), year=2023) == [
+        "the firm has no CPP, CPP2 and EI rates for 2023 to check this T4 with: escalate, and a person checks it"]
+    # exempt from EI (box 28): no premiums, and none expected
+    no_ei = T4_PHOTO.replace("\nEmployee's EI premiums 18 1,057.80", "")
+    assert check(no_ei, boxes=boxes(**{"18": "", "28": "EI"})) == []
+    assert check(boxes=boxes(**{"28": "CPP"}))[0].startswith("box 28 marks the employee exempt from CPP, but")
+    assert check(no_ei, boxes=boxes(**{"18": "", "28 CPP": "No", "28 EI": "X"})) == []  # a line a plan, as read
+    assert check(no_ei, boxes=boxes(**{"18": "", "28 EI": "No"}))[-1].startswith("box 18 (EI) is 0.00, but box 24")
+    # a part year: less of the exemption. Within what the year allows, unless the firm's T4s are all full years
+    part = {"16": "1,680.88", "18": "492.00", "24": "30,000.00", "26": "30,000.00"}
+    words = "\n".join(f"Box {k} {v}" for k, v in {**part, "14": "30,000.00", "22": "4,000.00"}.items())
+    words = f"T4 Statement of Remuneration Paid\nYear 2025\n{words}"
+    assert check(words, amount=30000.00, tax_deducted=4000.00, boxes=boxes(**part)) == []
+    practice = firm.db.get_setting("practice", {})
+    firm.db.set_setting("practice", {**practice, "slips": {"t4_full_year": True}})
+    assert check(words, amount=30000.00, tax_deducted=4000.00, boxes=boxes(**part)) == [
+        "box 16 (CPP) is 1680.88, not a full year's on box 26 (1576.75), and the firm's T4s are full years of regular "
+        f"pay; {misread}"]
+    assert check() == []
 
 
 def test_the_last_slip_coming_while_staff_are_to_call_takes_the_return_on(firm):
@@ -1496,15 +1662,50 @@ def test_the_organizer_expects_only_the_client_s_slips_on_file_from_last_year(fi
 
 
 def test_an_upgrade_to_1_9_proposes_the_documents_agent_s_model_for_pictures_and_nothing_changes_until_approved(firm):
-    """A 1.8 hub's documents agent has no model for pictures. The upgrade proposes the one the pack names, in the
-    hub's name: until a policy owner approves it, no picture goes to that model."""
-    want = "ollama/qwen3.5:4b"
-    firm.propose_agent_profile(firm.member("sophie"), "documents-agent", {"vision_model": ""})  # as 1.8 had it
+    """A 1.8 hub's documents agent has no model for pictures. The upgrades propose the ones the pack names, in the
+    hub's name (1.10's reading model joining 1.9's proposal, which keeps what it changes): until a policy owner
+    approves them, no picture goes to either model."""
+    want, reads = "ollama/qwen3.5:4b", "ollama/glm-ocr"
+    firm.propose_agent_profile(firm.member("sophie"), "documents-agent",
+                               {"vision_model": "", "reading_model": ""})  # as 1.8 had it
     firm.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records", "1.8-clients-by-kind"])  # a hub on 1.8
-    assert firm.run_pack_upgrades() == [{"upgrade": "1.9-documents-agent-sees", "profiles_proposed": 1}]
+    assert firm.run_pack_upgrades() == [{"upgrade": "1.9-documents-agent-sees", "profiles_proposed": 1},
+                                        {"upgrade": "1.10-documents-agent-reads", "profiles_proposed": 1,
+                                         "rates_made": 0}]
     waiting = firm.agent_profile_proposal("documents-agent")
-    assert (waiting["profile"]["vision_model"], waiting["author"]) == (want, "hub")
-    assert "vision_model" not in firm.member("documents-agent")["profile"]
+    assert (waiting["profile"]["vision_model"], waiting["profile"]["reading_model"], waiting["author"]) == \
+        (want, reads, "hub")
+    profile = firm.member("documents-agent")["profile"]
+    assert "vision_model" not in profile and "reading_model" not in profile
     assert firm.run_pack_upgrades() == []
     firm.approve_agent_profile(firm.member("anne"), "documents-agent", waiting["version"])
-    assert firm.member("documents-agent")["profile"]["vision_model"] == want
+    profile = firm.member("documents-agent")["profile"]
+    assert (profile["vision_model"], profile["reading_model"]) == (want, reads)
+
+
+def test_an_upgrade_to_1_10_proposes_the_reading_model_and_enters_the_cpp2_rates_a_t4_is_checked_with(monkeypatch):
+    """A 1.9 hub's documents agent is shown a photo by its model for pictures, and the firm has no CPP2 rates. 1.10
+    proposes the reading model the pack names, in the hub's name, and enters the CPP2 rates the pack knows, for the
+    years the firm has none: until a policy owner approves the model, a photo is still shown to the model that sees
+    it. A CPP2 rate the firm entered itself is left as it is."""
+    monkeypatch.setenv("PRACTICEHUB_SECRET", "test-secret")
+    hub = snapshot_hub("accounting_office_without_rates", PACK, lambda h: h.install(PACK))
+    mod = hub.pack.module
+    kinds = {r["kind"] for r in mod.SEED_RATES}
+    assert "cpp2" in kinds
+    mod.seed_rates(hub, IMPORTER, kinds=kinds - {"cpp2"})  # the rates a 1.9 firm has
+    own = {**next(r for r in mod.SEED_RATES if r["kind"] == "cpp2" and r["year"] == 2024), "max_earnings": 73200}
+    hub.create_record(IMPORTER, "TaxRate", own)  # the firm entered 2024's itself
+    hub.propose_agent_profile(hub.member("sophie"), "documents-agent", {"reading_model": ""})  # as 1.9 had it
+    hub.db.set_setting("pack_upgrades_done", ["1.7-rates-are-records", "1.8-clients-by-kind",
+                                              "1.9-documents-agent-sees"])
+    assert hub.run_pack_upgrades() == [{"upgrade": "1.10-documents-agent-reads", "profiles_proposed": 1,
+                                        "rates_made": 1}]
+    cpp2 = sorted((r["year"], r["max_earnings"]) for r in hub.records.search("TaxRate", limit=None)
+                  if r["kind"] == "cpp2")
+    assert cpp2 == [(2024, 73200), (2025, 81200)]
+    assert mod.t4_rates(hub, 2025) and mod.t4_rates(hub, 2024)
+    assert "reading_model" not in hub.member("documents-agent")["profile"]
+    waiting = hub.agent_profile_proposal("documents-agent")
+    assert (waiting["profile"]["reading_model"], waiting["author"]) == ("ollama/glm-ocr", "hub")
+    assert hub.run_pack_upgrades() == []

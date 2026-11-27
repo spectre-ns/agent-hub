@@ -9303,6 +9303,29 @@ def test_a_decimal_is_asked_of_a_model_as_a_number_and_kept_exact_at_its_places(
     assert fieldmod.coerce(spec, {"amount": "48,250.00"})["amount"] == Decimal("48250.00")
 
 
+def test_a_model_is_asked_for_every_field_of_its_step_in_the_step_s_order():
+    """Rule: a model is asked for every field of its step, in the step's order, one it may leave empty as null: a
+    model's structured output writes the fields it must before any it may, and a small model ends there, never
+    reaching a field it may leave out. A null is an empty field. A person or an MCP client may still leave one out."""
+    from practicehub import fields as fieldmod, models
+    spec = [{"name": "text", "label": "Words", "type": "text"},
+            {"name": "kind", "label": "Kind", "type": "choice", "choices": ["a", "b"], "required": True},
+            {"name": "tax", "label": "Tax", "type": "decimal", "scale": 2},
+            {"name": "tags", "label": "Tags", "type": "list"},
+            {"name": "size", "label": "Size", "type": "choice", "choices": ["s", "m"]}]
+    schema = fieldmod.json_schema(spec)
+    assert schema["required"] == ["kind"]
+    asked = models.envelope(schema)["properties"]["answer"]
+    assert list(asked["properties"]) == asked["required"] == ["text", "kind", "tax", "tags", "size"]
+    assert asked["properties"]["kind"] == schema["properties"]["kind"] == {"type": "string", "enum": ["a", "b"]}
+    assert asked["properties"]["text"]["type"] == ["string", "null"]
+    assert asked["properties"]["tax"]["type"] == ["number", "null"]
+    assert asked["properties"]["tags"] == {"type": ["array", "null"], "items": {"type": "string"}}
+    assert asked["properties"]["size"] == {"type": ["string", "null"], "enum": ["s", "m", None]}
+    got = fieldmod.coerce(spec, {"text": None, "kind": "a", "tax": None, "tags": None, "size": None})
+    assert got == {"text": None, "kind": "a", "tax": None, "tags": [], "size": None}
+
+
 def test_a_condition_adds_multiplies_and_totals_exactly():
     """Conditions do + - * / exactly (0.1 + 0.2 is 0.3), in brackets too; a whole number with a whole number stays
     one. Anything over a missing value or text is null, and so is dividing by zero. sum, min, max and count read
@@ -10194,6 +10217,9 @@ id = "done"
 
 
 def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(hub):
+    """Rule: a picture a step carries is shown only to the model the agent's profile names for pictures (a second
+    policy owner approves it), fetched as the agent; that model is given what the step asks and what its files are,
+    never the records or earlier work the step reads. Any other model is told there is a picture it cannot see."""
     _filed_letters(hub)
     jo, rana, amara, agent = M(hub, "jo"), M(hub, "rana"), M(hub, "dr-amara"), "scheduling-agent"
     hub.approve_workflow(rana, "letter-look", hub.propose_workflow(jo, LOOK, "a look")["version"])
@@ -10221,6 +10247,7 @@ def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(h
     model, prompt, shown = look()
     assert model == "words" and shown == [] and "a picture you cannot see: letter.png (image/png)" in prompt
     assert '"picture": "image/png"' in prompt and '"text": null' in prompt  # what the file is, never its bytes
+    assert '"record:visits"' in prompt and '"provider:free-slots"' in prompt  # a model not reading it has the rest
     # a model for pictures is an addition: in force only once a second policy owner approves it
     out = hub.propose_agent_profile(rana, agent, {"vision_model": "ollama/eyes"})
     assert out["status"] == "proposed" and "vision_model" not in M(hub, agent)["profile"]
@@ -10229,10 +10256,165 @@ def test_a_picture_is_shown_only_to_the_vision_model_the_agent_s_profile_names(h
     model, prompt, shown = look()
     assert model == "eyes" and [p["data"] for p in shown] == [PNG_BYTES] and shown[0]["contentType"] == "image/png"
     assert "You are shown 1 picture with this step, in order: letter.png (image/png)" in prompt
+    # the model reading the picture is given what the step asks and what the file is, and nothing else it reads
+    assert '"file:file"' in prompt and "Fields to fill:" in prompt and "How to do it:" in prompt
+    assert '"record:visits"' not in prompt and '"provider:free-slots"' not in prompt
     assert hub.db.events.exists({"action": "record.viewed", "actor": agent, "subject": ref, "data.how": "file"})
     # taking it away only lets the agent do less: in force at once
     assert hub.propose_agent_profile(rana, agent, {"vision_model": ""})["status"] == "active"
     assert look()[0] == "words"
+
+
+READS = """
+[[output]]
+name = "text"
+type = "text"
+
+[[output]]
+name = "patient"
+label = "Patient"
+type = "string"
+required = true
+
+[[output]]
+name = "seen"
+type = "text"
+
+[reading]
+words = "text"
+
+[[reading.form]]
+says = ["Referral"]
+fields = ["patient_name", "reason_for_referral"]
+
+[reading.form.answer]
+patient = "patient_name"
+seen = { "Patient" = "patient_name", "Reason" = "reason_for_referral" }
+"""
+
+
+def test_a_skill_s_reading_names_the_field_its_words_go_in_and_the_forms_it_knows():
+    """Rule: a skill's ``[reading]`` names the text field of its output a picture's words go in, and the forms it
+    knows by their words, each with the keys a reading model fills from one and the output fields it gives the answer
+    as read (``answer``: a field takes one key's value; a text field takes a line for each of its keys); anything else
+    is refused. A picture's form is the first whose words it has, whole and in any case."""
+    from practicehub.pack import parse_reading, reading_form
+    out = [{"name": "text", "type": "text"}, {"name": "kind", "type": "choice"}, {"name": "boxes", "type": "text"}]
+    form = {"says": ["Referral"], "fields": ["patient", "box_14"]}
+    r, problems = parse_reading({"words": "text", "form": [form]}, out)
+    assert problems == [] and r == {"words": "text", "forms": [{"says": ["Referral"], "fields": ["patient", "box_14"],
+                                                                "answer": {}}]}
+    given = {**form, "answer": {"kind": "patient", "boxes": {"14": "box_14"}}}
+    assert parse_reading({"words": "text", "form": [given]}, out)[0]["forms"][0]["answer"] == given["answer"]
+    assert parse_reading(None, out) == (None, []) and parse_reading({"words": "text"}, out)[0]["forms"] == []
+    bad = lambda r: parse_reading(r, out)[1]  # noqa: E731
+    assert bad({"words": "kind"}) == ["reading.words: 'kind' is not a text field of the skill's output"]
+    assert bad({"words": "text", "how": "fast"}) == ["reading holds words and form, not how"]
+    assert bad({}) == ["reading: name the field its words go in (words), a form to read, or both"]
+    assert bad({"form": [{"says": [], "fields": ["a"]}]}) == [
+        "reading.form 1: says is a list of the words a document of this form has"]
+    for keys in (["a b"], ["a", "a"], []):
+        assert bad({"words": "text", "form": [{"says": ["X"], "fields": keys}]}) == [
+            "reading.form 1: fields is a list of keys (letters, digits and _), each once"]
+    assert bad({"words": "text", "form": [{"says": ["X"], "fields": ["a"], "more": 1}]}) == [
+        "reading.form 1: says, fields and answer, nothing else"]
+    gives = lambda answer: bad({"words": "text", "form": [{"says": ["X"], "fields": ["a"], "answer": answer}]})  # noqa
+    assert gives({"who": "a"}) == ["reading.form 1: answer.who is not a field of the skill's output"]
+    assert gives({"text": "a"}) == ["reading.form 1: answer.text is not a field of the skill's output (its words go "
+                                    "in text)"]
+    for answer in ({"kind": "b"}, {"kind": {"1": "a"}}, {"boxes": {"1": "b"}}, {"boxes": {}}, "a"):
+        assert gives(answer) in (["reading.form 1: answer.%s names one of the form's fields, or (a text field) its "
+                                  "lines, each label naming one" % next(iter(answer))],
+                                 ["reading.form 1: answer is a table of the output fields given as read"])
+    assert reading_form(r, "a REFERRAL letter")["fields"] == ["patient", "box_14"]
+    assert reading_form(r, "Referrals") is None and reading_form(None, "Referral") is None
+
+
+def test_a_picture_is_read_first_by_the_reading_model_and_the_step_answered_from_what_was_read(hub):
+    """Rule: a picture whose step's skill says how it is read (``[reading]``) is read first, fetched as the agent, by
+    the model its profile names for reading documents (a second policy owner approves it): its words, and the fields
+    of a form the skill knows by its words, go in the file's ``reading``. The step is then answered by the profile's
+    model from what was read: never shown the picture, nor given the records the step reads, nor asked for the words,
+    which are the skill's words field as read, not as the answering model would write them, nor the fields the
+    form gives the answer, which are filled as read (whatever the model says). A field the step requires that the
+    reading did not give goes to a person, unasked; so does a picture that cannot be read."""
+    from practicehub.models import READ_FIELDS, READ_WORDS
+    _filed_letters(hub)
+    jo, rana, amara, agent = M(hub, "jo"), M(hub, "rana"), M(hub, "dr-amara"), "scheduling-agent"
+    hub.approve_workflow(rana, "letter-look", hub.propose_workflow(jo, LOOK, "a look")["version"])
+    hub.approve(amara, "skill", "slot-proposal",
+                hub.propose("skill", rana, hub.skill("slot-proposal").source + READS)["version"])
+    with pytest.raises(Invalid):  # a reading naming no text field of the skill is refused like any other mistake
+        hub.propose("skill", rana, hub.skill("slot-proposal").source.replace('words = "text"', 'words = "why"'))
+    photo = hub.add_file(jo, "Letter", PNG_BYTES, "letter.png", "image/png")
+    ref = "Letter/" + hub.create_record(jo, "Letter", {"subject": "Referral", "file": photo})["id"]
+    asked, reads, says = [], [], {"words": "Referral\nPatient: Mr. Lee", "fields": '{"patient_name": "Mr. Lee"'}
+
+    class Local:  # stands for Ollama: what each model is asked, shown and reads
+        external = False
+
+        def __call__(self, model, system, prompt, schema, ctx, pictures=(), thinking=None):
+            if ctx["step"]["id"] != "look":
+                return {"answer": {}, "escalate": True, "reason": "not this test's"}
+            asked.append((model, prompt, list(pictures), schema["properties"]["answer"]["properties"]))
+            return {"answer": {"slot": ctx["choices"]["slot"][0]["value"], "why": "first", "text": "my words",
+                               "patient": "Mrs. Wrong", "seen": "my lines"}, "escalate": False, "reason": ""}
+
+        def read(self, model, prompt, pictures, ctx):
+            reads.append((model, prompt, [p["data"] for p in pictures], ctx["keys"]))
+            return says["fields"] if ctx["keys"] else says["words"]
+
+    gw = ModelGateway(hub)
+    gw.backends["ollama"] = Local()
+
+    def look():
+        run = hub.engine.start(jo, "letter-look", record=ref)
+        reads.clear()
+        AgentRunner(LocalClient(hub, agent), gw, quiet).work_once()
+        return hub.engine.run(run["id"])
+
+    answers = hub.propose_agent_profile(rana, agent, {"model": "ollama/words"})
+    hub.approve_agent_profile(amara, agent, answers["version"])
+    out = hub.propose_agent_profile(rana, agent, {"model": "ollama/words", "reading_model": "ollama/glm-ocr"})
+    assert out["status"] == "proposed" and "reading_model" not in M(hub, agent)["profile"]
+    look()
+    assert reads == [] and asked[-1][0] == "words" and "a picture you cannot see" in asked[-1][1]
+    hub.approve_agent_profile(amara, agent, out["version"])
+    run = look()
+    template = '{\n    "patient_name": "",\n    "reason_for_referral": ""\n}'
+    assert reads == [("glm-ocr", READ_WORDS, [PNG_BYTES], None),
+                     ("glm-ocr", READ_FIELDS + template, [PNG_BYTES], ["patient_name", "reason_for_referral"])]
+    model, prompt, shown, props = asked[-1]
+    assert model == "words" and shown == [] and "slot" in props and "why" in props
+    assert not {"text", "patient", "seen"} & set(props) and "A field the reading gives the answer as read" in prompt
+    assert "read for you: letter.png (image/png)" in prompt and "a picture you cannot see" not in prompt
+    assert '"words": "Referral\\nPatient: Mr. Lee"' in prompt
+    assert '"fields": {\n    "patient_name": "Mr. Lee"\n' in prompt
+    assert '"record:visits"' not in prompt and '"provider:free-slots"' not in prompt
+    assert run["ctx"]["look"]["text"] == "Referral\nPatient: Mr. Lee" and run["ctx"]["look"]["why"] == "first"
+    assert run["ctx"]["look"]["patient"] == "Mr. Lee" and run["ctx"]["look"]["seen"] == "Patient: Mr. Lee"
+    assert hub.db.events.exists({"action": "record.viewed", "actor": agent, "subject": ref, "data.how": "file"})
+    # words that are no form the skill knows: read once, and answered from them alone
+    says["words"] = "Dear Dr. Okafor"
+    look()
+    assert [r[3] for r in reads] == [None] and '"fields": {}' in asked[-1][1] and "patient" in asked[-1][3]
+    # the form, but not the field the step requires from it: not asked, and a person reads it
+    says.update(words="Referral", fields='{"reason_for_referral": "a cough"}')
+    n, run = len(asked), look()
+    item = hub.db.items.find_one({"run_id": run["id"], "step_id": "look"})
+    assert len(asked) == n and item["persons_only"] and item["status"] == "open"
+    assert item["note"] == ("Patient is read from the picture's patient_name, which was not read: a person reads "
+                            "the picture")
+    # a picture read as nothing: nothing is answered from it, and a person reads it
+    says["words"] = "  "
+    n, run = len(asked), look()
+    item = hub.db.items.find_one({"run_id": run["id"], "step_id": "look"})
+    assert len(asked) == n and item["persons_only"] and item["status"] == "open"
+    assert item["note"] == "the picture could not be read: ollama/glm-ocr read no words in letter.png"
+    # taking it away only lets the agent do less: in force at once
+    assert hub.propose_agent_profile(rana, agent, {"reading_model": ""})["status"] == "active"
+    look()
+    assert reads == [] and "a picture you cannot see" in asked[-1][1]
 
 
 # ------------------------------------------------------------------ an agent answers where it was mentioned

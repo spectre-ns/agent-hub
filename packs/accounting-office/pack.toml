@@ -65,7 +65,16 @@
 #  picture was blurred, or its answers) are refused, and it escalates; every slip is read with who issued it, and its tax deducted is never below 0. A slip no agent can read goes to a person. The organizer expects only the client's slips on file from last year. A return whose last slip
 #  comes while staff are to call the client about it goes on to be compared and drafted (the call is withdrawn). The
 #  upgrade proposes the documents agent's model for pictures, for a policy owner to approve (1.9-documents-agent-sees).
-version = "1.9"
+# 1.10: a slip that is a photo is read first by a model made to read documents (the documents agent's reading model,
+#  GLM-OCR), which reads its words and, on a T4, each box by name; the words are the slip's text and a T4's year,
+#  issuer, amounts and boxes its answer, as read, and the agent answers the rest from what was read. A T4 read from a
+#  photo is checked box by box: every amount read is printed in its words with its cents, every amount printed is in
+#  some box, its CPP, CPP2 and EI are what the year's rates give from its earnings (TaxRate gains CPP2), its other boxes
+#  are as a T4's are, and a SIN on it passes its check digit. One that does not hold together was misread and goes to a
+#  person; so does a Quebec T4, and one for a year with no rates. A firm whose T4s are full years of regular pay can
+#  hold them to it ([practice.slips] t4_full_year). The upgrade proposes the reading model for a policy owner to
+#  approve, and enters the CPP2 rates (1.10-documents-agent-reads).
+version = "1.10"
 
 [practice]
 requires_core = "1.1"
@@ -89,6 +98,12 @@ agent_rules = [
   "You never give tax planning or legal advice: a question that needs a judgement is escalated to a person.",
   "A SIN or business number is never written in a message.",
 ]
+
+# How a slip read from a photo is checked. A T4's CPP may be a part year's (an employee who started in the year has
+# less of the exemption): t4_full_year = true holds every T4 to a full year of regular pay (its CPP the full year's to
+# the dollar, box 26 box 14 up to the maximum), for a firm whose clients' T4s all are; any other goes to a person.
+[practice.slips]
+t4_full_year = false
 
 # How long a queued message may wait for its delivery connector before someone sends it by hand.
 [practice.outbox.email]
@@ -428,9 +443,10 @@ name = "Documents agent"
 title = "Sends organizers, reads slips, chases what is missing"
 sponsor = "sophie"
 roles = ["document-clerk"]
-# a slip that is a photo is shown to a model that can see it (qwen3.5:4b reads a slip's boxes); anything else is read
-# with the hub's default model
-profile = { max_risk = "low", skills = ["engagement-letter", "t1-organizer", "slip-extract", "slip-chase"], vision_model = "ollama/qwen3.5:4b" }
+# a slip that is a photo is read first by a model made to read documents (GLM-OCR reads its words, and a T4's boxes),
+# and answered from what it read; with no reading model it is shown to a model that can see it (qwen3.5:4b). Anything
+# else is read with the hub's default model
+profile = { max_risk = "low", skills = ["engagement-letter", "t1-organizer", "slip-extract", "slip-chase"], vision_model = "ollama/qwen3.5:4b", reading_model = "ollama/glm-ocr" }
 
 [[members]]
 id = "tax-agent"

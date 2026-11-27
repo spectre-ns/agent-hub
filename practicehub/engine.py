@@ -38,6 +38,7 @@ from .states import FAILED
 from .db import utcnow
 from .backends import backend_for, _timeout as engine_timeout
 from .fields import FieldError, coerce, json_schema
+from .pack import taken
 from . import decimals
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
@@ -3146,7 +3147,8 @@ class Engine:
                      # the links its record must have before it is done (``requires_links``) that it does not yet
                      "needs": self.hub.missing_links(step, run["record"]) if step.requires_links and run.get("record")
                      else []},
-            "skill": {"id": skill.id, "title": skill.title, "instructions": skill.instructions} if skill else None,
+            "skill": ({"id": skill.id, "title": skill.title, "instructions": skill.instructions}
+                      | ({"reading": skill.reading} if skill.reading else {})) if skill else None,
             "context": data, "draft": draft, "fields": fields,
             "schema": json_schema(fields, self._choice_ctx(fields, data, run)),
             "choices": {f["name"]: self._choices(f, data, run) for f in fields if f["type"] == "choice" or f.get("choices_from")},
@@ -3271,7 +3273,8 @@ class Engine:
                         raise Invalid("the answer cannot be checked now, so it is not taken: the code that checks "
                                       f"this step is not running ({why})")
             if guard:  # it sees what the answerer was shown, and who answers (a person or an agent)
-                problems = guard(values, {**ctxview, "by": {"id": member["id"], "kind": member["kind"]}}) or []
+                problems = guard(values, {**ctxview, "by": {"id": member["id"], "kind": member["kind"]}},
+                                 **taken(guard, hub=hub)) or []
                 if problems:
                     raise Invalid("the answer does not pass the step's checks", problems)
             refused = self._refused_move(run, step, values, member)

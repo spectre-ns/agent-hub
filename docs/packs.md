@@ -75,6 +75,8 @@ profile = { model = "litellm/firm-local", max_risk = "medium", skills = ["return
 An agent that names no `model` is given the hub's default when it is installed: `PRACTICEHUB_DEFAULT_MODEL`, else
 `ollama/qwen3.5:4b`, a local model through Ollama (`OLLAMA_URL`). It is written into the agent's profile, so a
 later change of the default moves no agent. `model = "standin"` answers from the pack's `STANDINS`, with no model.
+`vision_model` names the model a picture is shown to, and `reading_model` the one a picture is read with first
+([workflows.md](workflows.md#context-what-work-reads)).
 
 **Design the data classes first.** They decide what each agent can ever see. Give every agent the narrowest grants
 that let it do its job. A scheduling agent needs demographics and appointments, nothing else.
@@ -442,7 +444,33 @@ required = true
 ```
 
 The instructions go to the model with the step's context, marked as data. The output fields become a JSON schema
-for structured output, and the answer is validated against them.
+for structured output, and the answer is validated against them. The model is asked for every field, in the order
+the skill lists them, and answers null for one it leaves empty: a field it may leave out is still asked, in its
+place. So a skill that has the model write something down before reading from it (a document's words, then what
+they say) lists that field first.
+
+A skill whose step carries a picture can say how it is read first, by the agent's `reading_model`
+([workflows.md](workflows.md#context-what-work-reads)):
+
+```toml
+[reading]
+words = "text"            # the text output field its words go in, as read: the answering model is not asked it
+
+[[reading.form]]          # a kind of document, and the fields read from a picture of one
+says = ["Statement of Remuneration Paid", "T4"]   # known by any of these words, whole, in any case
+fields = ["year", "box_14_employment_income", "box_16_cpp", "box_22_income_tax_deducted"]   # named for what they hold
+
+[reading.form.answer]     # output fields filled as read: the answering model is not asked them
+amount = "box_14_employment_income"              # takes that field's value
+boxes = { "16" = "box_16_cpp", "22" = "box_22_income_tax_deducted" }   # a text field: a line, 16: 3629.50, each read
+```
+
+The reading model is asked for each field by its key, so a key says what it holds; it reads best the fields it is
+asked first. A picture whose words are no form's is answered from its words alone. What the form's `answer` names goes
+in the answer as read, whatever the answering model would have written, so a small model cannot copy a value into
+the wrong field; one the step requires that was not read sends the step to a person, unasked. The skill's
+instructions tell the answering model it answers the rest from the file's `reading` (`words`, `fields`), and a guard
+holds the answer against the words, which the answering model did not write.
 
 ## pack.py
 
@@ -455,7 +483,7 @@ Everything is optional. These module-level names are picked up:
 | `facts(rec) -> dict` | the headline facts on a subject's page; a value `"member:<id>"` shows that member's name |
 | `ACTIONS = {"name": fn(engine, run, step, params, actor)}` | deterministic actions for automation steps |
 | `PROVIDERS = {"name": fn(engine, run, step, member)}` | computed context (`provider:<name>`) |
-| `GUARDS = {"skill-id": fn(values, ctxview) -> [problems]}` | extra checks on any answer for that skill, from a person or an agent. `ctxview` is what the answerer was shown (`context`, `run`, `step`, `item`), and `by`: who answers (`id`, and `kind`, `person` or `agent`), for a rule that holds an agent only. A prompt block is guarded by `"block:<id>"`, or by its `extends` skill's guard |
+| `GUARDS = {"skill-id": fn(values, ctxview) -> [problems]}` | extra checks on any answer for that skill, from a person or an agent. `ctxview` is what the answerer was shown (`context`, `run`, `step`, `item`), and `by`: who answers (`id`, and `kind`, `person` or `agent`), for a rule that holds an agent only. A guard that takes `hub` is given the hub, to check against what the practice has on file (its rates, its settings); it reads, never writes. A prompt block is guarded by `"block:<id>"`, or by its `extends` skill's guard |
 | `STANDINS = {"skill-id": fn(ctx) -> {answer, escalate, reason}}` | deterministic answers, so tests and a demo's past need no model (`ModelGateway(hub, scripted=True)`). `"block:<id>"` answers a prompt block, `"mention"` an agent's reply where it is mentioned (`fn(ctx) -> {body}`; `ctx` is what it was given there: `mention`, `record`, `thread`), and `"chat"` an agent's next move in a chat (`fn(ctx) -> {text, calls: [{name, args}]}`; `ctx` has the chat's `messages`, the `tools` by name and the `system` prompt) |
 | `demo(hub)` | demo records and runs, for `init --demo` |
 | `UPGRADES = {"id": fn(hub, actor) -> dict \| None}` | what a new version does to what an older one left, each once, in batches (`Hub.run_pack_upgrades`). It runs as the hub, and may also propose a change to an agent's profile (`hub.propose_agent_profile`): a policy owner approves it as any other, so a pack never puts more in an agent's hands by itself |

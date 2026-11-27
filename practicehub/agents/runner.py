@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.request
 
-from ..models import Looped, ModelError, ModelGateway, Thinking
+from ..models import Looped, ModelError, ModelGateway, Thinking, read_files
 from .. import decimals
 
 
@@ -263,15 +263,17 @@ class AgentRunner:
         return "declined"
 
     def _pictures(self, me: dict, ctx: dict) -> list[dict]:
-        """The pictures the step's context names (``file:<field>`` entries that are pictures). For an agent whose
-        profile names a model that can see, each is fetched as the agent (``data``); one it may not read, or any for
-        another agent, goes without, and the model is told there is a picture it is not shown."""
-        found = [v for k, v in (ctx.get("context") or {}).items()
+        """The pictures the step's context names (``file:<field>`` entries that are pictures; ``of``: the entry's
+        key). For an agent whose profile names a model that can see or read them, each is fetched as the agent
+        (``data``); one it may not read, or any for another agent, goes without, and the model is told there is a
+        picture it is not shown."""
+        found = [(k, v) for k, v in (ctx.get("context") or {}).items()
                  if k.startswith("file:") and isinstance(v, dict) and v.get("picture")]
-        sees = bool((me.get("profile") or {}).get("vision_model"))
+        profile = me.get("profile") or {}
+        sees = bool(profile.get("vision_model") or profile.get("reading_model"))
         out = []
-        for v in found:
-            p = {"name": v.get("name"), "contentType": v["picture"], "size": v.get("size")}
+        for k, v in found:
+            p = {"name": v.get("name"), "contentType": v["picture"], "size": v.get("size"), "of": k}
             if sees:
                 try:
                     p["data"] = self.client.file(v["ref"], v["blob"])
@@ -285,6 +287,14 @@ class AgentRunner:
         self.client.claim(iid)
         ctx = self.client.context(iid)
         pictures = self._pictures(me, ctx)
+        try:  # read once, before the first answer: a second answer is given what the first was
+            ctx, pictures = self.gateway.read(me, ctx, pictures)
+        except ModelError as exc:
+            return self._escalate(me, iid, f"the picture could not be read: {exc}")
+        for k, v in read_files(ctx).items():
+            r = v["reading"]
+            self.log(f"[{me['id']}] {r['by']} read {v.get('name') or k}: {len(r['words'].split())} words"
+                     + (f", {len(r['fields'])} fields" if r["fields"] else ""))
         feedback = ans = None
         for attempt in (1, 2):
             if feedback:  # the answer itself goes back too: told only what was wrong, a model starts over and loses what it had right
